@@ -193,6 +193,11 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             })?;
         let snapshot = selected.snapshot;
         let authority = selected.verified;
+        // The joining device installs this snapshot's image before it applies
+        // the plan, so the plan starts where that image ends. The candidate
+        // filter above already established the bootstrap cut reaches past the
+        // snapshot's coverage, so the trimmed closure still lands on the cut
+        // the attempt's activation commit names.
         let plan = timings
             .stage(
                 "walk the plan history",
@@ -200,6 +205,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
                     &attempt.bootstrap_cut,
                     attempt_activation,
                     &attempt.membership,
+                    &snapshot.meta.coverage,
                 ),
             )
             .await

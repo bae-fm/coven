@@ -817,13 +817,19 @@ impl Store {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn prepare_device_join_bootstrap_for_test(
         &self,
-        coverage: &coven_protocol::store_commit::StoreHistoryCut,
+        bootstrap_cut: &coven_protocol::store_commit::StoreHistoryCut,
         attempt_activation: &coven_protocol::store_commit::StoreBatchCommitRef,
         membership_state: &coven_protocol::circle_control::StoreMembershipStateRef,
+        installed: &coven_protocol::store_commit::CommitFrontier,
     ) -> Result<coven_database::DeviceJoinBootstrapPlan, StoreError> {
         let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
-            .prepare_device_join_bootstrap_for_test(coverage, attempt_activation, membership_state)
+            .prepare_device_join_bootstrap_for_test(
+                bootstrap_cut,
+                attempt_activation,
+                membership_state,
+                installed,
+            )
             .await
     }
 

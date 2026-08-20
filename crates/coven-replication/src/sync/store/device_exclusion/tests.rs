@@ -590,11 +590,15 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
             .order
             .predecessor_cut()
             .expect("read exclusion activation predecessor");
+        // The replaying device installs the pre-exclusion snapshot below, so
+        // the plan starts at that snapshot's coverage — the history behind it
+        // arrives in the image and is never carried twice.
         let plan = owner_device
             .prepare_device_join_bootstrap_for_test(
                 &replay_cut,
                 &activation,
                 &activation_commit.value().membership_state,
+                &snapshot_coverage,
             )
             .await
             .expect("prepare post-snapshot exclusion replay");

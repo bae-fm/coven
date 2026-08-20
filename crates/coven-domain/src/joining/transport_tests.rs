@@ -1966,3 +1966,231 @@ async fn run_a_join_resolves_only_the_history_its_snapshot_does_not_cover() {
         "the join read no package at all, so it proves nothing about coverage",
     );
 }
+
+/// What one same-provider join actually handed the joining device: the closure
+/// the owner carried, and the size of the journal row it sits in.
+struct CarriedJoin {
+    /// The Store root the closure belongs to.
+    root: coven_protocol::store_commit::StoreRootRef,
+    /// The cut the attempt's activation commit names, which the joining device
+    /// has to land on however little the closure carries.
+    bootstrap_cut: coven_protocol::store_commit::StoreHistoryCut,
+    /// The snapshot's coverage, as a tip sequence per stream.
+    coverage: std::collections::BTreeMap<String, u64>,
+    closure: coven_protocol::store_commit::device_join_exchange::DeviceJoinBootstrapClosure,
+    /// The owner's journal row for the attempt, serialized as it is stored.
+    journal_bytes: usize,
+}
+
+impl CarriedJoin {
+    /// The stream and sequence of every commit the closure carried.
+    fn carried(&self) -> Vec<(String, u64)> {
+        self.closure
+            .commits
+            .iter()
+            .map(|commit| {
+                (
+                    commit.reference.coord.stream_id.to_string(),
+                    commit.reference.coord.sequence(),
+                )
+            })
+            .collect()
+    }
+}
+
+/// Run one whole same-provider join over a store whose history runs `covered`
+/// owner commits deep behind its snapshot and three commits past it, and report
+/// what the owner carried.
+async fn carried_join_over(store_id: &str, covered: usize) -> CarriedJoin {
+    let fixture = TransportFixture::build(store_id).await;
+    for index in 0..covered {
+        fixture.publish_owner_row(&format!("covered-{index}")).await;
+    }
+    // Two announcement streams, so the coverage names a tip for each and the
+    // trimmed walk has to start from both.
+    fixture.publish_second_stream(3).await;
+    fixture.publish_owner_snapshot().await;
+    let coverage = fixture
+        .owner_database
+        .latest_local_store_snapshot()
+        .await
+        .expect("read the owner's published snapshot")
+        .expect("the owner published a snapshot")
+        .meta
+        .coverage
+        .commits()
+        .iter()
+        .map(|(stream, reference)| (stream.to_string(), reference.coord.sequence()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert!(
+        coverage.len() > 1,
+        "the snapshot has to cover more than one stream: {coverage:?}",
+    );
+    for index in 0..3 {
+        fixture
+            .publish_owner_row(&format!("uncovered-{index}"))
+            .await;
+    }
+
+    let bundle = fixture.begin().await;
+    let cancel = never_cancelled();
+    let joiner = fixture.client();
+    let (config, activation) = tokio::join!(
+        Box::pin(joiner.join_via_transport(&bundle, timing(), no_join_progress(), &cancel)),
+        Box::pin(fixture.drive_owner(&bundle)),
+    );
+    activated(activation);
+    joined(config);
+
+    let record = fixture
+        .owner_database
+        .load_device_join(
+            bundle.offer.attempt_id,
+            coven_replication::sync::store::DeviceJoinRole::Owner,
+        )
+        .await
+        .expect("read the owner's join journal")
+        .expect("the owner journalled the attempt it completed");
+    let journal_bytes = serde_json::to_string(&record)
+        .expect("the journal row serializes as it is stored")
+        .len();
+    let join = match *record.progress {
+        coven_protocol::store_commit::device_join_journal::DeviceJoinRoleProgress::Owner(
+            coven_protocol::store_commit::device_join_journal::OwnerJoinProgress::
+                SamePrincipalCompleted { join },
+        ) => join,
+        other => panic!("the owner's journal is at {other:?}, not a completed same-provider join"),
+    };
+    CarriedJoin {
+        root: join.installation.authority.store_root.clone(),
+        bootstrap_cut: join.installation.attempt.bootstrap_cut.clone(),
+        coverage,
+        closure: join.installation.bootstrap,
+        journal_bytes,
+    }
+}
+
+/// The owner hands the joining device a snapshot image and the commits
+/// published after it. Carrying the history behind that snapshot as well makes
+/// the joiner parse and signature-check every commit of the store's life only
+/// to discard the result at installation, and writes the whole history into the
+/// owner's journal row on every attempt — which is what put a live join over
+/// two hundred commits into the minutes and megabytes.
+#[test]
+fn a_join_carries_only_the_history_its_snapshot_does_not_cover() {
+    on_a_deep_stack(run_a_join_carries_only_the_history_its_snapshot_does_not_cover);
+}
+
+async fn run_a_join_carries_only_the_history_its_snapshot_does_not_cover() {
+    let shallow = carried_join_over("device-join-carry-shallow", 2).await;
+    let deep = carried_join_over("device-join-carry-deep", 14).await;
+
+    for (name, join) in [("shallow", &shallow), ("deep", &deep)] {
+        let carried = join.carried();
+        let covered = carried
+            .iter()
+            .filter(|(stream, sequence)| {
+                join.coverage.get(stream).is_some_and(|tip| sequence <= tip)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            covered.is_empty(),
+            "the {name} join carried commits its snapshot already covers: {covered:?} \
+             against coverage {:?}",
+            join.coverage,
+        );
+        assert!(
+            !carried.is_empty(),
+            "the {name} join carried no commit at all, so it proves nothing",
+        );
+        // The activation commit still names the whole bootstrap cut, and the
+        // joining device still checks it against that cut — the second stream's
+        // tip sits behind the snapshot, so the closure does not carry it and
+        // the check passes on what the installed image supplies instead. The
+        // join above ran to membership, which is that check passing.
+        let uncarried_tips = join
+            .bootstrap_cut
+            .commits()
+            .values()
+            .filter(|reference| {
+                !carried.contains(&(
+                    reference.coord.stream_id.to_string(),
+                    reference.coord.sequence(),
+                ))
+            })
+            .count();
+        assert!(
+            uncarried_tips > 0,
+            "the {name} join carried every tip of its bootstrap cut, so the cut check \
+             was never asked to reach past the closure",
+        );
+    }
+
+    assert_eq!(
+        shallow.carried().len(),
+        deep.carried().len(),
+        "twelve more commits behind the snapshot changed what the join carries: \
+         {:?} against {:?}",
+        shallow.carried(),
+        deep.carried(),
+    );
+    assert!(
+        deep.journal_bytes < shallow.journal_bytes + shallow.journal_bytes / 10,
+        "the owner's journal row grew with history behind the snapshot: \
+         {} bytes over {covered_deep} covered commits against {} over {covered_shallow}",
+        deep.journal_bytes,
+        shallow.journal_bytes,
+        covered_deep = 14,
+        covered_shallow = 2,
+    );
+}
+
+/// Trimming the carry does not trim the checking. Every commit still in the
+/// closure is parsed against its exact reference and signature-checked against
+/// its author before the joining device will build a plan from it, so an
+/// altered body, a body swapped with a sibling's, and a body lifted from
+/// another Store are all refused.
+#[test]
+fn a_trimmed_closure_is_still_verified_commit_by_commit() {
+    on_a_deep_stack(run_a_trimmed_closure_is_still_verified_commit_by_commit);
+}
+
+async fn run_a_trimmed_closure_is_still_verified_commit_by_commit() {
+    let join = carried_join_over("device-join-carry-verified", 2).await;
+    let foreign = carried_join_over("device-join-carry-foreign", 2).await;
+    coven_database::DeviceJoinBootstrapPlan::from_closure(&join.root, join.closure.clone())
+        .expect("the closure the owner carried builds a plan");
+    assert!(
+        join.closure.commits.len() > 1,
+        "the refusals below need at least two carried commits: {:?}",
+        join.carried(),
+    );
+
+    let mut altered = join.closure.clone();
+    altered.commits[0].canonical_commit[0] ^= 0xff;
+    assert!(
+        coven_database::DeviceJoinBootstrapPlan::from_closure(&join.root, altered).is_err(),
+        "a closure with an altered commit body built a plan",
+    );
+
+    let mut swapped = join.closure.clone();
+    swapped.commits[0].canonical_commit = swapped.commits[1].canonical_commit.clone();
+    assert!(
+        coven_database::DeviceJoinBootstrapPlan::from_closure(&join.root, swapped).is_err(),
+        "a closure whose commit body belongs to a different reference built a plan",
+    );
+
+    let mut borrowed = join.closure.clone();
+    borrowed.commits[0].canonical_commit = foreign.closure.commits[0].canonical_commit.clone();
+    assert!(
+        coven_database::DeviceJoinBootstrapPlan::from_closure(&join.root, borrowed).is_err(),
+        "a closure carrying another Store's commit body built a plan",
+    );
+
+    let mut foreign_root = join.closure.clone();
+    foreign_root.commits = foreign.closure.commits.clone();
+    assert!(
+        coven_database::DeviceJoinBootstrapPlan::from_closure(&join.root, foreign_root).is_err(),
+        "a closure of another Store's commits built a plan for this Store's root",
+    );
+}

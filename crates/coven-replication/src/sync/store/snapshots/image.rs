@@ -328,9 +328,10 @@ impl PreparedDeviceJoinSnapshot {
             head_refs: installation.bootstrap.membership.0.clone(),
         };
         // Every commit in the carried closure is parsed and signature-checked
-        // here, whether or not the snapshot already covers it. Over a long
-        // history that is the bulk of this step, and it is invisible while it
-        // sits inside the download.
+        // here. The closure holds only the history this snapshot does not
+        // cover, so that is the work of the tail rather than of the Store's
+        // whole life — the rest arrives inside the image, under the owner's
+        // signature over the snapshot metadata validated above.
         let bootstrap = timings.mark("verify the carried history", || {
             coven_database::DeviceJoinBootstrapPlan::from_closure(&root_ref, installation.bootstrap)
         })?;

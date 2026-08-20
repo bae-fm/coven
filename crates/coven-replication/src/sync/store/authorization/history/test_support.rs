@@ -236,12 +236,18 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn prepare_device_join_bootstrap_for_test(
         &mut self,
-        coverage: &coven_protocol::store_commit::StoreHistoryCut,
+        bootstrap_cut: &coven_protocol::store_commit::StoreHistoryCut,
         attempt_activation: &coven_protocol::store_commit::StoreBatchCommitRef,
         membership_state: &coven_protocol::circle_control::StoreMembershipStateRef,
+        installed: &coven_protocol::store_commit::CommitFrontier,
     ) -> Result<coven_database::DeviceJoinBootstrapPlan, StoreError> {
         self.history_verifier
-            .prepare_device_join_bootstrap(coverage, attempt_activation, membership_state)
+            .prepare_device_join_bootstrap(
+                bootstrap_cut,
+                attempt_activation,
+                membership_state,
+                installed,
+            )
             .await
             .map_err(StoreError::from)
     }

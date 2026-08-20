@@ -687,13 +687,14 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             .outcome
             .verify_at(&join.activation.outcome, &attempt, &owner)?;
         let approval = join.bootstrap.bootstrap.request.approval();
-        let administrator = registration_in_bootstrap(
+        let database = installed.database;
+        let administrator = joining_device_registration(
+            &database,
             &installed.bootstrap,
             &approval.request.offer.provider_admin.administrator,
         )
-        .ok_or(DeviceJoinError::AttemptMismatch)?;
-        approval.verify(&installed.verified_root, &owner, administrator)?;
-        let database = installed.database;
+        .await?;
+        approval.verify(&installed.verified_root, &owner, &administrator)?;
         // The installed snapshot image covers the history behind it; every
         // commit between that snapshot and the bootstrap cut still carries its
         // rows in a package this device has to read before it installs.
@@ -807,6 +808,26 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             .into_joining_store(database, store_dir, self.identity)
             .await
     }
+}
+
+/// The registration a joining device's checks name, from the two places it can
+/// hold one.
+///
+/// The carried plan covers only the history published after the snapshot this
+/// device installed, so a device registered before that snapshot is not in it —
+/// it is in the installed image, activated there under the same owner
+/// signatures that put it in the plan's history in the first place.
+async fn joining_device_registration(
+    database: &StoreDatabase,
+    plan: &DeviceJoinBootstrapPlan,
+    reference: &StoreDeviceRegistrationRef,
+) -> Result<StoreDeviceRegistration, DeviceJoinError> {
+    if let Some(registration) = registration_in_bootstrap(plan, reference) {
+        return Ok(registration.clone());
+    }
+    let activated =
+        Box::pin(database.activated_store_device_registration(reference.clone())).await?;
+    Ok(activated.value().clone())
 }
 
 fn registration_in_bootstrap<'plan>(

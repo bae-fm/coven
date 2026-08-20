@@ -331,46 +331,69 @@ impl<'a> MergeHistoryVerifier<'a> {
             .load_device_join_attempt_evidence(attempt, attempt_owner)
             .await?;
         let verified_attempt = self.verify_device_join_attempt_evidence(evidence).await?;
+        // This device builds the plan for itself and materializes it into a
+        // database that holds no Store snapshot, so nothing is already there to
+        // carry from — the closure runs back to genesis.
         let plan = self
             .prepare_device_join_bootstrap(
                 &verified_attempt.value.bootstrap_cut,
                 attempt_activation,
                 &verified_attempt.value.membership,
+                &CommitFrontier(BTreeMap::new()),
             )
             .await?;
         Ok((verified_attempt, plan))
     }
 
+    /// The commits a joining device has to materialize to stand at
+    /// `bootstrap_cut`, in an order that never puts a commit before one it
+    /// depends on.
+    ///
+    /// `installed` is the history that device already holds when it applies the
+    /// plan — the coverage of the Store snapshot it installs first. The walk
+    /// stops there instead of at genesis, so a join onto a long-lived Store
+    /// carries only what was published after that snapshot. A device that
+    /// starts from nothing passes an empty frontier and gets the whole closure.
+    ///
+    /// Trimming does not weaken what the receiver checks. Every commit that is
+    /// still carried is parsed and signature-checked on arrival exactly as
+    /// before, and the commits left out are the ones the owner already signed
+    /// for in the snapshot's metadata, which the receiver verifies before it
+    /// installs the image.
     pub(crate) async fn prepare_device_join_bootstrap(
         &mut self,
-        coverage: &StoreHistoryCut,
+        bootstrap_cut: &StoreHistoryCut,
         attempt_activation: &StoreBatchCommitRef,
         membership_state: &StoreMembershipStateRef,
+        installed: &CommitFrontier,
     ) -> Result<DeviceJoinBootstrapPlan, StorePullError> {
         let membership = self
             .load_predecessor_membership(membership_state)
             .await
             .map_err(StorePullError::from)?;
-        let mut pending = history_cut_references(coverage);
+        let mut pending = history_cut_references(bootstrap_cut);
         pending.push(attempt_activation.clone());
         self.verify_refs(pending.clone()).await?;
         self.prepare_device_join_bootstrap_from_verified_parts(
-            coverage,
+            bootstrap_cut,
             attempt_activation,
             membership_state,
             membership,
             pending,
+            installed,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_device_join_bootstrap_from_verified_parts(
         &self,
-        coverage: &StoreHistoryCut,
+        bootstrap_cut: &StoreHistoryCut,
         attempt_activation: &StoreBatchCommitRef,
         membership_state: &StoreMembershipStateRef,
         membership: MembershipChain,
         mut pending: Vec<StoreBatchCommitRef>,
+        installed: &CommitFrontier,
     ) -> Result<DeviceJoinBootstrapPlan, StorePullError> {
         // The bootstrap carries the founder registration itself, so this is one
         // of the few places that wants the object rather than its reference.
@@ -392,7 +415,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .order
             .predecessor_cut()
             .map_err(StorePullError::Protocol)?
-            != *coverage
+            != *bootstrap_cut
         {
             return Err(StorePullError::InvalidState(
                 "device join attempt activation predecessor differs from its signed bootstrap cut"
@@ -408,7 +431,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
         let mut required = BTreeSet::new();
         while let Some(reference) = pending.pop() {
-            if !required.insert(reference.clone()) {
+            if installed.covers_commit(&reference) || !required.insert(reference.clone()) {
                 continue;
             }
             let verified = self.history.commits.get(&reference).ok_or_else(|| {
@@ -428,7 +451,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                 (!emitted.contains(reference)
                     && commit_predecessor_references(verified.verified.value())
                         .iter()
-                        .all(|dependency| emitted.contains(dependency)))
+                        .all(|dependency| {
+                            installed.covers_commit(dependency) || emitted.contains(dependency)
+                        }))
                 .then(|| reference.clone())
             });
             let Some(reference) = next else {

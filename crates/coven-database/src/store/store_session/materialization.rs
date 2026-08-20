@@ -27,28 +27,22 @@ fn reach_materialization_failure(
     Ok(true)
 }
 
-/// The bootstrap commits this database already materializes. Two things put a
-/// commit here: the materialized commit index names it, or the installed
-/// snapshot image covers it.
+/// The bootstrap commits this database already materializes, which is to say
+/// the ones a previous run of this same installation landed before it stopped.
 ///
-/// A snapshot image carries one exact tip per stream and no record of the
-/// commits behind it — it keeps a derived device state only for those tips and
-/// for what its retained replay inputs need. So the covered set is read off the
-/// plan instead: start at each coverage tip and walk `predecessor`, which a
-/// stream's commits chain hash-pinned back to its first. Every commit that walk
-/// reaches is one the image already holds the rows for, and installation
-/// neither resolves row data for it nor advances over it again.
-///
-/// A plan commit at or under a coverage tip that the walk does not reach is a
-/// different history from the one this device installed — a fork at that
-/// coordinate, or a snapshot that ran past the bootstrap cut. Neither can be
-/// installed over, so the join fails here instead of writing rows against an
-/// image that disagrees with them.
+/// A plan carries only the history past the installed snapshot's coverage: the
+/// device that built it knew which snapshot this device installs and walked
+/// forward from that snapshot's tips. So a plan commit at or under a coverage
+/// tip is never the ordinary case — it is a plan built against a different
+/// history, a fork at that coordinate, or a snapshot that ran past the
+/// bootstrap cut. None can be installed over, so the join fails here instead of
+/// writing rows against an image that disagrees with them.
 fn device_join_bootstrap_represented_on(
     tx: &rusqlite::Transaction<'_>,
     commits: &[crate::DeviceJoinBootstrapCommit],
 ) -> Result<BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
     let mut represented = BTreeSet::new();
+    let coverage = crate::store::materialized_commit_index::snapshot_coverage_on(tx)?;
     for prepared in commits {
         let stream_id = prepared.reference.coord.stream_id.to_string();
         let sequence = prepared.reference.coord.sequence();
@@ -61,29 +55,8 @@ fn device_join_bootstrap_represented_on(
                 )));
             }
             represented.insert(prepared.reference.clone());
-        }
-    }
-    let planned = commits
-        .iter()
-        .map(|prepared| (prepared.reference.clone(), prepared))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let coverage = crate::store::materialized_commit_index::snapshot_coverage_on(tx)?;
-    for tip in coverage.values() {
-        let mut next = Some(tip.clone());
-        while let Some(reference) = next {
-            let Some(prepared) = planned.get(&reference) else {
-                break;
-            };
-            next = prepared.commit.value().order.predecessor().cloned();
-            represented.insert(reference);
-        }
-    }
-    for prepared in commits {
-        if represented.contains(&prepared.reference) {
             continue;
         }
-        let stream_id = prepared.reference.coord.stream_id.to_string();
-        let sequence = prepared.reference.coord.sequence();
         if coverage
             .get(&stream_id)
             .is_some_and(|tip| sequence <= tip.coord.sequence())

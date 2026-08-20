@@ -299,8 +299,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             outcome_activation: activation_ref,
         };
         // Selecting the snapshot and preparing the carried closure are both
-        // history walks, and the closure's is over the whole plan. They reported
-        // as one step with the commit publication in front of them.
+        // history walks, and neither is visible from the commit publication in
+        // front of them, so they report as their own step.
         let mut timings =
             crate::sync::stage_timing::StageTimings::start("Same-provider join installation");
         let installation = timings
