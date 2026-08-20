@@ -22,6 +22,20 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         .await
     }
 
+    /// Read and verify the row data a device-join bootstrap must materialize
+    /// for the commits this database does not already cover.
+    pub(crate) async fn resolve_device_join_bootstrap(
+        &mut self,
+        plan: coven_database::DeviceJoinBootstrapPlan,
+        membership: &coven_protocol::membership::MembershipChain,
+        identity: &UserKeypair,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<coven_database::ResolvedDeviceJoinBootstrap, pull::StorePullError> {
+        self.pull_history()
+            .resolve_device_join_bootstrap(plan, membership, identity, routing_encryption)
+            .await
+    }
+
     pub(super) fn pull_history(&mut self) -> pull::PullHistory<'_, 'storage> {
         pull::PullHistory::new(
             self.database.clone(),

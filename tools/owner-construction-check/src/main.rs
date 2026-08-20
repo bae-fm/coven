@@ -216,6 +216,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "PendingDeviceJoinObservation",
         "into_joining_store",
     ),
+    (
+        "crates/coven-replication/src/sync/store/device_join/joiner.rs",
+        "PendingDeviceJoinAuthority",
+        "prepare_same_principal_completion",
+    ),
     ("crates/coven-replication/src/sync/store/authorization.rs", "Store", "create"),
     ("crates/coven-replication/src/sync/store/authorization.rs", "Store", "open"),
     ("crates/coven-replication/src/sync/store/authorization.rs", "Store", "load"),

@@ -261,7 +261,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         identity: &UserKeypair,
         attempt_ref: DeviceJoinAttemptRef,
         verified_attempt: coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
-        bootstrap_plan: super::DeviceJoinBootstrapPlan,
+        bootstrap: coven_database::ResolvedDeviceJoinBootstrap,
         attempt_activation: StoreBatchCommitRef,
         owner: &StoreDeviceRegistration,
         published_at: &str,
@@ -272,7 +272,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             identity,
             attempt_ref,
             verified_attempt,
-            bootstrap_plan,
+            bootstrap,
             attempt_activation,
             owner,
             published_at,
@@ -307,7 +307,7 @@ pub(crate) async fn bootstrap_pending_device_on(
     identity: &UserKeypair,
     attempt_ref: DeviceJoinAttemptRef,
     verified_attempt: coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
-    bootstrap_plan: super::DeviceJoinBootstrapPlan,
+    bootstrap: coven_database::ResolvedDeviceJoinBootstrap,
     attempt_activation: StoreBatchCommitRef,
     owner: &StoreDeviceRegistration,
     published_at: &str,
@@ -321,7 +321,8 @@ pub(crate) async fn bootstrap_pending_device_on(
     }
     let attempt = verified_attempt.value;
     let activation_stream = attempt_activation.coord.stream_id.to_string();
-    let verified_activation = bootstrap_plan
+    let verified_activation = bootstrap
+        .plan
         .verified_commit(&attempt_activation)
         .cloned()
         .ok_or_else(|| {
@@ -329,7 +330,8 @@ pub(crate) async fn bootstrap_pending_device_on(
                 "device join bootstrap omits its attempt activation".to_string(),
             )
         })?;
-    let installed_registration_activation = bootstrap_plan
+    let installed_registration_activation = bootstrap
+        .plan
         .commits
         .iter()
         .find(|commit| commit.reference == attempt_activation)
@@ -339,7 +341,7 @@ pub(crate) async fn bootstrap_pending_device_on(
             })
         })
         .map(|registration| registration.activation().clone());
-    Box::pin(database.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap_plan))
+    Box::pin(database.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap))
         .await
         .map_err(registration_database_error)?;
     if Box::pin(

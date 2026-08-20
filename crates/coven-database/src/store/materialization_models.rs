@@ -658,6 +658,31 @@ pub struct DeviceJoinBootstrapPlan {
     pub commits: Vec<DeviceJoinBootstrapCommit>,
 }
 
+/// Everything one bootstrap commit needs to materialize its rows, for a commit
+/// the joining database does not already cover through an installed snapshot.
+///
+/// Installation runs inside a single database transaction and cannot read the
+/// cloud, so the joining device resolves this beforehand — reading, decrypting
+/// and verifying each package exactly the way an ordinary pull does.
+pub struct DeviceJoinBootstrapRowData {
+    pub circle_activations: VerifiedCircleActivations,
+    pub membership_objects: Option<VerifiedMergeMembershipObjects>,
+    pub membership_remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
+    pub packages: Vec<PreparedMergeMaterializationPackage>,
+}
+
+/// A bootstrap plan together with the row data for every commit in it the
+/// joining database does not already materialize. Installation only accepts
+/// this shape, so a bootstrap can never advance its position over commits
+/// whose rows were never resolved.
+pub struct ResolvedDeviceJoinBootstrap {
+    pub plan: DeviceJoinBootstrapPlan,
+    pub row_data: std::collections::BTreeMap<StoreBatchCommitRef, DeviceJoinBootstrapRowData>,
+    pub local_store_membership: coven_protocol::membership::LocalStoreMembership,
+    pub routing_key: Option<coven_protocol::circle::RowRoutingKey>,
+    pub receiver_wall_ms: u64,
+}
+
 impl DeviceJoinBootstrapPlan {
     pub fn verified_commit(
         &self,

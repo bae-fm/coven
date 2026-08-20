@@ -3,12 +3,19 @@ use super::*;
 impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn install_device_join_bootstrap_for_test(
-        &self,
+        &mut self,
         plan: coven_database::DeviceJoinBootstrapPlan,
-    ) -> Result<(), coven_database::DbError> {
+    ) -> Result<(), StoreError> {
+        let membership = self.membership.clone();
+        let identity = self.identity.clone();
+        let resolved = self
+            .history
+            .resolve_device_join_bootstrap(plan, &membership, &identity, None)
+            .await?;
         self.database
-            .install_device_join_bootstrap(self.root.clone(), plan)
+            .install_device_join_bootstrap(self.root.clone(), resolved)
             .await
+            .map_err(StoreError::from)
     }
 
     #[cfg(test)]

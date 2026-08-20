@@ -361,10 +361,29 @@ impl<'storage> JoiningStore<'storage> {
         Ok(execution.result)
     }
 
+    /// Read and verify the row data the bootstrap plan's uncovered commits
+    /// carry, so installing it materializes their rows instead of advancing
+    /// the joining device's position past them.
+    pub(crate) async fn resolve_bootstrap(
+        &mut self,
+        plan: coven_database::DeviceJoinBootstrapPlan,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<coven_database::ResolvedDeviceJoinBootstrap, DeviceJoinError> {
+        let membership = self.membership.clone();
+        Ok(Box::pin(self.history.resolve_device_join_bootstrap(
+            plan,
+            &membership,
+            &self.identity,
+            routing_encryption,
+        ))
+        .await?)
+    }
+
     pub async fn bootstrap(
         &mut self,
         bootstrap: ProviderReadyDeviceBootstrap,
         published_at: &str,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<DeviceJoinReadiness, DeviceJoinError> {
         let offer = &bootstrap.bootstrap.request.approval().request.offer;
         if &offer.store_root != self.history.root()
@@ -409,6 +428,9 @@ impl<'storage> JoiningStore<'storage> {
         {
             return Err(DeviceJoinError::AttemptMismatch);
         }
+        let resolved = self
+            .resolve_bootstrap(bootstrap_plan, routing_encryption)
+            .await?;
         let proof = Box::pin(
             self.history.device_join().bootstrap_pending_device(
                 &self.identity,
@@ -418,7 +440,7 @@ impl<'storage> JoiningStore<'storage> {
                     .attempt
                     .clone(),
                 verified_attempt,
-                bootstrap_plan,
+                resolved,
                 bootstrap
                     .bootstrap
                     .publication_authorization
@@ -557,11 +579,13 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
 
     pub async fn prepare_same_principal_completion(
         pending: &DeviceJoinJournalDatabase,
-        storage: &std::sync::Arc<dyn CloudSyncObjectStorage>,
+        storage: &'storage std::sync::Arc<dyn CloudSyncObjectStorage>,
+        store_dir: &'storage coven_foundation::store_dir::StoreDir,
         identity: &UserKeypair,
         join: SamePrincipalDeviceJoin,
         installed: crate::sync::store::InstalledDeviceJoinSnapshot,
         published_at: &str,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<PendingSamePrincipalDeviceJoinCompletion, DeviceJoinError> {
         join.verify_shape()?;
         let attempt_ref = join
@@ -633,13 +657,29 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
         .ok_or(DeviceJoinError::AttemptMismatch)?;
         approval.verify(&installed.verified_root, &owner, administrator)?;
         let database = installed.database;
+        // The installed snapshot image covers the history behind it; every
+        // commit between that snapshot and the bootstrap cut still carries its
+        // rows in a package this device has to read before it installs.
+        let mut joining = PendingDeviceJoinObservation::open(
+            pending,
+            storage,
+            &installed.root,
+            attempt_ref.attempt_id,
+        )
+        .await?
+        .into_joining_store(database.clone(), store_dir, identity.clone())
+        .await?;
+        let resolved = joining
+            .resolve_bootstrap(installed.bootstrap, routing_encryption)
+            .await?;
+        drop(joining);
         let proof = super::history::bootstrap_pending_device_on(
             &database,
             storage.as_ref(),
             identity,
             attempt_ref,
             verified_attempt,
-            installed.bootstrap,
+            resolved,
             join.activation.outcome_activation.clone(),
             &owner,
             published_at,

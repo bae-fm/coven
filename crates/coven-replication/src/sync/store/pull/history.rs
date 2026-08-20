@@ -201,6 +201,21 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         self.database.schema_version()
     }
 
+    pub(crate) async fn unrepresented_device_join_bootstrap_commits(
+        &self,
+        plan: coven_database::DeviceJoinBootstrapPlan,
+    ) -> Result<
+        (
+            coven_database::DeviceJoinBootstrapPlan,
+            Vec<StoreBatchCommitRef>,
+        ),
+        coven_database::DbError,
+    > {
+        self.database
+            .unrepresented_device_join_bootstrap_commits(plan)
+            .await
+    }
+
     pub(crate) fn receive_wall_ms(&self) -> u64 {
         self.database.receive_wall_ms()
     }

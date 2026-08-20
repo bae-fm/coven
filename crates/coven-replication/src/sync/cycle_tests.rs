@@ -6210,7 +6210,7 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
             .expect("bind joining Store database");
         let (registration_visible, release_registration_create) =
             storage.pause_after_exact_create_call(1);
-        let mut bootstrap = Box::pin(joining_store.bootstrap(provider_ready, T0));
+        let mut bootstrap = Box::pin(joining_store.bootstrap(provider_ready, T0, None));
         tokio::select! {
             () = registration_visible.notified() => {}
             result = &mut bootstrap => panic!(
@@ -6352,6 +6352,67 @@ async fn cross_principal_device_join_completes_on_the_runtime_stack() {
             .expect("load joined local registration")
             .is_some_and(|registration| registration.is_activated()),
         "the cross-principal join activates the joining registration",
+    );
+}
+
+/// Every data commit a Store publishes between snapshots sits past the newest
+/// snapshot's coverage, so a joining device's bootstrap has to read those
+/// commits' packages and materialize their rows itself. Joining a Store that
+/// wrote rows after admitting the member exercises exactly that window.
+#[tokio::test]
+async fn cross_principal_device_join_materializes_rows_written_after_the_snapshot() {
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        owner_db_store_dir,
+        storage,
+        member,
+        ..
+    } = cross_principal_owner_and_member().await;
+    let encryption = EncryptionService::from_key([43; 32]);
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &member,
+        &encryption,
+    )
+    .await;
+
+    owner_db
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('post-snapshot', 'Written after the snapshot', NULL, 1, \
+             '0000000002000-0000-M', '2026-01-02')",
+        )
+        .await;
+    storage
+        .open_into(&owner_db, owner_db_store_dir.clone())
+        .await
+        .expect("open owner Store")
+        .run_cycle(None)
+        .await
+        .expect("publish the post-snapshot row");
+
+    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
+    storage
+        .install_cross_principal_device(
+            coven_database::StoreDatabase::new(&member_db),
+            &member,
+            "member-account",
+            T0,
+        )
+        .await
+        .expect("complete cross-principal device join");
+
+    assert_eq!(
+        member_db
+            .query_test_text("SELECT title FROM notes WHERE id = 'post-snapshot'")
+            .await,
+        "Written after the snapshot",
+        "the bootstrap must materialize the rows of every commit past the snapshot",
     );
 }
 

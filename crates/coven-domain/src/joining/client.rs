@@ -786,7 +786,9 @@ impl DeviceJoinClient {
         let mut joining = opened
             .begin_device_join(&pending, offer.as_ref().clone())
             .await?;
-        Ok(joining.bootstrap(bootstrap, &published_at).await?)
+        Ok(joining
+            .bootstrap(bootstrap, &published_at, Some(&routing_encryption))
+            .await?)
     }
 
     pub(crate) async fn complete_device_join(
@@ -931,10 +933,12 @@ impl DeviceJoinClient {
         let completion = coven_replication::sync::store::PendingDeviceJoinAuthority::prepare_same_principal_completion(
             &pending,
             &storage.storage,
+            &store_dir,
             &signer,
             join,
             installed,
             &self.clock.now().to_rfc3339(),
+            Some(&routing_encryption),
         )
         .await?;
         if completion.joined().registration.device_id.to_string() != device_id {

@@ -27,6 +27,51 @@ fn reach_materialization_failure(
     Ok(true)
 }
 
+/// The bootstrap commits this database already materializes — each one both
+/// covered by an installed device-state snapshot row and reached by the
+/// materialized frontier. Installation records nothing for these, and the
+/// joining device resolves no row data for them.
+fn device_join_bootstrap_represented_on(
+    tx: &rusqlite::Transaction<'_>,
+    commits: &[crate::DeviceJoinBootstrapCommit],
+) -> Result<BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
+    let frontier = crate::store::materialized_commit_index::materialized_frontier_on(tx, None)?;
+    let mut represented = BTreeSet::new();
+    for prepared in commits {
+        let stream_id = prepared.reference.coord.stream_id.to_string();
+        let sequence = prepared.reference.coord.sequence();
+        if let Some(existing) = crate::store::materialized_commit_index::materialized_commit_ref_on(
+            tx, &stream_id, sequence,
+        )? {
+            if existing != prepared.reference {
+                return Err(DbError::Message(format!(
+                    "device join bootstrap conflicts at {stream_id}/{sequence}"
+                )));
+            }
+            represented.insert(prepared.reference.clone());
+            continue;
+        }
+        let encoded = serde_json::to_string(&prepared.reference).map_err(|error| {
+            DbError::context("serialize device join bootstrap commit ref", error)
+        })?;
+        let has_snapshot_state = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM store_device_state_snapshots
+                     WHERE commit_ref = ?1)",
+                [&encoded],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(DbError::from)?;
+        let covered = frontier
+            .get(&stream_id)
+            .is_some_and(|tip| sequence <= tip.coord.sequence());
+        if has_snapshot_state && covered {
+            represented.insert(prepared.reference.clone());
+        }
+    }
+    Ok(represented)
+}
+
 impl VerifiedStoreTransaction<'_, '_, '_> {
     fn apply_received_merge_materialization(
         &mut self,
@@ -340,9 +385,19 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
     fn install_device_join_bootstrap(
         &mut self,
         root: coven_protocol::store_commit::StoreRootRef,
-        plan: crate::DeviceJoinBootstrapPlan,
-    ) -> Result<(), DbError> {
+        resolved: crate::ResolvedDeviceJoinBootstrap,
+    ) -> Result<Option<coven_protocol::hlc::Timestamp>, DbError> {
+        let crate::ResolvedDeviceJoinBootstrap {
+            plan,
+            mut row_data,
+            local_store_membership,
+            routing_key,
+            receiver_wall_ms,
+        } = resolved;
         let tx = self.store.transaction;
+        let blob_decls = self.blob_decls;
+        let gates = self.gates;
+        let synced_tables = self.synced_tables;
         let authority = &mut *self.authority;
         let installed_root = authority.root().clone();
         if installed_root != root || plan.founder.store_root != root {
@@ -365,48 +420,26 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         )?;
         plan.membership.install_on(tx)?;
 
-        let frontier = crate::store::materialized_commit_index::materialized_frontier_on(tx, None)?;
-        let mut represented = BTreeSet::new();
+        let represented = device_join_bootstrap_represented_on(tx, &plan.commits)?;
+
+        // Row data has to be present before anything advances over it. A commit
+        // that names a Store package but resolved none would otherwise leave the
+        // joining device with an advanced position and no rows.
         for prepared in &plan.commits {
-            let stream_id = prepared.reference.coord.stream_id.to_string();
-            let sequence = prepared.reference.coord.sequence();
-            if let Some(existing) =
-                crate::store::materialized_commit_index::materialized_commit_ref_on(
-                    tx, &stream_id, sequence,
-                )?
-            {
-                if existing != prepared.reference {
-                    return Err(DbError::Message(format!(
-                        "device join bootstrap conflicts at {stream_id}/{sequence}"
-                    )));
-                }
-                represented.insert(prepared.reference.clone());
+            if represented.contains(&prepared.reference) {
                 continue;
             }
-            let encoded = serde_json::to_string(&prepared.reference).map_err(|error| {
-                DbError::context("serialize device join bootstrap commit ref", error)
-            })?;
-            let has_snapshot_state = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM store_device_state_snapshots
-                         WHERE commit_ref = ?1)",
-                    [&encoded],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(DbError::from)?;
-            let covered = frontier
-                .get(&stream_id)
-                .is_some_and(|tip| sequence <= tip.coord.sequence());
-            if has_snapshot_state && covered {
-                represented.insert(prepared.reference.clone());
-            }
-        }
-
-        for prepared in &plan.commits {
             let commit = prepared.commit.value();
-            if !represented.contains(&prepared.reference)
-                && (commit.store_package().is_some() || !commit.circle_packages().is_empty())
-            {
+            let resolved = row_data.get(&prepared.reference);
+            let carries_store_package = resolved.is_some_and(|data| {
+                data.packages.iter().any(|prepared| {
+                    matches!(
+                        prepared.package.audience(),
+                        coven_protocol::audience_package::PackageAudience::Store
+                    )
+                })
+            });
+            if resolved.is_none() || (commit.store_package().is_some() && !carries_store_package) {
                 return Err(DbError::Message(format!(
                     "device join bootstrap cannot advance over unmaterialized row data at {}/{}",
                     prepared.reference.coord.stream_id,
@@ -415,6 +448,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             }
         }
 
+        let mut max_updated_at: Option<coven_protocol::hlc::Timestamp> = None;
         for prepared in plan.commits {
             if represented.contains(&prepared.reference) {
                 continue;
@@ -435,33 +469,77 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 }
                 continue;
             }
-            let commit = prepared.commit.value();
-            super::record_activated_store_device_registrations_on(
-                tx,
-                commit,
-                &prepared.registrations,
-            )?;
-            let circle_activations = VerifiedCircleActivations::none(commit, &prepared.reference)
-                .map_err(DbError::from)?;
-            let activation = &prepared.activation;
-            let materialization = VerifiedMergeMaterialization::verify(
-                &root,
-                &prepared.commit,
-                &prepared.registrations,
-                &prepared.device_operations,
-                &circle_activations,
-                &activation.head,
-                &activation.object,
-                &activation.history_evidence,
-                None,
-                &[],
-                None,
-            )?;
-            let retained = MergeMaterializationTransaction::from_store(self.store)
-                .record_verified_merge_materialization(authority, materialization)?;
+            let data = row_data.remove(&prepared.reference).ok_or_else(|| {
+                DbError::Message(format!(
+                    "device join bootstrap has no resolved row data at {stream_id}/{}",
+                    prepared.reference.coord.sequence()
+                ))
+            })?;
+            let activation = prepared.activation;
+            let materialization = crate::PreparedMergeMaterialization {
+                root: root.clone(),
+                verified_commit: prepared.commit,
+                activation_head: activation.head,
+                activation_head_object: activation.object,
+                history_evidence: activation.history_evidence,
+                membership_objects: data.membership_objects,
+                membership_remote_objects: data.membership_remote_objects,
+                registrations: prepared.registrations,
+                package_application: (!data.packages.is_empty())
+                    .then_some(crate::RetainedPackageApplication::Received { receiver_wall_ms }),
+                packages: data.packages,
+                device_operations: prepared.device_operations,
+                circle_activations: data.circle_activations,
+            };
+            let mut applied = MergeMaterializationTransaction::from_store(self.store)
+                .apply_prepared_merge_materialization(
+                    authority,
+                    blob_decls,
+                    gates,
+                    synced_tables,
+                    routing_key.as_ref(),
+                    local_store_membership,
+                    crate::IncomingTimestampPolicy::Received { receiver_wall_ms },
+                    None,
+                    materialization,
+                )?;
+            match &applied.outcome {
+                crate::MaterializationOutcome::Applied(_) => {}
+                crate::MaterializationOutcome::Held(
+                    crate::MaterializationHold::ForeignKeyDependency,
+                ) => {
+                    return Err(DbError::Message(format!(
+                        "device join bootstrap at {stream_id}/{} depends on rows outside its history",
+                        prepared.reference.coord.sequence()
+                    )));
+                }
+                crate::MaterializationOutcome::Held(
+                    crate::MaterializationHold::ConstraintConflict(tables),
+                ) => {
+                    return Err(DbError::Message(format!(
+                        "device join bootstrap at {stream_id}/{} conflicts on {}",
+                        prepared.reference.coord.sequence(),
+                        tables.join(", ")
+                    )));
+                }
+            }
+            let retained = applied.retained.take().ok_or_else(|| {
+                DbError::Message(
+                    "device join bootstrap materialization omitted its verified retained input"
+                        .to_string(),
+                )
+            })?;
             authority.insert_verified(retained)?;
+            if let Some(applied_max) = applied.max_updated_at {
+                if max_updated_at
+                    .as_ref()
+                    .is_none_or(|current| *current < applied_max)
+                {
+                    max_updated_at = Some(applied_max);
+                }
+            }
         }
-        Ok(())
+        Ok(max_updated_at)
     }
 
     fn complete_owner_recovery(
@@ -599,15 +677,42 @@ impl StoreSession<'_> {
         })
     }
 
+    fn unrepresented_device_join_bootstrap_commits(
+        &mut self,
+        plan: crate::DeviceJoinBootstrapPlan,
+    ) -> Result<
+        (
+            crate::DeviceJoinBootstrapPlan,
+            Vec<coven_protocol::store_commit::StoreBatchCommitRef>,
+        ),
+        DbError,
+    > {
+        self.verified_store_transaction(move |transaction| {
+            let represented =
+                device_join_bootstrap_represented_on(transaction.store.transaction, &plan.commits)?;
+            let unrepresented = plan
+                .commits
+                .iter()
+                .map(|prepared| prepared.reference.clone())
+                .filter(|reference| !represented.contains(reference))
+                .collect::<Vec<_>>();
+            Ok(StoreTransactionOutcome::Rollback((plan, unrepresented)))
+        })
+    }
+
     fn install_device_join_bootstrap(
         &mut self,
         root: coven_protocol::store_commit::StoreRootRef,
-        plan: crate::DeviceJoinBootstrapPlan,
+        resolved: crate::ResolvedDeviceJoinBootstrap,
     ) -> Result<(), DbError> {
-        self.verified_store_transaction(move |transaction| {
-            transaction.install_device_join_bootstrap(root, plan)?;
-            Ok(StoreTransactionOutcome::Commit(()))
-        })
+        let max_updated_at = self.verified_store_transaction(move |transaction| {
+            let max_updated_at = transaction.install_device_join_bootstrap(root, resolved)?;
+            Ok(StoreTransactionOutcome::Commit(max_updated_at))
+        })?;
+        if let Some(max_applied) = max_updated_at.as_ref() {
+            self.hlc.advance_past(max_applied);
+        }
+        Ok(())
     }
 
     fn complete_owner_recovery(
@@ -716,12 +821,28 @@ impl StoreDatabase {
         .await
     }
 
+    /// The plan commits whose rows this database does not already materialize.
+    /// The joining device resolves row data for exactly these before installing.
+    pub async fn unrepresented_device_join_bootstrap_commits(
+        &self,
+        plan: crate::DeviceJoinBootstrapPlan,
+    ) -> Result<
+        (
+            crate::DeviceJoinBootstrapPlan,
+            Vec<coven_protocol::store_commit::StoreBatchCommitRef>,
+        ),
+        DbError,
+    > {
+        self.call_store(move |session| session.unrepresented_device_join_bootstrap_commits(plan))
+            .await
+    }
+
     pub async fn install_device_join_bootstrap(
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
-        plan: crate::DeviceJoinBootstrapPlan,
+        resolved: crate::ResolvedDeviceJoinBootstrap,
     ) -> Result<(), DbError> {
-        self.call_store(move |session| session.install_device_join_bootstrap(root, plan))
+        self.call_store(move |session| session.install_device_join_bootstrap(root, resolved))
             .await
     }
 

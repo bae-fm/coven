@@ -85,11 +85,11 @@ pub use host_write_operation::{HostWriteError, HostWriteOperation};
 pub use local_blob_cleanup::LocalBlobCleanup;
 pub use materialization_models::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
-    DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, MembershipAuthorityBytes,
-    OwnedVerifiedMergeMaterialization, PreparedMergeMaterialization,
-    PreparedMergeMaterializationPackage, RetainedAudiencePackage, RetainedMergeHistoryCheckpoint,
-    RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
-    VerifiedMergeMembershipObjects, VerifiedStoreSnapshotStability,
+    DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, DeviceJoinBootstrapRowData,
+    MembershipAuthorityBytes, OwnedVerifiedMergeMaterialization, PreparedMergeMaterialization,
+    PreparedMergeMaterializationPackage, ResolvedDeviceJoinBootstrap, RetainedAudiencePackage,
+    RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
+    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, VerifiedStoreSnapshotStability,
 };
 #[cfg(test)]
 pub(crate) use merge_materialization_transaction::test_install_winning_blob_bindings;

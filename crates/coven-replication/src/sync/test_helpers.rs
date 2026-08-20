@@ -619,7 +619,11 @@ mod test_device {
                 )));
             }
             joining
-                .bootstrap(join.bootstrap.clone(), published_at)
+                .bootstrap(
+                    join.bootstrap.clone(),
+                    published_at,
+                    Some(&routing_encryption),
+                )
                 .await?;
             joining.complete(join.activation).await?;
             Self::load_with_database(
@@ -4326,7 +4330,9 @@ impl TestStore {
             let mut joining = pending_join
                 .begin_joining_store(local_database, &store_dir)
                 .await?;
-            let readiness = joining.bootstrap(provider_ready, published_at).await?;
+            let readiness = joining
+                .bootstrap(provider_ready, published_at, None)
+                .await?;
             if !matches!(
                 readiness.provider,
                 coven_protocol::store_commit::device_join_exchange::DeviceProviderReadiness::CrossPrincipal(_)

@@ -242,9 +242,9 @@ pub(crate) use store::payload_store;
 pub use store::PayloadStoreError;
 pub use store::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
-    DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, MembershipAuthorityBytes,
-    PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
-    VerifiedStoreSnapshotStability,
+    DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, DeviceJoinBootstrapRowData,
+    MembershipAuthorityBytes, PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
+    ResolvedDeviceJoinBootstrap, VerifiedStoreSnapshotStability,
 };
 pub use store::{
     audience_moves_by_row, local_blob_cleanup_intents, AudienceBlobMoveStaging, PostUpload,

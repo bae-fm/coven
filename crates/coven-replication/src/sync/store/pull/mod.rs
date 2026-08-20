@@ -26,6 +26,7 @@ use coven_protocol::store_commit::{
 use coven_protocol::{circle, store_commit};
 pub(crate) use history::PullHistory;
 
+mod device_join_bootstrap;
 mod device_lifecycle_state;
 mod discovery;
 mod join_activation;
