@@ -230,7 +230,10 @@ impl SyncLoopThread {
         while self.running.load(Ordering::Acquire) && !*self.stop_rx.borrow() {
             // Everything between two idle waits, so the gap between cycles is
             // accounted for even when the cycle itself was not the slow part.
-            let mut timings = StageTimings::start("sync loop iteration");
+            let mut timings = StageTimings::counting(
+                "sync loop iteration",
+                self.inner.components.provider_requests(),
+            );
             self.status_tx.send_replace(SyncLoopStatus::CheckingStorage);
             let reachable = timings
                 .stage("probe storage", self.inner.components.probe_storage())

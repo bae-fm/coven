@@ -130,7 +130,28 @@ impl CloudHomeFactory {
         })
     }
 
+    /// Open the configured provider's home, counting every operation asked of
+    /// it.
+    ///
+    /// Every home a running installation works through is built here, so
+    /// wrapping here is what makes each stage of a live run able to say how
+    /// many provider operations it cost. The homes tests construct directly are
+    /// not wrapped and count nothing, and the runs over them report their times
+    /// alone.
     pub async fn create(
+        &self,
+        config: &coven_foundation::config::Config,
+        clock: coven_foundation::clock::ClockRef,
+        cloudkit_ops: Option<std::sync::Arc<dyn cloudkit::CloudKitOps>>,
+        credential_custody: Arc<dyn CloudHomeCredentialCustody>,
+    ) -> Result<Box<dyn ExactCloudHome>, CloudHomeError> {
+        Ok(Box::new(super::CountingCloudHome::new(Arc::from(
+            self.open(config, clock, cloudkit_ops, credential_custody)
+                .await?,
+        ))))
+    }
+
+    async fn open(
         &self,
         config: &coven_foundation::config::Config,
         clock: coven_foundation::clock::ClockRef,

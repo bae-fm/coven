@@ -385,8 +385,10 @@ impl<'storage> JoiningStore<'storage> {
         published_at: &str,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<DeviceJoinReadiness, DeviceJoinError> {
-        let mut timings =
-            coven_foundation::stage_timing::StageTimings::start("Device join history install");
+        let mut timings = coven_foundation::stage_timing::StageTimings::counting(
+            "Device join history install",
+            self.history.provider_requests(),
+        );
         let outcome = Box::pin(self.bootstrap_staged(
             bootstrap,
             published_at,
@@ -467,8 +469,10 @@ impl<'storage> JoiningStore<'storage> {
         // The readiness step is a database transaction, two provider round-trips
         // and a publish; it reports its own breakdown, because from out here it
         // is one number that moves with the store rather than with this join.
-        let mut inner =
-            coven_foundation::stage_timing::StageTimings::start("Device join readiness");
+        let mut inner = coven_foundation::stage_timing::StageTimings::counting(
+            "Device join readiness",
+            self.history.provider_requests(),
+        );
         let proof = timings
             .stage(
                 "publish readiness",
@@ -647,8 +651,9 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         membership: Option<coven_protocol::membership::MembershipChain>,
     ) -> Result<PendingSamePrincipalDeviceJoinCompletion, DeviceJoinError> {
-        let mut run = coven_foundation::stage_timing::StageTimings::start(
+        let mut run = coven_foundation::stage_timing::StageTimings::counting(
             "Same-provider join history install",
+            storage.provider_requests(),
         );
         let timings = &mut run;
         join.verify_shape()?;

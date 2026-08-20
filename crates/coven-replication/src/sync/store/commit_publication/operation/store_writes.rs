@@ -276,11 +276,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         // a live cycle. Each commit it publishes costs several provider round
         // trips — two slot allocations while preparing, then the packages, the
         // commit, the head, and the read-back that confirms the head — on top of
-        // sealing a package per audience. The stage totals say which of those
-        // the time went to, and they accumulate across every commit the loop
-        // publishes so a slow cycle is described by one line however many
-        // commits it drained. Reported on every exit path, including failures.
-        let mut timings = StageTimings::start("Store write publication");
+        // sealing a package per audience. Counting the run says how many of
+        // those each stage actually made rather than leaving it to be read off
+        // this comment, and both the times and the counts accumulate across
+        // every commit the loop publishes, so a slow cycle is described by one
+        // line however many commits it drained. Reported on every exit path,
+        // including failures.
+        let mut timings =
+            StageTimings::counting("Store write publication", self.provider_requests());
         let outcome = Box::pin(self.publish_pending_store_writes_timed(&mut timings)).await;
         timings.report();
         outcome
@@ -324,7 +327,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         run: &'static str,
     ) -> Result<u64, StoreError> {
-        let mut timings = StageTimings::start(run);
+        let mut timings = StageTimings::counting(run, self.provider_requests());
         let outcome = Box::pin(self.drain_prepared_store_writes(&mut timings)).await;
         timings.report();
         outcome

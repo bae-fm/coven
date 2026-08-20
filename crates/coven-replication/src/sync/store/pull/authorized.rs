@@ -41,7 +41,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         // Report the breakdown whichever way the pull ends. A pull that failed
         // partway is exactly the one whose stage timings are wanted, and the
         // stages it did reach are still real elapsed time.
-        let mut timings = StageTimings::start("Store pull");
+        let mut timings = StageTimings::counting("Store pull", self.history.provider_requests());
         let outcome = Box::pin(self.execute_stages(&mut timings)).await;
         timings.report();
         outcome
@@ -153,8 +153,16 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                         error,
                     )
                 })?;
-            timings.record("fetch heads", discovered.reads.heads);
-            timings.record("fetch commits", discovered.reads.commits);
+            timings.record(
+                "fetch heads",
+                discovered.reads.heads,
+                discovered.reads.head_reads,
+            );
+            timings.record(
+                "fetch commits",
+                discovered.reads.commits,
+                discovered.reads.commit_reads,
+            );
             if let Some(head) = discovered.latest_head {
                 visible_heads.push(VerifiedStoreDeviceHead {
                     head,

@@ -84,6 +84,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .read_protocol_slot(&context, &slot, &semantic_prefix)
                 .await;
             reads.heads = reads.heads.saturating_add(head_read.elapsed());
+            reads.head_reads = reads.head_reads.saturating_add(1);
             let (bytes, object) = match opened {
                 Ok(opened) => opened,
                 Err(StorageError::NotFound(_)) => break,
@@ -155,6 +156,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             let commit_read = Stopwatch::start();
             let loaded = self.load_ref(&unverified.commit).await;
             reads.commits = reads.commits.saturating_add(commit_read.elapsed());
+            reads.commit_reads = reads.commit_reads.saturating_add(1);
             let commit = match loaded {
                 Ok(verified)
                     if verified.value().author_registration == *registration_ref

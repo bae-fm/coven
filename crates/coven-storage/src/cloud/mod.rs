@@ -14,6 +14,7 @@ pub mod test_utils;
 #[cfg(feature = "oauth-providers")]
 pub(crate) mod account_email;
 pub mod cloudkit;
+mod counting;
 #[cfg(feature = "oauth-providers")]
 pub mod dropbox;
 mod factory;
@@ -39,6 +40,7 @@ mod sharing;
 #[cfg(test)]
 mod test_server;
 
+pub use counting::CountingCloudHome;
 use coven_protocol::objects::{ObjectSlot, StorageBackendFailure};
 pub use factory::CloudHomeFactory;
 #[cfg(feature = "oauth-providers")]
@@ -631,6 +633,20 @@ pub trait CloudHome: Send + Sync {
     /// larger ones stream via [`open_multipart`](CloudHome::open_multipart).
     fn multipart_threshold(&self) -> u64;
 
+    /// The running total of provider operations issued through this home, for
+    /// a run's stage timings to report each stage's count beside its wall time.
+    ///
+    /// `None` from a home nobody wrapped for counting — every provider's own
+    /// implementation, and the in-memory homes tests run against. A run told
+    /// `None` reports its times alone, because a column of zeroes would claim a
+    /// measurement nobody took. [`CountingCloudHome`] is what answers `Some`,
+    /// and the factory wraps every home it builds in one.
+    fn provider_requests(
+        &self,
+    ) -> Option<std::sync::Arc<dyn coven_foundation::stage_timing::ProviderRequests>> {
+        None
+    }
+
     /// Write a sized [`BlobBody`] to `key`. Not overridden — the central
     /// `write_blob` driver picks single-request vs multipart and pumps the
     /// parts, reporting cumulative bytes through `progress` for the per-file bar.
@@ -684,6 +700,9 @@ pub trait CloudHome: Send + Sync {
 pub trait ExactCloudHome: CloudHome + ExactSlotStorage {}
 
 impl<T> ExactCloudHome for T where T: CloudHome + ExactSlotStorage {}
+
+#[cfg(test)]
+mod counting_tests;
 
 #[cfg(test)]
 mod object_slot_tests;

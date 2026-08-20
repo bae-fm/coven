@@ -245,6 +245,15 @@ impl SyncLoopHandle {
         self.activate_tx.send_replace(true);
     }
 
+    /// The provider-operation counter of the home this loop works through, so
+    /// a run driven from outside the loop — an owner-side device-join step —
+    /// can report each stage's count beside its wall time.
+    pub fn provider_requests(
+        &self,
+    ) -> Option<Arc<dyn coven_foundation::stage_timing::ProviderRequests>> {
+        self.inner.components.provider_requests()
+    }
+
     /// Whether the background sync thread is running.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)

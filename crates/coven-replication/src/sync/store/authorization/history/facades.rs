@@ -56,6 +56,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         Ok(())
     }
 
+    /// The provider-operation counter of the storage this reads through, so a
+    /// run over it can report each stage's count beside its wall time.
+    pub(crate) fn provider_requests(
+        &self,
+    ) -> Option<std::sync::Arc<dyn coven_foundation::stage_timing::ProviderRequests>> {
+        self.storage.provider_requests()
+    }
+
     pub(super) fn pull_history(&mut self) -> pull::PullHistory<'_, 'storage> {
         pull::PullHistory::new(
             self.database.clone(),

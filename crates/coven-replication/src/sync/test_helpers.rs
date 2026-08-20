@@ -4894,6 +4894,12 @@ where
         self.inner.probe_provider().await
     }
 
+    fn provider_requests(
+        &self,
+    ) -> Option<std::sync::Arc<dyn coven_foundation::stage_timing::ProviderRequests>> {
+        self.inner.provider_requests()
+    }
+
     async fn set_member_access(
         &self,
         state: coven_storage::cloud::CloudAccessState,

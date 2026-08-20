@@ -154,8 +154,9 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         if attempt.store_root != root {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let mut timings = coven_foundation::stage_timing::StageTimings::start(
+        let mut timings = coven_foundation::stage_timing::StageTimings::counting(
             "Same-provider join installation plan",
+            self.storage.provider_requests(),
         );
         let snapshots = self.database.local_store_snapshots().await?;
         if snapshots.is_empty() {

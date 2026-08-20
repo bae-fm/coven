@@ -275,8 +275,10 @@ impl PreparedDeviceJoinSnapshot {
         on_progress: &crate::sync::JoiningDeviceJoinProgressObserver,
         cancel: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<Self, SnapshotError> {
-        let mut timings =
-            coven_foundation::stage_timing::StageTimings::start("Device join snapshot preparation");
+        let mut timings = coven_foundation::stage_timing::StageTimings::counting(
+            "Device join snapshot preparation",
+            storage.provider_requests(),
+        );
         timings.mark("verify the snapshot authority", || {
             installation.authority.validate()
         })?;

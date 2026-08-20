@@ -11,8 +11,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         // transport step above it is one opaque span. The stages below are the
         // pieces: two history walks, the signing, the four uploads, and the
         // journal write that carries the whole join.
-        let mut timings =
-            coven_foundation::stage_timing::StageTimings::start("Same-provider join activation");
+        let mut timings = coven_foundation::stage_timing::StageTimings::counting(
+            "Same-provider join activation",
+            self.storage.provider_requests(),
+        );
         let outcome =
             Box::pin(self.activate_same_principal_join_staged(request, &mut timings)).await;
         timings.report();

@@ -111,6 +111,16 @@ impl CloudSyncConnection {
         }
     }
 
+    /// The running total of provider operations issued through this
+    /// connection's home — by this connection and by any other over the same
+    /// home, which on a device join is how the plaintext bootstrap reads and
+    /// the encrypted reads after them land in one total.
+    pub fn provider_requests(
+        &self,
+    ) -> Option<Arc<dyn coven_foundation::stage_timing::ProviderRequests>> {
+        self.home.provider_requests()
+    }
+
     /// Seal and read blobs with `chunking` instead of [`BlobChunking::DEFAULT`].
     /// The chunk size applies to blobs this storage seals from now on; already
     /// stored blobs keep the size their own headers record, so installations

@@ -295,7 +295,10 @@ pub async fn restore_from_cloud(
 
         let blob_paths = BlobPathScheme::for_storage(storage);
 
-        let cloud_home = source.open_cloud_home(&store_keys, clock.clone()).await?;
+        let cloud_home: Arc<dyn ExactCloudHome> =
+            Arc::new(coven_storage::cloud::CountingCloudHome::new(
+                source.open_cloud_home(&store_keys, clock.clone()).await?,
+            ));
         let join_info = &source.join_info;
 
         let storage: Arc<dyn coven_storage::CloudSyncObjectStorage> =

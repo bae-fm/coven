@@ -100,7 +100,7 @@ impl StoreTransaction<'_, '_> {
             )
             .map_err(DbError::from)?;
         }
-        timings.record("record the coverage", coverage_started.elapsed());
+        timings.record("record the coverage", coverage_started.elapsed(), 0);
         let baseline_started = coven_foundation::clock::Stopwatch::start();
         install_snapshot_replay_baseline_on(
             crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
@@ -108,10 +108,10 @@ impl StoreTransaction<'_, '_> {
             routing_hash,
             install.authority.clone(),
         )?;
-        timings.record("capture the replay baseline", baseline_started.elapsed());
+        timings.record("capture the replay baseline", baseline_started.elapsed(), 0);
         let circles_started = coven_foundation::clock::Stopwatch::start();
         let outcome = self.install_selected_snapshot_circles(install, &root, synced_tables);
-        timings.record("install the circles", circles_started.elapsed());
+        timings.record("install the circles", circles_started.elapsed(), 0);
         timings.report();
         outcome
     }

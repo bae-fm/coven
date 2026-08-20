@@ -29,7 +29,8 @@ impl PullHistory<'_, '_> {
         identity: &UserKeypair,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<ResolvedDeviceJoinBootstrap, StorePullError> {
-        let mut timings = StageTimings::start("Device join bootstrap resolution");
+        let mut timings =
+            StageTimings::counting("Device join bootstrap resolution", self.provider_requests());
         let outcome = Box::pin(self.resolve_device_join_bootstrap_staged(
             plan,
             membership,
@@ -90,7 +91,8 @@ impl PullHistory<'_, '_> {
         );
         // The commit that failed is the one whose split is wanted, so the inner
         // breakdown is reported before the failure propagates.
-        let mut inner = StageTimings::start("Device join bootstrap row data");
+        let mut inner =
+            StageTimings::counting("Device join bootstrap row data", self.provider_requests());
         let row_data = Box::pin(self.resolve_bootstrap_row_data(
             &plan,
             unrepresented,

@@ -226,7 +226,8 @@ impl AuthorizedSyncCycle<'_, '_> {
     async fn run(mut self) -> Result<SyncCycleResult, SyncCycleFailure> {
         // Time the stages whichever way the cycle ends: a cycle that failed
         // halfway through is exactly the one whose stage breakdown is wanted.
-        let mut timings = StageTimings::start("sync cycle");
+        let mut timings =
+            StageTimings::counting("sync cycle", self.authorization.provider_requests());
         let outcome = Box::pin(self.run_stages(&mut timings)).await;
         timings.report();
         outcome
@@ -1320,6 +1321,14 @@ impl SyncComponents {
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<coven_protocol::circle::CircleCloseStatus, super::store::CircleOperationError> {
         self.store.circles().circle_close_status(circle_id).await
+    }
+
+    /// The provider-operation counter of the home this loop works through, so
+    /// a run over it can report each stage's count beside its wall time.
+    pub(crate) fn provider_requests(
+        &self,
+    ) -> Option<std::sync::Arc<dyn coven_foundation::stage_timing::ProviderRequests>> {
+        self.storage.provider_requests()
     }
 
     pub async fn run_cycle(

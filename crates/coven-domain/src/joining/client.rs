@@ -734,8 +734,13 @@ impl DeviceJoinClient {
         coven_protocol::store_commit::device_join_exchange::DeviceJoinReadiness,
         BootstrapError,
     > {
-        let mut timings = StageTimings::start("Device join bootstrap");
+        // Opened before the run so the run counts through it. Opening one is
+        // local, so nothing measurable happens ahead of the first stage.
+        let cloud = self.build_cloud_home().await?;
+        let mut timings =
+            StageTimings::counting("Device join bootstrap", cloud.provider_requests());
         let outcome = Box::pin(self.bootstrap_pending_device_staged(
+            cloud,
             bootstrap,
             on_progress,
             cancel,
@@ -748,6 +753,7 @@ impl DeviceJoinClient {
 
     async fn bootstrap_pending_device_staged(
         &self,
+        cloud: Arc<dyn ExactCloudHome>,
         bootstrap: coven_replication::sync::ProviderReadyDeviceBootstrap,
         on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
         cancel: &watch::Receiver<bool>,
@@ -765,7 +771,7 @@ impl DeviceJoinClient {
         }
         let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
         let join = timings
-            .stage("open cloud home", self.build_storage(&signer))
+            .stage("open Store storage", self.build_storage(cloud, &signer))
             .await?;
         let store_dir = self.layout.store_dir(&self.admission.store_id);
         if let Some(readiness) = pending.completed_joiner_readiness(attempt)? {
@@ -844,15 +850,25 @@ impl DeviceJoinClient {
         activation: coven_replication::sync::DeviceJoinActivation,
         on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
     ) -> Result<Config, BootstrapError> {
-        let mut timings = StageTimings::start("Device join completion");
-        let outcome =
-            Box::pin(self.complete_device_join_staged(activation, on_progress, &mut timings)).await;
+        // Opened before the run so the run counts through it. Opening one is
+        // local, so nothing measurable happens ahead of the first stage.
+        let cloud = self.build_cloud_home().await?;
+        let mut timings =
+            StageTimings::counting("Device join completion", cloud.provider_requests());
+        let outcome = Box::pin(self.complete_device_join_staged(
+            cloud,
+            activation,
+            on_progress,
+            &mut timings,
+        ))
+        .await;
         timings.report();
         outcome
     }
 
     async fn complete_device_join_staged(
         &self,
+        cloud: Arc<dyn ExactCloudHome>,
         activation: coven_replication::sync::DeviceJoinActivation,
         on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
         timings: &mut StageTimings,
@@ -876,7 +892,7 @@ impl DeviceJoinClient {
             None => coven_keys::keys::peek_pending_identity(&self.member_pubkey)?,
         };
         let join = timings
-            .stage("open cloud home", self.build_storage(&signer))
+            .stage("open Store storage", self.build_storage(cloud, &signer))
             .await?;
         let pending_readiness = pending.observe_joiner_activation_if_pending(&activation)?;
         let device_id = match (pending_readiness.as_ref(), completed_config.as_ref()) {
@@ -970,8 +986,13 @@ impl DeviceJoinClient {
         on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
         cancel: &watch::Receiver<bool>,
     ) -> Result<Config, BootstrapError> {
-        let mut timings = StageTimings::start("Same-provider device join");
+        // Opened before the run so the run counts through it. Opening one is
+        // local, so nothing measurable happens ahead of the first stage.
+        let cloud = self.build_cloud_home().await?;
+        let mut timings =
+            StageTimings::counting("Same-provider device join", cloud.provider_requests());
         let outcome = Box::pin(self.install_same_principal_device_join_staged(
+            cloud,
             join,
             on_progress,
             cancel,
@@ -984,6 +1005,7 @@ impl DeviceJoinClient {
 
     async fn install_same_principal_device_join_staged(
         &self,
+        cloud: Arc<dyn ExactCloudHome>,
         join: coven_replication::sync::SamePrincipalDeviceJoin,
         on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
         cancel: &watch::Receiver<bool>,
@@ -1003,7 +1025,7 @@ impl DeviceJoinClient {
         }
         let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
         let storage = timings
-            .stage("open cloud home", self.build_storage(&signer))
+            .stage("open Store storage", self.build_storage(cloud, &signer))
             .await?;
         store_dir.ensure_created()?;
         let prepared = timings
@@ -1104,12 +1126,20 @@ impl DeviceJoinClient {
         )?)
     }
 
+    /// Open the home this join reads through, counting every operation asked
+    /// of it.
+    ///
+    /// A join opens two storages over this one home — a plaintext one to pin
+    /// the Store root and walk the membership chain, then an encrypted one for
+    /// everything after — so counting here rather than per storage is what puts
+    /// the whole join's operations in one running total. The home a test
+    /// supplies is left alone and counts nothing.
     async fn build_cloud_home(&self) -> Result<Arc<dyn ExactCloudHome>, BootstrapError> {
         #[cfg(any(test, feature = "test-utils"))]
         if let Some(home) = &self.test_home {
             return Ok(home.clone());
         }
-        build_cloud_home_for_join(
+        let home = build_cloud_home_for_join(
             &self.admission.join_info,
             &self.store_keys,
             &self.cloud_homes,
@@ -1118,7 +1148,8 @@ impl DeviceJoinClient {
             self.clock.clone(),
             self.exact_upload_verification,
         )
-        .await
+        .await?;
+        Ok(Arc::new(coven_storage::cloud::CountingCloudHome::new(home)))
     }
 
     /// Plaintext storage over the joining device's cloud home.
@@ -1147,33 +1178,36 @@ impl DeviceJoinClient {
         ))
     }
 
-    /// Open the cloud home this join reads through.
+    /// Unwrap the store keyring over the home this join already opened.
     ///
     /// Timed as one step by its callers, where it has been the second-largest
     /// on a live join. Constructing the home is local — no bucket check, no
-    /// auth probe — so the time is the two reads that pin the Store root and
-    /// its founder, the membership chain walk, and the wrapped-key reads. The
-    /// chain walk is a sequential slot-by-slot traversal per membership stream,
-    /// each terminated by a read that misses, so it costs a round-trip per
-    /// membership entry and grows with the store's membership history.
+    /// auth probe — and its caller does it, so all of this time is the two
+    /// reads that pin the Store root and its founder, the membership chain
+    /// walk, and the wrapped-key reads. The walk lists each membership stream
+    /// under its prefix and reads the listed heads in batches, so it costs a
+    /// listing and a terminating miss per stream rather than a round trip per
+    /// entry — but it still fetches and verifies every entry, so it grows with
+    /// the store's membership history. The counts on this run's stages are what
+    /// say which of the two it is on any given join.
     async fn build_storage(
         &self,
+        cloud: Arc<dyn ExactCloudHome>,
         signer: &UserKeypair,
     ) -> Result<DeviceJoinStorage, BootstrapError> {
-        let mut timings = StageTimings::start("Device join cloud home");
-        let outcome = Box::pin(self.build_storage_staged(signer, &mut timings)).await;
+        let mut timings =
+            StageTimings::counting("Device join Store storage", cloud.provider_requests());
+        let outcome = Box::pin(self.build_storage_staged(cloud, signer, &mut timings)).await;
         timings.report();
         outcome
     }
 
     async fn build_storage_staged(
         &self,
+        cloud: Arc<dyn ExactCloudHome>,
         signer: &UserKeypair,
         timings: &mut StageTimings,
     ) -> Result<DeviceJoinStorage, BootstrapError> {
-        let cloud = timings
-            .stage("construct the home", self.build_cloud_home())
-            .await?;
         let bootstrap_storage = self.plaintext_storage(cloud.clone(), signer)?;
         let recipient = hex::encode(signer.public_key());
         if self.admission.wrapped_key.recipient_pubkey != recipient {

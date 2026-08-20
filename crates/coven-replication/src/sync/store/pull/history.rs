@@ -57,6 +57,14 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         }
     }
 
+    /// The provider-operation counter of the storage this pull reads through,
+    /// so the pull's stage timings can say how many operations each stage cost.
+    pub(crate) fn provider_requests(
+        &self,
+    ) -> Option<std::sync::Arc<dyn coven_foundation::stage_timing::ProviderRequests>> {
+        self.storage.provider_requests()
+    }
+
     pub(crate) fn circles(
         &mut self,
     ) -> crate::sync::store::circles::VerifiedCircleHistory<'_, 'storage> {

@@ -23,10 +23,18 @@ pub(crate) struct MergeStreamDiscovery {
 /// "probing for work nobody published is the whole cost", so the walk measures
 /// them apart and hands both to whoever asked. Only the sync cycle turns them
 /// into a log line; every other caller ignores them.
+///
+/// The read counts travel with the times because they answer different halves
+/// of the same question: the time says how long the wait was, the count says
+/// whether it was one slow read or a hundred fast ones. The walk is the only
+/// place that can tell a head read from a commit read, so it is the only place
+/// that can split the count the way it splits the time.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct MergeStreamReadTiming {
     pub(crate) heads: Duration,
+    pub(crate) head_reads: u64,
     pub(crate) commits: Duration,
+    pub(crate) commit_reads: u64,
 }
 
 pub(crate) enum MergeStreamBlock {

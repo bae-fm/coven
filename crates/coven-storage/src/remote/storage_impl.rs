@@ -35,6 +35,12 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         self.probe().await.map_err(Into::into)
     }
 
+    fn provider_requests(
+        &self,
+    ) -> Option<std::sync::Arc<dyn coven_foundation::stage_timing::ProviderRequests>> {
+        CloudSyncConnection::provider_requests(self)
+    }
+
     async fn set_member_access(
         &self,
         state: crate::cloud::CloudAccessState,

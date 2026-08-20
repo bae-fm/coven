@@ -34,6 +34,16 @@ pub struct Store {
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
 }
 
+impl Store {
+    /// The provider-operation counter of the home this Store works through, so
+    /// a run over it can report each stage's count beside its wall time.
+    pub fn provider_requests(
+        &self,
+    ) -> Option<Arc<dyn coven_foundation::stage_timing::ProviderRequests>> {
+        self.storage.provider_requests()
+    }
+}
+
 #[doc(hidden)]
 pub struct StoreRestoreMembership {
     pub store_root: StoreRootRef,

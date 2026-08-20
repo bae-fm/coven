@@ -52,6 +52,14 @@ pub trait CloudSyncObjectStorage: Send + Sync {
     /// Verify that the retained provider session is reachable and usable.
     async fn probe_provider(&self) -> Result<(), StorageError>;
 
+    /// The running total of provider operations issued through this storage's
+    /// home, so a run's stage timings can report each stage's count beside its
+    /// wall time. `None` when nothing is counting — see
+    /// [`CloudHome::provider_requests`](crate::cloud::CloudHome::provider_requests).
+    fn provider_requests(
+        &self,
+    ) -> Option<std::sync::Arc<dyn coven_foundation::stage_timing::ProviderRequests>>;
+
     /// Apply and read back one provider membership-access state.
     async fn set_member_access(
         &self,

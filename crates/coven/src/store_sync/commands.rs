@@ -314,7 +314,12 @@ impl StoreSync {
         member_pubkey: &str,
     ) -> Result<crate::DeviceJoinOffer, SyncError> {
         let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
-        Ok(timed_owner_join_step("publish offer", sync.begin_device_join(member_pubkey)).await?)
+        Ok(timed_owner_join_step(
+            "publish offer",
+            sync.provider_requests(),
+            sync.begin_device_join(member_pubkey),
+        )
+        .await?)
     }
 
     pub(crate) async fn abandon_device_join(
@@ -322,7 +327,12 @@ impl StoreSync {
         offer: crate::DeviceJoinOffer,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
         let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
-        Ok(timed_owner_join_step("abandon offer", sync.abandon_device_join(offer)).await?)
+        Ok(timed_owner_join_step(
+            "abandon offer",
+            sync.provider_requests(),
+            sync.abandon_device_join(offer),
+        )
+        .await?)
     }
 
     pub(crate) async fn authorize_device_provider_access(
@@ -333,6 +343,7 @@ impl StoreSync {
         let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
         Ok(timed_owner_join_step(
             "authorize provider access",
+            sync.provider_requests(),
             sync.authorize_device_provider_access(request, access_administrator),
         )
         .await?)
@@ -345,6 +356,7 @@ impl StoreSync {
         let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
         Ok(timed_owner_join_step(
             "accept registration",
+            sync.provider_requests(),
             sync.accept_device_registration(request),
         )
         .await?)
@@ -357,6 +369,7 @@ impl StoreSync {
         let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
         Ok(timed_owner_join_step(
             "publish provider challenge",
+            sync.provider_requests(),
             sync.publish_device_provider_challenge(bootstrap),
         )
         .await?)
@@ -369,6 +382,7 @@ impl StoreSync {
         let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
         Ok(timed_owner_join_step(
             "complete provider admission",
+            sync.provider_requests(),
             sync.complete_device_provider_admission(readiness),
         )
         .await?)
@@ -379,10 +393,12 @@ impl StoreSync {
         completion: crate::DeviceProviderAdmissionCompletion,
     ) -> Result<crate::DeviceJoinActivation, SyncError> {
         let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
-        Ok(
-            timed_owner_join_step("publish activation", sync.finalize_device_join(completion))
-                .await?,
+        Ok(timed_owner_join_step(
+            "publish activation",
+            sync.provider_requests(),
+            sync.finalize_device_join(completion),
         )
+        .await?)
     }
 
     pub(crate) async fn cancel_device_join(

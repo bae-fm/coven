@@ -454,14 +454,17 @@ impl JoinPollBackoff {
 ///
 /// Each of these is one transition in the Add-a-device flow — approve the
 /// provider access, accept the registration, activate — and each is one or more
-/// provider round trips. Two flows reach them: the discrete command API a host
-/// drives itself, and the pairing driver's `drive_once`. They share this
-/// function so a run through either one reads the same in the log.
+/// provider round trips, which is what `requests` counts. Two flows reach them:
+/// the discrete command API a host drives itself, and the pairing driver's
+/// `drive_once`. They share this function so a run through either one reads the
+/// same in the log, and each passes the counter of the home it drives.
 pub async fn timed_owner_join_step<T>(
     step: &'static str,
+    requests: Option<std::sync::Arc<dyn coven_foundation::stage_timing::ProviderRequests>>,
     work: impl std::future::Future<Output = T>,
 ) -> T {
-    let mut timings = coven_foundation::stage_timing::StageTimings::start("Device join owner step");
+    let mut timings =
+        coven_foundation::stage_timing::StageTimings::counting("Device join owner step", requests);
     let outcome = timings.stage(step, work).await;
     timings.report();
     outcome
@@ -999,7 +1002,7 @@ impl<'attempt> AttemptTransport<'attempt> {
     /// one inline grows its already-large state machine past the stack a test
     /// runner gives it.
     async fn step<T>(&self, step: &'static str, work: impl std::future::Future<Output = T>) -> T {
-        timed_owner_join_step(step, Box::pin(work)).await
+        timed_owner_join_step(step, self.store.provider_requests(), Box::pin(work)).await
     }
 
     /// Read the artifact the other side owes this step, waiting for it to appear.
@@ -1299,8 +1302,9 @@ impl<'attempt> AttemptTransport<'attempt> {
     ) -> Result<SamePrincipalDeviceJoin, DeviceJoinTransportError> {
         // Sixty-eight seconds hid behind this one step in a live run. It is
         // three provider-facing pieces, and they report as three.
-        let mut timings = coven_foundation::stage_timing::StageTimings::start(
+        let mut timings = coven_foundation::stage_timing::StageTimings::counting(
             "Device join same-provider activation",
+            self.store.provider_requests(),
         );
         let outcome = async {
             let mut writer = timings
