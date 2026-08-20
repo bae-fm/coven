@@ -1165,19 +1165,18 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
         let image_path = image_dir.path().to_path_buf();
         let tables = crate::sync::test_helpers::test_synced_tables();
         let root = store.root().clone();
-        let image = StoreDatabase::new(&source)
+        let source_database = StoreDatabase::new(&source);
+        let image = source_database
             .capture_snapshot_image_for_test(root, image_path, None)
             .await
             .expect("create bootstrap database image");
+        let coverage = captured_coverage(&source_database).await;
         let published_snapshot = device
-            .publish_snapshot(image, CommitFrontier(BTreeMap::new()))
+            .publish_snapshot(image, coverage.clone())
             .await
             .expect("publish bootstrap database image");
         device
-            .stage_acknowledgement(
-                CommitFrontier(BTreeMap::new()),
-                "2026-07-16T00:00:01Z".to_string(),
-            )
+            .stage_acknowledgement(coverage, "2026-07-16T00:00:01Z".to_string())
             .await
             .expect("stage snapshot stability acknowledgement");
         device
@@ -1279,12 +1278,16 @@ async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements(
     let image_dir = tempfile::tempdir().expect("snapshot image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(&source)
+    let source_database = StoreDatabase::new(&source);
+    let image = source_database
         .capture_snapshot_image_for_test(root, image_path, None)
         .await
         .expect("create unstable bootstrap database image");
+    // Deliberately unacknowledged — this case is about stability. The coverage
+    // is still the frontier the captured image holds.
+    let coverage = captured_coverage(&source_database).await;
     device
-        .publish_snapshot(image, CommitFrontier(BTreeMap::new()))
+        .publish_snapshot(image, coverage)
         .await
         .expect("publish unstable bootstrap database image");
 
@@ -1611,4 +1614,18 @@ fn blob_graph_install_rejects_a_conflicting_existing_row_binding() {
             .contains("already bound to different exact content"),
         "{error}"
     );
+}
+
+/// The frontier a captured image covers. A snapshot published over real history
+/// while declaring no coverage tells every device that installs it to resolve
+/// that history again from the cloud, and no test built on it can see the
+/// difference — so the fixtures declare what they captured.
+async fn captured_coverage(database: &StoreDatabase) -> CommitFrontier {
+    CommitFrontier::from_refs(
+        database
+            .materialized_frontier()
+            .await
+            .expect("read the captured materialized frontier"),
+    )
+    .expect("the materialized frontier is a commit frontier")
 }

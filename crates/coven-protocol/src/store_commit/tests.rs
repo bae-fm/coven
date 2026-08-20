@@ -2122,3 +2122,30 @@ mod standing_acknowledgement {
         )));
     }
 }
+
+/// A frontier covering nothing is covered by every frontier, including itself.
+/// The device-join bootstrap leans on this: it offers a joining device only a
+/// snapshot the attempt's bootstrap cut covers, and a snapshot that declares no
+/// coverage asks nothing of the cut, so it always stays a candidate.
+#[test]
+fn a_frontier_covers_one_that_names_no_commits() {
+    let empty = CommitFrontier(BTreeMap::new());
+    let stream = AuthorStreamId::from_digest(ObjectHash::digest(b"covers-stream"));
+    let reference = StoreBatchCommitRef {
+        coord: StoreCommitCoord {
+            stream_id: stream,
+            sequence: 7,
+        },
+        commit_hash: ObjectHash::digest(b"covers-commit"),
+        object: exact("commits/7.json".to_string(), b"covers-commit"),
+    };
+    let populated = CommitFrontier(BTreeMap::from([(stream, reference.clone())]));
+
+    assert!(empty.covers(&empty));
+    assert!(populated.covers(&empty));
+    assert!(populated.covers(&populated));
+    assert!(
+        !empty.covers(&populated),
+        "a frontier that names no commit on a stream cannot cover one that does",
+    );
+}

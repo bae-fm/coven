@@ -69,37 +69,6 @@ struct TransportFixture {
 /// The Dropbox namespace a cross-principal fixture's store lives in.
 const CROSS_PRINCIPAL_NAMESPACE: &str = "transport-shared-namespace";
 
-/// Publish one Store snapshot at the owner's materialized frontier and the
-/// acknowledgement that makes it stable. The coverage is the real frontier, so
-/// a device installing this image installs the rows behind it and owes only the
-/// commits published after it.
-async fn publish_owner_snapshot_on(
-    owner_device: &TestDevice,
-    owner_database: &coven_database::StoreDatabase,
-    root: coven_protocol::store_commit::StoreRootRef,
-    snapshot_dir: &std::path::Path,
-) {
-    let image = owner_database
-        .capture_snapshot_image_for_test(root, snapshot_dir.to_path_buf(), None)
-        .await
-        .expect("create join snapshot");
-    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-        owner_database
-            .materialized_frontier()
-            .await
-            .expect("read the owner's materialized frontier"),
-    )
-    .expect("the owner's frontier is a commit frontier");
-    owner_device
-        .publish_snapshot(image, coverage.clone())
-        .await
-        .expect("publish join snapshot");
-    owner_device
-        .publish_acknowledgement(coverage)
-        .await
-        .expect("publish join snapshot acknowledgement");
-}
-
 impl TransportFixture {
     /// Owner and joiner on one provider account: the admission takes the
     /// same-principal path and publishes no probe.
@@ -217,7 +186,7 @@ impl TransportFixture {
             .expect("load membership including joiner");
         let tables = test_synced_tables();
         let snapshot_dir = tempfile::tempdir().expect("snapshot directory");
-        publish_owner_snapshot_on(
+        crate::test_snapshots::publish_owner_snapshot(
             &owner_device,
             &owner_database,
             store.root(),
@@ -272,7 +241,7 @@ impl TransportFixture {
     /// materialized, then acknowledge it — the state a joining device finds
     /// when the owner's snapshot cadence has already run.
     async fn publish_owner_snapshot(&self) {
-        publish_owner_snapshot_on(
+        crate::test_snapshots::publish_owner_snapshot(
             &self.owner_store,
             &self.owner_database,
             self.owner_test_store.root(),

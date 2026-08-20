@@ -9,3 +9,6 @@
 
 pub mod joining;
 pub mod restoration;
+
+#[cfg(test)]
+mod test_snapshots;

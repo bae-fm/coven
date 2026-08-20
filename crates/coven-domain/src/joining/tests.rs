@@ -1,6 +1,5 @@
 //! Device admission through the public four-transfer join client.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use coven_foundation::clock::SystemClock;
@@ -98,20 +97,13 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .expect("load membership including joiner");
     let tables = test_synced_tables();
     let snapshot_dir = tempfile::tempdir().expect("snapshot directory");
-    let snapshot_path = snapshot_dir.path().to_path_buf();
-    let snapshot = owner_database
-        .capture_snapshot_image_for_test(store.root().clone(), snapshot_path, None)
-        .await
-        .expect("create join snapshot");
-    let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());
-    owner_device
-        .publish_snapshot(snapshot, snapshot_coverage.clone())
-        .await
-        .expect("publish join snapshot");
-    owner_device
-        .publish_acknowledgement(snapshot_coverage)
-        .await
-        .expect("publish join snapshot acknowledgement");
+    crate::test_snapshots::publish_owner_snapshot(
+        &owner_device,
+        &owner_database,
+        store.root().clone(),
+        snapshot_dir.path(),
+    )
+    .await;
     let owner_store = owner_device;
     let app = tempfile::tempdir().expect("join app directory");
     let layout = coven_foundation::store_dir::StoreLayout::new(app.path());

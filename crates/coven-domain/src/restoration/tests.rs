@@ -8,7 +8,7 @@
 //! tests pin that the id is refused the moment the code is decoded, so it never
 //! reaches the directory step: a decoded `RestoreCode` always carries a safe id.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -863,21 +863,14 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         .await
         .expect("load owner membership");
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
-    let snap_dir = snap_tmp.path().to_path_buf();
     let store_database = coven_database::StoreDatabase::new(&db);
-    let snapshot = store_database
-        .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
-        .await
-        .expect("create owner snapshot");
-    let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());
-    owner_device
-        .publish_snapshot(snapshot, snapshot_coverage.clone())
-        .await
-        .expect("publish owner snapshot");
-    owner_device
-        .publish_acknowledgement(snapshot_coverage)
-        .await
-        .expect("publish owner snapshot acknowledgement");
+    crate::test_snapshots::publish_owner_snapshot(
+        &owner_device,
+        &store_database,
+        store_root.clone(),
+        snap_tmp.path(),
+    )
+    .await;
 
     let joiner_keypair = owner_keypair.clone();
     let store_keys = StoreKeys::bind(store_id.to_string());
@@ -1127,21 +1120,14 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     let floor = MembershipFloor(membership.head_refs().to_vec());
     let tables = test_synced_tables();
     let snapshot_tmp = tempfile::tempdir().expect("snapshot temp dir");
-    let snapshot_dir = snapshot_tmp.path().to_path_buf();
     let store_database = coven_database::StoreDatabase::new(&owner_db);
-    let snapshot = store_database
-        .capture_snapshot_image_for_test(root.clone(), snapshot_dir, None)
-        .await
-        .expect("create recovery snapshot");
-    let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());
-    owner_device
-        .publish_snapshot(snapshot, snapshot_coverage.clone())
-        .await
-        .expect("publish recovery snapshot");
-    owner_device
-        .publish_acknowledgement(snapshot_coverage)
-        .await
-        .expect("publish recovery snapshot acknowledgement");
+    crate::test_snapshots::publish_owner_snapshot(
+        &owner_device,
+        &store_database,
+        root.clone(),
+        snapshot_tmp.path(),
+    )
+    .await;
     let authority = owner_device.published_owner_recovery_authority(&owner);
     let code = encode_restore_code(&RestoreCode {
         v: RESTORE_CODE_VERSION,
@@ -1217,21 +1203,14 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             )
             .await;
         let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
-        let snap_dir = snap_tmp.path().to_path_buf();
         let store_database = coven_database::StoreDatabase::new(&db_owner);
-        let snapshot = store_database
-            .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
-            .await
-            .expect("owner snapshot");
-        let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());
-        owner_device
-            .publish_snapshot(snapshot, snapshot_coverage.clone())
-            .await
-            .expect("publish owner snapshot");
-        owner_device
-            .publish_acknowledgement(snapshot_coverage)
-            .await
-            .expect("publish owner snapshot acknowledgement");
+        crate::test_snapshots::publish_owner_snapshot(
+            &owner_device,
+            &store_database,
+            store_root.clone(),
+            snap_tmp.path(),
+        )
+        .await;
 
         let snapshot_before = owner_storage
             .list_provider_keys_for_test("store-v1/snapshots/")
@@ -1463,10 +1442,12 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         .capture_snapshot_image_for_test(storage.root(), snap_dir, None)
         .await
         .expect("owner snapshot");
+    // Deliberately unacknowledged: this case is about the membership floor, not
+    // about stability. The coverage is still the frontier the image holds.
     owner_device
         .publish_snapshot(
             snapshot,
-            coven_protocol::store_commit::CommitFrontier(BTreeMap::new()),
+            crate::test_snapshots::captured_coverage(&store_database).await,
         )
         .await
         .expect("publish post-removal snapshot");
