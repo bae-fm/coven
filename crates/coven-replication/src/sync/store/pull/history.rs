@@ -6,6 +6,30 @@ use coven_protocol::membership::MembershipStatus;
 use coven_protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
 use std::collections::BTreeMap;
 
+/// What preparing a package does about the blobs its rows bind.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PackageBlobPolicy {
+    /// Fetch and hash every bound blob, keeping the ones declared eager. What a
+    /// pull does: it is applying rows this device will immediately serve, and a
+    /// pull covers one commit at a time.
+    FetchAndVerify,
+    /// Record the bindings and fetch nothing.
+    ///
+    /// A device-join bootstrap installs a whole history at once, so fetching
+    /// every blob every commit in it ever bound is the entire library — measured
+    /// at ~8 ms per 4 KB blob on an in-memory home, and the live joins it wedged
+    /// were reading tens of megabytes per commit. Nothing is lost: a binding
+    /// names its plaintext hash, the read that wants the bytes checks them
+    /// against it, and the eager cache fills after the joined library opens.
+    TrustBindings,
+}
+
+impl PackageBlobPolicy {
+    fn fetches(self) -> bool {
+        matches!(self, Self::FetchAndVerify)
+    }
+}
+
 /// The reads, verifications, and materializations a pull performs, over the
 /// five capabilities they need.
 pub(crate) struct PullHistory<'operation, 'storage> {
@@ -63,6 +87,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         &self,
         package: coven_protocol::audience_package::AudiencePackage,
         schema: std::sync::Arc<coven_database::TableSchema>,
+        blobs: PackageBlobPolicy,
     ) -> Result<Result<PreparedMergeMaterializationPackage, HeldStorePositionReason>, StorePullError>
     {
         let changeset =
@@ -96,7 +121,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
             }
         };
         let mut eager = Vec::new();
-        for change in &changes {
+        for change in changes.iter().filter(|_| blobs.fetches()) {
             if change.op == coven_foundation::changeset::ChangeOp::Delete {
                 continue;
             }
@@ -146,7 +171,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         let mut failures = Vec::new();
         let blob_authority =
             coven_protocol::blob::RowBlobAuthority::Remote(package.audience().clone());
-        for binding in package.blob_bindings() {
+        for binding in package.blob_bindings().iter().filter(|_| blobs.fetches()) {
             let stored = binding.blob();
             if verified.iter().any(|candidate| candidate == stored) {
                 continue;

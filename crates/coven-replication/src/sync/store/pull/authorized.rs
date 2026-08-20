@@ -588,8 +588,11 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             match timings
                 .stage(
                     "fetch blobs",
-                    self.history
-                        .prepare_package(package, self.package_schema.clone()),
+                    self.history.prepare_package(
+                        package,
+                        self.package_schema.clone(),
+                        super::history::PackageBlobPolicy::FetchAndVerify,
+                    ),
                 )
                 .await?
             {
@@ -605,8 +608,11 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             match timings
                 .stage(
                     "fetch blobs",
-                    self.history
-                        .prepare_package(package, self.package_schema.clone()),
+                    self.history.prepare_package(
+                        package,
+                        self.package_schema.clone(),
+                        super::history::PackageBlobPolicy::FetchAndVerify,
+                    ),
                 )
                 .await?
             {

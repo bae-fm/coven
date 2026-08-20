@@ -6536,3 +6536,119 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
         Err(crate::sync::cycle::InitSyncError::PendingRotationRestore(_))
     ));
 }
+
+/// A device join installs a whole history at once. Fetching the blob content
+/// every commit in that history ever bound is the entire library — the live
+/// joins that did it ran twenty-eight minutes at full CPU over a hundred
+/// commits and never finished, and the bytes prove nothing the read that wants
+/// them will not prove against the binding's plaintext hash.
+#[tokio::test]
+async fn a_device_join_reads_no_blob_content() {
+    let owner = UserKeypair::generate();
+    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let blob_decl = coven_protocol::synced_schema::BlobDecl::new(
+        "photos",
+        coven_protocol::blob::Provenance::UserProvided,
+        coven_protocol::blob::CacheFill::CacheLazy,
+    );
+    let owner_db = crate::sync::test_helpers::open_test_db_with_blob(
+        owner_db_store_dir.clone(),
+        blob_decl.clone(),
+    );
+    let home = cross_principal_test_home();
+    let (storage, _cloud) =
+        cycle_test_store_fixture(&owner_db, owner_db_store_dir.clone(), &owner, home.clone()).await;
+    let member = UserKeypair::generate();
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &member,
+        &EncryptionService::from_key([43; 32]),
+    )
+    .await;
+
+    // Publish rows carrying blobs, so the history the joiner installs binds them.
+    let database = coven_database::StoreDatabase::new(&owner_db);
+    let rows = (0..4)
+        .map(|index| (format!("joined-blob-{index}"), vec![b'x'; 4096]))
+        .collect::<Vec<_>>();
+    let borrowed = rows
+        .iter()
+        .map(|(id, bytes)| (id.as_str(), bytes.as_slice()))
+        .collect::<Vec<_>>();
+    owner_db
+        .insert_local_upload_rows_for_test("joined-root", &borrowed)
+        .await
+        .expect("plant the blob rows");
+    for (id, bytes) in &rows {
+        let path = owner_db_store_dir
+            .db_path()
+            .parent()
+            .expect("Store directory has a parent")
+            .join(format!("{id}.source"));
+        coven_foundation::local_file::AtomicStagedFile::write_for_test(&path, bytes)
+            .await
+            .expect("write the blob source");
+        database
+            .register_external_blob_for_test("note_photos", id, &path)
+            .await;
+    }
+    crate::sync::test_owner_graph::TestOwnerGraph::new(database, owner_db_store_dir.clone())
+        .make_remote("notes", "joined-root", false)
+        .await
+        .expect("make the planted blobs remote");
+    let device = storage
+        .open_into(&owner_db, owner_db_store_dir.clone())
+        .await
+        .expect("open the owner Store");
+    device
+        .drain_uploads(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("upload the planted blobs");
+    device
+        .run_cycle(None)
+        .await
+        .expect("publish the blob-bearing rows");
+
+    let uploaded = home
+        .exact_creates()
+        .into_iter()
+        .map(|slot| slot.logical_key().to_string())
+        .filter(|key| key.starts_with("photos/"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        uploaded.len(),
+        4,
+        "the four blobs reached the home: {uploaded:?}"
+    );
+    home.clear_exact_reads();
+
+    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let member_db =
+        crate::sync::test_helpers::open_test_db_with_blob(member_db_store_dir.clone(), blob_decl);
+    storage
+        .install_cross_principal_device(
+            coven_database::StoreDatabase::new(&member_db),
+            &member,
+            "member-account",
+            T0,
+        )
+        .await
+        .expect("complete cross-principal device join");
+
+    let read = home
+        .exact_reads()
+        .into_iter()
+        .map(|slot| slot.logical_key().to_string())
+        .collect::<Vec<_>>();
+    let blob_reads = read
+        .iter()
+        .filter(|key| uploaded.contains(key))
+        .collect::<Vec<_>>();
+    assert!(
+        blob_reads.is_empty(),
+        "the join fetched blob content it did not need: {blob_reads:?}",
+    );
+}

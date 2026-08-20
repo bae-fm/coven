@@ -300,9 +300,13 @@ impl PullHistory<'_, '_> {
         // A pull holds its position when a package is unreadable and retries the
         // commit later. A bootstrap has no position to hold — it installs the
         // whole closure at once — so an unreadable package fails the join.
-        self.prepare_package(package, schema.clone())
-            .await?
-            .map_err(|reason| bootstrap_row_data_error(reference, reason))
+        self.prepare_package(
+            package,
+            schema.clone(),
+            super::history::PackageBlobPolicy::TrustBindings,
+        )
+        .await?
+        .map_err(|reason| bootstrap_row_data_error(reference, reason))
     }
 }
 
