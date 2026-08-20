@@ -13,6 +13,7 @@ use coven_database::Migration;
 #[cfg(feature = "oauth-providers")]
 use coven_foundation::config::CloudProvider;
 use coven_foundation::config::{Config, ConfigError, HomeStorage};
+use coven_foundation::stage_timing::StageTimings;
 use coven_foundation::store_dir::{StoreDir, StoreLayout};
 use coven_keys::encryption::{EncryptionError, EncryptionService, MasterKeyring};
 use coven_keys::identity_custody::IdentityCustody;
@@ -20,7 +21,6 @@ use coven_keys::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys, UserKeypair,
 };
 use coven_protocol::synced_schema::SyncedTable;
-use coven_replication::sync::stage_timing::StageTimings;
 use coven_replication::sync::store::{
     MembershipMutationError, PreparedDeviceJoinSnapshot, PreparedSnapshotBootstrap, PullError,
     SnapshotError,
@@ -1137,11 +1137,33 @@ impl DeviceJoinClient {
         ))
     }
 
+    /// Open the cloud home this join reads through.
+    ///
+    /// Timed as one step by its callers, where it has been the second-largest
+    /// on a live join. Constructing the home is local — no bucket check, no
+    /// auth probe — so the time is the two reads that pin the Store root and
+    /// its founder, the membership chain walk, and the wrapped-key reads. The
+    /// chain walk is a sequential slot-by-slot traversal per membership stream,
+    /// each terminated by a read that misses, so it costs a round-trip per
+    /// membership entry and grows with the store's membership history.
     async fn build_storage(
         &self,
         signer: &UserKeypair,
     ) -> Result<DeviceJoinStorage, BootstrapError> {
-        let cloud = self.build_cloud_home().await?;
+        let mut timings = StageTimings::start("Device join cloud home");
+        let outcome = Box::pin(self.build_storage_staged(signer, &mut timings)).await;
+        timings.report();
+        outcome
+    }
+
+    async fn build_storage_staged(
+        &self,
+        signer: &UserKeypair,
+        timings: &mut StageTimings,
+    ) -> Result<DeviceJoinStorage, BootstrapError> {
+        let cloud = timings
+            .stage("construct the home", self.build_cloud_home())
+            .await?;
         let bootstrap_storage = self.plaintext_storage(cloud.clone(), signer)?;
         let recipient = hex::encode(signer.public_key());
         if self.admission.wrapped_key.recipient_pubkey != recipient {
@@ -1156,23 +1178,34 @@ impl DeviceJoinClient {
             .membership_floor
             .validate()
             .map_err(coven_replication::sync::store::MembershipMutationError::MembershipFloor)?;
-        let mut history = coven_replication::sync::store::HistoryConstructionAuthority::admission()
-            .open_pinned(&bootstrap_storage, &self.admission.store_root)
-            .await
-            .map_err(coven_replication::sync::store::MembershipMutationError::from)?;
-        let chain = history
-            .load_exact_anchored_membership(
-                &self.admission.membership_floor.0,
-                Some(&self.admission.owner_pubkey),
+        let mut history = timings
+            .stage(
+                "pin the Store root",
+                coven_replication::sync::store::HistoryConstructionAuthority::admission()
+                    .open_pinned(&bootstrap_storage, &self.admission.store_root),
             )
             .await
             .map_err(coven_replication::sync::store::MembershipMutationError::from)?;
-        let encryption = coven_replication::sync::store::StoreKeyrings::new(
-            &bootstrap_storage,
-            self.admission.store_root.clone(),
-        )
-        .open_containing(signer, &chain, &self.admission.wrapped_key)
-        .await?;
+        let chain = timings
+            .stage(
+                "walk the membership chain",
+                history.load_exact_anchored_membership(
+                    &self.admission.membership_floor.0,
+                    Some(&self.admission.owner_pubkey),
+                ),
+            )
+            .await
+            .map_err(coven_replication::sync::store::MembershipMutationError::from)?;
+        let encryption = timings
+            .stage(
+                "open the keyring",
+                coven_replication::sync::store::StoreKeyrings::new(
+                    &bootstrap_storage,
+                    self.admission.store_root.clone(),
+                )
+                .open_containing(signer, &chain, &self.admission.wrapped_key),
+            )
+            .await?;
         let keyring = MasterKeyring::from(encryption.clone());
         let storage = CloudSyncConnection::new(
             cloud,

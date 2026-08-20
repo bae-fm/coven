@@ -1,8 +1,8 @@
 //! Causal discovery and atomic materialization for immutable Store commits.
 
 use super::*;
-use crate::sync::stage_timing::StageTimings;
 use coven_database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
+use coven_foundation::stage_timing::StageTimings;
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::store_commit::{CommitFrontier, StoreDeviceStatus, StoreHistoryCut};
 use std::collections::BTreeMap;

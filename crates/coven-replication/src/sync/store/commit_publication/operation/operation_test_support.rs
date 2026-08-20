@@ -92,7 +92,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn prepare_pending_store_write(&mut self) -> Result<bool, StoreError> {
-        let mut timings = crate::sync::stage_timing::StageTimings::start("test Store write");
+        let mut timings = coven_foundation::stage_timing::StageTimings::start("test Store write");
         let outcome = self.prepare_store_write(&mut timings).await;
         timings.report();
         outcome

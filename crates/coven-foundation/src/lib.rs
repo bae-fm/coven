@@ -21,4 +21,5 @@ pub mod config;
 pub mod id_provider;
 pub mod local_file;
 pub mod object_hash;
+pub mod stage_timing;
 pub mod store_dir;

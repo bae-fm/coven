@@ -1,5 +1,5 @@
 use super::*;
-use crate::sync::stage_timing::StageTimings;
+use coven_foundation::stage_timing::StageTimings;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 impl<'storage> AuthorizedWriterOperation<'storage> {

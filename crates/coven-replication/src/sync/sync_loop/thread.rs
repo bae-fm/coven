@@ -7,7 +7,7 @@ use tracing::{debug, error, info};
 
 use super::{SyncCommand, SyncLoopFailure, SyncLoopHandleInner, SyncLoopStatus};
 use crate::sync::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
-use crate::sync::stage_timing::StageTimings;
+use coven_foundation::stage_timing::StageTimings;
 
 struct RuntimeSlotState {
     loop_thread: Option<SyncLoopThread>,

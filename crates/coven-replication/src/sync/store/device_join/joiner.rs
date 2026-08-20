@@ -386,7 +386,7 @@ impl<'storage> JoiningStore<'storage> {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<DeviceJoinReadiness, DeviceJoinError> {
         let mut timings =
-            crate::sync::stage_timing::StageTimings::start("Device join history install");
+            coven_foundation::stage_timing::StageTimings::start("Device join history install");
         let outcome = Box::pin(self.bootstrap_staged(
             bootstrap,
             published_at,
@@ -403,7 +403,7 @@ impl<'storage> JoiningStore<'storage> {
         bootstrap: ProviderReadyDeviceBootstrap,
         published_at: &str,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-        timings: &mut crate::sync::stage_timing::StageTimings,
+        timings: &mut coven_foundation::stage_timing::StageTimings,
     ) -> Result<DeviceJoinReadiness, DeviceJoinError> {
         let offer = &bootstrap.bootstrap.request.approval().request.offer;
         if &offer.store_root != self.history.root()
@@ -464,6 +464,11 @@ impl<'storage> JoiningStore<'storage> {
                 self.resolve_bootstrap(bootstrap_plan, routing_encryption),
             )
             .await?;
+        // The readiness step is a database transaction, two provider round-trips
+        // and a publish; it reports its own breakdown, because from out here it
+        // is one number that moves with the store rather than with this join.
+        let mut inner =
+            coven_foundation::stage_timing::StageTimings::start("Device join readiness");
         let proof = timings
             .stage(
                 "publish readiness",
@@ -484,10 +489,13 @@ impl<'storage> JoiningStore<'storage> {
                             .clone(),
                         &attempt_owner,
                         published_at,
+                        &mut inner,
                     ),
                 ),
             )
-            .await?;
+            .await;
+        inner.report();
+        let proof = proof?;
         let provider = match (
             &bootstrap.bootstrap.request.approval().admission,
             &bootstrap.bootstrap.request.response(),
@@ -614,6 +622,20 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             .record_registration_request(offer, approval, request)
     }
 
+    /// Install the carried history onto the snapshot image this device just
+    /// opened, and journal the join as ready.
+    ///
+    /// This is where the joining device's store dir is bound, so the whole
+    /// thing stays one function rather than delegating to a staged helper: a
+    /// second entry point taking the store dir would be a second place an owner
+    /// graph is composed, which is what the boundary gate refuses. The run
+    /// below therefore reports at the end of this body, and on a failure its
+    /// drop reports how far it got.
+    ///
+    /// The caller times all of this as one step, and that step does not track
+    /// the carried closure — resolving row data and materializing it are both
+    /// small. The stages say what it does track.
+    #[allow(clippy::too_many_arguments)]
     pub async fn prepare_same_principal_completion(
         pending: &DeviceJoinJournalDatabase,
         storage: &'storage std::sync::Arc<dyn CloudSyncObjectStorage>,
@@ -624,6 +646,10 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
         published_at: &str,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<PendingSamePrincipalDeviceJoinCompletion, DeviceJoinError> {
+        let mut run = coven_foundation::stage_timing::StageTimings::start(
+            "Same-provider join history install",
+        );
+        let timings = &mut run;
         join.verify_shape()?;
         let attempt_ref = join
             .bootstrap
@@ -688,27 +714,46 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             .verify_at(&join.activation.outcome, &attempt, &owner)?;
         let approval = join.bootstrap.bootstrap.request.approval();
         let database = installed.database;
-        let administrator = joining_device_registration(
-            &database,
-            &installed.bootstrap,
-            &approval.request.offer.provider_admin.administrator,
-        )
-        .await?;
+        let administrator = timings
+            .stage(
+                "read the administrator registration",
+                joining_device_registration(
+                    &database,
+                    &installed.bootstrap,
+                    &approval.request.offer.provider_admin.administrator,
+                ),
+            )
+            .await?;
         approval.verify(&installed.verified_root, &owner, &administrator)?;
         // The installed snapshot image covers the history behind it; every
         // commit between that snapshot and the bootstrap cut still carries its
         // rows in a package this device has to read before it installs.
-        let mut joining = PendingDeviceJoinObservation::open(
-            pending,
-            storage,
-            &installed.root,
-            attempt_ref.attempt_id,
-        )
-        .await?
-        .into_joining_store(database.clone(), store_dir, identity.clone())
-        .await?;
-        let resolved = joining
-            .resolve_bootstrap(installed.bootstrap, routing_encryption)
+        let observation = timings
+            .stage(
+                "pin the Store root",
+                PendingDeviceJoinObservation::open(
+                    pending,
+                    storage,
+                    &installed.root,
+                    attempt_ref.attempt_id,
+                ),
+            )
+            .await?;
+        // Installing the owner anchor walks the membership chain from the cloud
+        // slot by slot — the same traversal the joining device already paid for
+        // when it opened its cloud home, and it grows with the store's
+        // membership history rather than with this join.
+        let mut joining = timings
+            .stage(
+                "install the owner membership",
+                observation.into_joining_store(database.clone(), store_dir, identity.clone()),
+            )
+            .await?;
+        let resolved = timings
+            .stage(
+                "resolve row data",
+                joining.resolve_bootstrap(installed.bootstrap, routing_encryption),
+            )
             .await?;
         drop(joining);
         let proof = super::history::bootstrap_pending_device_on(
@@ -721,6 +766,7 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             join.activation.outcome_activation.clone(),
             &owner,
             published_at,
+            timings,
         )
         .await?;
         let readiness = DeviceJoinReadiness {
@@ -736,13 +782,17 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
         if observed != readiness {
             return Err(DeviceJoinError::JournalConflict);
         }
-        let joined = joined_store_from_materialized(
-            &database,
-            &attempt,
-            &installed.outcome,
-            join.activation,
-        )
-        .await?;
+        let joined = timings
+            .stage(
+                "read the joined store",
+                joined_store_from_materialized(
+                    &database,
+                    &attempt,
+                    &installed.outcome,
+                    join.activation,
+                ),
+            )
+            .await?;
         if joined.registration != readiness.proof.registration {
             return Err(DeviceJoinError::JournalConflict);
         }
@@ -758,6 +808,7 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             return Err(DeviceJoinError::JournalConflict);
         }
         let activated = journal.record(JoinerJoinProgress::Activated(joined.clone()));
+        run.report();
         Ok(PendingSamePrincipalDeviceJoinCompletion {
             database,
             journal,

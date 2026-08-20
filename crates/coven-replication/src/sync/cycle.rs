@@ -15,10 +15,10 @@ use coven_foundation::changeset::RowChange;
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::BlobTransitionObserver;
 
-use super::stage_timing::StageTimings;
 use super::status::DeviceActivity;
 use super::store::HeldStorePosition;
 use super::store::{AuthorizedWriterOperation, Store};
+use coven_foundation::stage_timing::StageTimings;
 use coven_protocol::objects::RotationPending;
 use coven_storage::{
     BlobPathScheme, CloudSyncCipherStateAccess, CloudSyncConnection, CloudSyncObjectStorage,

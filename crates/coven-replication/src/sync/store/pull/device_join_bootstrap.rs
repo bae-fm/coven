@@ -8,11 +8,11 @@
 //! decrypted and verified here first, exactly the way an ordinary pull does.
 
 use super::*;
-use crate::sync::stage_timing::StageTimings;
 use coven_database::{
     DeviceJoinBootstrapPlan, DeviceJoinBootstrapRowData, PreparedMergeMaterializationPackage,
     ResolvedDeviceJoinBootstrap,
 };
+use coven_foundation::stage_timing::StageTimings;
 use coven_protocol::circle_activation::VerifiedCircleActivations;
 use coven_protocol::membership::{LocalStoreMembership, MembershipChain};
 use std::collections::BTreeMap;

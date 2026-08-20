@@ -7,16 +7,38 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         request: DeviceRegistrationRequest,
     ) -> Result<SamePrincipalDeviceJoin, DeviceJoinError> {
+        // Most of a live same-provider admission is spent here, and from the
+        // transport step above it is one opaque span. The stages below are the
+        // pieces: two history walks, the signing, the four uploads, and the
+        // journal write that carries the whole join.
+        let mut timings =
+            coven_foundation::stage_timing::StageTimings::start("Same-provider join activation");
+        let outcome =
+            Box::pin(self.activate_same_principal_join_staged(request, &mut timings)).await;
+        timings.report();
+        outcome
+    }
+
+    async fn activate_same_principal_join_staged(
+        &mut self,
+        request: DeviceRegistrationRequest,
+        timings: &mut coven_foundation::stage_timing::StageTimings,
+    ) -> Result<SamePrincipalDeviceJoin, DeviceJoinError> {
         if !matches!(request, DeviceRegistrationRequest::SamePrincipal { .. }) {
             return Err(DeviceJoinError::ApprovalMismatch);
         }
-        self.writer
-            .seed_retained_history()
+        timings
+            .stage("seed retained history", self.writer.seed_retained_history())
             .await
             .map_err(DeviceJoinError::from)?;
-        let offer = self.validate_registration_request(&request).await?;
+        let offer = timings
+            .stage(
+                "validate the request",
+                self.validate_registration_request(&request),
+            )
+            .await?;
         let journal = self.journal(offer.attempt_id);
-        let current = journal.current().await?;
+        let current = timings.stage("read the journal", journal.current()).await?;
         if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::SamePrincipalCompleted { join }) =
             &*current.progress
         {
@@ -46,7 +68,9 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 _ => return Err(DeviceJoinError::JournalConflict),
             };
 
-        let plan = self.writer.prepare_plan().await?;
+        let plan = timings
+            .stage("prepare the commit plan", self.writer.prepare_plan())
+            .await?;
         #[cfg(any(test, feature = "test-utils"))]
         self.database
             .reach_test_point(coven_database::DatabaseTestPoint::DeviceJoinAttemptPositionHeld)
@@ -244,15 +268,17 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     outcome: outcome_ref.clone(),
                 },
             )?;
-        let candidate = self
-            .writer
-            .prepare_candidate(
+        let candidate = timings
+            .stage(
+                "prepare the candidate commit",
+                self.writer.prepare_candidate(
                 plan,
                 crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::SamePrincipalDeviceJoin {
                     attempt: attempt_ref.clone(),
                     outcome: outcome_ref.clone(),
                     registration: Box::new(activated_registration),
                 },
+                ),
             )
             .await?;
         let create_attempt = self.storage.create_verified_protocol_object(
@@ -274,15 +300,28 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             &outcome_bytes,
         );
         let upload_commit = self.writer.upload_prepared(Box::new(candidate));
-        let ((), (), (), uploaded) = tokio::try_join!(
-            async { create_attempt.await.map_err(DeviceJoinError::Storage) },
-            async { create_registration.await.map_err(DeviceJoinError::Storage) },
-            async { create_outcome.await.map_err(DeviceJoinError::Storage) },
-            async { upload_commit.await.map_err(DeviceJoinError::from) },
-        )?;
-        let activation_ref = self.writer.activate_uploaded(uploaded).await?;
-        self.join_history()
-            .retain_same_principal_join_activation(&activation_ref)
+        let ((), (), (), uploaded) = timings
+            .stage("publish the join objects", async {
+                tokio::try_join!(
+                    async { create_attempt.await.map_err(DeviceJoinError::Storage) },
+                    async { create_registration.await.map_err(DeviceJoinError::Storage) },
+                    async { create_outcome.await.map_err(DeviceJoinError::Storage) },
+                    async { upload_commit.await.map_err(DeviceJoinError::from) },
+                )
+            })
+            .await?;
+        let activation_ref = timings
+            .stage(
+                "activate the uploaded commit",
+                self.writer.activate_uploaded(uploaded),
+            )
+            .await?;
+        timings
+            .stage(
+                "retain the activation",
+                self.join_history()
+                    .retain_same_principal_join_activation(&activation_ref),
+            )
             .await?;
         let bootstrap = ProviderReadyDeviceBootstrap {
             bootstrap: Box::new(ProvisionalDeviceBootstrap {
@@ -300,9 +339,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         };
         // Selecting the snapshot and preparing the carried closure are both
         // history walks, and neither is visible from the commit publication in
-        // front of them, so they report as their own step.
-        let mut timings =
-            crate::sync::stage_timing::StageTimings::start("Same-provider join installation");
+        // front of them.
         let installation = timings
             .stage(
                 "prepare the installation",
@@ -313,12 +350,16 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 ),
             )
             .await?;
-        timings.report();
         let join = SamePrincipalDeviceJoin::verified(bootstrap, activation, installation)?;
-        journal
-            .advance(
-                &intent,
-                OwnerJoinProgress::SamePrincipalCompleted { join: join.clone() },
+        // The completed join goes into one journal row, carried closure and
+        // all, so this write scales with what that closure carries.
+        timings
+            .stage(
+                "journal the completion",
+                journal.advance(
+                    &intent,
+                    OwnerJoinProgress::SamePrincipalCompleted { join: join.clone() },
+                ),
             )
             .await?;
         Ok(join)

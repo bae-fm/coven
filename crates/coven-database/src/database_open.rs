@@ -1,4 +1,5 @@
 use super::*;
+use coven_foundation::stage_timing::StageTimings;
 use coven_foundation::store_dir::StoreDir;
 
 pub(crate) enum CovenMetadataOpen<'a> {
@@ -181,15 +182,24 @@ impl DatabaseCore {
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<Self, OpenError> {
-        let mut conn = Connection::open(path).map_err(DbError::from)?;
-        // Rollback journaling lets one SQLite transaction commit the Store and an
-        // attached operation journal through a super-journal. Production selects
-        // DELETE + FULL so that cross-file commit is crash-atomic before an external
-        // step begins. Tests select MEMORY + OFF: transaction rollback remains real,
-        // while crash durability and its filesystem work are deliberately absent.
-        crate::connection_io::configure_connection_durability(&conn, connection_durability)?;
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .map_err(DbError::from)?;
+        // A device join spends most of its wall time inside this function, and
+        // from the caller it is one opaque step. Every phase below scales with
+        // something different — the migration ladder with the number of
+        // migrations, the snapshot install and the two full-image passes at the
+        // end with the size of the image — so they are named separately.
+        let mut timings = StageTimings::start("Store database open");
+        let mut conn = timings.mark("open the connection", || {
+            let conn = Connection::open(path).map_err(DbError::from)?;
+            // Rollback journaling lets one SQLite transaction commit the Store and an
+            // attached operation journal through a super-journal. Production selects
+            // DELETE + FULL so that cross-file commit is crash-atomic before an external
+            // step begins. Tests select MEMORY + OFF: transaction rollback remains real,
+            // while crash durability and its filesystem work are deliberately absent.
+            crate::connection_io::configure_connection_durability(&conn, connection_durability)?;
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .map_err(DbError::from)?;
+            Ok::<_, OpenError>(conn)
+        })?;
         let initialized = match &metadata_open {
             CovenMetadataOpen::VerifiedSnapshot(_) => false,
             CovenMetadataOpen::Detect => {
@@ -217,24 +227,39 @@ impl DatabaseCore {
         let (schema_version, sync_routing_contract, gates, blob_decls) = {
             let tx = conn.transaction().map_err(DbError::from)?;
             let outcome = (|| -> Result<_, OpenError> {
-                let schema_version = run_migrations_in_transaction(&tx, migrations)?;
+                let schema_version =
+                    timings.mark("migrate", || run_migrations_in_transaction(&tx, migrations))?;
 
                 // The host ladder and routing validation share this transaction.
                 // A pending migration that changes confidentiality topology cannot
                 // leave either its DDL or `user_version` advance committed.
-                validate_host_synced_tables(&tx, &synced_tables)?;
-                let resolved = SyncRoutingContract::from_connection(&tx, &synced_tables)
-                    .map_err(DbError::from)?;
-                if let Some(pinned) = &pinned_routing_contract {
-                    validate_sync_routing_contract(pinned, &resolved)?;
-                    validate_initialized_coven_schema(&tx, resolved.has_scoped_graph())?;
-                } else {
-                    initialize_coven_metadata_on(&tx, &resolved, resolved.has_scoped_graph())?;
-                }
-                pin_host_device_id_on(&tx, hlc.device_id(), initialized)?;
-                let gates = Gates::from_tables(&tx, &synced_tables).map_err(DbError::from)?;
-                let blob_decls =
-                    BlobDecls::from_tables(&tx, &synced_tables).map_err(DbError::from)?;
+                // Contract validation reads every row identity in every synced
+                // table, so it scales with the image rather than the schema and
+                // is named apart from the introspection that follows it.
+                timings.mark("validate the host tables", || {
+                    validate_host_synced_tables(&tx, &synced_tables)
+                })?;
+                let (resolved, gates, blob_decls) =
+                    timings.mark("resolve the host tables", || {
+                        let resolved = SyncRoutingContract::from_connection(&tx, &synced_tables)
+                            .map_err(DbError::from)?;
+                        if let Some(pinned) = &pinned_routing_contract {
+                            validate_sync_routing_contract(pinned, &resolved)?;
+                            validate_initialized_coven_schema(&tx, resolved.has_scoped_graph())?;
+                        } else {
+                            initialize_coven_metadata_on(
+                                &tx,
+                                &resolved,
+                                resolved.has_scoped_graph(),
+                            )?;
+                        }
+                        pin_host_device_id_on(&tx, hlc.device_id(), initialized)?;
+                        let gates =
+                            Gates::from_tables(&tx, &synced_tables).map_err(DbError::from)?;
+                        let blob_decls =
+                            BlobDecls::from_tables(&tx, &synced_tables).map_err(DbError::from)?;
+                        Ok::<_, OpenError>((resolved, gates, blob_decls))
+                    })?;
                 if let CovenMetadataOpen::VerifiedSnapshot(install) = &metadata_open {
                     if resolved.has_scoped_graph() {
                         let routing_key = install.routing_key.as_ref().ok_or_else(|| {
@@ -243,53 +268,68 @@ impl DatabaseCore {
                                     .to_string(),
                             )
                         })?;
-                        gate::validate_snapshot_routing_state(
-                            &tx,
-                            &gates,
-                            routing_key,
-                            &coven_protocol::circle::Audience::Store,
-                        )
-                        .map_err(DbError::from)?;
+                        timings.mark("validate the snapshot routing", || {
+                            gate::validate_snapshot_routing_state(
+                                &tx,
+                                &gates,
+                                routing_key,
+                                &coven_protocol::circle::Audience::Store,
+                            )
+                            .map_err(DbError::from)
+                        })?;
                     }
-                    crate::store::install_verified_snapshot_bootstrap_on(
-                        &tx,
-                        &store_dir,
-                        install,
-                        schema_version,
-                        resolved.hash(),
-                        &synced_tables,
-                    )?;
+                    timings.mark("install the snapshot", || {
+                        crate::store::install_verified_snapshot_bootstrap_on(
+                            &tx,
+                            &store_dir,
+                            install,
+                            schema_version,
+                            resolved.hash(),
+                            &synced_tables,
+                        )
+                    })?;
                 }
                 Ok((schema_version, resolved, gates, blob_decls))
             })();
             match outcome {
                 Ok(initialized) => {
-                    tx.commit().map_err(DbError::from)?;
+                    timings.mark("commit the open", || tx.commit().map_err(DbError::from))?;
                     initialized
                 }
                 Err(error) => return Err(error),
             }
         };
         let sync_routing_hash = sync_routing_contract.hash();
-        validate_durable_coven_state(&conn)?;
+        // Both of these walk the whole database rather than anything this open
+        // changed: the foreign-key check visits every row of every child table,
+        // and the clock seed reads a max per synced table — over an expression
+        // no index serves, so it is a scan too. With the row-identity pass
+        // above, a freshly installed snapshot image is read end to end three
+        // times before the database is usable.
+        timings.mark("check foreign keys", || validate_durable_coven_state(&conn))?;
         // Seed the register clock so a restart cannot mint a stamp behind a value
         // already on disk. Floor = max(persisted high-water, max synced-row
         // `_updated_at`).
-        let persisted = get_protocol_state_on(&conn, HIGHWATER_STATE_KEY)?;
-        seed_from(&hlc, persisted, "HLC high-water mark in protocol_state")?;
-        let seed_wall_ms = hlc.wall_now_ms();
-        let seed_bound_ms = seed_wall_ms.saturating_add(MAX_FUTURE_SKEW_MS);
-        let on_disk = scan_max_updated_at(&conn, &synced_tables, seed_bound_ms)?;
-        seed_from(&hlc, on_disk, "`_updated_at` in synced tables")?;
+        timings.mark("seed the clock", || {
+            let persisted = get_protocol_state_on(&conn, HIGHWATER_STATE_KEY)?;
+            seed_from(&hlc, persisted, "HLC high-water mark in protocol_state")?;
+            let seed_wall_ms = hlc.wall_now_ms();
+            let seed_bound_ms = seed_wall_ms.saturating_add(MAX_FUTURE_SKEW_MS);
+            let on_disk = scan_max_updated_at(&conn, &synced_tables, seed_bound_ms)?;
+            seed_from(&hlc, on_disk, "`_updated_at` in synced tables")
+        })?;
 
         let synced_tables = Arc::new(synced_tables);
         let gates = Arc::new(gates);
         let blob_decls = Arc::new(blob_decls);
-        blob_decls
-            .install_cleanup_guards(&conn)
-            .map_err(DbError::from)?;
-        gate::attach_empty_clone(&conn, &gates)
-            .map_err(|error| DbError::context("install host transaction gate", error))?;
+        timings.mark("install the guards", || {
+            blob_decls
+                .install_cleanup_guards(&conn)
+                .map_err(DbError::from)?;
+            gate::attach_empty_clone(&conn, &gates)
+                .map_err(|error| DbError::context("install host transaction gate", error))
+        })?;
+        timings.report();
         Ok(DatabaseCore::new(
             store_dir,
             conn,

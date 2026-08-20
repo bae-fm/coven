@@ -25,7 +25,7 @@ struct LocalBlobDropRequest {
 impl AuthorizedWriterOperation<'_> {
     pub(super) async fn prepare_store_write(
         &mut self,
-        timings: &mut crate::sync::stage_timing::StageTimings,
+        timings: &mut coven_foundation::stage_timing::StageTimings,
     ) -> Result<bool, StoreError> {
         let database = self.database.clone();
         let Some(pending) = timings

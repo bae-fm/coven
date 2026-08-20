@@ -154,8 +154,9 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         if attempt.store_root != root {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let mut timings =
-            crate::sync::stage_timing::StageTimings::start("Same-provider join installation plan");
+        let mut timings = coven_foundation::stage_timing::StageTimings::start(
+            "Same-provider join installation plan",
+        );
         let snapshots = self.database.local_store_snapshots().await?;
         if snapshots.is_empty() {
             return Err(DeviceJoinError::Store(
@@ -295,6 +296,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         attempt_activation: StoreBatchCommitRef,
         owner: &StoreDeviceRegistration,
         published_at: &str,
+        timings: &mut coven_foundation::stage_timing::StageTimings,
     ) -> Result<DeviceReadinessProof, StoreRegistrationError> {
         bootstrap_pending_device_on(
             &self.database,
@@ -306,6 +308,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             attempt_activation,
             owner,
             published_at,
+            timings,
         )
         .await
     }
@@ -341,6 +344,7 @@ pub(crate) async fn bootstrap_pending_device_on(
     attempt_activation: StoreBatchCommitRef,
     owner: &StoreDeviceRegistration,
     published_at: &str,
+    timings: &mut coven_foundation::stage_timing::StageTimings,
 ) -> Result<DeviceReadinessProof, StoreRegistrationError> {
     if verified_attempt.semantic_hash != attempt_ref.attempt_hash
         || verified_attempt.object != attempt_ref.object
@@ -371,7 +375,11 @@ pub(crate) async fn bootstrap_pending_device_on(
             })
         })
         .map(|registration| registration.activation().clone());
-    Box::pin(database.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap))
+    timings
+        .stage(
+            "materialize the carried history",
+            Box::pin(database.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap)),
+        )
         .await
         .map_err(registration_database_error)?;
     if Box::pin(
@@ -408,7 +416,11 @@ pub(crate) async fn bootstrap_pending_device_on(
             "device join attempt is not activated by the named exact Store commit".to_string(),
         ));
     }
-    let provider = Box::pin(storage.provider_binding())
+    let provider = timings
+        .stage(
+            "read the provider binding",
+            Box::pin(storage.provider_binding()),
+        )
         .await
         .map_err(StoreObjectError::from)?;
     if provider.device != attempt.expected_registration.provider {
@@ -455,20 +467,27 @@ pub(crate) async fn bootstrap_pending_device_on(
             attempt.store_root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
-        let next_slot = Box::pin(storage.allocate_protocol_slot(
-            &ack_context,
-            &ack_slot_prefix(&expected_registration.device_id.to_string(), 2),
-            ".json",
-        ))
-        .await
-        .map_err(StoreObjectError::from)?;
+        let next_slot = timings
+            .stage(
+                "allocate the acknowledgement slot",
+                Box::pin(storage.allocate_protocol_slot(
+                    &ack_context,
+                    &ack_slot_prefix(&expected_registration.device_id.to_string(), 2),
+                    ".json",
+                )),
+            )
+            .await
+            .map_err(StoreObjectError::from)?;
         let device_signer = expected_registration
             .device_signer(identity)
             .map_err(StoreRegistrationError::from)?;
-        let (device_state, _) =
-            Box::pin(database.store_device_state_for_history_cut(&attempt.bootstrap_cut))
-                .await
-                .map_err(registration_database_error)?;
+        let (device_state, _) = timings
+            .stage(
+                "resolve the device state",
+                Box::pin(database.store_device_state_for_history_cut(&attempt.bootstrap_cut)),
+            )
+            .await
+            .map_err(registration_database_error)?;
         let initial_ack = StoreAck::signed(
             attempt.store_root.store_root_hash,
             1,
@@ -539,8 +558,11 @@ pub(crate) async fn bootstrap_pending_device_on(
             }
         }
     }
-    super::RegistrationOutbox::new(database.clone(), storage)
-        .drain()
+    timings
+        .stage(
+            "publish the registration",
+            super::RegistrationOutbox::new(database.clone(), storage).drain(),
+        )
         .await?;
     let durable = Box::pin(database.latest_local_store_device_registration())
         .await

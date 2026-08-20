@@ -1,10 +1,16 @@
-//! Wall-clock timing for the named stages a sync run is made of.
+//! Wall-clock timing for the named stages a run is made of.
 //!
-//! A sync loop iteration, a sync cycle, and a Store pull are each a sequence of
-//! named stages — probe the provider, drain uploads, discover streams, verify
-//! commits, download blobs, materialize. When a cycle takes twenty seconds the
-//! only useful question is which of those stages it spent them in, and the logs
-//! have to answer it without a second round of instrumentation.
+//! A sync loop iteration, a sync cycle, a Store pull, and a database open are
+//! each a sequence of named stages — probe the provider, drain uploads,
+//! discover streams, verify commits, migrate, install a snapshot image,
+//! materialize. When one of them takes twenty seconds the only useful question
+//! is which of those stages it spent them in, and the logs have to answer it
+//! without a second round of instrumentation.
+//!
+//! This lives in the foundation rather than beside the sync loop because the
+//! slow stages are not all in one crate: a device join spends most of its time
+//! inside a database open, and timing that from the caller only ever reports
+//! one opaque total.
 //!
 //! Each run holds one [`StageTimings`], times every stage through it, and
 //! reports one line naming each stage's total. Stages repeat — a pull discovers
@@ -17,14 +23,14 @@
 //! The reported total is the run's whole wall time, so time spent outside every
 //! named stage stays visible as the difference rather than disappearing.
 //! Timing reads a [`Stopwatch`], not the injected
-//! [`Clock`](coven_foundation::clock::Clock): this measures how long real work
+//! [`Clock`](crate::clock::Clock): this measures how long real work
 //! took, not what the store stamps its commits with.
 
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
-use coven_foundation::clock::Stopwatch;
+use crate::clock::Stopwatch;
 use tracing::info;
 
 pub struct StageTimings {
@@ -95,7 +101,7 @@ impl StageTimings {
             total_ms = self.started.elapsed().as_millis() as u64,
             stages = %StageBreakdown(&self.stages),
             cancelled,
-            "Sync stage timings"
+            "Stage timings"
         );
         true
     }

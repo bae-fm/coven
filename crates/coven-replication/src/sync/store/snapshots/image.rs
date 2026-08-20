@@ -276,7 +276,7 @@ impl PreparedDeviceJoinSnapshot {
         cancel: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<Self, SnapshotError> {
         let mut timings =
-            crate::sync::stage_timing::StageTimings::start("Device join snapshot preparation");
+            coven_foundation::stage_timing::StageTimings::start("Device join snapshot preparation");
         timings.mark("verify the snapshot authority", || {
             installation.authority.validate()
         })?;

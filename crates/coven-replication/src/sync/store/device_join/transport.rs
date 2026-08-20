@@ -461,7 +461,7 @@ pub async fn timed_owner_join_step<T>(
     step: &'static str,
     work: impl std::future::Future<Output = T>,
 ) -> T {
-    let mut timings = crate::sync::stage_timing::StageTimings::start("Device join owner step");
+    let mut timings = coven_foundation::stage_timing::StageTimings::start("Device join owner step");
     let outcome = timings.stage(step, work).await;
     timings.report();
     outcome
@@ -1299,8 +1299,9 @@ impl<'attempt> AttemptTransport<'attempt> {
     ) -> Result<SamePrincipalDeviceJoin, DeviceJoinTransportError> {
         // Sixty-eight seconds hid behind this one step in a live run. It is
         // three provider-facing pieces, and they report as three.
-        let mut timings =
-            crate::sync::stage_timing::StageTimings::start("Device join same-provider activation");
+        let mut timings = coven_foundation::stage_timing::StageTimings::start(
+            "Device join same-provider activation",
+        );
         let outcome = async {
             let mut writer = timings
                 .stage("authorize writer", self.store.authorize_writer())
