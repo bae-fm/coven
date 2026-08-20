@@ -54,6 +54,16 @@ impl StageTimings {
         outcome
     }
 
+    /// Time one blocking step. [`stage`](Self::stage) covers work that awaits;
+    /// plenty of what dominates a run — parsing and signature checks over a
+    /// carried history — never awaits, and is invisible without this.
+    pub fn mark<T>(&mut self, stage: &'static str, work: impl FnOnce() -> T) -> T {
+        let started = Stopwatch::start();
+        let outcome = work();
+        self.add(stage, started.elapsed());
+        outcome
+    }
+
     /// Adds time a caller measured itself, for work whose split is only visible
     /// from inside it — a stream walk knows how much of its wait was head slots
     /// and how much was the commits behind them; the pull only sees the total.

@@ -154,6 +154,8 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         if attempt.store_root != root {
             return Err(DeviceJoinError::AttemptMismatch);
         }
+        let mut timings =
+            crate::sync::stage_timing::StageTimings::start("Same-provider join installation plan");
         let snapshots = self.database.local_store_snapshots().await?;
         if snapshots.is_empty() {
             return Err(DeviceJoinError::Store(
@@ -176,9 +178,12 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
                     .to_string(),
             ));
         }
-        let selected = self
-            .history
-            .select_maximal_installable_store_snapshot(candidates)
+        let selected = timings
+            .stage(
+                "select the snapshot",
+                self.history
+                    .select_maximal_installable_store_snapshot(candidates),
+            )
             .await
             .map_err(|error| StorePullError::context("verify same-provider join snapshot", error))?
             .ok_or_else(|| {
@@ -188,18 +193,21 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             })?;
         let snapshot = selected.snapshot;
         let authority = selected.verified;
-        let plan = self
-            .history
-            .prepare_device_join_bootstrap(
-                &attempt.bootstrap_cut,
-                attempt_activation,
-                &attempt.membership,
+        let plan = timings
+            .stage(
+                "walk the plan history",
+                self.history.prepare_device_join_bootstrap(
+                    &attempt.bootstrap_cut,
+                    attempt_activation,
+                    &attempt.membership,
+                ),
             )
             .await
             .map_err(|error| {
                 StorePullError::context("prepare same-provider join history", error)
             })?;
-        let bootstrap = plan.into_closure(&root)?;
+        let bootstrap = timings.mark("carry the plan closure", || plan.into_closure(&root))?;
+        timings.report();
         Ok(SamePrincipalStoreInstallation {
             store_root: self.root().protocol().clone(),
             attempt: attempt.clone(),

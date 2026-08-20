@@ -275,7 +275,11 @@ impl PreparedDeviceJoinSnapshot {
         on_progress: &crate::sync::JoiningDeviceJoinProgressObserver,
         cancel: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<Self, SnapshotError> {
-        installation.authority.validate()?;
+        let mut timings =
+            crate::sync::stage_timing::StageTimings::start("Device join snapshot preparation");
+        timings.mark("verify the snapshot authority", || {
+            installation.authority.validate()
+        })?;
         if installation.metadata.schema_version > binary_schema_version {
             return Err(SnapshotError::SchemaTooNew {
                 snapshot_version: installation.metadata.schema_version,
@@ -323,10 +327,13 @@ impl PreparedDeviceJoinSnapshot {
         let membership = coven_database::InitialStoreMembershipAuthority {
             head_refs: installation.bootstrap.membership.0.clone(),
         };
-        let bootstrap = coven_database::DeviceJoinBootstrapPlan::from_closure(
-            &root_ref,
-            installation.bootstrap,
-        )?;
+        // Every commit in the carried closure is parsed and signature-checked
+        // here, whether or not the snapshot already covers it. Over a long
+        // history that is the bulk of this step, and it is invisible while it
+        // sits inside the download.
+        let bootstrap = timings.mark("verify the carried history", || {
+            coven_database::DeviceJoinBootstrapPlan::from_closure(&root_ref, installation.bootstrap)
+        })?;
         let snapshot = coven_database::PublishedStoreSnapshot {
             reference: installation.snapshot,
             successor_slot: installation.metadata.successor.next_slot.clone(),
@@ -334,11 +341,22 @@ impl PreparedDeviceJoinSnapshot {
         };
         let authority =
             coven_database::VerifiedStoreSnapshotAuthority::from_authority(installation.authority)?;
-        let plaintext =
-            download_snapshot_image(storage.as_ref(), &root_ref, &snapshot, on_progress, cancel)
-                .await?;
-        let database_image =
-            SnapshotDatabaseImage::create(target_path.to_path_buf(), &plaintext)?.canonicalize()?;
+        let plaintext = timings
+            .stage(
+                "download the snapshot image",
+                download_snapshot_image(
+                    storage.as_ref(),
+                    &root_ref,
+                    &snapshot,
+                    on_progress,
+                    cancel,
+                ),
+            )
+            .await?;
+        let database_image = timings.mark("stage the image on disk", || {
+            SnapshotDatabaseImage::create(target_path.to_path_buf(), &plaintext)?.canonicalize()
+        })?;
+        timings.report();
         Ok(Self {
             database_image,
             db_hash: snapshot_db_hash(&plaintext),

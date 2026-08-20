@@ -298,10 +298,22 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             outcome: outcome_ref,
             outcome_activation: activation_ref,
         };
-        let installation = self
-            .join_history()
-            .prepare_same_principal_installation(&attempt, outcome, &activation.outcome_activation)
+        // Selecting the snapshot and preparing the carried closure are both
+        // history walks, and the closure's is over the whole plan. They reported
+        // as one step with the commit publication in front of them.
+        let mut timings =
+            crate::sync::stage_timing::StageTimings::start("Same-provider join installation");
+        let installation = timings
+            .stage(
+                "prepare the installation",
+                self.join_history().prepare_same_principal_installation(
+                    &attempt,
+                    outcome,
+                    &activation.outcome_activation,
+                ),
+            )
             .await?;
+        timings.report();
         let join = SamePrincipalDeviceJoin::verified(bootstrap, activation, installation)?;
         journal
             .advance(
