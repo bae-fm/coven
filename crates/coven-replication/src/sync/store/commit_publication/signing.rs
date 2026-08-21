@@ -78,6 +78,12 @@ impl LocalStoreWriter {
         &self.registration.value().device_id
     }
 
+    pub(super) fn registration_ref(
+        &self,
+    ) -> &coven_protocol::store_commit::StoreDeviceRegistrationRef {
+        self.registration.reference()
+    }
+
     pub(crate) fn is_authored_by_registration(
         &self,
         registration: &coven_protocol::store_commit::StoreDeviceRegistrationRef,

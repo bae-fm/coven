@@ -47,6 +47,9 @@ pub struct InstalledDeviceJoinSnapshot {
 }
 
 pub use acknowledgements::StoreAckError;
+pub use acknowledgements::{
+    ReplayBaselineAdvance, ReplayBaselineDecline, StagedStoreAcknowledgement,
+};
 pub use blob::eager_cache::{EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus};
 pub use blob::{BlobCacheError, BlobStream};
 pub use circles::CircleOperationError;

@@ -7,6 +7,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.writer.device_id()
     }
 
+    pub(crate) fn local_registration_ref(
+        &self,
+    ) -> &coven_protocol::store_commit::StoreDeviceRegistrationRef {
+        self.writer.registration_ref()
+    }
+
     pub(crate) fn announcement_stream_id(&self) -> coven_protocol::membership::AuthorStreamId {
         self.writer
             .announcement_stream_id(self.store_root().store_root_hash)

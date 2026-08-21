@@ -278,7 +278,13 @@ impl AuthorizedSyncCycle<'_, '_> {
                     })?;
             }
             let routing_encryption = self.routing_encryption;
-            let baseline_advance = timings
+            timings
+                .stage(
+                    "advance replay baseline",
+                    Box::pin(self.stand_on_acknowledged_snapshot(routing_encryption)),
+                )
+                .await?;
+            timings
                 .stage(
                     "publish acknowledgements",
                     Box::pin(
@@ -287,8 +293,8 @@ impl AuthorizedSyncCycle<'_, '_> {
                             .stage_and_publish(&completed.sync_time, routing_encryption),
                     ),
                 )
-                .await?;
-            Self::report_baseline_advance(baseline_advance);
+                .await
+                .map(Self::report_baseline_advance)?;
             timings
                 .stage("reclaim packages", Box::pin(self.reclaim_packages()))
                 .await?;
@@ -554,12 +560,53 @@ impl AuthorizedSyncCycle<'_, '_> {
         })
     }
 
-    /// Say what advancing this device's replay baseline retired.
+    /// Stand on the snapshot this device has acknowledged, and say every cycle
+    /// what that did — including, and especially, when it did nothing.
     ///
-    /// Read this beside the reclaim line below it: a device whose baseline
-    /// never advances keeps its whole past retained, and every package it ever
-    /// wrote stays pinned for replay, which is what a reclaim run reporting
-    /// every target as retained looks like from the log.
+    /// Read this beside the reclaim line below it. A device whose baseline
+    /// never advances keeps its whole past retained and every package it ever
+    /// wrote pinned for replay, which is what a reclaim run reporting every
+    /// target as retained looks like from the log; without this line there is
+    /// no way to tell that from a reclaim that simply had nothing to do.
+    async fn stand_on_acknowledged_snapshot(
+        &mut self,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<(), SyncCycleFailure> {
+        use super::store::{ReplayBaselineAdvance, ReplayBaselineDecline};
+
+        let outcome = self
+            .authorization
+            .acknowledgements()
+            .stand_on_acknowledged_snapshot(routing_encryption)
+            .await
+            .map_err(|error| {
+                SyncCycleFailure::operation("advance the Store replay baseline", error)
+            })?;
+        match outcome {
+            ReplayBaselineAdvance::Advanced(advanced) => info!(
+                commits = advanced.retired_commits,
+                pins = advanced.released_pins,
+                "Advanced the replay baseline over an acknowledged snapshot"
+            ),
+            // The steady state is the loudest of these only in the sense that
+            // it is the one printed most; it is also the only one that is not a
+            // problem, so it says so by naming the generation it stands at.
+            ReplayBaselineAdvance::Declined(decline) => info!(
+                declined = decline.as_str(),
+                generation = decline.generation(),
+                acknowledged = !matches!(decline, ReplayBaselineDecline::NoAcknowledgedSnapshot),
+                "Did not advance the replay baseline"
+            ),
+        }
+        Ok(())
+    }
+
+    /// Say what standing on a newly acknowledged snapshot retired, when the
+    /// acknowledgement stage moved the baseline itself.
+    ///
+    /// The stage above is where a device catches up; this is the ordering
+    /// guarantee for a claim it is about to publish, which has to be true
+    /// locally before it is signed.
     fn report_baseline_advance(advanced: Option<coven_database::AdvancedReplayBaseline>) {
         let Some(advanced) = advanced else {
             return;
@@ -567,7 +614,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         info!(
             commits = advanced.retired_commits,
             pins = advanced.released_pins,
-            "Advanced the replay baseline over an acknowledged snapshot"
+            "Advanced the replay baseline over a newly acknowledged snapshot"
         );
     }
 

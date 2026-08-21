@@ -2780,6 +2780,56 @@ mod test_device {
                 .map_err(TestError::from)
         }
 
+        /// Acknowledge `frontier` the way a device on a build without the
+        /// advance did: publish the statement, leave the baseline where it is.
+        pub async fn publish_acknowledgement_without_advancing(
+            &self,
+            frontier: coven_protocol::store_commit::CommitFrontier,
+        ) -> Result<(), TestError> {
+            self.store
+                .stage_acknowledgement_without_advancing_for_test(
+                    frontier,
+                    "2026-07-16T00:00:03Z".to_string(),
+                )
+                .await?
+                .ok_or_else(|| {
+                    TestError::invariant(
+                        "the fixture acknowledgement asserted nothing new".to_string(),
+                    )
+                })?;
+            let published = self.store.drain_acknowledgements_for_test().await?;
+            if published != 1 {
+                return Err(TestError::invariant(format!(
+                    "fixture published {published} acknowledgements instead of one"
+                )));
+            }
+            Ok(())
+        }
+
+        /// Stand on the snapshot this device has acknowledged, the way the
+        /// cycle does, and report what it did or why it did nothing.
+        pub async fn stand_on_acknowledged_snapshot(
+            &self,
+        ) -> Result<crate::sync::store::ReplayBaselineAdvance, TestError> {
+            self.store
+                .stand_on_acknowledged_snapshot_for_test()
+                .await
+                .map_err(TestError::from)
+        }
+
+        /// Acknowledge `frontier` and report the whole pass: what it staged,
+        /// if anything, and what standing on the acknowledged snapshots
+        /// retired.
+        pub async fn stage_acknowledgement_reporting_advance(
+            &self,
+            frontier: coven_protocol::store_commit::CommitFrontier,
+        ) -> Result<crate::sync::store::StagedStoreAcknowledgement, TestError> {
+            self.store
+                .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:05Z".to_string())
+                .await
+                .map_err(TestError::from)
+        }
+
         /// Stage an acknowledgement and report only what the baseline advance
         /// it licensed retired.
         pub async fn advance_baseline_by_acknowledging(

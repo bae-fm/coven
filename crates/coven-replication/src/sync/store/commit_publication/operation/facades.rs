@@ -160,6 +160,21 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.history.cleanup_merge_candidate(write_id).await
     }
 
+    pub(crate) async fn resolve_acknowledged_snapshot(
+        &mut self,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+    ) -> Result<
+        Result<
+            crate::sync::store::commit_verification::merge_history::SelectedInstallableStoreSnapshot,
+            crate::sync::store::ReplayBaselineDecline,
+        >,
+        crate::sync::store::acknowledgements::StoreAckError,
+    >{
+        self.history
+            .resolve_acknowledged_snapshot(registration)
+            .await
+    }
+
     pub(crate) async fn select_acknowledgement_snapshot(
         &mut self,
         frontier: &coven_protocol::store_commit::CommitFrontier,

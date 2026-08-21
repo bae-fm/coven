@@ -178,12 +178,83 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    /// The snapshot this device acknowledges, verified as installable.
+    /// Resolve the snapshot this device has already acknowledged, ready to
+    /// stand on.
     ///
-    /// It is the same authority the device installs a baseline from, because
-    /// acknowledging a snapshot and standing on it are the same act: the
-    /// acknowledgement says this device holds everything the snapshot covers,
-    /// and the baseline advance is that claim made true locally.
+    /// `Err` is never the answer to "there is nothing to do" — every way of
+    /// having nothing to do is a [`ReplayBaselineDecline`], so the cycle can
+    /// say which one it hit instead of printing a silent nothing.
+    pub(crate) async fn resolve_acknowledged_snapshot(
+        &mut self,
+        registration: &StoreDeviceRegistrationRef,
+    ) -> Result<
+        Result<
+            crate::sync::store::commit_verification::merge_history::SelectedInstallableStoreSnapshot,
+            crate::sync::store::ReplayBaselineDecline,
+        >,
+        crate::sync::store::acknowledgements::StoreAckError,
+    >{
+        use crate::sync::store::ReplayBaselineDecline;
+
+        let Some(locator) = self
+            .history_verifier
+            .newest_acknowledged_snapshot(registration)
+        else {
+            return Ok(Err(ReplayBaselineDecline::NoAcknowledgedSnapshot));
+        };
+        let generation = locator.snapshot.generation;
+        let author = self
+            .database
+            .activated_store_device_registration_records()
+            .await?
+            .into_iter()
+            .find(|record| record.reference() == &locator.author_registration);
+        let Some(author) = author else {
+            return Ok(Err(ReplayBaselineDecline::SnapshotAuthorInactive {
+                generation,
+            }));
+        };
+        let snapshot = self
+            .history_verifier
+            .load_acknowledged_snapshot(&locator, author.value())
+            .await
+            .map_err(crate::sync::store::acknowledgements::StoreAckError::from)?;
+        let Some(snapshot) = snapshot else {
+            return Ok(Err(ReplayBaselineDecline::SnapshotUnavailable {
+                generation,
+            }));
+        };
+        if self
+            .history_verifier
+            .replay_baseline_covers(&snapshot.meta.coverage)
+        {
+            return Ok(Err(ReplayBaselineDecline::BaselineAtCoverage {
+                generation,
+            }));
+        }
+        let verified = self
+            .history_verifier
+            .verify_acknowledged_store_snapshot(&snapshot)
+            .await
+            .map_err(crate::sync::store::snapshots::SnapshotError::from)?;
+        let Some(verified) = verified else {
+            return Ok(Err(ReplayBaselineDecline::SnapshotRejected { generation }));
+        };
+        Ok(Ok(
+            crate::sync::store::commit_verification::merge_history::SelectedStoreSnapshot {
+                snapshot,
+                verified,
+            },
+        ))
+    }
+
+    /// The newest snapshot this device could acknowledge next, verified as
+    /// installable.
+    ///
+    /// What a device *may say next* — not what it has already said. A snapshot
+    /// whose device state the store has moved past fails these filters while
+    /// remaining exactly what this device acknowledged, which is why the
+    /// baseline advance is licensed elsewhere.
     pub(crate) async fn select_acknowledgement_snapshot(
         &mut self,
         frontier: &CommitFrontier,
@@ -198,29 +269,29 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .database
             .activated_store_device_registration_records()
             .await?;
-        let mut candidates = Vec::new();
+        let mut published = Vec::new();
         for registration in registrations {
-            for snapshot in self
-                .history_verifier
-                .load_store_snapshot_stream(registration.reference(), registration.value())
-                .await?
-            {
-                // A snapshot this device's replay baseline already stands
-                // past is dropped here rather than verified: it would need the
-                // history the baseline retired, and acknowledging it would
-                // claim less than the device holds.
-                if !frontier.covers(&snapshot.meta.coverage)
-                    || self
+            published.extend(
+                self.history_verifier
+                    .load_store_snapshot_stream(registration.reference(), registration.value())
+                    .await?,
+            );
+        }
+        let candidates = published
+            .into_iter()
+            .filter(|snapshot| {
+                // A snapshot this device's replay baseline already stands past
+                // is dropped rather than verified: it would need the history
+                // the baseline retired, and acknowledging it would claim less
+                // than the device holds.
+                frontier.covers(&snapshot.meta.coverage)
+                    && !self
                         .history_verifier
                         .replay_baseline_stands_past(&snapshot.meta.coverage)
-                    || snapshot.meta.state.devices.state_hash() != device_state.state_hash()
-                    || snapshot.meta.state.devices.recovery() != device_state.recovery()
-                {
-                    continue;
-                }
-                candidates.push(snapshot);
-            }
-        }
+                    && snapshot.meta.state.devices.state_hash() == device_state.state_hash()
+                    && snapshot.meta.state.devices.recovery() == device_state.recovery()
+            })
+            .collect::<Vec<_>>();
         if candidates.is_empty() {
             return Ok(None);
         }

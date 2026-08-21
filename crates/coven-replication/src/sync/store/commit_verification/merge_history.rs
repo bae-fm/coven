@@ -64,7 +64,9 @@ pub(crate) use predecessor::{
 pub(crate) use promotion::{
     VerifiedMergeConflictResolutionActivation, VerifiedOwnerPromotionRequestActivation,
 };
-pub(crate) use snapshots::{SelectedAcknowledgedStoreSnapshot, SelectedInstallableStoreSnapshot};
+pub(crate) use snapshots::{
+    SelectedAcknowledgedStoreSnapshot, SelectedInstallableStoreSnapshot, SelectedStoreSnapshot,
+};
 pub use successor::MergeHistorySuccessorEvidence;
 pub use successor::PreparedMergeHistorySuccessor;
 pub(crate) use successor::{
@@ -517,6 +519,38 @@ impl<'a> MergeHistoryVerifier<'a> {
     /// to offer it, because the baseline restates at least as much.
     pub(crate) fn replay_baseline_stands_past(&self, coverage: &CommitFrontier) -> bool {
         !coverage.covers(self.history.baseline.coverage())
+    }
+
+    /// Whether this device's installed replay baseline already restates
+    /// everything `coverage` does, so standing on it again would retire
+    /// nothing.
+    pub(crate) fn replay_baseline_covers(&self, coverage: &CommitFrontier) -> bool {
+        self.history.baseline.coverage().covers(coverage)
+    }
+
+    /// The newest snapshot `registration` has published an acknowledgement of.
+    pub(crate) fn newest_acknowledged_snapshot(
+        &self,
+        registration: &StoreDeviceRegistrationRef,
+    ) -> Option<store_commit::StoreSnapshotLocator> {
+        self.commit_verifier
+            .newest_acknowledged_snapshot(registration)
+    }
+
+    /// The published snapshot `locator` names, from its author's stream.
+    pub(crate) async fn load_acknowledged_snapshot(
+        &mut self,
+        locator: &store_commit::StoreSnapshotLocator,
+        author: &StoreDeviceRegistration,
+    ) -> Result<
+        Option<coven_database::PublishedStoreSnapshot>,
+        crate::sync::store::snapshots::SnapshotError,
+    > {
+        Ok(self
+            .load_store_snapshot_stream(&locator.author_registration, author)
+            .await?
+            .into_iter()
+            .find(|snapshot| snapshot.reference == locator.snapshot))
     }
 
     pub(crate) fn admit_retained_history(

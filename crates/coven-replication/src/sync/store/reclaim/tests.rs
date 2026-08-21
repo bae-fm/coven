@@ -883,6 +883,269 @@ async fn replay_reconstructs_the_store_after_the_baseline_advances() {
     );
 }
 
+/// The acknowledgement a device has already published is the licence, and it
+/// goes on licensing without being restated.
+///
+/// A quiet device says nothing new: its standing acknowledgement still asserts
+/// everything true, so the cycle stages no acknowledgement at all. If moving
+/// the baseline rode on staging one, a device that acknowledged a snapshot on a
+/// build without the advance would stay on its old baseline for as long as it
+/// had nothing to say — pinning every package behind that snapshot, which is
+/// exactly the state this whole change exists to end.
+#[tokio::test]
+async fn a_standing_acknowledgement_advances_a_baseline_that_never_moved() {
+    let fixture = StandingAcknowledgementFixture::build("standing-ack-advance").await;
+
+    let advanced = fixture.stand_on_acknowledged_snapshot().await;
+
+    assert!(
+        advanced.retired_commits > 0,
+        "advancing retires the retained materializations the acknowledged cut covers, retired {}",
+        advanced.retired_commits,
+    );
+    assert!(
+        advanced.released_pins > 0,
+        "and releases the replay pins those materializations held, released {}",
+        advanced.released_pins,
+    );
+}
+
+/// The live shape: the licence is in history, not in the latest word.
+///
+/// An acknowledgement names a snapshot only while that snapshot still describes
+/// the Store's devices. Register a device and every acknowledgement after it
+/// names nothing — the standing one included — because there is no published
+/// snapshot left to name. The device has still said it holds the older one, in
+/// an acknowledgement its own retained history carries, and that statement is
+/// what licenses the advance. A store in this state sat on a genesis baseline
+/// with two hundred retained rows, reporting every reclaim target as retained
+/// for replay, cycle after cycle.
+#[tokio::test]
+async fn a_baseline_advances_over_a_snapshot_only_history_remembers_acknowledging() {
+    let fixture = StandingAcknowledgementFixture::build("standing-ack-overtaken").await;
+    fixture.overtake_the_acknowledged_device_state().await;
+    fixture.acknowledge_naming_no_snapshot().await;
+
+    assert!(
+        fixture.standing_acknowledgement_names_no_snapshot().await,
+        "the fixture reproduces the live shape: the latest word names no snapshot",
+    );
+
+    let advanced = fixture.stand_on_acknowledged_snapshot().await;
+
+    assert!(
+        advanced.retired_commits > 0,
+        "the acknowledgement history carries licenses the advance, retired {}",
+        advanced.retired_commits,
+    );
+}
+
+/// Once a device has caught up, the stage says so and reads nothing.
+#[tokio::test]
+async fn a_baseline_at_the_acknowledged_coverage_declines_and_says_why() {
+    let fixture = StandingAcknowledgementFixture::build("standing-ack-settled").await;
+    fixture.stand_on_acknowledged_snapshot().await;
+
+    let outcome = fixture
+        .device
+        .stand_on_acknowledged_snapshot()
+        .await
+        .expect("stand on the acknowledged snapshot again");
+
+    assert_eq!(
+        outcome,
+        crate::sync::store::ReplayBaselineAdvance::Declined(
+            crate::sync::store::ReplayBaselineDecline::BaselineAtCoverage { generation: 0 },
+        ),
+        "the second pass reports the steady state rather than a silent nothing",
+    );
+}
+
+/// A device that has acknowledged no snapshot says that, rather than nothing.
+#[tokio::test]
+async fn a_device_that_acknowledged_no_snapshot_declines_and_says_why() {
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let signer = UserKeypair::generate();
+    let (store, _storage) = crate::sync::test_helpers::TestStore::create_with_connection(
+        &db,
+        db_store_dir.clone(),
+        "no-acknowledged-snapshot",
+        signer.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let device = store
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
+        .await
+        .expect("bind Store");
+
+    let outcome = device
+        .stand_on_acknowledged_snapshot()
+        .await
+        .expect("stand on nothing");
+
+    assert_eq!(
+        outcome,
+        crate::sync::store::ReplayBaselineAdvance::Declined(
+            crate::sync::store::ReplayBaselineDecline::NoAcknowledgedSnapshot,
+        ),
+    );
+}
+
+/// Two changesets, a published snapshot, and an acknowledgement of it made the
+/// way a build without the advance made one: the statement is published and the
+/// baseline never moved.
+struct StandingAcknowledgementFixture {
+    db: coven_database::Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
+    store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
+    device: crate::sync::test_helpers::TestDevice,
+    signer: UserKeypair,
+}
+
+impl StandingAcknowledgementFixture {
+    async fn build(store_id: &str) -> Self {
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+        let signer = UserKeypair::generate();
+        let home = crate::sync::test_helpers::test_cloud_home();
+        let (store, _storage) = crate::sync::test_helpers::TestStore::create_with_connection(
+            &db,
+            db_store_dir.clone(),
+            store_id,
+            signer.clone(),
+            home,
+        )
+        .await
+        .expect("create Store");
+        let device = store
+            .bind_device_in(&db, db_store_dir.clone(), &signer)
+            .await
+            .expect("bind Store");
+        for (sequence, row) in [
+            (
+                1,
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('standing-1', 'first', NULL, \
+                 '0000000001000-0000-standing', '2026-01-01')",
+            ),
+            (
+                2,
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('standing-2', 'second', NULL, \
+                 '0000000002000-0000-standing', '2026-01-01')",
+            ),
+        ] {
+            let changeset = crate::sync::test_helpers::open_test_db(
+                crate::sync::test_helpers::test_store_dir(),
+            )
+            .capture_test_changeset(&[row])
+            .await;
+            store
+                .publish_changeset("founder", sequence, &changeset, db.schema_version())
+                .await
+                .expect("publish package activation");
+        }
+        let image_dir = tempfile::tempdir().expect("snapshot image dir");
+        let image = coven_database::StoreDatabase::new(&db)
+            .capture_snapshot_image_for_test(
+                store.root().clone(),
+                image_dir.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("capture a real snapshot image");
+        let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+            coven_database::StoreDatabase::new(&db)
+                .materialized_frontier()
+                .await
+                .expect("materialized frontier"),
+        )
+        .expect("frontier");
+        device
+            .publish_snapshot(image, coverage.clone())
+            .await
+            .expect("publish the snapshot");
+        device
+            .publish_acknowledgement_without_advancing(coverage)
+            .await
+            .expect("acknowledge it the way a build without the advance did");
+        Self {
+            db,
+            db_store_dir,
+            store,
+            device,
+            signer,
+        }
+    }
+
+    async fn frontier(&self) -> coven_protocol::store_commit::CommitFrontier {
+        coven_protocol::store_commit::CommitFrontier::from_refs(
+            coven_database::StoreDatabase::new(&self.db)
+                .materialized_frontier()
+                .await
+                .expect("read materialized frontier"),
+        )
+        .expect("shape materialized frontier")
+    }
+
+    async fn stand_on_acknowledged_snapshot(&self) -> coven_database::AdvancedReplayBaseline {
+        match self
+            .device
+            .stand_on_acknowledged_snapshot()
+            .await
+            .expect("stand on the acknowledged snapshot")
+        {
+            crate::sync::store::ReplayBaselineAdvance::Advanced(advanced) => advanced,
+            crate::sync::store::ReplayBaselineAdvance::Declined(decline) => {
+                panic!("declined to advance: {}", decline.as_str())
+            }
+        }
+    }
+
+    /// Publish an acknowledgement now that nothing is acknowledgeable, so the
+    /// latest word names no snapshot.
+    async fn acknowledge_naming_no_snapshot(&self) {
+        self.device
+            .publish_acknowledgement_without_advancing(self.frontier().await)
+            .await
+            .expect("publish an acknowledgement that names no snapshot");
+    }
+
+    async fn standing_acknowledgement_names_no_snapshot(&self) -> bool {
+        coven_database::StoreDatabase::new(&self.db)
+            .latest_local_store_ack()
+            .await
+            .expect("read the standing acknowledgement")
+            .and_then(|published| published.standing)
+            .expect("the device has published an acknowledgement")
+            .assertion
+            .snapshot
+            .is_none()
+    }
+
+    /// Register a second device, so no published snapshot describes this
+    /// Store's devices any more and nothing is acknowledgeable.
+    async fn overtake_the_acknowledged_device_state(&self) {
+        let joining_store_dir = crate::sync::test_helpers::test_store_dir();
+        self.store
+            .activate_joined_device_from_snapshot(
+                &self.db,
+                self.db_store_dir.clone(),
+                joining_store_dir,
+                &self.signer,
+                "2026-07-16T00:00:04Z",
+                crate::sync::test_helpers::test_synced_tables(),
+                crate::sync::test_helpers::test_migrations(),
+                self.db.schema_version(),
+            )
+            .await
+            .expect("activate a second device");
+    }
+}
+
 /// Publishing a snapshot does not move the publisher's baseline; acknowledging
 /// it does.
 ///

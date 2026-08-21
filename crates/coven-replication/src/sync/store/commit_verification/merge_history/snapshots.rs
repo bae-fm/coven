@@ -171,6 +171,28 @@ impl<'a> MergeHistoryVerifier<'a> {
         take_maximal_eligible(eligible, maximal_rejection, selector)
     }
 
+    /// Verify one snapshot this device has already acknowledged.
+    ///
+    /// `None` when it is not eligible for a reason particular to it — the same
+    /// rejections the selectors pass over. An acknowledgement this device
+    /// published is a statement it already stands behind, so it is not put
+    /// through the candidate filters: those decide what a device *may say
+    /// next*, and a snapshot whose device state has since moved on fails them
+    /// while remaining exactly what this device said it holds.
+    pub(crate) async fn verify_acknowledged_store_snapshot(
+        &mut self,
+        snapshot: &coven_database::PublishedStoreSnapshot,
+    ) -> Result<Option<coven_database::VerifiedStoreSnapshotAuthority>, StorePullError> {
+        match self.verify_installable_snapshot(snapshot).await {
+            Ok(verified) => Ok(Some(verified)),
+            Err(error) if disqualifies_one_candidate(&error) => {
+                report_rejected_snapshot(snapshot, &error, SnapshotSelector::Installable);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// The newest snapshot every device active at its cut has acknowledged.
     /// Reclaim deletes history behind a snapshot only against this.
     pub(crate) async fn select_maximal_acknowledged_store_snapshot(

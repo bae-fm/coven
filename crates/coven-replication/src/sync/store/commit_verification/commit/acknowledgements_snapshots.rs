@@ -16,6 +16,36 @@ impl<'a> StoreCommitVerifier<'a> {
             .map(|(_, value)| value.clone())
     }
 
+    /// The newest snapshot `registration` has published an acknowledgement of.
+    ///
+    /// A device's own acknowledgement is what licenses it to stand on a
+    /// snapshot, and the statement keeps standing after the acknowledgement
+    /// that carried it stops being the latest one. Its later acknowledgements
+    /// name no snapshot at all once the store's device state moves past what
+    /// any published snapshot describes — a device registered, excluded or
+    /// recovered, and nothing the owner has published still describes the store
+    /// — so reading the licence off the newest acknowledgement, or off what the
+    /// device could acknowledge next, finds nothing exactly when the device has
+    /// most history to retire.
+    ///
+    /// Answered from the acknowledgements this verifier holds, which the pull
+    /// seeds from this device's own retained rows: no read, and no fact that
+    /// was not already authenticated.
+    pub(crate) fn newest_acknowledged_snapshot(
+        &self,
+        registration: &StoreDeviceRegistrationRef,
+    ) -> Option<StoreSnapshotLocator> {
+        self.acknowledgements
+            .lock()
+            .expect("authenticated acknowledgement cache poisoned")
+            .values()
+            .filter(|(reference, value)| {
+                &reference.registration == registration && value.snapshot.is_some()
+            })
+            .max_by_key(|(reference, _)| reference.sequence)
+            .and_then(|(_, value)| value.snapshot.clone())
+    }
+
     /// Admit an acknowledgement this verifier did not read itself, from a source
     /// that authenticated it under the same root — a retained materialization
     /// row's activated-ack evidence. Rejects a value that disagrees with its
