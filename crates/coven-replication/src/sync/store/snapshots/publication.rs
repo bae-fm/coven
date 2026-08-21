@@ -1,6 +1,7 @@
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
-    snapshot_image_semantic_prefix, snapshot_slot_prefix, CircleSnapshotMeta, SnapshotMeta,
+    membership_rollup_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
+    CircleSnapshotMeta, SnapshotMeta,
 };
 use coven_storage::CloudSyncObjectStorage;
 
@@ -92,6 +93,21 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
                 &pending.image.prepared,
                 &snapshot_image_semantic_prefix(&device_id, meta.image.image_hash),
                 &pending.image.value,
+            )
+            .await
+            .map_err(SnapshotError::Bucket)?;
+        // Before the metadata that names it: a published snapshot pointing at a
+        // rollup nobody put at the provider would send every joining device to
+        // a signed reference that does not open.
+        self.storage
+            .create_verified_protocol_object(
+                &ProtocolObjectContext::signed_plaintext(
+                    meta.store_root_hash,
+                    ProtocolObjectDomain::StoreMembershipRollup,
+                ),
+                &pending.rollup.prepared,
+                &membership_rollup_semantic_prefix(&device_id, meta.membership_rollup.rollup_hash),
+                &pending.rollup.bytes,
             )
             .await
             .map_err(SnapshotError::Bucket)?;

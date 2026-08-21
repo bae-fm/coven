@@ -102,6 +102,7 @@ opaque byte store. It sees:
   store-v1/snapshots/{author}/{hash}.json
   store-v1/membership/entries/{author}/{grant}/{stream_id}/{seq}/{hash}.json
   store-v1/membership/heads/{author}/{grant}/{stream_id}/{seq}.json
+  store-v1/membership-rollups/{author}/{hash}.json
   images/{ab}/{cd}/{id}                       encrypted application blobs
   keys/{owner_pubkey}/{recipient_pubkey}.enc  store keyring wrapped to a member
   ```
@@ -200,7 +201,8 @@ blob-path scheme, both held by a `CloudSyncConnection`:
   consumer supplies (see [blobs](blobs.md#browsable-home-blob-paths)).
 
 The storage mode changes only what happens at rest. Changesets, snapshots, the
-snapshot metadata, the min-schema marker, membership entries, and blobs are
+snapshot metadata, the min-schema marker, membership entries and rollups, and
+blobs are
 stored sealed (opaque) or verbatim (browsable); everything else, the sync
 protocol, the HLC register, the row-level gate, is unchanged.
 

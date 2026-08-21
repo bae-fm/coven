@@ -331,6 +331,7 @@ macro_rules! coven_tables {
     snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
     meta_prepared TEXT NOT NULL CHECK (json_valid(meta_prepared)),
     image_ref TEXT NOT NULL CHECK (json_valid(image_ref)),
+    rollup_ref TEXT NOT NULL CHECK (json_valid(rollup_ref)),
     meta_bytes BLOB NOT NULL,
     blobs TEXT NOT NULL CHECK (json_valid(blobs))
 "

@@ -1275,3 +1275,214 @@ async fn a_membership_stream_is_listed_once_and_fetched_together() {
         "membership heads are fetched together, not each one gated on the last"
     );
 }
+
+/// A published membership rollup carries the chain, so a reader takes it in one
+/// read — and reaches exactly the chain the full walk reaches.
+///
+/// This is the property the whole rollup rests on: it is a carrier, not an
+/// authority. The chain it produces is compared against one walked entirely off
+/// the provider over the same Store, and the Store is built so the comparison
+/// has something to say — a member admitted and then removed, which rotates the
+/// wrapped keys and retires that member's grant, plus a membership change
+/// published *after* the snapshot so the rollup is deliberately stale and the
+/// reader has a tail to walk.
+#[tokio::test]
+async fn a_membership_rollup_reaches_the_chain_the_full_walk_reaches() {
+    let fixture = MergeFixture::new("membership-rollup-equivalence").await;
+    let removed = UserKeypair::generate();
+    let kept = UserKeypair::generate();
+    fixture.admit_member(&removed, MemberRole::Member).await;
+    fixture.admit_member(&kept, MemberRole::Member).await;
+    fixture.remove_member(&removed).await;
+    fixture
+        .device
+        .ensure_device_join_snapshot_for_test()
+        .await
+        .expect("publish the snapshot the rollup rides");
+    // Published after the snapshot: the rollup cannot cover this, so the reader
+    // that adopts it still has to walk the tail to find it.
+    let after_snapshot = UserKeypair::generate();
+    let admission = fixture
+        .admit_member(&after_snapshot, MemberRole::Member)
+        .await;
+
+    let walked = walk_admission_membership(&fixture, &admission, false).await;
+    let rolled = walk_admission_membership(&fixture, &admission, true).await;
+
+    assert_eq!(
+        walked.head_refs(),
+        rolled.head_refs(),
+        "the rollup reader ends on another membership frontier"
+    );
+    assert_eq!(
+        walked.resolution_refs(),
+        rolled.resolution_refs(),
+        "the rollup reader ends on another resolution cut"
+    );
+    assert_eq!(
+        walked.status(),
+        rolled.status(),
+        "the rollup reader resolves another member set"
+    );
+    for (label, pubkey) in [
+        ("the owner", fixture.owner_pubkey.clone()),
+        ("the removed member", pubkey_hex(&removed)),
+        ("the kept member", pubkey_hex(&kept)),
+        (
+            "the member admitted after the snapshot",
+            pubkey_hex(&after_snapshot),
+        ),
+    ] {
+        assert_eq!(
+            walked.can_write_now(&pubkey),
+            rolled.can_write_now(&pubkey),
+            "the rollup reader disagrees about whether {label} can write"
+        );
+        assert_eq!(
+            walked.is_owner_now(&pubkey),
+            rolled.is_owner_now(&pubkey),
+            "the rollup reader disagrees about whether {label} is an owner"
+        );
+    }
+    assert!(
+        !walked.can_write_now(&pubkey_hex(&removed)),
+        "the fixture never removed anyone, so this proves nothing about revocation"
+    );
+    assert!(
+        walked.can_write_now(&pubkey_hex(&after_snapshot)),
+        "the member admitted after the snapshot is absent from both chains, \
+         so the tail walk is untested"
+    );
+}
+
+/// The reads a joining device spends on membership do not grow with the Store's
+/// membership history.
+///
+/// Every membership change used to cost a joining device two provider round
+/// trips — the head, then the entry it selects — back to the founding entry, on
+/// a chain nothing had touched in months. The rollup makes that one read
+/// whatever the history is; what is left is the probe that finds each stream's
+/// end, which is about the tail and not about the past.
+#[tokio::test]
+async fn membership_reads_on_a_fresh_reader_do_not_grow_with_the_chain() {
+    let shallow = membership_reads_after_admissions("rollup-reads-shallow", 1).await;
+    let deep = membership_reads_after_admissions("rollup-reads-deep", 9).await;
+
+    assert_eq!(
+        shallow, deep,
+        "a reader of a nine-change chain spent {deep} membership operations \
+         against {shallow} for a one-change chain, so the walk still follows history",
+    );
+    // Listing the snapshot prefix, the newest snapshot's metadata, the rollup,
+    // the newest covered head the rollup deliberately does not hold, and the
+    // absent slot that ends the stream. Written as a number rather than a bound
+    // because a budget nobody wrote down is one nobody notices doubling.
+    assert_eq!(
+        deep, 5,
+        "a fresh reader spends {deep} membership operations, not the read and a \
+         probe per stream the rollup exists to make it",
+    );
+}
+
+/// Provider operations one fresh reader spends reaching a Store's membership,
+/// over a chain of `admissions` changes with a snapshot published at the end.
+///
+/// Counted are the reads and listings under the membership, rollup, and
+/// snapshot-metadata prefixes: everything the reader spends deciding what the
+/// membership is. The snapshot *image* is not among them — a joining device
+/// downloads one of those on purpose, and it is the one large transfer the
+/// round-trip budget allows.
+async fn membership_reads_after_admissions(store_id: &str, admissions: usize) -> usize {
+    let fixture = MergeFixture::new(store_id).await;
+    let mut admission = fixture
+        .admit_member(&UserKeypair::generate(), MemberRole::Member)
+        .await;
+    for _ in 1..admissions {
+        admission = fixture
+            .admit_member(&UserKeypair::generate(), MemberRole::Member)
+            .await;
+    }
+    fixture
+        .device
+        .ensure_device_join_snapshot_for_test()
+        .await
+        .expect("publish the snapshot the rollup rides");
+
+    // Read the owner's own frontier before counting: resolving it walks the
+    // chain on a verifier of its own, and those reads are not the joiner's.
+    let expected = fixture.load().await;
+    fixture.home.clear_exact_reads();
+    fixture.home.clear_exact_listings();
+    let membership = walk_admission_membership(&fixture, &admission, true).await;
+    assert_eq!(
+        membership.head_refs(),
+        expected.head_refs(),
+        "the counted read ended on another frontier than the owner's own"
+    );
+    // The rollup holds every covered head but the newest, so the newest is read
+    // from its create-once slot. That read is what pins the whole covered
+    // prefix: it names its predecessor, which names its own, down to the
+    // sequence-one slot the signed Store root names. Without it a rollup could
+    // hand a reader one branch of a forked author stream while the provider
+    // holds the other.
+    let tip = expected
+        .head_refs()
+        .last()
+        .expect("the chain has a newest head")
+        .object
+        .slot()
+        .logical_key()
+        .to_string();
+    assert!(
+        fixture
+            .home
+            .exact_reads()
+            .iter()
+            .any(|slot| slot.logical_key() == tip),
+        "the newest covered membership head was not read from its own slot: {tip}"
+    );
+
+    let counted = |key: &str| {
+        key.starts_with("store-v1/membership/")
+            || key.starts_with("store-v1/membership-rollups/")
+            || key.starts_with("store-v1/snapshots/")
+    };
+    fixture
+        .home
+        .exact_reads()
+        .iter()
+        .filter(|slot| counted(slot.logical_key()))
+        .count()
+        + fixture
+            .home
+            .exact_listed_prefixes()
+            .iter()
+            .filter(|prefix| counted(prefix))
+            .count()
+}
+
+/// Open the Store the way an admitted device does — pinned root, nothing else
+/// — and resolve its membership, with or without the published rollup.
+async fn walk_admission_membership(
+    fixture: &MergeFixture,
+    admission: &crate::sync::store::MemberAdmission,
+    adopt_rollup: bool,
+) -> MembershipChain {
+    let mut history = crate::sync::store::HistoryConstructionAuthority::admission()
+        .open_pinned(&*fixture.storage, &admission.store_root)
+        .await
+        .expect("open admission history");
+    if adopt_rollup {
+        assert!(
+            history.adopt_published_membership_rollup().await,
+            "the Store published a snapshot, so its rollup has to be adoptable"
+        );
+    }
+    history
+        .load_exact_anchored_membership(
+            &admission.membership_floor.0,
+            Some(&admission.owner_pubkey),
+        )
+        .await
+        .expect("walk membership from the cloud")
+}

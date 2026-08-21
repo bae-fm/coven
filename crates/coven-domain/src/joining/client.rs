@@ -792,6 +792,15 @@ impl DeviceJoinClient {
             )
             .await
             .map_err(SnapshotError::from)?;
+        // Selecting the snapshot resolves membership at the admission floor on
+        // this verifier, which is a second one and holds nothing the first
+        // walked. The rollup is what keeps that from being a second walk.
+        timings
+            .stage(
+                "read the membership rollup",
+                history_verifier.adopt_published_membership_rollup(),
+            )
+            .await;
         let snapshot = timings
             .stage(
                 "download snapshot",
@@ -1183,13 +1192,15 @@ impl DeviceJoinClient {
     /// Timed as one step by its callers, where it has been the second-largest
     /// on a live join. Constructing the home is local — no bucket check, no
     /// auth probe — and its caller does it, so all of this time is the two
-    /// reads that pin the Store root and its founder, the membership chain
-    /// walk, and the wrapped-key reads. The walk lists each membership stream
-    /// under its prefix and reads the listed heads in batches, so it costs a
-    /// listing and a terminating miss per stream rather than a round trip per
-    /// entry — but it still fetches and verifies every entry, so it grows with
-    /// the store's membership history. The counts on this run's stages are what
-    /// say which of the two it is on any given join.
+    /// reads that pin the Store root and its founder, the membership rollup,
+    /// the membership chain walk, and the wrapped-key reads.
+    ///
+    /// The walk used to grow with the Store's whole membership history: a
+    /// listing and a read per head, then a read per entry, back to the founding
+    /// entry. It now takes everything up to the newest published snapshot's
+    /// membership frontier from that snapshot's rollup, in one read, and walks
+    /// the provider only for what was published after it — so what is left is
+    /// the probe that finds each stream's end, and the tail itself.
     async fn build_storage(
         &self,
         cloud: Arc<dyn ExactCloudHome>,
@@ -1230,6 +1241,15 @@ impl DeviceJoinClient {
             )
             .await
             .map_err(coven_replication::sync::store::MembershipMutationError::from)?;
+        // What the walk below would otherwise fetch two round trips at a time,
+        // in one read. Advisory: a Store with no published rollup, or one that
+        // does not authenticate, leaves the walk exactly as it was.
+        timings
+            .stage(
+                "read the membership rollup",
+                history.adopt_published_membership_rollup(),
+            )
+            .await;
         let chain = timings
             .stage(
                 "walk the membership chain",

@@ -13,6 +13,77 @@ use std::pin::Pin;
 
 mod graph;
 
+/// One author stream as the anchored walk actually read it: every head from
+/// the stream's anchor to its tip, with the entry each head selects.
+///
+/// This is what a published membership rollup is made of. The walk already
+/// holds all of it — collecting it costs nothing and is the only place it
+/// exists in one piece, because a `MembershipChain` keeps the reduced state and
+/// the entries but not the heads that carried them.
+pub(crate) struct TraversedMembershipStream {
+    pub(crate) author_pubkey: String,
+    pub(crate) author_owner_grant: MembershipGrantId,
+    pub(crate) stream_id: coven_protocol::membership::AuthorStreamId,
+    pub(crate) heads: Vec<(MembershipHeadRef, AuthorHead, MembershipEntry)>,
+}
+
+pub(crate) struct TraversedMembership {
+    pub(crate) streams: Vec<TraversedMembershipStream>,
+    pub(crate) resolutions: Vec<(
+        StoreMembershipConflictResolutionRef,
+        StoreMembershipConflictResolution,
+    )>,
+}
+
+impl TraversedMembership {
+    /// The published form of what the walk read.
+    pub(crate) fn into_rollup_parts(
+        self,
+    ) -> (
+        Vec<coven_protocol::store_commit::MembershipRollupStream>,
+        Vec<coven_protocol::store_commit::MembershipRollupResolution>,
+    ) {
+        let streams = self
+            .streams
+            .into_iter()
+            // A stream the chain activates whose first head the walk cannot yet
+            // reach carries nothing to hand a reader, and a reader that finds
+            // no entry for it lists and walks it the way it always did.
+            .filter(|stream| !stream.heads.is_empty())
+            .map(
+                |stream| coven_protocol::store_commit::MembershipRollupStream {
+                    author_pubkey: stream.author_pubkey,
+                    author_owner_grant: stream.author_owner_grant,
+                    stream_id: stream.stream_id,
+                    heads: stream
+                        .heads
+                        .into_iter()
+                        .map(|(reference, head, entry)| {
+                            coven_protocol::store_commit::MembershipRollupHead {
+                                entry: head.body.entry.clone(),
+                                head: reference,
+                                head_value: head,
+                                entry_value: entry,
+                            }
+                        })
+                        .collect(),
+                },
+            )
+            .collect();
+        let resolutions = self
+            .resolutions
+            .into_iter()
+            .map(
+                |(reference, value)| coven_protocol::store_commit::MembershipRollupResolution {
+                    resolution: reference,
+                    resolution_value: value,
+                },
+            )
+            .collect();
+        (streams, resolutions)
+    }
+}
+
 struct ExactMembershipStream {
     entries: Vec<(MembershipCoord, MembershipEntry)>,
     heads: Vec<(MembershipHeadRef, AuthorHead)>,
@@ -67,7 +138,7 @@ impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
         &mut self,
         cursors: &[MembershipHeadRef],
         owner_pubkey: Option<&str>,
-    ) -> Result<MembershipChain, AnchoredChainError> {
+    ) -> Result<(MembershipChain, TraversedMembership), AnchoredChainError> {
         self.authority
             .load_exact_anchored_chain(cursors, owner_pubkey)
             .await
@@ -228,7 +299,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         &mut self,
         cursors: &[MembershipHeadRef],
         owner_pubkey: Option<&str>,
-    ) -> Result<MembershipChain, AnchoredChainError> {
+    ) -> Result<(MembershipChain, TraversedMembership), AnchoredChainError> {
         let root = self.root().clone();
         let root_value = self.verified_root().clone();
         if let Some(owner) = owner_pubkey {
@@ -283,6 +354,12 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             consumed_cursors.insert(cursor.clone());
         }
         let mut latest_heads = vec![founder_latest];
+        let mut traversed = vec![TraversedMembershipStream {
+            author_pubkey: root_value.descriptor.founder_pubkey.clone(),
+            author_owner_grant: root_value.descriptor.founder_grant.clone(),
+            stream_id: founder_stream,
+            heads: zip_traversed_heads(&founder_loaded),
+        }];
         let mut resolutions = founder_loaded.resolutions;
 
         loop {
@@ -309,7 +386,25 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                             .to_string(),
                     ));
                 }
-                return Ok(chain);
+                traversed.sort_by(|left, right| {
+                    (
+                        &left.author_pubkey,
+                        &left.author_owner_grant,
+                        left.stream_id,
+                    )
+                        .cmp(&(
+                            &right.author_pubkey,
+                            &right.author_owner_grant,
+                            right.stream_id,
+                        ))
+                });
+                return Ok((
+                    chain,
+                    TraversedMembership {
+                        streams: traversed,
+                        resolutions: resolutions.into_iter().collect(),
+                    },
+                ));
             }
 
             for (stream, anchor) in pending {
@@ -327,6 +422,12 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                 if let Some(cursor) = cursor {
                     consumed_cursors.insert(cursor.clone());
                 }
+                traversed.push(TraversedMembershipStream {
+                    author_pubkey: stream.author_pubkey.clone(),
+                    author_owner_grant: stream.author_owner_grant.clone(),
+                    stream_id: stream.stream_id,
+                    heads: zip_traversed_heads(&loaded),
+                });
                 resolutions.extend(loaded.resolutions);
                 if let Some(latest) = loaded.heads.last().cloned() {
                     latest_heads.push(latest);
@@ -1216,6 +1317,19 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             resolutions,
         })
     }
+}
+
+/// Pair each head a traversal read with the entry it selected. The walk pushes
+/// both in step, so index `k` of each is one membership change.
+fn zip_traversed_heads(
+    loaded: &ExactMembershipStream,
+) -> Vec<(MembershipHeadRef, AuthorHead, MembershipEntry)> {
+    loaded
+        .heads
+        .iter()
+        .zip(loaded.entries.iter())
+        .map(|((reference, head), (_, entry))| (reference.clone(), head.clone(), entry.clone()))
+        .collect()
 }
 
 pub(super) fn map_membership_object_error(error: StoreObjectError) -> AnchoredChainError {

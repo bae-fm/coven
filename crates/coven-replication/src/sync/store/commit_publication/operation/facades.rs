@@ -337,6 +337,29 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
     }
 
+    /// The membership objects a reader of this Store's current frontier would
+    /// otherwise fetch one at a time — what a snapshot publishes as its
+    /// membership rollup.
+    ///
+    /// This runs the anchored walk again rather than keeping what an earlier
+    /// one read, because the rollup has to describe the whole chain and not
+    /// whatever part of it this operation happened to touch. The walk is
+    /// served from this verifier's own slot and object memos, so on a device
+    /// that has already resolved its membership this costs the terminating
+    /// probe per stream and nothing else.
+    pub(crate) async fn membership_rollup_parts(
+        &mut self,
+        membership: &coven_protocol::membership::MembershipChain,
+    ) -> Result<
+        (
+            Vec<coven_protocol::store_commit::MembershipRollupStream>,
+            Vec<coven_protocol::store_commit::MembershipRollupResolution>,
+        ),
+        crate::sync::store::membership::AnchoredChainError,
+    > {
+        self.history.membership_rollup_parts(membership).await
+    }
+
     pub(crate) fn snapshots(
         &mut self,
     ) -> crate::sync::store::snapshots::AuthorizedSnapshots<'_, 'storage> {

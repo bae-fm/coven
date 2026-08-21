@@ -300,6 +300,12 @@ pub struct SnapshotMetaBody {
     pub generation: u64,
     pub predecessor: Option<StoreSnapshotRef>,
     pub image: SnapshotImageRef,
+    /// The membership objects a reader needs to reach `state.membership`,
+    /// published beside the image. A joining device opens the Store keyring out
+    /// of the membership chain, so it cannot read anything the keyring
+    /// protects — this reference is what lets it take the chain in one read
+    /// instead of two round trips per membership change.
+    pub membership_rollup: MembershipRollupRef,
     pub coverage: CommitFrontier,
     pub state: StoreSnapshotState,
     pub history_summary: RetainedVerifiedMergeHistorySummary,
@@ -362,6 +368,7 @@ impl SnapshotMeta {
         generation: u64,
         predecessor: Option<StoreSnapshotRef>,
         image: SnapshotImageRef,
+        membership_rollup: MembershipRollupRef,
         coverage: CommitFrontier,
         state: StoreSnapshotState,
         history_summary: RetainedVerifiedMergeHistorySummary,
@@ -381,6 +388,7 @@ impl SnapshotMeta {
                 generation,
                 predecessor,
                 image,
+                membership_rollup,
                 coverage,
                 state,
                 history_summary,

@@ -283,7 +283,9 @@ async fn lost_snapshot_image_create_response_is_resolved_before_metadata_creatio
         )
         .await
         .expect("resolve exact image-create response loss");
-    assert_eq!(home.exact_create_count(), 2);
+    // The image create whose response was lost, then the resumed publication:
+    // membership rollup, then metadata.
+    assert_eq!(home.exact_create_count(), 3);
     assert_eq!(
         published.image.image_hash,
         ObjectHash::digest(b"lost response image")
@@ -319,19 +321,21 @@ async fn snapshot_image_is_durable_before_metadata_can_be_created() {
         .expect("snapshot remains staged");
     let image_hash = pending.meta.value.image.image_hash;
     let stored_hash = pending.image.prepared.reference().stored_hash();
+    let rollup_hash = pending.meta.value.membership_rollup.rollup_hash;
+    let rollup_stored_hash = pending.rollup.prepared.reference().stored_hash();
     let claims = store_database(&db)
         .outbound_store_snapshot_payload_claims_for_test()
         .await
         .expect("read staged snapshot payload claims");
     assert_eq!(
         claims,
-        vec![image_hash, stored_hash]
+        vec![image_hash, stored_hash, rollup_hash, rollup_stored_hash]
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>()
     );
-    for hash in [image_hash, stored_hash] {
+    for hash in [image_hash, stored_hash, rollup_hash, rollup_stored_hash] {
         assert!(store_database(&db)
             .has_payload_for_test(hash)
             .await
@@ -355,7 +359,7 @@ async fn snapshot_image_is_durable_before_metadata_can_be_created() {
         .await
         .expect("read completed snapshot payload claims")
         .is_empty());
-    for hash in [image_hash, stored_hash] {
+    for hash in [image_hash, stored_hash, rollup_hash, rollup_stored_hash] {
         assert!(!store_database(&db)
             .has_payload_for_test(hash)
             .await

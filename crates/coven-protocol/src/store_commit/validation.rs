@@ -462,6 +462,10 @@ pub fn membership_resolution_semantic_prefix(
     format!("store-v1/membership/resolutions/{conflict_hash}/{resolver}/{resolution_hash}")
 }
 
+pub fn membership_rollup_semantic_prefix(author: &str, rollup_hash: ObjectHash) -> String {
+    format!("{STORE_MEMBERSHIP_ROLLUP_PREFIX}{author}/{rollup_hash}")
+}
+
 pub fn snapshot_image_semantic_prefix(author: &str, image_hash: ObjectHash) -> String {
     format!("{STORE_SNAPSHOT_IMAGE_PREFIX}{author}/{image_hash}")
 }

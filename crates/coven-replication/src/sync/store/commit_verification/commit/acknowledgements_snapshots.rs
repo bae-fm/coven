@@ -218,6 +218,125 @@ impl<'a> StoreCommitVerifier<'a> {
         Ok((reference.clone(), opened.value))
     }
 
+    /// The newest snapshot any device has published, found by listing the
+    /// snapshot prefix instead of walking a device's snapshot stream.
+    ///
+    /// This is a hint and is treated as one. A snapshot stream is generation-
+    /// linked, so a reader that has to *settle* which snapshot to install walks
+    /// it — `load_store_snapshot_stream` does, and a bootstrap picking the
+    /// image it will run on still does. But the membership rollup a snapshot
+    /// names is content-addressed and re-verified object by object by the walk
+    /// that consumes it, so nothing rests on picking the right snapshot here:
+    /// the worst a wrong or stale pick can do is leave the anchored walk with
+    /// fewer objects in hand and more to read.
+    ///
+    /// The listing is unsigned and gets no trust. It chooses one candidate; the
+    /// candidate's own bytes are then authenticated against this Store's root
+    /// and its author's registration exactly as a stream walk authenticates
+    /// them, and a candidate that fails is simply not used.
+    ///
+    /// So the worst anyone who can write to the provider — a removed member
+    /// whose credentials the owner has not revoked there yet — can do by
+    /// planting a higher generation is cost a reader its rollup and send it
+    /// back to walking the chain. That is the pace this had before the rollup
+    /// existed, not a wrong answer, and it is the same reader who would
+    /// otherwise be reading objects that writer could equally have deleted.
+    pub(crate) async fn newest_listed_store_snapshot(
+        &self,
+    ) -> Result<Option<SnapshotMeta>, StoreObjectError> {
+        let context = ProtocolObjectContext::signed_plaintext(
+            self.root.reference().store_root_hash,
+            ProtocolObjectDomain::StoreSnapshotMeta,
+        );
+        let slots = self
+            .storage
+            .list_protocol_slots(&context, STORE_SNAPSHOT_LISTING_PREFIX)
+            .await?;
+        let Some((generation, slot)) = slots
+            .into_iter()
+            .filter_map(|slot| listed_snapshot_generation(&slot).map(|value| (value, slot)))
+            .max_by_key(|(generation, _)| *generation)
+        else {
+            return Ok(None);
+        };
+        let Some(semantic_prefix) = context.semantic_prefix_of(&slot) else {
+            return Ok(None);
+        };
+        let (bytes, object) = self
+            .storage
+            .read_protocol_slot(&context, &slot, semantic_prefix)
+            .await?;
+        let unverified: SnapshotMeta = coven_protocol::objects::decode_protocol_object(&bytes)
+            .map_err(|source| StoreObjectError::InvalidObject {
+                semantic_prefix: semantic_prefix.to_string(),
+                key: slot.logical_key().to_string(),
+                source: Box::new(source),
+            })?;
+        let registration = self
+            .load_registration(&unverified.author_registration)
+            .await?;
+        let reference = StoreSnapshotRef {
+            generation,
+            snapshot_hash: SnapshotMeta::semantic_hash_from_bytes(&bytes).map_err(|source| {
+                StoreObjectError::InvalidObject {
+                    semantic_prefix: semantic_prefix.to_string(),
+                    key: slot.logical_key().to_string(),
+                    source: Box::new(source),
+                }
+            })?,
+            object,
+        };
+        let meta = SnapshotMeta::parse_at(
+            &bytes,
+            self.root.reference().store_root_hash,
+            &reference,
+            &registration.value,
+        )
+        .map_err(|source| StoreObjectError::InvalidObject {
+            semantic_prefix: semantic_prefix.to_string(),
+            key: slot.logical_key().to_string(),
+            source: Box::new(source),
+        })?;
+        Ok(Some(meta))
+    }
+
+    /// Read the membership rollup one snapshot names, authenticated against the
+    /// snapshot's own author.
+    pub(crate) async fn load_membership_rollup(
+        &self,
+        meta: &SnapshotMeta,
+    ) -> Result<coven_protocol::store_commit::MembershipRollup, StoreObjectError> {
+        let context = ProtocolObjectContext::signed_plaintext(
+            self.root.reference().store_root_hash,
+            ProtocolObjectDomain::StoreMembershipRollup,
+        );
+        let registration = self.load_registration(&meta.author_registration).await?;
+        let prefix = coven_protocol::store_commit::membership_rollup_semantic_prefix(
+            &registration.value.device_id.to_string(),
+            meta.membership_rollup.rollup_hash,
+        );
+        let expected = meta.membership_rollup.clone();
+        let object = expected.object.clone();
+        let store_root_hash = self.root.reference().store_root_hash;
+        let author = registration.value.clone();
+        self.load_exact_object(
+            &context,
+            &object,
+            &prefix,
+            expected.rollup_hash,
+            move |bytes| {
+                coven_protocol::store_commit::MembershipRollup::parse_at(
+                    bytes,
+                    store_root_hash,
+                    &expected,
+                    &author,
+                )
+            },
+        )
+        .await
+        .map(|opened| opened.value)
+    }
+
     pub(crate) async fn load_store_snapshot_stream(
         &self,
         registration_ref: &StoreDeviceRegistrationRef,
@@ -619,3 +738,15 @@ impl<'a> StoreCommitVerifier<'a> {
             })
     }
 }
+
+/// The generation a listed snapshot slot names, or `None` for a key this
+/// domain does not write.
+fn listed_snapshot_generation(slot: &coven_protocol::objects::ObjectSlot) -> Option<u64> {
+    slot.logical_key()
+        .strip_prefix(STORE_SNAPSHOT_LISTING_PREFIX)?
+        .strip_suffix(".json")?
+        .split_once('/')
+        .and_then(|(_, generation)| generation.parse().ok())
+}
+
+const STORE_SNAPSHOT_LISTING_PREFIX: &str = "store-v1/snapshots/";

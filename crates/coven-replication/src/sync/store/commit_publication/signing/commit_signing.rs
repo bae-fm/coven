@@ -139,6 +139,7 @@ impl LocalStoreWriter {
         generation: u64,
         predecessor: Option<coven_protocol::store_commit::StoreSnapshotRef>,
         image: coven_protocol::store_commit::SnapshotImageRef,
+        membership_rollup: coven_protocol::store_commit::MembershipRollupRef,
         coverage: coven_protocol::store_commit::CommitFrontier,
         state: coven_protocol::store_commit::StoreSnapshotState,
         history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
@@ -155,12 +156,35 @@ impl LocalStoreWriter {
             generation,
             predecessor,
             image,
+            membership_rollup,
             coverage,
             state,
             history_summary,
             schema_version,
             created_at,
             successor,
+            &self.device_signer,
+        )
+    }
+
+    /// Sign the membership rollup this device is about to publish beside a
+    /// snapshot. Signed by the same device that signs the snapshot naming it,
+    /// so a reader that opens the rollup knows who stands behind the objects in
+    /// it before it checks any of them.
+    pub(crate) fn sign_membership_rollup(
+        &self,
+        store_root_hash: coven_protocol::store_commit::ObjectHash,
+        streams: Vec<coven_protocol::store_commit::MembershipRollupStream>,
+        resolutions: Vec<coven_protocol::store_commit::MembershipRollupResolution>,
+    ) -> Result<
+        coven_protocol::store_commit::MembershipRollup,
+        coven_protocol::store_commit::StoreProtocolError,
+    > {
+        coven_protocol::store_commit::MembershipRollup::signed(
+            store_root_hash,
+            self.registration.reference().clone(),
+            streams,
+            resolutions,
             &self.device_signer,
         )
     }

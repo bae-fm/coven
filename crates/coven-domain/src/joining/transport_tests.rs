@@ -253,6 +253,25 @@ impl TransportFixture {
         .await;
     }
 
+    /// Admit one more member, growing the founder's membership stream by one
+    /// entry without adding an announcement stream.
+    async fn admit_extra_member(&self) {
+        let member = UserKeypair::generate();
+        self.owner_test_store
+            .admit_member(
+                &self.owner_db,
+                self.owner_store_dir.clone(),
+                &self.owner_keypair,
+                &pubkey_hex(&member),
+                None,
+                coven_protocol::membership::MemberRole::Member,
+                &EncryptionService::from_key([42; 32]),
+                "Device Join Transport Store",
+            )
+            .await
+            .expect("admit an extra member");
+    }
+
     /// Admit and activate a second device that then publishes its own rows, so
     /// the store's history runs on two announcement streams rather than one.
     /// A snapshot's coverage names a tip per stream, and a bootstrap credits
@@ -2266,4 +2285,101 @@ async fn run_a_join_walks_the_membership_chain_once() {
         head_reads.len(),
         distinct.len(),
     );
+}
+
+/// What a joining device spends on membership does not grow with the Store's
+/// membership history.
+///
+/// A device join opens the Store keyring out of the membership chain, so the
+/// chain is the first thing it reads and none of it can come from behind the
+/// keyring. Reading it change by change made "open Store storage" most of a
+/// live join: two provider round trips per membership change, back to the
+/// Store's founding entry. The newest published snapshot names a rollup
+/// carrying all of it, so the joining device reads that instead and walks the
+/// provider only for what the snapshot does not cover.
+///
+/// Counted here are the operations under the membership, rollup, and
+/// snapshot-metadata prefixes — everything the join spends deciding what the
+/// membership is. The snapshot *image* is deliberately not among them: a
+/// joining device downloads one on purpose, and it is the one large transfer
+/// the round-trip budget allows.
+#[test]
+fn a_join_reads_the_same_membership_however_deep_the_chain() {
+    on_a_deep_stack(run_a_join_reads_the_same_membership_however_deep_the_chain);
+}
+
+async fn run_a_join_reads_the_same_membership_however_deep_the_chain() {
+    let shallow = join_membership_operations("join-rollup-shallow", 0).await;
+    let deep = join_membership_operations("join-rollup-deep", 8).await;
+
+    assert_eq!(
+        shallow, deep,
+        "a join over a chain with eight more members spent {deep} membership \
+         operations against {shallow}, so it still follows the history",
+    );
+    // Listing the snapshot prefix, the newest snapshot's metadata, the rollup,
+    // the newest covered head the rollup deliberately does not hold, the absent
+    // slot that ends the stream, and that newest head once more when the store's
+    // own verifier resolves the registration that signed it. Written as a number
+    // rather than a bound because a budget nobody wrote down is one nobody
+    // notices doubling.
+    assert_eq!(
+        deep, 6,
+        "a join spends {deep} membership operations, not the read and a probe \
+         per stream the rollup exists to make it",
+    );
+}
+
+/// The membership operations one whole join issues over a Store with
+/// `extra_members` admitted beyond its founder.
+async fn join_membership_operations(store_id: &str, extra_members: usize) -> usize {
+    let fixture = TransportFixture::build(store_id).await;
+    for _ in 0..extra_members {
+        fixture.admit_extra_member().await;
+    }
+    fixture.publish_owner_snapshot().await;
+    let bundle = fixture.begin().await;
+    let cancel = never_cancelled();
+
+    let join_once = |timing| {
+        let client = fixture.client();
+        let bundle = &bundle;
+        let cancel = &cancel;
+        async move {
+            client
+                .join_via_transport(bundle, timing, no_join_progress(), cancel)
+                .await
+        }
+    };
+
+    // The joining device publishes its request and dies; the owner then admits
+    // it without needing the joining device back, so that from here on every
+    // operation counted is the joining device's own.
+    assert_joiner_waited_for(
+        Box::pin(join_once(one_shot())).await,
+        DeviceJoinTransportKind::SamePrincipalJoin,
+    );
+    activated(fixture.drive_owner_with(&bundle, one_shot()).await);
+
+    fixture.home.clear_exact_reads();
+    fixture.home.clear_exact_listings();
+    joined(Box::pin(join_once(timing())).await);
+
+    let counted = |key: &str| {
+        key.starts_with("store-v1/membership/")
+            || key.starts_with("store-v1/membership-rollups/")
+            || key.starts_with("store-v1/snapshots/")
+    };
+    fixture
+        .home
+        .exact_reads()
+        .iter()
+        .filter(|slot| counted(slot.logical_key()))
+        .count()
+        + fixture
+            .home
+            .exact_listed_prefixes()
+            .iter()
+            .filter(|prefix| counted(prefix))
+            .count()
 }

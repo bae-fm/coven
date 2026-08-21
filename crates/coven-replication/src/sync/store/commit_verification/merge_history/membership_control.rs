@@ -720,7 +720,25 @@ impl<'a> MergeHistoryVerifier<'a> {
         heads: &[protocol_membership::MembershipHeadRef],
         owner: Option<&str>,
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
-        let membership = membership::HistoryMembershipActivation::new(self)
+        self.load_exact_anchored_membership_traversal(heads, owner)
+            .await
+            .map(|(membership, _)| membership)
+    }
+
+    /// The anchored walk, and every membership object it read on the way.
+    ///
+    /// A snapshot publisher needs the second half: what it publishes as the
+    /// membership rollup is exactly the set of objects a reader of this same
+    /// frontier would otherwise fetch one at a time.
+    pub(crate) async fn load_exact_anchored_membership_traversal(
+        &mut self,
+        heads: &[protocol_membership::MembershipHeadRef],
+        owner: Option<&str>,
+    ) -> Result<
+        (MembershipChain, membership::TraversedMembership),
+        crate::sync::store::membership::AnchoredChainError,
+    > {
+        let (membership, traversed) = membership::HistoryMembershipActivation::new(self)
             .load_exact_anchored_chain(heads, owner)
             .await?;
         if self.history.commits.is_empty() {
@@ -730,7 +748,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
             self.remember_verified_membership(authority, membership.clone());
         }
-        Ok(membership)
+        Ok((membership, traversed))
     }
 
     pub(crate) async fn load_membership_at_exact_heads(

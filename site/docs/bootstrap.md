@@ -30,14 +30,16 @@ paths:
 
 ```text
 store-v1/snapshot-images/{author}/{image_hash}.db
+store-v1/membership-rollups/{author}/{rollup_hash}.json
 store-v1/snapshots/{author}/{snapshot_hash}.json
 ```
 
-Before storage I/O, coven commits the exact image bytes, metadata bytes, image
-hash, and snapshot hash to its durable snapshot publication record. It creates
-and reads back the exact image object, then creates and reads back the exact
-metadata object. Only after both verify does local completion clear that
-publication record and record the snapshot hash and coverage.
+Before storage I/O, coven commits the exact image bytes, membership rollup
+bytes, metadata bytes, image hash, and snapshot hash to its durable snapshot
+publication record. It creates and reads back the exact image object, then the
+rollup the metadata names, then the exact metadata object. Only after all of
+them verify does local completion clear that publication record and record the
+snapshot hash and coverage.
 
 A failed or lost storage response leaves the exact publication record intact.
 Retry reuses its reserved exact image and metadata objects; different bytes at
@@ -46,6 +48,39 @@ either occupied identity are rejected.
 Only a current Owner can publish snapshot metadata. The signature binds the
 metadata to the signed Store protocol root, image hash, coverage, schema version,
 author, and creation time.
+
+## The membership rollup
+
+A joining device opens the store keyring out of the membership chain, so the
+chain is the first thing it reads and none of it can be encrypted under the key
+the chain is what unlocks. Read change by change, that cost two provider round
+trips per membership change the store has ever made — a head, then the entry it
+selects — back to the founding entry, and on a real store it was most of a
+device join.
+
+Each snapshot therefore publishes a **membership rollup** beside its image: one
+signed, plaintext object holding every membership head and entry up to the
+frontier the snapshot pins, plus the conflict resolutions they depend on. A
+reader takes the rollup in one read and then walks the provider only for what
+was published after the snapshot, so what it spends on membership stops growing
+with the store's membership history.
+
+The rollup carries objects, not conclusions. Every head in it goes through the
+identical check a head read off the provider goes through — the coordinate its
+slot claims, its author's registration, its own signature — and a head that
+fails refuses the whole rollup. Predecessor linkage, grant authority, the Store
+commit that activates an authority change, and conflict-resolution layering are
+all still decided afterwards by the same anchored walk. A reader that finds no
+rollup, or one that does not verify, walks the chain exactly as it did before.
+
+A membership head lives at a create-once slot, so which of an author's heads
+sits at a sequence is settled by the provider rather than by whoever describes
+it. The newest head of each stream is therefore left out of what a rollup stands
+in for: the reader reads that one from its own slot, and its signed predecessor
+names the head below it, whose entry names the hash of the one below that, down
+to the sequence-one slot the signed Store protocol root names. One read per
+stream pins every head under it, so a rollup cannot show a reader one branch of
+a forked author stream while the provider holds the other.
 
 ## Selecting a snapshot
 

@@ -91,7 +91,7 @@ pub(crate) fn load_outbound_store_snapshot_on(
     authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
 ) -> Result<Option<DurableSnapshotPublication>, DbError> {
     conn.query_row(
-        "SELECT snapshot_ref, meta_prepared, image_ref, meta_bytes, blobs \
+        "SELECT snapshot_ref, meta_prepared, image_ref, rollup_ref, meta_bytes, blobs \
          FROM outbound_store_snapshot WHERE singleton = 1",
         [],
         |row| {
@@ -99,15 +99,16 @@ pub(crate) fn load_outbound_store_snapshot_on(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
-                row.get::<_, String>(4)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, String>(5)?,
             ))
         },
     )
     .optional()
     .map_err(DbError::from)?
     .map(
-        |(reference, meta_prepared, image_reference, meta_bytes, blobs)| {
+        |(reference, meta_prepared, image_reference, rollup_reference, meta_bytes, blobs)| {
             let reference: StoreSnapshotRef = serde_json::from_str(&reference)
                 .map_err(|error| DbError::context("outbound Store snapshot ref", error))?;
             let meta_prepared: PreparedExactObject =
@@ -161,8 +162,45 @@ pub(crate) fn load_outbound_store_snapshot_on(
                     "outbound Store snapshot metadata differs from its exact image".to_string(),
                 ));
             }
+            let rollup_reference: coven_protocol::store_commit::MembershipRollupRef =
+                serde_json::from_str(&rollup_reference)
+                    .map_err(|error| DbError::context("outbound membership rollup ref", error))?;
+            let rollup_bytes = crate::payload_store::read_payload_blocking(
+                conn,
+                store_dir,
+                rollup_reference.rollup_hash,
+            )
+            .map_err(|error| DbError::context("outbound membership rollup", error))?;
+            let rollup_prepared = PreparedExactObject::new(
+                rollup_reference.object.clone(),
+                crate::payload_store::read_payload_blocking(
+                    conn,
+                    store_dir,
+                    rollup_reference.object.stored_hash(),
+                )
+                .map_err(|error| DbError::context("outbound prepared membership rollup", error))?,
+            )
+            .map_err(|error| DbError::context("outbound prepared membership rollup", error))?;
+            let rollup = coven_protocol::store_commit::MembershipRollup::parse_at(
+                &rollup_bytes,
+                author.store_root.store_root_hash,
+                &rollup_reference,
+                author,
+            )
+            .map_err(|error| DbError::context("outbound membership rollup", error))?;
+            if meta.membership_rollup != rollup_reference {
+                return Err(DbError::Message(
+                    "outbound membership rollup differs from the snapshot that names it"
+                        .to_string(),
+                ));
+            }
             Ok(DurableSnapshotPublication {
                 reference,
+                rollup: ExactProtocolObject {
+                    value: rollup,
+                    bytes: rollup_bytes,
+                    prepared: rollup_prepared,
+                },
                 meta: ExactProtocolObject {
                     value: meta,
                     bytes: meta_bytes,

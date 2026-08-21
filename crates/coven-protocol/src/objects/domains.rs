@@ -21,6 +21,7 @@ pub enum ProtectedObjectDomain {
     OwnerRecoveryNode,
     StoreSnapshotMeta,
     StoreSnapshotImage,
+    StoreMembershipRollup,
     StoreMembershipEntry,
     StoreMembershipHead,
     StoreMembershipResolution,
@@ -311,6 +312,14 @@ impl ProtectedObjectDomain {
                 }]),
                 extension: ".json",
             },
+            Self::StoreMembershipRollup => ProtocolObjectMetadata {
+                aad_label: b"store-membership-rollup",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[(0, "store-v1"), (1, "membership-rollups")],
+                }]),
+                extension: ".json",
+            },
             Self::StoreSnapshotImage => ProtocolObjectMetadata {
                 aad_label: b"store-snapshot-image",
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
@@ -561,6 +570,8 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreSnapshotMeta);
     pub const StoreSnapshotImage: StoreEncryptedProtocolObjectDomain =
         StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::StoreSnapshotImage);
+    pub const StoreMembershipRollup: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipRollup);
     pub const StoreMembershipEntry: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipEntry);
     pub const StoreMembershipHead: SignedStoreProtocolObjectDomain =

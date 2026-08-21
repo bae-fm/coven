@@ -49,6 +49,7 @@ use predecessor::{
     predecessor_verifies_provider_administrator, predecessor_verifies_provider_administrator_grant,
 };
 mod promotion;
+mod rollup;
 mod snapshots;
 mod stream;
 mod successor;

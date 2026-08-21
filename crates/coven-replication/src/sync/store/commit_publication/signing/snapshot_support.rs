@@ -72,6 +72,7 @@ impl LocalStoreWriter {
             meta.generation,
             meta.predecessor.clone(),
             meta.image.clone(),
+            meta.membership_rollup.clone(),
             meta.coverage.clone(),
             meta.state.clone(),
             meta.history_summary.clone(),

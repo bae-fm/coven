@@ -13,6 +13,32 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
+    /// The membership objects a reader of `membership`'s frontier would have to
+    /// fetch, in the form a snapshot publishes them.
+    pub(crate) async fn membership_rollup_parts(
+        &mut self,
+        membership: &MembershipChain,
+    ) -> Result<
+        (
+            Vec<coven_protocol::store_commit::MembershipRollupStream>,
+            Vec<coven_protocol::store_commit::MembershipRollupResolution>,
+        ),
+        crate::sync::store::membership::AnchoredChainError,
+    > {
+        let owner = self
+            .history_verifier
+            .verified_root()
+            .protocol()
+            .descriptor
+            .founder_pubkey
+            .clone();
+        let (_, traversed) = self
+            .history_verifier
+            .load_exact_anchored_membership_traversal(membership.head_refs(), Some(&owner))
+            .await?;
+        Ok(traversed.into_rollup_parts())
+    }
+
     pub(crate) fn root(&self) -> &StoreRootRef {
         self.history_verifier.verified_root().reference()
     }

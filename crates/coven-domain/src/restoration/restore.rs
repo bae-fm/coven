@@ -347,6 +347,10 @@ pub async fn restore_from_cloud(
                 .open_pinned(storage.as_ref(), &store_root)
                 .await
                 .map_err(SnapshotError::from)?;
+        // Selecting the snapshot resolves membership at the restore code's
+        // floor, which is the same chain walk a device join makes and takes the
+        // same rollup instead of making it.
+        history_verifier.adopt_published_membership_rollup().await;
         let bootstrap = PreparedSnapshotBootstrap::prepare(
             &storage,
             history_verifier,

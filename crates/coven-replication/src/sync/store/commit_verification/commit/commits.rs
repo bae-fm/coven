@@ -461,6 +461,23 @@ impl<'a> StoreCommitVerifier<'a> {
     /// The result is remembered under the prefix, because one anchored-chain
     /// load walks the same stream several times and each walk would otherwise
     /// list and fetch it again.
+    /// Hold bytes for a slot stream this verifier did not read off the
+    /// provider, so a walk of `listing_prefix` finds them where its own
+    /// prefetch would have put them.
+    ///
+    /// Same standing as a prefetch: the walk still runs every check on every
+    /// slot it reaches, and a slot it reaches that is not here is read the way
+    /// it always was. The caller is responsible for having established that
+    /// these bytes belong at these slots before handing them over — this only
+    /// decides which round trips are skipped.
+    pub(crate) fn remember_slot_stream(&self, listing_prefix: &str, reads: StreamSlotReads) {
+        self.prefetched_slot_streams
+            .lock()
+            .expect("prefetched slot stream cache poisoned")
+            .entry(listing_prefix.to_string())
+            .or_insert(reads);
+    }
+
     pub(crate) async fn prefetch_slot_stream(
         &self,
         context: &ProtocolObjectContext,

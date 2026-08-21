@@ -69,6 +69,10 @@ pub enum MembershipMutationActivation {
 pub struct DurableSnapshotPublication {
     pub reference: StoreSnapshotRef,
     pub meta: ExactProtocolObject<SnapshotMeta>,
+    /// The membership rollup the metadata names. Staged with the snapshot and
+    /// uploaded before it, so a published snapshot never names a rollup that is
+    /// not at the provider.
+    pub rollup: ExactProtocolObject<coven_protocol::store_commit::MembershipRollup>,
     pub image: PreparedProtocolObject<Vec<u8>>,
     pub blobs: Vec<PreparedSnapshotBlob>,
 }

@@ -20,6 +20,8 @@ impl StoreSession<'_> {
         &mut self,
         meta: SnapshotMeta,
         meta_prepared: PreparedExactObject,
+        rollup_bytes: Vec<u8>,
+        rollup_prepared: PreparedExactObject,
         image: SnapshotDatabaseImage,
         image_prepared: PreparedExactObject,
         blobs: Vec<PreparedSnapshotBlob>,
@@ -73,6 +75,36 @@ impl StoreSession<'_> {
         if verified != meta {
             return Err(DbError::Message(
                 "staged Store snapshot changed during exact verification".to_string(),
+            ));
+        }
+        coven_protocol::store_commit::MembershipRollup::parse_at(
+            &rollup_bytes,
+            registration.store_root.store_root_hash,
+            &meta.membership_rollup,
+            registration,
+        )
+        .map_err(|error| DbError::context("verify staged membership rollup", error))?;
+        if rollup_prepared.reference() != &meta.membership_rollup.object {
+            return Err(DbError::Message(
+                "staged membership rollup differs from the snapshot that names it".to_string(),
+            ));
+        }
+        // Spooled beside the image rather than carried in the row: a rollup
+        // holds every membership object the Store has, which is KB-class and
+        // belongs in the payload store.
+        let rollup_hash =
+            crate::payload_store::write_payload_blocking(&tx, self.store_dir, &rollup_bytes)
+                .map_err(|error| DbError::context("spool membership rollup", error))?;
+        let rollup_prepared_hash = crate::payload_store::write_payload_blocking(
+            &tx,
+            self.store_dir,
+            rollup_prepared.stored_bytes(),
+        )
+        .map_err(|error| DbError::context("spool prepared membership rollup", error))?;
+        if rollup_hash != meta.membership_rollup.rollup_hash {
+            return Err(DbError::Message(
+                "staged membership rollup bytes differ from the hash the snapshot names"
+                    .to_string(),
             ));
         }
         let previous = load_published_store_snapshot_on(&tx, &authority)?;
@@ -131,8 +163,9 @@ impl StoreSession<'_> {
         )?;
         tx.execute(
             "INSERT INTO outbound_store_snapshot \
-             (singleton, snapshot_ref, meta_prepared, image_ref, meta_bytes, blobs) \
-             VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+             (singleton, snapshot_ref, meta_prepared, image_ref, rollup_ref, \
+              meta_bytes, blobs) \
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 serde_json::to_string(&reference).map_err(|error| {
                     DbError::context("serialize exact Store snapshot ref", error)
@@ -142,6 +175,9 @@ impl StoreSession<'_> {
                 })?,
                 serde_json::to_string(&meta.image).map_err(|error| {
                     DbError::context("serialize exact Store snapshot image ref", error)
+                })?,
+                serde_json::to_string(&meta.membership_rollup).map_err(|error| {
+                    DbError::context("serialize exact membership rollup ref", error)
                 })?,
                 meta.to_bytes(),
                 serde_json::to_string(&blobs).map_err(|error| {
@@ -153,7 +189,12 @@ impl StoreSession<'_> {
         crate::payload_store::set_payload_owner_claims_on(
             &tx,
             crate::payload_store::OUTBOUND_STORE_SNAPSHOT_OWNER_KEY,
-            &BTreeSet::from([image_hash, image_prepared_hash]),
+            &BTreeSet::from([
+                image_hash,
+                image_prepared_hash,
+                rollup_hash,
+                rollup_prepared_hash,
+            ]),
         )?;
         tx.commit().map_err(DbError::from)?;
         Ok(reference)
@@ -272,16 +313,27 @@ impl StoreDatabase {
         Ok(pending)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn stage_snapshot_publication(
         &self,
         meta: SnapshotMeta,
         meta_prepared: PreparedExactObject,
+        rollup_bytes: Vec<u8>,
+        rollup_prepared: PreparedExactObject,
         image: SnapshotDatabaseImage,
         image_prepared: PreparedExactObject,
         blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<StoreSnapshotRef, DbError> {
         self.call_store(move |session| {
-            session.stage_snapshot_publication(meta, meta_prepared, image, image_prepared, blobs)
+            session.stage_snapshot_publication(
+                meta,
+                meta_prepared,
+                rollup_bytes,
+                rollup_prepared,
+                image,
+                image_prepared,
+                blobs,
+            )
         })
         .await
     }

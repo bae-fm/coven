@@ -209,6 +209,18 @@ and cannot grant itself access.
 An initialized store never accepts an unsigned commit or a commit whose author
 is unauthorized.
 
+## Reading the chain without walking it
+
+A device that has not yet opened the store — a joining device, a restore —
+resolves membership before it has the store key, so it reads the chain from the
+provider. The newest published snapshot names a **membership rollup** carrying
+every head and entry up to the frontier that snapshot pins, so such a reader
+takes the chain in one read and walks only what was published since (see
+[Bootstrap](bootstrap.md#the-membership-rollup)). The rollup changes how many
+round trips the reader makes and nothing about what it concludes: every object
+in it is verified exactly as one read off the provider is, and a rollup that is
+absent or does not verify leaves the reader walking the chain.
+
 ## Revocation is key rotation
 
 You cannot un-send data: a removed member keeps every byte they already

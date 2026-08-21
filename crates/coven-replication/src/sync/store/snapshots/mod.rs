@@ -26,8 +26,9 @@ use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 #[cfg(test)]
 use coven_protocol::store_commit::StoreSnapshotRef;
 use coven_protocol::store_commit::{
-    snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, ObjectHash,
-    SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut, StoreSnapshotState,
+    membership_rollup_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
+    CommitFrontier, MembershipRollupRef, ObjectHash, SnapshotImageRef, SnapshotMeta,
+    SnapshotSuccessorLink, StoreHistoryCut, StoreSnapshotState,
 };
 use coven_storage::CloudSyncObjectStorage;
 use std::sync::Arc;
@@ -298,9 +299,15 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         let store_root_hash = self.writer.store_root().store_root_hash;
         let membership = self.membership.clone();
         let database = self.database.clone();
+        let storage = Arc::clone(&self.storage);
+        let store_dir = self.store_dir;
         let membership = &membership;
         let database = &database;
-        let publication = self.writer.snapshot_publication().await;
+        // Held over this whole operation, and taken from this owner's own
+        // handles rather than through the writer, so the writer stays free for
+        // the membership walk the rollup needs.
+        let publication =
+            AuthorizedSnapshotPublication::begin(database, storage.as_ref(), store_dir).await;
         publication.drain_spool_cleanup().await?;
         if let Some(pending) = database
             .outbound_snapshot_publication()
@@ -341,7 +348,16 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             .prepare_merge_snapshot_history_summary(&coverage, membership, &resolved_devices)
             .await
             .map_err(SnapshotError::from)?;
-        let storage = self.storage.as_ref();
+        let (rollup_streams, rollup_resolutions) = self
+            .writer
+            .membership_rollup_parts(membership)
+            .await
+            .map_err(SnapshotError::from)?;
+        let rollup = self
+            .local_writer
+            .sign_membership_rollup(store_root_hash, rollup_streams, rollup_resolutions)
+            .map_err(SnapshotError::from)?;
+        let storage = storage.as_ref();
         let previous = database
             .latest_local_store_snapshot()
             .await
@@ -392,6 +408,30 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             object: image_prepared.reference().clone(),
         };
 
+        let rollup_context = ProtocolObjectContext::signed_plaintext(
+            store_root_hash,
+            ProtocolObjectDomain::StoreMembershipRollup,
+        );
+        let rollup_bytes = rollup.to_bytes();
+        let rollup_hash = ObjectHash::digest(&rollup_bytes);
+        let rollup_prefix = membership_rollup_semantic_prefix(&device_id, rollup_hash);
+        let rollup_slot = storage
+            .allocate_protocol_slot(&rollup_context, &rollup_prefix, ".json")
+            .await
+            .map_err(SnapshotError::Bucket)?;
+        let rollup_prepared = storage
+            .prepare_protocol_object(
+                &rollup_context,
+                rollup_slot,
+                &rollup_prefix,
+                rollup_bytes.clone(),
+            )
+            .map_err(SnapshotError::Bucket)?;
+        let membership_rollup = MembershipRollupRef {
+            rollup_hash,
+            object: rollup_prepared.reference().clone(),
+        };
+
         let meta_context = ProtocolObjectContext::signed_plaintext(
             store_root_hash,
             ProtocolObjectDomain::StoreSnapshotMeta,
@@ -423,6 +463,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                 generation,
                 predecessor.clone(),
                 image,
+                membership_rollup,
                 coverage,
                 state,
                 history_summary,
@@ -447,6 +488,8 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             .stage_snapshot_publication(
                 meta.clone(),
                 meta_prepared,
+                rollup_bytes,
+                rollup_prepared,
                 db_image,
                 image_prepared,
                 snapshot_blobs,
