@@ -161,12 +161,29 @@ pub enum OwnerJoinProgress {
         cancellation: DeviceJoinOutcomeRef,
         prepared: PreparedDeviceJoinObject,
     },
+    /// The owner published the activation commit and has nothing left to do
+    /// but hand the artifact over.
+    ///
+    /// `registration` is the joined device's, carried so the owner can tell
+    /// when that device has actually arrived: its announcement stream id is a
+    /// pure function of this reference, and a stream that appears in the
+    /// materialized frontier is the device's own first commit — the one thing
+    /// it publishes that the owner did not write for it.
     ActivationPrepared {
         completion: DeviceProviderAdmissionCompletion,
         activation: DeviceJoinActivation,
+        registration: StoreDeviceRegistrationRef,
     },
+    /// The same-principal join completed, carried closure and all.
+    ///
+    /// `registration` is the joined device's, for the same reason
+    /// [`ActivationPrepared`](Self::ActivationPrepared) carries one: this row is
+    /// the largest a join writes — a snapshot's metadata and the bootstrap
+    /// closure live inside `join` — and the owner needs to be able to tell when
+    /// the device it activated has arrived so the row can go.
     SamePrincipalCompleted {
         join: SamePrincipalDeviceJoin,
+        registration: StoreDeviceRegistrationRef,
     },
     Abandoned(DeviceJoinAbandonment),
     Cancelled(DeviceJoinCancellation),
@@ -455,9 +472,9 @@ pub(crate) fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoin
         )) => DeviceJoinStatus::AwaitingActivation {
             completion: completion.clone(),
         },
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::SamePrincipalCompleted { join }) => {
-            DeviceJoinStatus::SamePrincipalCompleted { join: join.clone() }
-        }
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::SamePrincipalCompleted {
+            join, ..
+        }) => DeviceJoinStatus::SamePrincipalCompleted { join: join.clone() },
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared {
             activation, ..
         })
@@ -577,9 +594,9 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap)) => Some(
             DeviceJoinAction::TransferProvisionalBootstrap(bootstrap.clone()),
         ),
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::SamePrincipalCompleted { join }) => {
-            Some(DeviceJoinAction::TransferSamePrincipalJoin(join.clone()))
-        }
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::SamePrincipalCompleted {
+            join, ..
+        }) => Some(DeviceJoinAction::TransferSamePrincipalJoin(join.clone())),
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared {
             activation, ..
         }) => Some(DeviceJoinAction::TransferActivation(activation.clone())),

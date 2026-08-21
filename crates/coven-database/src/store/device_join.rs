@@ -332,7 +332,6 @@ pub(crate) fn device_join_records_on(
         .map_err(crate::DbError::from)
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn forget_device_join_on(
     conn: &rusqlite::Connection,
     key: &str,
@@ -493,6 +492,59 @@ impl StoreDatabase {
             .iter()
             .filter_map(DeviceJoinJournalRecord::action)
             .collect())
+    }
+
+    /// Every owner journal row standing at a published activation, with the
+    /// registration of the device it activated.
+    ///
+    /// The owner's half of a join ends here and the row is never advanced past
+    /// it, so this is the whole set of attempts that could be finished.
+    pub async fn owner_device_joins_awaiting_arrival(
+        &self,
+    ) -> Result<
+        Vec<(
+            DeviceJoinAttemptId,
+            coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        )>,
+        DeviceJoinJournalError,
+    > {
+        use coven_protocol::store_commit::device_join_journal::{
+            DeviceJoinRoleProgress, OwnerJoinProgress,
+        };
+
+        Ok(self
+            .device_join_records()
+            .await?
+            .into_iter()
+            .filter_map(|record| match &*record.progress {
+                // Both of the owner's ends: the cross-principal join hands the
+                // activation over, and the same-principal join hands the whole
+                // installation over. The second is the larger row by far — a
+                // snapshot's metadata and the bootstrap closure ride inside it.
+                DeviceJoinRoleProgress::Owner(
+                    OwnerJoinProgress::ActivationPrepared { registration, .. }
+                    | OwnerJoinProgress::SamePrincipalCompleted { registration, .. },
+                ) => Some((record.attempt_id, registration.clone())),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Drop one attempt's journal row for one role.
+    ///
+    /// The row is this device's working notes on an exchange, not a record
+    /// anything later reads: what the join durably produced is the activation
+    /// commit and the outcome object it named, both of which live in history
+    /// and are what every other device verifies the join against.
+    pub async fn retire_device_join(
+        &self,
+        attempt_id: DeviceJoinAttemptId,
+        role: DeviceJoinRole,
+    ) -> Result<(), DeviceJoinJournalError> {
+        let key = DeviceJoinJournalRecord::store_key_for(attempt_id, role);
+        self.call_database(move |session| session.forget_device_join(&key))
+            .await
+            .map_err(DeviceJoinJournalError::Database)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

@@ -131,6 +131,8 @@ pub(crate) enum SyncCycleCause {
     #[error("{0}")]
     Reclaim(#[from] super::store::StoreReclaimError),
     #[error("{0}")]
+    DeviceJoin(#[from] super::store::DeviceJoinError),
+    #[error("{0}")]
     TombstoneDrain(#[from] crate::blob::delete::TombstoneDrainError),
     #[error("{0}")]
     TombstoneGc(#[from] super::store::commit_publication::operation::TombstoneGcError),
@@ -296,6 +298,23 @@ impl AuthorizedSyncCycle<'_, '_> {
                 )
                 .await
                 .map(Self::report_baseline_advance)?;
+            timings
+                .stage(
+                    "retire arrived device joins",
+                    Box::pin(self.authorization.retire_arrived_device_joins()),
+                )
+                .await
+                .map(|retired| {
+                    if retired > 0 {
+                        info!(
+                            retired,
+                            "Device joins reached their arrival and were retired"
+                        );
+                    }
+                })
+                .map_err(|error| {
+                    SyncCycleFailure::operation("retire arrived device joins", error)
+                })?;
             timings
                 .stage("reclaim packages", Box::pin(self.reclaim_packages()))
                 .await?;

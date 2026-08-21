@@ -2076,7 +2076,7 @@ async fn carried_join_over(store_id: &str, covered: usize) -> CarriedJoin {
     let join = match *record.progress {
         coven_protocol::store_commit::device_join_journal::DeviceJoinRoleProgress::Owner(
             coven_protocol::store_commit::device_join_journal::OwnerJoinProgress::
-                SamePrincipalCompleted { join },
+                SamePrincipalCompleted { join, .. },
         ) => join,
         other => panic!("the owner's journal is at {other:?}, not a completed same-provider join"),
     };

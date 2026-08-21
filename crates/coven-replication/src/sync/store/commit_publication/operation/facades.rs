@@ -226,6 +226,55 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     /// Seed the verifier from retained history before a walk over it, so the
     /// walk reads nothing from the provider.
+    /// Retire the owner's journal for every join whose device has arrived.
+    ///
+    /// The owner's half of a join ends at a published activation commit, and
+    /// until now it ended there permanently: the row sat at
+    /// `ActivationPrepared` for the life of the store, still offering to hand
+    /// the activation over, because the owner has no artifact by which it could
+    /// learn the joining device took it — the same asymmetry that makes the
+    /// joiner, not the owner, delete the attempt's transport slots.
+    ///
+    /// The arrival it can see is the joined device's own first commit. Every
+    /// other trace of the join is something the owner wrote: the registration
+    /// goes Active from the owner's own activation commit, so it says nothing
+    /// about whether the device ever ran. A stream in the materialized frontier
+    /// under that device's announcement stream id is a commit the device signed
+    /// and this device verified, which it can only have published after
+    /// installing the Store.
+    ///
+    /// Reads nothing from the provider: the stream id is derived from the
+    /// registration the journal already holds, and the frontier is the row the
+    /// cycle reads anyway. Each retirement is one row delete, so a cycle that
+    /// fails partway leaves the rest for the next one to find.
+    pub(crate) async fn retire_arrived_device_joins(
+        &self,
+    ) -> Result<usize, crate::sync::store::DeviceJoinError> {
+        let awaiting = self.database.owner_device_joins_awaiting_arrival().await?;
+        if awaiting.is_empty() {
+            return Ok(0);
+        }
+        let frontier = self.database.materialized_frontier().await?;
+        let store_root_hash = self.store_root().store_root_hash;
+        let mut retired = 0;
+        for (attempt_id, registration) in awaiting {
+            let stream =
+                coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
+                    store_root_hash,
+                    &registration,
+                    coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                );
+            if !frontier.contains_key(&stream.to_string()) {
+                continue;
+            }
+            self.database
+                .retire_device_join(attempt_id, crate::sync::store::DeviceJoinRole::Owner)
+                .await?;
+            retired += 1;
+        }
+        Ok(retired)
+    }
+
     pub(crate) async fn seed_retained_history(
         &mut self,
     ) -> Result<(), crate::sync::store::pull::StorePullError> {

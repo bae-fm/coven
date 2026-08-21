@@ -584,6 +584,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared {
             completion: durable_completion,
             activation,
+            ..
         }) = &*current.progress
         {
             if durable_completion == &completion {
@@ -765,6 +766,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .map_err(|error| {
                 DeviceJoinError::prepared_object(error, DeviceJoinError::AttemptMismatch)
             })?;
+        let joined_registration = registration_ref.clone();
         let activated_registration =
             coven_protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
                 coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
@@ -797,6 +799,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 OwnerJoinProgress::ActivationPrepared {
                     completion,
                     activation: activation.clone(),
+                    registration: joined_registration,
                 },
             )
             .await?;

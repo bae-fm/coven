@@ -41,8 +41,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .await?;
         let journal = self.journal(offer.attempt_id);
         let current = timings.stage("read the journal", journal.current()).await?;
-        if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::SamePrincipalCompleted { join }) =
-            &*current.progress
+        if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::SamePrincipalCompleted {
+            join,
+            ..
+        }) = &*current.progress
         {
             return Ok(join.clone());
         }
@@ -262,7 +264,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let activated_registration =
             coven_protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
                 coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
-                    registration_ref,
+                    registration_ref.clone(),
                     request.expected_registration().clone(),
                 )?,
                 coven_protocol::store_commit::StoreDeviceRegistrationActivation::Join {
@@ -360,7 +362,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 "journal the completion",
                 journal.advance(
                     &intent,
-                    OwnerJoinProgress::SamePrincipalCompleted { join: join.clone() },
+                    OwnerJoinProgress::SamePrincipalCompleted {
+                        join: join.clone(),
+                        registration: registration_ref.clone(),
+                    },
                 ),
             )
             .await?;

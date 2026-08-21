@@ -1750,3 +1750,124 @@ async fn publishing_a_snapshot_asks_for_what_it_writes_and_nothing_per_commit() 
         }
     }
 }
+
+/// The owner's journal for a join is retired when the joined device arrives,
+/// and not before.
+///
+/// The owner's half of a join ended at a published activation commit and stayed
+/// there for the life of the store: `ActivationPrepared` is permanently a
+/// "hand the activation over" action, and the owner has no artifact by which it
+/// could learn the joining device took it — the same asymmetry that makes the
+/// joiner delete the attempt's transport slots. So every join a device ever
+/// hosted left a row behind, holding the completion and the activation.
+///
+/// What the owner can see is the joined device's own first commit. Everything
+/// else about the join is something the owner wrote — the registration goes
+/// Active from the owner's own activation commit, so it says nothing about
+/// whether that device ever ran. A stream under the joined registration's
+/// announcement stream id appearing in the materialized frontier is a commit
+/// that device signed and this one verified.
+#[tokio::test]
+async fn an_owner_retires_a_join_when_the_joined_device_arrives() {
+    use crate::sync::store::DeviceJoinAction;
+
+    let founder = UserKeypair::generate();
+    let member = UserKeypair::generate();
+    let member_pubkey = hex::encode(member.public_key());
+    let store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(store_dir.clone());
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let (store, _storage) = TestStore::create_with_connection(
+        &db,
+        store_dir.clone(),
+        "join-retirement",
+        founder.clone(),
+        home.clone(),
+    )
+    .await
+    .expect("create Merge Store");
+    let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+    store
+        .admit_member(
+            &db,
+            store_dir.clone(),
+            &founder,
+            &member_pubkey,
+            None,
+            coven_protocol::membership::MemberRole::Member,
+            &encryption,
+            "Join Retirement Store",
+        )
+        .await
+        .expect("admit the peer as a Member");
+    let peer_store_dir = crate::sync::test_helpers::test_store_dir();
+    let peer_db = crate::sync::test_helpers::open_test_db(peer_store_dir.clone());
+    let peer = store
+        .activate_joined_device(
+            &db,
+            store_dir.clone(),
+            &peer_db,
+            peer_store_dir.clone(),
+            &member,
+            "2026-03-01T00:00:45Z",
+        )
+        .await
+        .expect("activate the peer device");
+    let owner = store
+        .bind_device_in(&db, store_dir.clone(), &founder)
+        .await
+        .expect("bind the owner device");
+    let owner_db = coven_database::StoreDatabase::new(&db);
+
+    let awaiting_activation = |actions: &[DeviceJoinAction]| {
+        actions.iter().any(|action| {
+            matches!(
+                action,
+                DeviceJoinAction::TransferActivation(_)
+                    | DeviceJoinAction::TransferSamePrincipalJoin(_)
+            )
+        })
+    };
+    assert!(
+        awaiting_activation(
+            &owner_db
+                .device_join_actions()
+                .await
+                .expect("read the owner's join actions")
+        ),
+        "the owner holds the join it published for the joining device",
+    );
+
+    // A cycle before the joined device has published anything of its own must
+    // leave the row alone: the registration is already Active, because the
+    // owner activated it, and that is exactly the evidence that proves nothing.
+    owner
+        .run_cycle(None)
+        .await
+        .expect("run a cycle before the joined device arrives");
+    assert!(
+        awaiting_activation(
+            &owner_db
+                .device_join_actions()
+                .await
+                .expect("read the owner's join actions again")
+        ),
+        "a device that has published nothing has not arrived",
+    );
+
+    HistoryPublisher::new(&peer_db, &peer).publish_note(1).await;
+    owner
+        .run_cycle(None)
+        .await
+        .expect("pull the joined device's first commit");
+
+    assert!(
+        !awaiting_activation(
+            &owner_db
+                .device_join_actions()
+                .await
+                .expect("read the owner's join actions after arrival")
+        ),
+        "the joined device published its own commit, so the owner's journal is retired",
+    );
+}

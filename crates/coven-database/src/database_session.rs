@@ -74,7 +74,6 @@ impl<'session> DatabaseSession<'session> {
         crate::store::device_join_records_on(self.conn)
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn forget_device_join(&mut self, key: &str) -> Result<(), DbError> {
         crate::store::forget_device_join_on(self.conn, key)
     }
