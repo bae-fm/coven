@@ -8027,3 +8027,72 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
         "the dependent UPDATE must wait for its exact INSERT dependency",
     );
 }
+
+/// Catching up on many commits reads their packages together, and applies them
+/// in order.
+///
+/// Verifying a commit depends on the history the commits before it establish, so
+/// the apply pass is ordered and stays ordered. The bytes it works from are not:
+/// a commit names its own package, so the read has nothing to wait for. Left
+/// inside the ordered pass, ten albums arriving at once cost ten round trips one
+/// after another — the shape a phone feels as seconds per album.
+#[tokio::test]
+async fn a_catch_up_pull_reads_every_package_at_once_and_applies_them_in_order() {
+    const COMMITS: u64 = 8;
+
+    let db1_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db1 = crate::sync::test_helpers::open_test_db(db1_store_dir.clone());
+    let storage = create_store(&db1, db1_store_dir.clone(), UserKeypair::generate()).await;
+    for sequence in 0..COMMITS {
+        let changeset = db1
+            .capture_test_changeset(&[&format!(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('n{sequence}', 'Release {sequence}', NULL, 1, \
+                 '000000000{}000-0000-dev1', '2026-01-01')",
+                sequence + 1,
+            )])
+            .await;
+        storage
+            .publish_founder_changeset(changeset, sequence)
+            .await
+            .expect("publish a Store commit to catch up on");
+    }
+
+    // One pull, over a home that delays every whole-object read so the schedule
+    // of those reads is observable without measuring wall-clock time.
+    let db2_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db2 = crate::sync::test_helpers::open_test_db(db2_store_dir.clone());
+    storage.clear_exact_reads();
+    storage.delay_exact_full_reads(std::time::Duration::from_millis(20));
+    let (_updated, result) = storage.pull_into(&db2, &db2_store_dir).await;
+
+    assert_eq!(
+        result.changesets_applied, COMMITS,
+        "one pull catches the device up on every commit",
+    );
+    for sequence in 0..COMMITS {
+        assert!(
+            db2.test_row_exists(&format!("SELECT 1 FROM notes WHERE id = 'n{sequence}'"))
+                .await,
+            "commit {sequence} materialized",
+        );
+    }
+
+    let package_reads = storage
+        .exact_reads()
+        .into_iter()
+        .filter(|slot| slot.logical_key().contains("/packages/"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        package_reads.len() as u64,
+        COMMITS,
+        "each package is read exactly once — the schedule changed, not the reads: {package_reads:?}",
+    );
+    // Eight commits, eight reads, all in flight at once — the width caps at
+    // PROTOCOL_SLOT_READ_WIDTH, which this stays under.
+    assert_eq!(
+        storage.exact_full_read_max_inflight() as u64,
+        COMMITS,
+        "the packages are read together, not each one gated on the commit before it",
+    );
+}

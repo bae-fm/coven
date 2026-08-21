@@ -384,6 +384,19 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         self.history.verified_membership_prefix(predecessors)
     }
 
+    /// Hold every candidate commit's Store package before the ordered pass.
+    pub(crate) async fn prefetch_store_packages<'commits>(
+        &self,
+        commits: impl IntoIterator<
+            Item = (
+                &'commits coven_protocol::store_commit::StoreBatchCommitRef,
+                &'commits coven_protocol::store_commit::StoreBatchCommit,
+            ),
+        >,
+    ) {
+        self.history.prefetch_store_packages(commits).await
+    }
+
     pub(crate) async fn load_store_package(
         &mut self,
         reference: &StoreBatchCommitRef,

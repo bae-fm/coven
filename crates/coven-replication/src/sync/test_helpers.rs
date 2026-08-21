@@ -3726,6 +3726,24 @@ impl TestStore {
 
     /// Provider operations asked for so far. The unit the cycle log reports in,
     /// so a budget written here is the budget read there.
+    /// Delay every whole-object read and record how many overlap, so a test can
+    /// assert on the schedule of reads rather than on wall-clock time.
+    pub fn delay_exact_full_reads(&self, delay: std::time::Duration) {
+        self.home.delay_exact_full_reads(delay);
+    }
+
+    pub fn exact_full_read_max_inflight(&self) -> usize {
+        self.home.exact_full_read_max_inflight()
+    }
+
+    pub fn exact_reads(&self) -> Vec<coven_protocol::objects::ObjectSlot> {
+        self.home.exact_reads()
+    }
+
+    pub fn clear_exact_reads(&self) {
+        self.home.clear_exact_reads();
+    }
+
     pub fn provider_requests_issued(&self) -> u64 {
         self.provider_requests
             .as_ref()

@@ -122,6 +122,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         let mut candidates = BTreeMap::new();
         let mut visible_heads = Vec::new();
         let mut held = Vec::new();
+        let mut discovered_commits = Vec::new();
         for registration in active {
             let registration_ref = registration.reference();
             let inactive_cut = match discovery_device_state
@@ -172,125 +173,148 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             if let Some(block) = discovered.block {
                 held.push(block.into_position());
             }
-            for (activation_head_ref, activation_head, commit_ref, commit) in discovered.commits {
-                if commit_ref.coord.sequence() != commit.seq() {
-                    held.push(HeldStorePosition::commit(
-                        &commit_ref,
-                        HeldStorePositionReason::InvalidObject(
-                            "exact commit coordinate differs from signed sequence".to_string(),
-                        ),
-                    ));
-                    continue;
-                }
-                let stream_id = commit_stream_id(&commit_ref.coord);
-                if let Some(materialized) = timings
-                    .stage(
-                        "check materialized",
-                        self.history
-                            .exact_materialized_ref(&stream_id, commit_ref.coord.sequence()),
-                    )
-                    .await?
-                {
-                    if materialized == commit_ref {
-                        continue;
-                    }
-                    held.push(HeldStorePosition::commit(
-                        &commit_ref,
-                        HeldStorePositionReason::HashMismatch {
-                            referenced_device_id: stream_id,
-                            referenced_commit: commit_ref.clone(),
-                            materialized_hash: materialized.commit_hash,
-                        },
-                    ));
-                    continue;
-                }
-                if let Some(package) = commit.store_package() {
-                    if package.schema_version > self.history.schema_version() {
-                        held.push(HeldStorePosition::commit(
-                            &commit_ref,
-                            HeldStorePositionReason::NewerSchema {
-                                local: self.history.schema_version(),
-                                required: package.schema_version,
-                            },
-                        ));
-                        continue;
-                    }
-                }
-                if let Err(error) = timings
-                    .stage(
-                        "verify commits",
-                        self.history.verify_refs([commit_ref.clone()]),
-                    )
-                    .await
-                {
-                    let reason = match error {
-                        StorePullError::Object(error) => held_object_error(error),
-                        error => HeldStorePositionReason::InvalidObjectPull(error.into()),
-                    };
-                    held.push(HeldStorePosition::commit(&commit_ref, reason));
-                    continue;
-                }
-                let verified = self.history.verified_commit(&commit_ref).ok_or_else(|| {
-                    StorePullError::InvalidState(
-                        "Merge candidate is absent from its operation-verified history".to_string(),
-                    )
-                })?;
-                if verified.verified.value() != &commit {
-                    held.push(HeldStorePosition::commit(
-                        &commit_ref,
-                        HeldStorePositionReason::InvalidObject(
-                            "Merge candidate differs from its operation-verified history"
-                                .to_string(),
-                        ),
-                    ));
-                    continue;
-                }
-                let predecessor_membership = verified.predecessor_membership.clone();
-                let registrations = verified.registrations.clone();
-                let device_operations = verified.operations.clone();
-                let membership_control = verified.membership_control.clone();
-                let membership_prefix = self
-                    .history
-                    .verified_membership_prefix(commit_predecessor_references(&commit))?;
-                let verified_commit = verified.verified.clone();
-                let package = match timings
-                    .stage(
-                        "load packages",
-                        self.history.load_store_package(verified_commit.reference()),
-                    )
-                    .await
-                {
-                    Ok(package) => package.map(|package| package.value),
-                    Err(error) => {
-                        held.push(HeldStorePosition::package(
-                            &commit_ref,
-                            &commit,
-                            held_object_error(error),
-                        ));
-                        continue;
-                    }
-                };
-                let key = (
-                    commit_stream_id(&commit_ref.coord),
-                    commit_ref.coord.sequence(),
-                );
-                candidates.insert(
-                    key,
-                    MergeCandidate {
-                        activation_head,
-                        activation_head_object: activation_head_ref.object,
-                        candidate: Candidate {
-                            verified: verified_commit,
-                            package,
-                            registrations,
-                        },
-                        predecessor_membership,
-                        device_operations,
-                        membership_control,
-                        membership_prefix,
-                    },
-                );
+            discovered_commits.extend(discovered.commits);
+        }
+        // Which commits this pull has anything to do with is decided first, and
+        // decided without asking the provider anything: a coordinate that
+        // contradicts its own signature, a position already materialized, a
+        // schema this device cannot read. Only what survives is worth bytes.
+        let mut pending = Vec::with_capacity(discovered_commits.len());
+        for (activation_head_ref, activation_head, commit_ref, commit) in discovered_commits {
+            if commit_ref.coord.sequence() != commit.seq() {
+                held.push(HeldStorePosition::commit(
+                    &commit_ref,
+                    HeldStorePositionReason::InvalidObject(
+                        "exact commit coordinate differs from signed sequence".to_string(),
+                    ),
+                ));
+                continue;
             }
+            let stream_id = commit_stream_id(&commit_ref.coord);
+            if let Some(materialized) = timings
+                .stage(
+                    "check materialized",
+                    self.history
+                        .exact_materialized_ref(&stream_id, commit_ref.coord.sequence()),
+                )
+                .await?
+            {
+                if materialized == commit_ref {
+                    continue;
+                }
+                held.push(HeldStorePosition::commit(
+                    &commit_ref,
+                    HeldStorePositionReason::HashMismatch {
+                        referenced_device_id: stream_id,
+                        referenced_commit: commit_ref.clone(),
+                        materialized_hash: materialized.commit_hash,
+                    },
+                ));
+                continue;
+            }
+            if let Some(package) = commit.store_package() {
+                if package.schema_version > self.history.schema_version() {
+                    held.push(HeldStorePosition::commit(
+                        &commit_ref,
+                        HeldStorePositionReason::NewerSchema {
+                            local: self.history.schema_version(),
+                            required: package.schema_version,
+                        },
+                    ));
+                    continue;
+                }
+            }
+            pending.push((activation_head_ref, activation_head, commit_ref, commit));
+        }
+        // A commit names its own package, so nothing orders these reads against
+        // each other — only applying the commits is ordered, and it stays so.
+        // Left inside the ordered pass, catching up on ten commits cost ten
+        // round trips one after another; issued together here, that pass finds
+        // each one's bytes already in hand.
+        timings
+            .stage(
+                "prefetch packages",
+                self.history.prefetch_store_packages(
+                    pending
+                        .iter()
+                        .map(|(_, _, commit_ref, commit)| (commit_ref, commit)),
+                ),
+            )
+            .await;
+        for (activation_head_ref, activation_head, commit_ref, commit) in pending {
+            if let Err(error) = timings
+                .stage(
+                    "verify commits",
+                    self.history.verify_refs([commit_ref.clone()]),
+                )
+                .await
+            {
+                let reason = match error {
+                    StorePullError::Object(error) => held_object_error(error),
+                    error => HeldStorePositionReason::InvalidObjectPull(error.into()),
+                };
+                held.push(HeldStorePosition::commit(&commit_ref, reason));
+                continue;
+            }
+            let verified = self.history.verified_commit(&commit_ref).ok_or_else(|| {
+                StorePullError::InvalidState(
+                    "Merge candidate is absent from its operation-verified history".to_string(),
+                )
+            })?;
+            if verified.verified.value() != &commit {
+                held.push(HeldStorePosition::commit(
+                    &commit_ref,
+                    HeldStorePositionReason::InvalidObject(
+                        "Merge candidate differs from its operation-verified history".to_string(),
+                    ),
+                ));
+                continue;
+            }
+            let predecessor_membership = verified.predecessor_membership.clone();
+            let registrations = verified.registrations.clone();
+            let device_operations = verified.operations.clone();
+            let membership_control = verified.membership_control.clone();
+            let membership_prefix = self
+                .history
+                .verified_membership_prefix(commit_predecessor_references(&commit))?;
+            let verified_commit = verified.verified.clone();
+            let package = match timings
+                .stage(
+                    "load packages",
+                    self.history.load_store_package(verified_commit.reference()),
+                )
+                .await
+            {
+                Ok(package) => package.map(|package| package.value),
+                Err(error) => {
+                    held.push(HeldStorePosition::package(
+                        &commit_ref,
+                        &commit,
+                        held_object_error(error),
+                    ));
+                    continue;
+                }
+            };
+            let key = (
+                commit_stream_id(&commit_ref.coord),
+                commit_ref.coord.sequence(),
+            );
+            candidates.insert(
+                key,
+                MergeCandidate {
+                    activation_head,
+                    activation_head_object: activation_head_ref.object,
+                    candidate: Candidate {
+                        verified: verified_commit,
+                        package,
+                        registrations,
+                    },
+                    predecessor_membership,
+                    device_operations,
+                    membership_control,
+                    membership_prefix,
+                },
+            );
         }
         let mut loaded_predecessor_memberships = BTreeMap::new();
         for materialization in retained {

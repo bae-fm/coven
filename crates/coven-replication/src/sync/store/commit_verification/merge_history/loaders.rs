@@ -300,6 +300,18 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.commit_verifier.load_store_package(reference).await
     }
 
+    pub(crate) async fn prefetch_store_packages<'commits>(
+        &self,
+        commits: impl IntoIterator<
+            Item = (
+                &'commits StoreBatchCommitRef,
+                &'commits coven_protocol::store_commit::StoreBatchCommit,
+            ),
+        >,
+    ) {
+        self.commit_verifier.prefetch_store_packages(commits).await
+    }
+
     pub(crate) async fn load_provider_access_grant(
         &self,
         reference: &coven_protocol::provider::StoreMemberProviderAccessGrantRef,

@@ -1,6 +1,60 @@
 use super::*;
 
 impl<'a> StoreCommitVerifier<'a> {
+    /// Read the Store packages `commits` name, all at once, and hold the bytes.
+    ///
+    /// A commit's package is named by that commit and nothing else, so the reads
+    /// have no order between them — while applying the commits very much does.
+    /// Catching up ten commits used to cost ten round trips one after another,
+    /// each one the latency of a phone's link, because the read sat inside the
+    /// ordered pass. It happens here instead, and the ordered pass finds the
+    /// bytes already in hand.
+    ///
+    /// Holding bytes is not believing them: [`load_exact_object`] re-runs its
+    /// verification on a hit, so a package still has to answer to the commit
+    /// that names it. A read that fails is simply not held — the ordered pass
+    /// reads that one itself and reports the failure at its own position, which
+    /// is the only place a held position means anything.
+    ///
+    /// [`load_exact_object`]: Self::load_exact_object
+    pub(crate) async fn prefetch_store_packages<'commits>(
+        &self,
+        commits: impl IntoIterator<Item = (&'commits StoreBatchCommitRef, &'commits StoreBatchCommit)>,
+    ) {
+        use futures_util::StreamExt;
+
+        let reads = commits
+            .into_iter()
+            .filter_map(|(reference, commit)| {
+                let package = commit.store_package()?;
+                let semantic_prefix = package_semantic_prefix(
+                    commit.candidate_family(),
+                    &reference.coord.stream_id.to_string(),
+                    commit.seq(),
+                    package.content_hash,
+                );
+                let context = ProtocolObjectContext::store_encrypted(
+                    commit.store_root_hash,
+                    ProtocolObjectDomain::StorePackage,
+                );
+                Some((context, package.object.clone(), semantic_prefix))
+            })
+            .collect::<Vec<_>>();
+        futures_util::stream::iter(reads)
+            .map(|(context, object, semantic_prefix)| async move {
+                if let Ok(bytes) = self
+                    .storage
+                    .read_protocol_object(&context, &object, &semantic_prefix)
+                    .await
+                {
+                    self.remember_exact_object(&object, &bytes);
+                }
+            })
+            .buffer_unordered(PROTOCOL_SLOT_READ_WIDTH)
+            .collect::<()>()
+            .await;
+    }
+
     pub(crate) async fn load_store_package(
         &mut self,
         reference: &StoreBatchCommitRef,
