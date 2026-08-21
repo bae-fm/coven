@@ -319,15 +319,29 @@ impl<'store> StoreRecords<'store> {
         crate::set_protocol_state_on(self.conn, key, value)
     }
 
+    /// One write's durable status.
+    ///
+    /// A write is in the journal only while something about it is still worth
+    /// holding, and the two ways a row leaves both mean the same thing. A
+    /// capture that partitioned into nothing is never journalled, and a
+    /// replay-baseline advance that absorbs a local-only write drops its row —
+    /// while a write that reached the cloud, or was reversed, keeps its receipt
+    /// through the advance. So an absent row says the write never left this
+    /// device, which is what `LocalOnly` says.
     pub(super) fn write_status(self, write_id: &WriteId) -> Result<WriteStatus, DbError> {
-        let raw: String = self
+        use rusqlite::OptionalExtension;
+        let raw: Option<String> = self
             .conn
             .query_row(
                 "SELECT status FROM store_writes WHERE write_id = ?1",
                 [write_id.as_str()],
                 |row| row.get(0),
             )
+            .optional()
             .map_err(DbError::from)?;
+        let Some(raw) = raw else {
+            return Ok(WriteStatus::LocalOnly);
+        };
         serde_json::from_str(&raw)
             .map_err(|error| DbError::context(format!("write {write_id} status"), error))
     }

@@ -916,6 +916,26 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     )?
                 }
             };
+            // A capture that partitioned into nothing said nothing this store
+            // has any use for: no partition to publish, no local partition to
+            // put back over a canonical replay, no audience move, and so no
+            // blob fact either — every one of those is read out of the
+            // partitions and moves. Journalling it anyway ties the store's
+            // growth to how often the host opens a write rather than to what
+            // its writes contain: a host that persists once a second into its
+            // own untracked tables leaves a row, a changeset payload and a
+            // payload claim every second for as long as it runs, and every
+            // replay afterwards loads each row as an overlay that applies
+            // nothing.
+            if partitioned.partitions.is_empty() && partitioned.moves.is_empty() {
+                drop(journal);
+                tx.commit().map_err(DbError::from).map_err(E::from)?;
+                return Ok(WriteReceipt {
+                    value,
+                    write_id,
+                    status: coven_protocol::write::WriteStatus::LocalOnly,
+                });
+            }
             let mut blob_facts =
                 capture_partition_blob_facts_on(&tx, &partitioned.partitions, blob_decls)
                     .map_err(E::from)?;

@@ -246,6 +246,104 @@ async fn merge_local_only_scoped_write_is_not_pending() {
     assert!(!partition.2.is_empty());
 }
 
+/// A host transaction that only wrote to tables this Store does not track
+/// leaves no trace of itself in the write journal.
+///
+/// The journal carries partitions, and this write produced none: the capture
+/// session attaches only the synced tables, so nothing it did was even seen.
+/// Journalling it anyway ties the store's growth to how often the host opens a
+/// write, which is the live shape exactly — a player persisting its position
+/// once a second into a table it never syncs left eighty thousand rows, each
+/// with a payload and a claim on it, in a few days.
+#[tokio::test]
+async fn a_capture_touching_no_tracked_table_journals_no_write() {
+    let temp = tempfile::tempdir().expect("temporary Store");
+    let path = temp.path().join("untracked.db");
+    let db_store_dir = coven_foundation::store_dir::StoreDir::new(temp.path());
+    let tables = vec![SyncedTable::new(
+        "accounts",
+        coven_protocol::synced_schema::RowIdentity::SharedKey,
+    )];
+    let migrations = vec![
+        Migration::sql(
+            1,
+            "accounts",
+            "CREATE TABLE accounts (
+                id TEXT PRIMARY KEY,
+                _updated_at TEXT NOT NULL
+             ) STRICT;",
+        ),
+        Migration::sql(
+            2,
+            "playback_state",
+            "CREATE TABLE playback_state (
+                id TEXT PRIMARY KEY,
+                position INTEGER NOT NULL
+             ) STRICT;",
+        ),
+    ];
+    let db = Database::open_synthetic_for_test(
+        &path,
+        db_store_dir.clone(),
+        tables,
+        BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
+        "untracked-device".to_string(),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        &migrations,
+    )
+    .expect("open Store with an untracked table");
+    TestStore::create(
+        &db,
+        db_store_dir,
+        "untracked",
+        coven_keys::keys::UserKeypair::generate(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("install exact Store authority");
+
+    let store_database = StoreDatabase::new(&db);
+    let before = store_database
+        .store_write_journal_counts_for_test()
+        .await
+        .expect("read the journal before the untracked writes");
+
+    for tick in 0..16i64 {
+        store_database
+            .run_host_store_write_for_test(None, None, move |tx| {
+                tx.execute(
+                    "INSERT INTO playback_state (id, position) VALUES ('track', ?1)
+                     ON CONFLICT(id) DO UPDATE SET position = excluded.position",
+                    [tick],
+                )?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .expect("persist untracked local state");
+    }
+
+    assert_eq!(
+        store_database
+            .store_write_journal_counts_for_test()
+            .await
+            .expect("read the journal after the untracked writes"),
+        before,
+        "a once-a-second persist into an untracked table does not grow the store",
+    );
+    assert_eq!(
+        store_database
+            .test_query_optional_text(
+                "SELECT CAST(position AS TEXT) FROM playback_state WHERE id = 'track'".to_string()
+            )
+            .await
+            .expect("read back the untracked row")
+            .as_deref(),
+        Some("15"),
+        "the host transaction still committed",
+    );
+}
+
 #[tokio::test]
 async fn discarding_a_scoped_write_reverses_its_private_routing_rows() {
     let (_temp, db, _) = capture_scoped_write_then_reopen("discard-scoped-routing").await;

@@ -226,6 +226,13 @@ impl StoreRows {
     }
 
     #[cfg(test)]
+    pub(crate) async fn store_write_journal_counts_for_test(
+        &self,
+    ) -> Result<(i64, i64), coven_database::DbError> {
+        self.writes.store_write_journal_counts_for_test().await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn cleanup_intent_count_for_test(
         &self,
         namespace: &str,

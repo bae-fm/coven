@@ -510,6 +510,24 @@ impl StoreSession<'_> {
         )
     }
 
+    /// How much of the store the write journal is holding: rows in
+    /// `store_writes` and the payload claims those rows own.
+    fn store_write_journal_counts_for_test(&self) -> Result<(i64, i64), DbError> {
+        let writes: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM store_writes", [], |row| row.get(0))
+            .map_err(DbError::from)?;
+        let claims: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM payload_owners WHERE owner_key LIKE 'store-write:%'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        Ok((writes, claims))
+    }
+
     fn write_blob_lease_count_for_test(&self, write_id: &WriteId) -> Result<i64, DbError> {
         self.conn
             .query_row(

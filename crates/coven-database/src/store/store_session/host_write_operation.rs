@@ -478,6 +478,11 @@ impl StoreRowWrites {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
+    pub async fn store_write_journal_counts_for_test(&self) -> Result<(i64, i64), DbError> {
+        self.database.store_write_journal_counts_for_test().await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn cleanup_intent_count_for_test(
         &self,
         namespace: &str,

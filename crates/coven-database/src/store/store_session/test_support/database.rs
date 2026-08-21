@@ -1,6 +1,11 @@
 use super::*;
 
 impl StoreDatabase {
+    pub async fn store_write_journal_counts_for_test(&self) -> Result<(i64, i64), DbError> {
+        self.call_store(|session| session.store_write_journal_counts_for_test())
+            .await
+    }
+
     pub async fn seed_prepared_audience_write_for_test(
         &self,
         write_id: WriteId,

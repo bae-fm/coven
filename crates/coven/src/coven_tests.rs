@@ -580,6 +580,18 @@ async fn device_local_transaction_is_local_only_and_never_pending() {
 
     assert_eq!(receipt.value, "saved");
     assert_eq!(receipt.status, crate::WriteStatus::LocalOnly);
+    // The transaction touched no synced table, so it partitioned into nothing
+    // and the write journal — which exists to carry partitions — holds no row
+    // for it. Local-only is still what its status says: a write the journal is
+    // not holding is a write that never left this device.
+    assert_eq!(
+        handle
+            .store_write_journal_counts_for_test()
+            .await
+            .expect("read the write journal"),
+        (0, 0),
+        "a device-local transaction costs the store no journal row and no payload",
+    );
     assert_eq!(
         handle
             .write_status(&receipt.write_id)
