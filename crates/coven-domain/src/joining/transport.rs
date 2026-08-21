@@ -522,9 +522,6 @@ impl DeviceJoinClient {
                     )
                     .await?;
                 }
-                Some(DeviceJoinStatus::Abandoned { abandonment }) => {
-                    return self.accept_abandonment(transport, abandonment).await;
-                }
                 Some(DeviceJoinStatus::AwaitingProviderAdmission { request }) => {
                     let same_principal =
                         request.offer.provider_admin.provider == request.peer_provider;

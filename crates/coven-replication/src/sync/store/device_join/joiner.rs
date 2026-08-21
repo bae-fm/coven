@@ -921,18 +921,13 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         if abandonment.abandonment.attempt_id != self.journal.attempt_id {
             return Err(DeviceJoinError::JournalConflict);
         }
-        let current = self
-            .journal
-            .load()?
-            .ok_or(DeviceJoinError::JournalConflict)?;
-        if coven_database::device_join_journal::joiner_abandonment_transition(
-            &current,
-            &abandonment,
-        )?
-        .is_none()
-        {
+        // No row means this abandonment was already accepted and the row it
+        // was accepted from deleted. Absence is the whole record of that, so a
+        // repeated acceptance has nothing left to do.
+        let Some(current) = self.journal.load()? else {
             return Ok(abandonment);
-        }
+        };
+        coven_database::device_join_journal::joiner_abandonment_retires(&current, &abandonment)?;
         let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.history_verifier
                 .verified_root()
@@ -973,12 +968,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let next = coven_database::device_join_journal::joiner_abandonment_transition(
-            &current,
-            &abandonment,
-        )?
-        .ok_or(DeviceJoinError::JournalConflict)?;
-        self.journal.advance_to(&current, &next)?;
+        self.journal.retire(&current)?;
         Ok(abandonment)
     }
 

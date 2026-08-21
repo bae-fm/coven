@@ -354,6 +354,21 @@ impl TransportFixture {
             .expect("the owner's write landed at a Store commit")
     }
 
+    /// What the admitting device's journal says about this attempt, if it
+    /// still holds a row for it at all.
+    async fn owner_status(
+        &self,
+        bundle: &DeviceJoinOfferBundle,
+    ) -> Option<coven_replication::sync::DeviceJoinStatus> {
+        self.owner_database
+            .device_join_status(
+                bundle.offer.attempt_id,
+                coven_replication::sync::DeviceJoinRole::Owner,
+            )
+            .await
+            .expect("read the admitting device's join status")
+    }
+
     /// Every row the joining device's pending journal still holds.
     fn pending_journal_records(
         &self,
@@ -1255,12 +1270,65 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
         );
     }
 
-    // A driver started after the fact still delivers the abandonment rather
-    // than waiting for a joiner that has already gone.
+    // Publishing the abandonment is the admitting side's last step, and the
+    // row that anchored getting it there goes with it. Nothing is left to
+    // re-offer the same transfer on every later pass.
+    assert_eq!(
+        fixture.owner_status(&bundle).await,
+        None,
+        "the admitting device kept a journal row for an attempt it abandoned",
+    );
+    // Asking to give it up again has nothing to give up: the attempt finished,
+    // and its absence is the record of that.
+    fixture
+        .owner_store
+        .device_join_transport()
+        .abort(&bundle)
+        .await
+        .expect("aborting a finished attempt is a no-op");
+}
+
+/// The admitting side published its abandonment commit and died before the
+/// artifact reached its slot. The row it left is the resume anchor, and a
+/// driver that finds it owes both halves of that step: deliver the artifact,
+/// then drop the row.
+#[tokio::test]
+async fn an_interrupted_abandonment_is_finished_by_the_next_drive() {
+    tokio::spawn(run_an_interrupted_abandonment_is_finished_by_the_next_drive())
+        .await
+        .expect("interrupted abandonment task");
+}
+
+async fn run_an_interrupted_abandonment_is_finished_by_the_next_drive() {
+    let fixture = TransportFixture::build("device-join-transport-abandon-resume").await;
+    let bundle = fixture.begin().await;
+    let cancel = never_cancelled();
+
+    let joiner = fixture.client();
+    assert_joiner_waited_for(
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
+        DeviceJoinTransportKind::SamePrincipalJoin,
+    );
+
+    // The Store-side abandonment alone: the commit lands and the row records
+    // it, which is where a crash before the transfer leaves things.
+    let abandonment = fixture
+        .owner_store
+        .abandon_device_join(bundle.offer.clone())
+        .await
+        .expect("the owner commits the abandonment");
+    assert!(
+        fixture
+            .slot_bytes(&bundle, DeviceJoinTransportKind::Abandonment)
+            .await
+            .is_none(),
+        "the interrupted abandonment must not have reached its slot yet",
+    );
+
     match fixture
         .drive_owner_with(&bundle, one_shot())
         .await
-        .expect("the admitting driver reports the abandonment")
+        .expect("the admitting driver finishes the abandonment")
     {
         coven_replication::sync::DeviceJoinDriveOutcome::Abandoned(observed) => {
             assert_eq!(observed, abandonment)
@@ -1269,6 +1337,18 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
             panic!("an abandoned attempt has no activation")
         }
     }
+    assert!(
+        fixture
+            .slot_bytes(&bundle, DeviceJoinTransportKind::Abandonment)
+            .await
+            .is_some(),
+        "the resumed drive owed the abandonment its slot",
+    );
+    assert_eq!(
+        fixture.owner_status(&bundle).await,
+        None,
+        "the resumed drive delivered the abandonment but kept its row",
+    );
 }
 
 /// `AutoApproveSelfIssued` admits only attempts this device issued. A device

@@ -528,12 +528,17 @@ fn exercise_pre_attempt_abandonment<'a>(
             .expect("load owner join status"),
             Some(DeviceJoinStatus::Abandoned { abandonment: durable }) if durable == abandonment
         ));
-        assert!(matches!(
+        // The joining device keeps no abandoned state: accepting the
+        // abandonment is its terminal step and takes the row with it, so
+        // absence is what says the attempt is over. The retry above went
+        // through that absence, which is why it had to answer the same.
+        assert_eq!(
             pending
                 .status(abandonment.abandonment.attempt_id)
-            .expect("load joiner join status"),
-            Some(DeviceJoinStatus::Abandoned { abandonment: durable }) if durable == abandonment
-        ));
+                .expect("load joiner join status"),
+            None,
+            "the joining device kept a journal row for an abandonment it accepted",
+        );
     })
 }
 

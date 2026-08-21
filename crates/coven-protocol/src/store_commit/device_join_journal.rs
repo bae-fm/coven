@@ -182,7 +182,6 @@ pub enum JoinerJoinProgress {
         readiness: DeviceJoinReadiness,
         activation: DeviceJoinActivation,
     },
-    Abandoned(DeviceJoinAbandonment),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,8 +366,7 @@ pub(crate) fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoin
         }) => DeviceJoinStatus::AwaitingCompletion {
             activation: activation.clone(),
         },
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Abandoned(abandonment))
-        | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Abandoned(abandonment)) => {
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Abandoned(abandonment)) => {
             DeviceJoinStatus::Abandoned {
                 abandonment: abandonment.clone(),
             }
@@ -435,7 +433,6 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
             activation,
             ..
         }) => Some(DeviceJoinAction::CompleteJoin(activation.clone())),
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Abandoned(_)) => None,
     }
 }
 

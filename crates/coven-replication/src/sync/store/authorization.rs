@@ -175,6 +175,20 @@ impl Store {
         Ok(self.database.device_join_status(attempt_id, role).await?)
     }
 
+    /// Drop the admitting side's row for an attempt that has finished.
+    ///
+    /// The row is the resume anchor for the terminal step and nothing more, so
+    /// it goes once that step's artifact is at its slot. After that its absence
+    /// is what says the attempt is over: an abandonment asked for again has
+    /// nothing to abandon, and the driver has nothing left to deliver.
+    pub(crate) async fn retire_device_join_row(
+        &self,
+        attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
+        role: crate::sync::store::DeviceJoinRole,
+    ) -> Result<(), transport::DeviceJoinTransportError> {
+        Ok(self.database.retire_device_join(attempt_id, role).await?)
+    }
+
     /// Refuse to drive an attempt this device is not the admitting side of.
     ///
     /// One party admits, and the offer says which: the device whose activated

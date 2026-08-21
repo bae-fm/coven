@@ -813,9 +813,7 @@ impl<'store> StoreDeviceJoinTransport<'store> {
     ) -> Result<DeviceJoinAbandonment, DeviceJoinTransportError> {
         let attempt = AttemptTransport::open(self.store, bundle).await?;
         let abandonment = self.store.abandon_device_join(bundle.offer.clone()).await?;
-        attempt
-            .publish(DeviceJoinAction::TransferAbandonment(abandonment.clone()))
-            .await?;
+        attempt.finish_abandonment(&abandonment).await?;
         Ok(abandonment)
     }
 
@@ -832,8 +830,12 @@ impl<'store> StoreDeviceJoinTransport<'store> {
     ) -> Result<(), DeviceJoinTransportError> {
         let attempt = AttemptTransport::open(self.store, bundle).await?;
         match attempt.owner_status().await? {
-            None
-            | Some(
+            // No row means the attempt already finished and its terminal step
+            // deleted it. There is nothing left to give up on, and minting a
+            // second abandonment for a finished attempt would only republish
+            // what was already delivered.
+            None => Ok(()),
+            Some(
                 DeviceJoinStatus::AwaitingAccessRequest { .. }
                 | DeviceJoinStatus::AwaitingProviderAdmission { .. }
                 | DeviceJoinStatus::ProviderAccessGrantCreatePending { .. }
@@ -887,6 +889,24 @@ impl<'attempt> AttemptTransport<'attempt> {
         .await
     }
 
+    /// Put the abandonment at its slot and drop the row that anchored getting
+    /// it there.
+    ///
+    /// These are one step. Until the artifact is published the row is what a
+    /// resumed drive reads to know it still owes it; once published there is
+    /// nothing further to say about the attempt, and a row left behind would
+    /// keep offering the same transfer on every pass forever.
+    async fn finish_abandonment(
+        &self,
+        abandonment: &DeviceJoinAbandonment,
+    ) -> Result<(), DeviceJoinTransportError> {
+        self.publish(DeviceJoinAction::TransferAbandonment(abandonment.clone()))
+            .await?;
+        self.store
+            .retire_device_join_row(self.attempt_id, DeviceJoinRole::Owner)
+            .await
+    }
+
     /// Time one step of the driven exchange under the shared owner-step line.
     ///
     /// The work is boxed: `drive_once` holds a dozen of these, and leaving each
@@ -927,12 +947,13 @@ impl<'attempt> AttemptTransport<'attempt> {
     ) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
         loop {
             match self.owner_status().await? {
-                // An abandoned attempt has no further step to drive. Publishing
-                // it here is what lets a driver started after the abandonment
-                // still deliver it to a joining device that has not seen it yet.
+                // A row still at Abandoned is one whose terminal step did not
+                // finish. Delivering the artifact is what a driver started
+                // after the abandonment owes a joining device that has not seen
+                // it yet, and retiring the row behind it is the rest of that
+                // same step.
                 Some(DeviceJoinStatus::Abandoned { abandonment }) => {
-                    self.publish(DeviceJoinAction::TransferAbandonment(abandonment.clone()))
-                        .await?;
+                    self.finish_abandonment(&abandonment).await?;
                     return Ok(DeviceJoinDriveOutcome::Abandoned(abandonment));
                 }
                 Some(DeviceJoinStatus::SamePrincipalCompleted { join }) => {

@@ -51,29 +51,24 @@ pub fn validate_successor(
 
 /// The joiner record an observed abandonment advances to, or `None` when the
 /// journal already holds that exact abandonment.
-pub fn joiner_abandonment_transition(
+/// Whether `record` is a joiner row an abandonment may retire.
+///
+/// The joining device keeps no abandoned state: accepting an abandonment
+/// deletes the row, so afterwards its absence is the whole answer and there is
+/// no state left for a second acceptance to compare against. Only the two
+/// waiting states can be abandoned — past them the device has been approved and
+/// holds storage access, which an abandonment does not take back.
+pub fn joiner_abandonment_retires(
     record: &DeviceJoinJournalRecord,
     abandonment: &DeviceJoinAbandonment,
-) -> Result<Option<DeviceJoinJournalRecord>, DeviceJoinJournalError> {
+) -> Result<(), DeviceJoinJournalError> {
     if record.attempt_id != abandonment.abandonment.attempt_id {
         return Err(DeviceJoinJournalError::JournalConflict);
     }
     match &*record.progress {
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Abandoned(existing)) => {
-            if existing == abandonment {
-                Ok(None)
-            } else {
-                Err(DeviceJoinJournalError::JournalConflict)
-            }
-        }
         DeviceJoinRoleProgress::Joiner(
             JoinerJoinProgress::AccessRequested(_) | JoinerJoinProgress::ApprovalReceived(_),
-        ) => Ok(Some(DeviceJoinJournalRecord {
-            attempt_id: record.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::Abandoned(abandonment.clone()),
-            )),
-        })),
+        ) => Ok(()),
         _ => Err(DeviceJoinJournalError::JournalConflict),
     }
 }
@@ -203,14 +198,8 @@ fn joiner_adjacent(previous: &JoinerJoinProgress, next: &JoinerJoinProgress) -> 
             JoinerJoinProgress::AccessRequested(_),
             JoinerJoinProgress::ApprovalReceived(_)
         ) | (
-            JoinerJoinProgress::AccessRequested(_),
-            JoinerJoinProgress::Abandoned(_)
-        ) | (
             JoinerJoinProgress::ApprovalReceived(_),
             JoinerJoinProgress::RegistrationPrepared(_)
-        ) | (
-            JoinerJoinProgress::ApprovalReceived(_),
-            JoinerJoinProgress::Abandoned(_)
         ) | (
             JoinerJoinProgress::RegistrationPrepared(_),
             JoinerJoinProgress::Ready(_)
