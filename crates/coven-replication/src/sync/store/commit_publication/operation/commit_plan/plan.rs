@@ -8,16 +8,14 @@ pub(crate) enum StoreOperationBatch {
     },
 
     ProviderAccessGrant(super::provider::StoreMemberProviderAccessGrantRef),
-    Attempt(DeviceJoinAttemptRef),
+    Attempt(coven_protocol::store_commit::DeviceJoinAttemptId),
     SamePrincipalDeviceJoin {
-        attempt: DeviceJoinAttemptRef,
-        outcome: DeviceJoinOutcomeRef,
+        attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
         registration: Box<ActivatedStoreDeviceRegistration>,
     },
     Abandonment(coven_protocol::store_commit::DeviceJoinAbandonmentRef),
-    Outcome {
-        outcome: DeviceJoinOutcomeRef,
-        registration: Option<Box<ActivatedStoreDeviceRegistration>>,
+    JoinActivation {
+        registration: Box<ActivatedStoreDeviceRegistration>,
     },
     DeviceExclusionProposal(super::store_commit::RetainedStoreDeviceExclusionProposal),
     DeviceExclusionOutcome(super::store_commit::RetainedStoreDeviceExclusionOutcome),

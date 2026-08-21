@@ -5,8 +5,6 @@ use coven_database::StoreDatabase;
 use coven_protocol::store_commit::device_join_exchange::{
     DeviceJoinActivation, DeviceJoinReadiness,
 };
-use coven_protocol::store_commit::DeviceJoinAttemptRef;
-use coven_protocol::store_commit::DeviceJoinOutcomeRef;
 
 pub(crate) use coven_database::device_join_journal::validate_initial_progress;
 use coven_database::device_join_journal::validate_successor;
@@ -181,14 +179,14 @@ impl DeviceJoinJournalDatabase {
 
     pub fn completed_joiner_readiness(
         &self,
-        attempt: &DeviceJoinAttemptRef,
+        attempt_id: DeviceJoinAttemptId,
     ) -> Result<Option<DeviceJoinReadiness>, DeviceJoinError> {
-        let Some(record) = self.load(attempt.attempt_id, DeviceJoinRole::Joiner)? else {
+        let Some(record) = self.load(attempt_id, DeviceJoinRole::Joiner)? else {
             return Ok(None);
         };
         match &*record.progress {
             DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Ready(readiness)) => {
-                if &readiness.proof.attempt != attempt {
+                if readiness.proof.attempt_id != attempt_id {
                     return Err(DeviceJoinError::JournalConflict);
                 }
                 Ok(Some(readiness.clone()))
@@ -201,10 +199,7 @@ impl DeviceJoinJournalDatabase {
         &self,
         activation: &DeviceJoinActivation,
     ) -> Result<Option<DeviceJoinReadiness>, DeviceJoinError> {
-        let attempt_id = activation.outcome.attempt().attempt_id;
-        if !matches!(activation.outcome, DeviceJoinOutcomeRef::Activated { .. }) {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
+        let attempt_id = activation.attempt_id;
         let Some(current) = self.load(attempt_id, DeviceJoinRole::Joiner)? else {
             return Ok(None);
         };

@@ -11,9 +11,7 @@ use crate::store_commit::{Signed, SignedBody};
 use crate::{ProviderDeviceBinding, StoreProviderBinding};
 use coven_keys::keys::{self, UserKeypair};
 
-use super::device_join::{
-    DeviceJoinAbandonmentRef, DeviceJoinAttempt, DeviceJoinAttemptId, DeviceJoinOutcomeRef,
-};
+use super::device_join::{DeviceJoinAbandonmentRef, DeviceJoinAttemptId};
 use super::{StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef};
 
 use super::*;
@@ -58,8 +56,6 @@ pub struct DeviceJoinOfferBody {
     pub member_pubkey: String,
     pub store_root: StoreRootRef,
     pub provider: StoreProviderBinding,
-    pub attempt_slot: ObjectSlot,
-    pub outcome_slot: ObjectSlot,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
     pub provider_admin: Box<ProviderAdminGrantRecord>,
@@ -75,7 +71,6 @@ impl DeviceJoinOfferBody {
     fn validate_shape(&self) -> Result<(), DeviceJoinExchangeError> {
         if self.member_pubkey.is_empty()
             || self.provider_admin.administrator != self.owner_registration
-            || self.attempt_slot == self.outcome_slot
         {
             return Err(DeviceJoinExchangeError::OfferMismatch);
         }
@@ -102,8 +97,6 @@ impl DeviceJoinOffer {
         member_pubkey: String,
         store_root: StoreRootRef,
         provider: StoreProviderBinding,
-        attempt_slot: ObjectSlot,
-        outcome_slot: ObjectSlot,
         owner_registration: StoreDeviceRegistrationRef,
         owner_grant: MembershipGrantId,
         provider_admin: ProviderAdminGrantRecord,
@@ -119,8 +112,6 @@ impl DeviceJoinOffer {
             member_pubkey,
             store_root,
             provider,
-            attempt_slot,
-            outcome_slot,
             owner_registration,
             owner_grant,
             provider_admin: Box::new(provider_admin),
@@ -210,24 +201,15 @@ impl DeviceProviderAccessRequestBody {
         if self.expected_registration.store_root != offer.store_root
             || self.expected_registration.author_pubkey != offer.member_pubkey
             || self.expected_registration.provider != self.peer_provider
-            || self.registration_slot == offer.attempt_slot
-            || self.registration_slot == offer.outcome_slot
         {
             return Err(DeviceJoinExchangeError::RegistrationRequestMismatch);
         }
         match &self.expected_registration.origin {
-            crate::store_commit::StoreDeviceRegistrationOrigin::Join {
-                attempt_id,
-                attempt_slot,
-                outcome_slot,
-            } if *attempt_id == offer.attempt_id
-                && attempt_slot == &offer.attempt_slot
-                && outcome_slot == &offer.outcome_slot => {}
+            crate::store_commit::StoreDeviceRegistrationOrigin::Join { attempt_id }
+                if *attempt_id == offer.attempt_id => {}
             _ => return Err(DeviceJoinExchangeError::RegistrationRequestMismatch),
         }
         let slots = vec![
-            offer.attempt_slot.clone(),
-            offer.outcome_slot.clone(),
             self.registration_slot.clone(),
             self.expected_registration
                 .acknowledgements
@@ -437,8 +419,6 @@ impl DeviceRegistrationRequest {
                     .verify_by(&member_pubkey)
                     .map_err(|_| DeviceJoinExchangeError::InvalidSignature)?;
                 let mut slots = vec![
-                    request.approval.request.offer.attempt_slot.clone(),
-                    request.approval.request.offer.outcome_slot.clone(),
                     request.approval.request.registration_slot.clone(),
                     request
                         .approval
@@ -529,18 +509,29 @@ pub enum DeviceProviderAdmissionCompletion {
         bootstrap: Box<ProviderReadyDeviceBootstrap>,
     },
     CrossPrincipal {
+        /// The bootstrap this completion answers. It carries the joining
+        /// device's signed registration request, which is where the expected
+        /// registration and its reserved slot come from now that no separate
+        /// attempt file restates them.
+        bootstrap: Box<ProviderReadyDeviceBootstrap>,
         readiness: Box<DeviceJoinReadiness>,
         receipt: CrossPrincipalProbeReceipt,
     },
 }
 
 impl DeviceProviderAdmissionCompletion {
-    pub fn attempt(&self) -> &DeviceJoinAttemptRef {
+    pub fn attempt_id(&self) -> DeviceJoinAttemptId {
         match self {
-            Self::SamePrincipal { bootstrap } => {
-                &bootstrap.bootstrap.publication_authorization.attempt
+            Self::SamePrincipal { bootstrap } | Self::CrossPrincipal { bootstrap, .. } => {
+                bootstrap.bootstrap.publication_authorization.attempt_id
             }
-            Self::CrossPrincipal { readiness, .. } => &readiness.proof.attempt,
+        }
+    }
+
+    /// The bootstrap this completion answers, whichever provider shape it took.
+    pub fn bootstrap(&self) -> &ProviderReadyDeviceBootstrap {
+        match self {
+            Self::SamePrincipal { bootstrap } | Self::CrossPrincipal { bootstrap, .. } => bootstrap,
         }
     }
 }
@@ -548,7 +539,7 @@ impl DeviceProviderAdmissionCompletion {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceJoinActivation {
-    pub outcome: DeviceJoinOutcomeRef,
+    pub attempt_id: DeviceJoinAttemptId,
     pub outcome_activation: StoreBatchCommitRef,
 }
 
@@ -587,8 +578,6 @@ pub struct DeviceJoinBootstrapClosure {
 #[serde(deny_unknown_fields)]
 pub struct SamePrincipalStoreInstallation {
     pub store_root: StoreProtocolRoot,
-    pub attempt: DeviceJoinAttempt,
-    pub outcome: DeviceJoinOutcome,
     pub snapshot: StoreSnapshotRef,
     pub metadata: SnapshotMeta,
     pub authority: RetainedReplaySnapshotAuthority,
@@ -622,24 +611,26 @@ impl SamePrincipalDeviceJoin {
         Ok(join)
     }
 
+    /// Check the parts of a same-provider join against each other.
+    ///
+    /// What this can settle is agreement between the pieces the joining device
+    /// already holds: the request it signed, the authorization the admitting
+    /// device signed over it, and the snapshot authority. That the joining
+    /// device was really registered is not settled here and never was — it is
+    /// settled by the bootstrap closure, whose activation commit names the
+    /// registration and is verified commit by commit against the Store's own
+    /// history.
     pub fn verify_shape(&self) -> Result<(), DeviceJoinExchangeError> {
         let bootstrap = &self.bootstrap;
         let activation = &self.activation;
         let installation = &self.installation;
         bootstrap.bootstrap.request.verify()?;
-        let attempt_reference = &bootstrap.bootstrap.publication_authorization.attempt;
-        let attempt_bytes = installation.attempt.to_bytes();
-        let outcome_bytes = installation.outcome.to_bytes();
-        let DeviceJoinDisposition::Activated { registration } = &installation.outcome.disposition;
+        let authorization = &bootstrap.bootstrap.publication_authorization;
         if !matches!(
             bootstrap.challenge_publication,
             DeviceProviderChallengePublication::SamePrincipal
-        ) || activation.outcome.attempt() != attempt_reference
-            || activation.outcome_activation
-                != bootstrap
-                    .bootstrap
-                    .publication_authorization
-                    .attempt_activation
+        ) || activation.attempt_id != authorization.attempt_id
+            || activation.outcome_activation != authorization.attempt_activation
             || installation.authority.store_root
                 != bootstrap
                     .bootstrap
@@ -654,32 +645,6 @@ impl SamePrincipalDeviceJoin {
                 != installation.authority.store_root.store_root_id
             || installation.store_root.object_hash()
                 != installation.authority.store_root.store_root_hash
-            || installation.attempt.attempt_hash() != attempt_reference.attempt_hash
-            || installation.attempt.attempt_slot != *attempt_reference.object.slot()
-            || installation.attempt.store_root != installation.authority.store_root
-            || installation.attempt.expected_registration
-                != *bootstrap.bootstrap.request.expected_registration()
-            || installation.attempt.provider_approval != *bootstrap.bootstrap.request.approval()
-            || installation.attempt.provider_response != bootstrap.bootstrap.request.response()
-            || installation.outcome.attempt != *attempt_reference
-            || installation.outcome.store_root_hash
-                != installation.attempt.store_root.store_root_hash
-            || installation.outcome.owner_registration != installation.attempt.owner_registration
-            || installation.outcome.owner_grant != installation.attempt.owner_grant
-            || activation
-                .outcome
-                .verify_outcome(&installation.outcome)
-                .is_err()
-            || attempt_reference.object.verify(&attempt_bytes).is_err()
-            || activation.outcome.object().verify(&outcome_bytes).is_err()
-            || registration
-                .verify_registration(&installation.attempt.expected_registration)
-                .is_err()
-            || registration.object.slot() != bootstrap.bootstrap.request.registration_slot()
-            || registration
-                .object
-                .verify(&installation.attempt.expected_registration.to_bytes())
-                .is_err()
         {
             return Err(DeviceJoinExchangeError::AttemptMismatch);
         }
@@ -694,7 +659,6 @@ pub struct DeviceJoinAbandonmentBody {
     pub store_root_hash: ObjectHash,
     pub offer_hash: ObjectHash,
     pub attempt_id: DeviceJoinAttemptId,
-    pub attempt_slot: ObjectSlot,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
 }
@@ -720,7 +684,6 @@ impl DeviceJoinAbandonmentObject {
                 store_root_hash: offer.store_root.store_root_hash,
                 offer_hash: offer.offer_hash(),
                 attempt_id: offer.attempt_id,
-                attempt_slot: offer.attempt_slot.clone(),
                 owner_registration: offer.owner_registration.clone(),
                 owner_grant: offer.owner_grant.clone(),
             },

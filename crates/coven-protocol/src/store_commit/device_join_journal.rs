@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::objects::ExactObjectRef;
 use crate::provider::StoreMemberProviderAccessGrant;
-use crate::store_commit::device_join::{DeviceJoinAttemptRef, DeviceJoinOutcomeRef};
 use crate::store_commit::device_join_exchange::{
     DeviceJoinAbandonment, DeviceJoinActivation, DeviceJoinOffer, DeviceJoinReadiness,
     DeviceProviderAccessRequest, DeviceProviderAdmissionApproval,
@@ -116,17 +115,11 @@ pub enum OwnerJoinProgress {
         request: DeviceRegistrationRequest,
         bootstrap_cut: StoreHistoryCut,
         membership: StoreMembershipStateRef,
-        attempt: DeviceJoinAttemptRef,
-        attempt_prepared: PreparedDeviceJoinObject,
         registration: StoreDeviceRegistrationRef,
         registration_prepared: PreparedDeviceJoinObject,
-        outcome: DeviceJoinOutcomeRef,
-        outcome_prepared: PreparedDeviceJoinObject,
     },
     ActivationCreateIntent {
         completion: DeviceProviderAdmissionCompletion,
-        outcome: DeviceJoinOutcomeRef,
-        prepared: PreparedDeviceJoinObject,
     },
     /// The owner published the activation commit and has nothing left to do
     /// but hand the artifact over.

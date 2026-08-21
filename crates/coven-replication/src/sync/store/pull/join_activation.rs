@@ -2,14 +2,21 @@ use super::*;
 
 pub(crate) fn verify_device_join_activation_commit(
     commit: &StoreBatchCommit,
-    expected_outcome: &super::store_commit::DeviceJoinOutcomeRef,
+    attempt_id: super::store_commit::DeviceJoinAttemptId,
 ) -> Result<(), StorePullError> {
     let same_principal_attempt = [super::store_commit::DeviceJoinAttemptDecisionRef::Attempt(
-        expected_outcome.attempt().clone(),
+        attempt_id,
     )];
     let attempt_shape = commit.device_join_attempt_decisions().is_empty()
         || commit.device_join_attempt_decisions() == same_principal_attempt;
-    if commit.device_join_outcomes() != std::slice::from_ref(expected_outcome)
+    let activates_this_attempt = commit.device_registrations().iter().any(|registration| {
+        matches!(
+            &registration.authority,
+            super::store_commit::StoreDeviceRegistrationActivationRef::Join { attempt_id: named }
+                if *named == attempt_id
+        )
+    });
+    if !activates_this_attempt
         || !attempt_shape
         || commit.device_registrations().len() != 1
         || !commit.provider_access_grants().is_empty()

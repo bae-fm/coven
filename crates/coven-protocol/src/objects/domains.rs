@@ -7,8 +7,6 @@ pub enum ProtectedObjectDomain {
     StoreHead,
     StoreAck,
     StoreDeviceRegistration,
-    DeviceJoinAttempt,
-    DeviceJoinOutcome,
     DeviceJoinAbandonment,
     DeviceJoinCleanupReceipt,
     DeviceJoinTransport,
@@ -208,27 +206,11 @@ impl ProtectedObjectDomain {
                 path: ProtocolPathRule::StoreDeviceRegistration,
                 extension: ".json",
             },
-            Self::DeviceJoinAttempt => ProtocolObjectMetadata {
-                aad_label: b"device-join-attempt",
-                path: ProtocolPathRule::Exact(&[ExactPathShape {
-                    component_count: 3,
-                    fixed_components: &[(0, "store-v1"), (1, "device-join-attempts")],
-                }]),
-                extension: ".json",
-            },
-            Self::DeviceJoinOutcome => ProtocolObjectMetadata {
-                aad_label: b"device-join-outcome",
-                path: ProtocolPathRule::Exact(&[ExactPathShape {
-                    component_count: 3,
-                    fixed_components: &[(0, "store-v1"), (1, "device-join-outcomes")],
-                }]),
-                extension: ".json",
-            },
             Self::DeviceJoinAbandonment => ProtocolObjectMetadata {
                 aad_label: b"device-join-abandonment",
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
                     component_count: 3,
-                    fixed_components: &[(0, "store-v1"), (1, "device-join-attempts")],
+                    fixed_components: &[(0, "store-v1"), (1, "device-join-abandonments")],
                 }]),
                 extension: ".json",
             },
@@ -540,10 +522,6 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreAck);
     pub const StoreDeviceRegistration: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceRegistration);
-    pub const DeviceJoinAttempt: SignedStoreProtocolObjectDomain =
-        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinAttempt);
-    pub const DeviceJoinOutcome: SignedStoreProtocolObjectDomain =
-        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinOutcome);
     pub const DeviceJoinAbandonment: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinAbandonment);
     pub const DeviceJoinCleanupReceipt: SignedStoreProtocolObjectDomain =

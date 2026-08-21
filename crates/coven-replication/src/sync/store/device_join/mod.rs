@@ -20,9 +20,9 @@ use coven_protocol::provider::{
     StoreMemberProviderAccessGrantRef,
 };
 use coven_protocol::store_commit::{
-    DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef,
-    DeviceJoinOutcomeRef, DeviceReadinessProof, ObjectHash, StoreBatchCommitRef,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot, StoreRootRef,
+    DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceReadinessProof, ObjectHash,
+    StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot,
+    StoreRootRef,
 };
 use coven_storage::CloudSyncObjectStorage;
 

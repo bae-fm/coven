@@ -41,17 +41,13 @@ pub(crate) fn record_activated_store_device_registrations_on(
             (
                 coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Join {
                     attempt_id: origin_attempt,
-                    outcome_slot,
-                    ..
                 },
                 coven_protocol::store_commit::StoreDeviceRegistrationActivationRef::Join {
                     attempt_id,
-                    outcome,
                 },
-            ) if origin_attempt == attempt_id && outcome_slot == outcome.slot() => {
+            ) if origin_attempt == attempt_id => {
                 coven_protocol::store_commit::StoreDeviceRegistrationActivation::Join {
                     attempt_id: *attempt_id,
-                    outcome: outcome.clone(),
                 }
             }
             (

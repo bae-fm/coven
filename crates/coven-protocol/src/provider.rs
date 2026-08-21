@@ -9,8 +9,8 @@ use crate::membership::{MembershipCoord, MembershipEntry, MembershipGrantId, Own
 use crate::objects::ObjectSlot;
 use crate::objects::{ExactObjectRef, ProviderDeviceBinding, StorageError, StoreProviderBinding};
 use crate::store_commit::{
-    DeviceJoinAttemptId, DeviceJoinAttemptRef, ObjectHash, StoreBatchCommitRef,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef,
+    DeviceJoinAttemptId, ObjectHash, StoreBatchCommitRef, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StoreRootRef,
 };
 
 const EXACT_TRANSCRIPT_DOMAIN: &[u8] = b"coven.provider-exact-slot-probe.v1\0";

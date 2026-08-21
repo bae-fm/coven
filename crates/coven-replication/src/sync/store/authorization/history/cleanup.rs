@@ -31,10 +31,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn materialize_device_join_activation(
         &mut self,
         reference: &StoreBatchCommitRef,
-        expected_outcome: &coven_protocol::store_commit::DeviceJoinOutcomeRef,
+        attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
         membership_state: &StoreMembershipStateRef,
     ) -> Result<(), crate::sync::store::pull::StorePullError> {
-        self.materialize_device_join_activation_inner(reference, expected_outcome, membership_state)
+        self.materialize_device_join_activation_inner(reference, attempt_id, membership_state)
             .await
     }
 
@@ -174,7 +174,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn materialize_device_join_activation_inner(
         &mut self,
         reference: &StoreBatchCommitRef,
-        expected_outcome: &coven_protocol::store_commit::DeviceJoinOutcomeRef,
+        attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
         membership_state: &StoreMembershipStateRef,
     ) -> Result<(), pull::StorePullError> {
         let root = self.history_verifier.verified_root().reference().clone();
@@ -197,7 +197,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let verified_commit = self.history_verifier.load_ref(reference).await?;
         let commit = verified_commit.value().clone();
         let author = verified_commit.author().clone();
-        pull::verify_device_join_activation_commit(&commit, expected_outcome)?;
+        pull::verify_device_join_activation_commit(&commit, attempt_id)?;
         if &commit.membership_state != membership_state {
             return Err(pull::StorePullError::InvalidState(
                 "device join activation differs from its expected Merge membership state"

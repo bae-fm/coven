@@ -259,7 +259,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         registration: &StoreDeviceRegistration,
         activating_author: &StoreDeviceRegistration,
         predecessor: &MembershipChain,
-        verified_join_outcomes: &BTreeMap<DeviceJoinOutcomeRef, VerifiedCommitJoinOutcome>,
+        activated_join_attempts: &BTreeSet<coven_protocol::store_commit::DeviceJoinAttemptId>,
     ) -> Result<StoreDeviceRegistrationActivation, RegistrationLoadError> {
         if !predecessor.is_owner_now(&activating_author.author_pubkey) {
             return Err(RegistrationLoadError::Invalid(
@@ -271,53 +271,20 @@ impl<'a> MergeHistoryVerifier<'a> {
             (
                 StoreDeviceRegistrationOrigin::Join {
                     attempt_id: origin_attempt,
-                    outcome_slot,
-                    ..
                 },
-                StoreDeviceRegistrationActivationRef::Join {
-                    attempt_id,
-                    outcome,
-                },
-            ) if origin_attempt == attempt_id && outcome_slot == outcome.slot() => {
-                let verified = verified_join_outcomes.get(outcome).ok_or_else(|| {
-                    RegistrationLoadError::Invalid(
-                        "registration activation has no verified join outcome".to_string(),
-                    )
-                })?;
-                let attempt = &verified.attempt;
-                let owner = &verified.owner;
-                if attempt.expected_registration != *registration
-                    || attempt.registration_slot != *activated.registration.object.slot()
-                    || !predecessor_verifies_owner(
-                        predecessor,
-                        &attempt.membership,
-                        &owner.author_pubkey,
-                        &attempt.owner_grant,
-                    )
-                {
+                StoreDeviceRegistrationActivationRef::Join { attempt_id },
+            ) if origin_attempt == attempt_id => {
+                // The registration says which attempt it was made under, signed
+                // by the joining device itself, and the activating commit says
+                // which attempt it activates. Whether that attempt was really
+                // opened is settled against this device's own history.
+                if !activated_join_attempts.contains(attempt_id) {
                     return Err(RegistrationLoadError::Invalid(
-                        "activated registration differs from its exact join attempt".to_string(),
-                    ));
-                }
-                let outcome_value = &verified.outcome;
-                if outcome_value.owner_registration != attempt.owner_registration
-                    || outcome_value.owner_grant != attempt.owner_grant
-                {
-                    return Err(RegistrationLoadError::Invalid(
-                        "join outcome signer differs from its exact attempt authority".to_string(),
-                    ));
-                }
-                let DeviceJoinDisposition::Activated {
-                    registration: outcome_registration,
-                } = &outcome_value.disposition;
-                if outcome_registration != &activated.registration {
-                    return Err(RegistrationLoadError::Invalid(
-                        "join outcome registration differs from its activation".to_string(),
+                        "registration activation names an unverified join attempt".to_string(),
                     ));
                 }
                 Ok(StoreDeviceRegistrationActivation::Join {
                     attempt_id: *attempt_id,
-                    outcome: outcome.clone(),
                 })
             }
             (

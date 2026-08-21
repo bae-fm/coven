@@ -61,6 +61,6 @@ pub use provider::{
     ProviderCapabilityProof, ProviderProbeId, StoreMemberProviderAccessGrantRef,
 };
 pub use store_commit::{
-    CommitFrontier, DeviceJoinAttemptId, DeviceJoinAttemptRef, ObjectHash, StoreBatchCommitRef,
-    StoreCommitCoord, StoreCommitOrder, StoreDeviceId,
+    CommitFrontier, DeviceJoinAttemptId, ObjectHash, StoreBatchCommitRef, StoreCommitCoord,
+    StoreCommitOrder, StoreDeviceId,
 };

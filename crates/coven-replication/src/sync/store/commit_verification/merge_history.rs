@@ -17,8 +17,8 @@ use coven_protocol::objects::{
 use coven_protocol::objects::{StoreObjectError, VerifiedObject};
 use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, ActivatedStoreDeviceRegistrationRef, CommitFrontier,
-    DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinDisposition, DeviceStreamAnchor,
-    ObjectHash, OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
+    DeviceJoinAttemptDecisionRef, DeviceStreamAnchor, ObjectHash,
+    OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
     ReferencedStoreDeviceRegistration, ResolvedStoreDeviceState,
     RetainedVerifiedMergeHistorySummary, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceHead, StoreDeviceProposalState, StoreDeviceRegistration,
@@ -28,10 +28,9 @@ use coven_protocol::store_commit::{
     VerifiedStoreDeviceOperations,
 };
 use coven_protocol::store_commit::{
-    DeviceJoinAttemptRef, DeviceJoinOutcome, DeviceJoinOutcomeRef, SnapshotMeta, StoreAck,
-    StoreAckRef, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposalRef,
-    StoreDeviceHeadRef, StoreSnapshotRef, VerifiedDeviceExclusionOutcome,
-    VerifiedDeviceExclusionProposal,
+    SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef,
+    StoreDeviceExclusionProposalRef, StoreDeviceHeadRef, StoreSnapshotRef,
+    VerifiedDeviceExclusionOutcome, VerifiedDeviceExclusionProposal,
 };
 use coven_protocol::{
     causal_grants, membership as protocol_membership, provider, remote_object, store_commit,
@@ -727,7 +726,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         if commit.control().is_some()
             || commit.acknowledgement().is_some()
             || commit.device_join_attempt_decisions().len() != 1
-            || commit.device_join_outcomes().len() != 1
             || commit.device_registrations().len() != 1
             || materialization.registrations().len() != 1
         {
@@ -879,45 +877,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             ));
         }
         Ok(true)
-    }
-
-    pub(super) async fn verify_device_join_attempt_evidence(
-        &mut self,
-        evidence: LoadedDeviceJoinAttemptEvidence,
-    ) -> Result<VerifiedObject<store_commit::DeviceJoinAttempt>, StorePullError> {
-        let frontier = &evidence.attempt.value.bootstrap_cut.0;
-        let authority = self
-            .verify_merge_history_authority(frontier, &evidence.attempt.value.membership)
-            .await?;
-        let approval = &evidence.attempt.value.provider_approval;
-        let provider_admin = &approval.request.offer.provider_admin;
-        let verifies_administrator = match approval.access_grant() {
-            None => predecessor_verifies_provider_administrator(
-                &authority.membership,
-                &provider_admin.grant_id,
-                &provider_admin.administrator,
-                provider_admin,
-            ),
-            Some(access) => self
-                .history
-                .commits
-                .get(&access.activation)
-                .is_some_and(|verified| {
-                    predecessor_verifies_provider_administrator(
-                        &verified.predecessor_membership,
-                        &access.grant.administrator_grant,
-                        &verified.verified.value().author_registration,
-                        provider_admin,
-                    )
-                }),
-        };
-        if !verifies_administrator {
-            return Err(StorePullError::InvalidState(
-                "device join attempt lacks exact Merge provider-administrator authority"
-                    .to_string(),
-            ));
-        }
-        Ok(evidence.attempt)
     }
 
     pub(crate) async fn verify_merge_history_authority(

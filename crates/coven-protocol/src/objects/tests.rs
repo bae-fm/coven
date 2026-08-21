@@ -45,27 +45,17 @@ fn every_protocol_domain_requires_its_exact_path_grammar() {
                 "store-v1/devices/device",
                 "store-v1/devices/founder/creation/registration",
             ],
-            cross_domain: "store-v1/device-join-attempts/attempt",
-        },
-        DomainPathCase {
-            domain: ProtectedObjectDomain::DeviceJoinAttempt,
-            valid: &["store-v1/device-join-attempts/attempt"],
-            cross_domain: "store-v1/device-join-outcomes/attempt",
-        },
-        DomainPathCase {
-            domain: ProtectedObjectDomain::DeviceJoinOutcome,
-            valid: &["store-v1/device-join-outcomes/attempt"],
-            cross_domain: "store-v1/device-join-attempts/attempt",
+            cross_domain: "store-v1/device-join-abandonments/attempt",
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::DeviceJoinAbandonment,
-            valid: &["store-v1/device-join-attempts/attempt"],
-            cross_domain: "store-v1/device-join-outcomes/attempt",
+            valid: &["store-v1/device-join-abandonments/attempt"],
+            cross_domain: "store-v1/device-join-cleanup-receipts/attempt",
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::DeviceJoinCleanupReceipt,
             valid: &["store-v1/device-join-cleanup-receipts/attempt"],
-            cross_domain: "store-v1/device-join-attempts/attempt",
+            cross_domain: "store-v1/device-join-abandonments/attempt",
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::StoreDeviceExclusionProposal,

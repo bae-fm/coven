@@ -69,18 +69,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn verify_device_join_attempt_for_test(
-        &mut self,
-        reference: &coven_protocol::store_commit::DeviceJoinAttemptRef,
-        owner: &coven_protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<(), StoreError> {
-        self.history_verifier
-            .load_verified_device_join_attempt(reference, owner)
-            .await?;
-        Ok(())
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn exact_next_announcement_slot_for_test(
         &mut self,
         registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,

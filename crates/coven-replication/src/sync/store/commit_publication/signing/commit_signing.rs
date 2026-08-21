@@ -247,7 +247,7 @@ impl LocalStoreWriter {
         }
 
         let registration_activation = match &batch {
-            StoreOperationBatch::Outcome { registration, .. } => registration.as_deref().cloned(),
+            StoreOperationBatch::JoinActivation { registration } => Some(*registration.clone()),
             StoreOperationBatch::SamePrincipalDeviceJoin { registration, .. } => {
                 Some(*registration.clone())
             }
@@ -302,8 +302,7 @@ impl LocalStoreWriter {
                 },
             ),
             StoreOperationBatch::SamePrincipalDeviceJoin {
-                attempt,
-                outcome,
+                attempt_id,
                 registration: activated_registration,
             } => sign_ops(
                 context,
@@ -313,9 +312,8 @@ impl LocalStoreWriter {
                 signer,
                 StoreCommitOperationsInput {
                     device_join_attempt_decisions: vec![DeviceJoinAttemptDecisionRef::Attempt(
-                        attempt,
+                        attempt_id,
                     )],
-                    device_join_outcomes: vec![outcome],
                     device_registrations: vec![activated_registration.activated_reference()?],
                     ..StoreCommitOperationsInput::empty()
                 },
@@ -333,31 +331,19 @@ impl LocalStoreWriter {
                     ..StoreCommitOperationsInput::empty()
                 },
             ),
-            StoreOperationBatch::Outcome {
-                outcome,
+            StoreOperationBatch::JoinActivation {
                 registration: activation,
-            } => {
-                let device_registrations = activation
-                    .into_iter()
-                    .map(|activation| {
-                        activation
-                            .activated_reference()
-                            .map_err(crate::sync::store::StoreError::from)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                sign_ops(
-                    context,
-                    write_id,
-                    registration_ref,
-                    registration,
-                    signer,
-                    StoreCommitOperationsInput {
-                        device_join_outcomes: vec![outcome],
-                        device_registrations,
-                        ..StoreCommitOperationsInput::empty()
-                    },
-                )
-            }
+            } => sign_ops(
+                context,
+                write_id,
+                registration_ref,
+                registration,
+                signer,
+                StoreCommitOperationsInput {
+                    device_registrations: vec![activation.activated_reference()?],
+                    ..StoreCommitOperationsInput::empty()
+                },
+            ),
             StoreOperationBatch::DeviceExclusionProposal(proposal) => sign_ops(
                 context,
                 write_id,

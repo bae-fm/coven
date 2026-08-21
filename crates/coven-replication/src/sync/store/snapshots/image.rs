@@ -261,8 +261,6 @@ pub struct PreparedDeviceJoinSnapshot {
     snapshot: coven_database::PublishedStoreSnapshot,
     authority: coven_database::VerifiedStoreSnapshotAuthority,
     membership: coven_database::InitialStoreMembershipAuthority,
-    attempt: coven_protocol::store_commit::DeviceJoinAttempt,
-    outcome: coven_protocol::store_commit::DeviceJoinOutcome,
     bootstrap: coven_database::DeviceJoinBootstrapPlan,
 }
 
@@ -368,8 +366,6 @@ impl PreparedDeviceJoinSnapshot {
             snapshot,
             authority,
             membership,
-            attempt: installation.attempt,
-            outcome: installation.outcome,
             bootstrap,
         })
     }
@@ -393,8 +389,6 @@ impl PreparedDeviceJoinSnapshot {
             snapshot,
             authority,
             membership,
-            attempt,
-            outcome,
             bootstrap,
         } = self;
         let bound_path = database_image.path().to_path_buf();
@@ -431,8 +425,6 @@ impl PreparedDeviceJoinSnapshot {
                 database: coven_database::StoreDatabase::from_database(db),
                 root: root_ref,
                 verified_root: root,
-                attempt,
-                outcome,
                 bootstrap,
             })
         })();

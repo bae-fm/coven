@@ -106,8 +106,6 @@ pub enum StoreDeviceRegistrationOrigin {
     },
     Join {
         attempt_id: DeviceJoinAttemptId,
-        attempt_slot: ObjectSlot,
-        outcome_slot: ObjectSlot,
     },
     Recovery {
         recovery_id: DeviceRecoveryId,
@@ -124,7 +122,6 @@ pub enum StoreDeviceRegistrationActivation {
     },
     Join {
         attempt_id: DeviceJoinAttemptId,
-        outcome: DeviceJoinOutcomeRef,
     },
     Recovery {
         recovery_id: DeviceRecoveryId,
@@ -144,7 +141,6 @@ pub struct ActivatedStoreDeviceRegistrationRef {
 pub enum StoreDeviceRegistrationActivationRef {
     Join {
         attempt_id: DeviceJoinAttemptId,
-        outcome: DeviceJoinOutcomeRef,
     },
     Recovery {
         recovery_id: DeviceRecoveryId,
@@ -318,14 +314,10 @@ impl ActivatedStoreDeviceRegistration {
             (
                 StoreDeviceRegistrationOrigin::Join {
                     attempt_id: origin_attempt,
-                    outcome_slot,
                     ..
                 },
-                StoreDeviceRegistrationActivation::Join {
-                    attempt_id,
-                    outcome,
-                },
-            ) => origin_attempt == attempt_id && outcome_slot == outcome.slot(),
+                StoreDeviceRegistrationActivation::Join { attempt_id },
+            ) => origin_attempt == attempt_id,
             (
                 StoreDeviceRegistrationOrigin::Recovery {
                     recovery_id: origin_recovery,
@@ -354,15 +346,11 @@ impl ActivatedStoreDeviceRegistration {
         }
         let matches = match (&reference.authority, &self.activation) {
             (
-                StoreDeviceRegistrationActivationRef::Join {
-                    attempt_id,
-                    outcome,
-                },
+                StoreDeviceRegistrationActivationRef::Join { attempt_id },
                 StoreDeviceRegistrationActivation::Join {
                     attempt_id: activated_attempt,
-                    outcome: activated_outcome,
                 },
-            ) => attempt_id == activated_attempt && outcome == activated_outcome,
+            ) => attempt_id == activated_attempt,
             (
                 StoreDeviceRegistrationActivationRef::Recovery { recovery_id, node },
                 StoreDeviceRegistrationActivation::Recovery {
@@ -385,13 +373,11 @@ impl ActivatedStoreDeviceRegistration {
             StoreDeviceRegistrationActivation::Founder { .. } => {
                 return Err(StoreProtocolError::DeviceStateMismatch)
             }
-            StoreDeviceRegistrationActivation::Join {
-                attempt_id,
-                outcome,
-            } => StoreDeviceRegistrationActivationRef::Join {
-                attempt_id: *attempt_id,
-                outcome: outcome.clone(),
-            },
+            StoreDeviceRegistrationActivation::Join { attempt_id } => {
+                StoreDeviceRegistrationActivationRef::Join {
+                    attempt_id: *attempt_id,
+                }
+            }
             StoreDeviceRegistrationActivation::Recovery { recovery_id, node } => {
                 StoreDeviceRegistrationActivationRef::Recovery {
                     recovery_id: *recovery_id,
@@ -445,16 +431,11 @@ impl ActivatedStoreDeviceRegistration {
                 }))
             }
             (
-                StoreDeviceRegistrationOrigin::Join {
-                    attempt_id,
-                    outcome_slot,
-                    ..
-                },
+                StoreDeviceRegistrationOrigin::Join { attempt_id, .. },
                 StoreDeviceRegistrationActivation::Join {
                     attempt_id: activated_attempt_id,
-                    outcome,
                 },
-            ) if attempt_id == activated_attempt_id && outcome_slot == outcome.slot() => Ok(None),
+            ) if attempt_id == activated_attempt_id => Ok(None),
             (
                 StoreDeviceRegistrationOrigin::Founder { .. },
                 StoreDeviceRegistrationActivation::Founder { .. },

@@ -178,7 +178,7 @@ impl PendingJoinJournal {
         &self,
         activation: &DeviceJoinActivation,
     ) -> Result<Option<DeviceJoinReadiness>, DeviceJoinError> {
-        if activation.outcome.attempt().attempt_id != self.attempt_id {
+        if activation.attempt_id != self.attempt_id {
             return Err(DeviceJoinError::AttemptMismatch);
         }
         self.database
@@ -275,31 +275,26 @@ impl<'storage> JoiningStore<'storage> {
         &mut self,
         activation: DeviceJoinActivation,
     ) -> Result<JoinedStore, DeviceJoinError> {
-        if !matches!(&activation.outcome, DeviceJoinOutcomeRef::Activated { .. }) {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
-        let attempt_ref = activation.outcome.attempt().clone();
         let root = self.history.root().clone();
-        let (attempt, owner) = self
+        // The activation commit carries the membership state it was published
+        // under, so the device state this materializes against comes from the
+        // commit rather than from a separate file restating it.
+        let membership_state = self
             .history
             .device_join()
-            .load_verified_attempt_and_owner(&attempt_ref)
-            .await?;
+            .load_commit(&activation.outcome_activation)
+            .await?
+            .value()
+            .membership_state
+            .clone();
         self.history
             .materialize_device_join_activation(
                 &activation.outcome_activation,
-                &activation.outcome,
-                &attempt.value.membership,
+                activation.attempt_id,
+                &membership_state,
             )
             .await?;
-        let outcome = self
-            .history
-            .device_join()
-            .load_outcome(&activation.outcome, &owner.value)
-            .await?
-            .value;
-        let coven_protocol::store_commit::DeviceJoinDisposition::Activated { registration } =
-            outcome.disposition.clone();
+
         let local = self
             .history
             .device_join()
@@ -313,17 +308,13 @@ impl<'storage> JoiningStore<'storage> {
                 activation.outcome_activation.coord, local.state
             )));
         }
-        if local.registration_hash != registration.registration_hash
-            || local.device_id != registration.device_id
-            || attempt.value.expected_registration.to_bytes() != local.registration_bytes
-        {
-            return Err(DeviceJoinError::Store(
-                "joining device registration differs from the activated registration".to_string(),
-            ));
-        }
         Ok(JoinedStore {
             store_root: root,
-            registration,
+            registration: StoreDeviceRegistrationRef {
+                device_id: local.device_id,
+                registration_hash: local.registration_hash,
+                object: local.prepared.reference().clone(),
+            },
             activation,
         })
     }
@@ -419,15 +410,14 @@ impl<'storage> JoiningStore<'storage> {
             )
             .await?
             .value;
-        let (verified_attempt, bootstrap_plan) = timings
+        let (_bootstrap_cut, bootstrap_plan) = timings
             .stage(
                 "verify history",
                 Box::pin(
                     self.history
                         .device_join()
                         .verify_attempt_and_prepare_bootstrap(
-                            &bootstrap.bootstrap.publication_authorization.attempt,
-                            &attempt_owner,
+                            bootstrap.bootstrap.publication_authorization.attempt_id,
                             &bootstrap
                                 .bootstrap
                                 .publication_authorization
@@ -436,11 +426,6 @@ impl<'storage> JoiningStore<'storage> {
                 ),
             )
             .await?;
-        if verified_attempt.value.expected_registration
-            != *bootstrap.bootstrap.request.expected_registration()
-        {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
         let resolved = timings
             .stage(
                 "resolve row data",
@@ -460,12 +445,8 @@ impl<'storage> JoiningStore<'storage> {
                 Box::pin(
                     self.history.device_join().bootstrap_pending_device(
                         &self.identity,
-                        bootstrap
-                            .bootstrap
-                            .publication_authorization
-                            .attempt
-                            .clone(),
-                        verified_attempt,
+                        bootstrap.bootstrap.publication_authorization.attempt_id,
+                        &bootstrap.bootstrap.request,
                         resolved,
                         bootstrap
                             .bootstrap
@@ -539,7 +520,7 @@ impl<'storage> JoiningStore<'storage> {
         &mut self,
         activation: DeviceJoinActivation,
     ) -> Result<JoinedStore, DeviceJoinError> {
-        let attempt_id = activation.outcome.attempt().attempt_id;
+        let attempt_id = activation.attempt_id;
         if let Some(record) = self
             .history
             .device_join()
@@ -638,11 +619,16 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
         );
         let timings = &mut run;
         join.verify_shape()?;
-        let attempt_ref = join
+        let attempt_id = join
             .bootstrap
             .bootstrap
             .publication_authorization
-            .attempt
+            .attempt_id;
+        let expected_registration = join
+            .bootstrap
+            .bootstrap
+            .request
+            .expected_registration()
             .clone();
         if installed.root
             != join
@@ -653,9 +639,7 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
                 .request
                 .offer
                 .store_root
-            || installed.attempt != join.installation.attempt
-            || installed.outcome != join.installation.outcome
-            || join.activation.outcome.attempt() != &attempt_ref
+            || join.activation.attempt_id != attempt_id
         {
             return Err(DeviceJoinError::AttemptMismatch);
         }
@@ -668,37 +652,21 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             .device_registrations()
             .iter()
             .any(|reference| {
-                reference.registration.device_id
-                    == installed.attempt.expected_registration.device_id
+                reference.registration.device_id == expected_registration.device_id
                     && matches!(
                         &reference.authority,
                         coven_protocol::store_commit::StoreDeviceRegistrationActivationRef::Join {
-                            attempt_id,
-                            outcome,
-                        } if *attempt_id == attempt_ref.attempt_id
-                            && outcome == &join.activation.outcome
+                            attempt_id: named,
+                        } if *named == attempt_id
                     )
             });
         if activation_commit.value().device_join_attempt_decisions()
-            != std::slice::from_ref(&DeviceJoinAttemptDecisionRef::Attempt(attempt_ref.clone()))
-            || activation_commit.value().device_join_outcomes()
-                != std::slice::from_ref(&join.activation.outcome)
+            != std::slice::from_ref(&DeviceJoinAttemptDecisionRef::Attempt(attempt_id))
             || !activated_registration_matches
         {
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let owner = activation_commit.author().clone();
-        let attempt_bytes = installed.attempt.to_bytes();
-        let attempt = DeviceJoinAttempt::parse_at(&attempt_bytes, &attempt_ref, &owner)?;
-        let verified_attempt = coven_protocol::objects::VerifiedObject {
-            value: attempt.clone(),
-            bytes: attempt_bytes,
-            semantic_hash: attempt_ref.attempt_hash,
-            object: attempt_ref.object.clone(),
-        };
-        installed
-            .outcome
-            .verify_at(&join.activation.outcome, &attempt, &owner)?;
         let approval = join.bootstrap.bootstrap.request.approval();
         let database = installed.database;
         approval.verify(&installed.verified_root, &owner)?;
@@ -708,12 +676,7 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
         let observation = timings
             .stage(
                 "pin the Store root",
-                PendingDeviceJoinObservation::open(
-                    pending,
-                    storage,
-                    &installed.root,
-                    attempt_ref.attempt_id,
-                ),
+                PendingDeviceJoinObservation::open(pending, storage, &installed.root, attempt_id),
             )
             .await?;
         // Installing the owner anchor walks the membership chain from the cloud
@@ -742,8 +705,8 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             &database,
             storage.as_ref(),
             identity,
-            attempt_ref,
-            verified_attempt,
+            attempt_id,
+            &join.bootstrap.bootstrap.request,
             resolved,
             join.activation.outcome_activation.clone(),
             &owner,
@@ -755,8 +718,7 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             proof,
             provider: DeviceProviderReadiness::SamePrincipal,
         };
-        let journal =
-            PendingJoinJournal::new(pending, join.activation.outcome.attempt().attempt_id);
+        let journal = PendingJoinJournal::new(pending, join.activation.attempt_id);
         let readiness = journal.record_readiness(join.bootstrap, readiness)?;
         let observed = journal
             .observe_activation_if_pending(&join.activation)?
@@ -769,8 +731,8 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
                 "read the joined store",
                 joined_store_from_materialized(
                     &database,
-                    &attempt,
-                    &installed.outcome,
+                    installed.root.clone(),
+                    &expected_registration,
                     join.activation,
                 ),
             )
@@ -848,15 +810,10 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
 ///
 async fn joined_store_from_materialized(
     database: &StoreDatabase,
-    attempt: &DeviceJoinAttempt,
-    outcome: &coven_protocol::store_commit::DeviceJoinOutcome,
+    store_root: coven_protocol::store_commit::StoreRootRef,
+    expected_registration: &StoreDeviceRegistration,
     activation: DeviceJoinActivation,
 ) -> Result<JoinedStore, DeviceJoinError> {
-    let coven_protocol::store_commit::DeviceJoinDisposition::Activated { registration } =
-        outcome.disposition.clone();
-    if activation.outcome.attempt().attempt_id != attempt.attempt_id {
-        return Err(DeviceJoinError::AttemptMismatch);
-    }
     let local = database
         .latest_local_store_device_registration()
         .await
@@ -868,16 +825,17 @@ async fn joined_store_from_materialized(
             activation.outcome_activation.coord, local.state
         )));
     }
-    if local.registration_hash != registration.registration_hash
-        || local.device_id != registration.device_id
-        || attempt.expected_registration.to_bytes() != local.registration_bytes
-    {
+    if expected_registration.to_bytes() != local.registration_bytes {
         return Err(DeviceJoinError::Store(
             "joining device registration differs from the activated registration".to_string(),
         ));
     }
+    let registration = StoreDeviceRegistrationRef::from_registration(
+        expected_registration,
+        local.prepared.reference().clone(),
+    );
     Ok(JoinedStore {
-        store_root: attempt.store_root.clone(),
+        store_root,
         registration,
         activation,
     })
@@ -1076,8 +1034,6 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
                 }
                 let origin = coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Join {
                     attempt_id: offer.attempt_id,
-                    attempt_slot: offer.attempt_slot.clone(),
-                    outcome_slot: offer.outcome_slot.clone(),
                 };
                 let device_id =
                     coven_protocol::store_commit::StoreDeviceId::derive(&offer.store_root, &origin);

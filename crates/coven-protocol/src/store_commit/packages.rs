@@ -543,14 +543,14 @@ pub enum CandidateExclusiveObjectRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceJoinAttemptDecisionRef {
-    Attempt(DeviceJoinAttemptRef),
+    Attempt(DeviceJoinAttemptId),
     Abandoned(crate::store_commit::DeviceJoinAbandonmentRef),
 }
 
 impl DeviceJoinAttemptDecisionRef {
     pub fn attempt_id(&self) -> DeviceJoinAttemptId {
         match self {
-            Self::Attempt(reference) => reference.attempt_id,
+            Self::Attempt(attempt_id) => *attempt_id,
             Self::Abandoned(reference) => reference.attempt_id,
         }
     }
@@ -563,7 +563,6 @@ pub struct StoreCommitOperations {
     pub circle_acknowledgements: Vec<CircleAckRef>,
     pub control: Option<StoreControl>,
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
-    pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
     pub provider_access_grants: Vec<crate::provider::StoreMemberProviderAccessGrantRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
@@ -584,7 +583,6 @@ impl StoreCommitOperations {
             && self.circle_acknowledgements.is_empty()
             && self.control.is_none()
             && self.device_join_attempt_decisions.is_empty()
-            && self.device_join_outcomes.is_empty()
             && self.provider_access_grants.is_empty()
             && self.device_registrations.is_empty()
             && self.device_exclusion_proposals.is_empty()
@@ -598,7 +596,6 @@ impl StoreCommitOperations {
         self.circle_acknowledgements.is_empty()
             && self.control.is_none()
             && self.device_join_attempt_decisions.is_empty()
-            && self.device_join_outcomes.is_empty()
             && self.provider_access_grants.is_empty()
             && self.device_registrations.is_empty()
             && self.device_exclusion_proposals.is_empty()
@@ -633,7 +630,6 @@ pub struct StoreCommitOperationsInput<'a> {
     pub circle_acknowledgements: Vec<CircleAckRef>,
     pub control: Option<StoreControl>,
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
-    pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
     pub provider_access_grants: Vec<crate::provider::StoreMemberProviderAccessGrantRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
@@ -652,7 +648,6 @@ impl StoreCommitOperationsInput<'_> {
             circle_acknowledgements: Vec::new(),
             control: None,
             device_join_attempt_decisions: Vec::new(),
-            device_join_outcomes: Vec::new(),
             provider_access_grants: Vec::new(),
             device_registrations: Vec::new(),
             device_exclusion_proposals: Vec::new(),

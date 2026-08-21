@@ -2,11 +2,11 @@ use super::*;
 use crate::sync::store::pull::StorePullError;
 use crate::sync::store::StoreRegistrationError;
 use coven_protocol::objects::StoreObjectError;
+use coven_protocol::store_commit::VerifiedStoreBatchCommit;
 use coven_protocol::store_commit::{
     ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckExclusionState, StoreAckRef,
     SuccessorLink,
 };
-use coven_protocol::store_commit::{DeviceJoinOutcome, VerifiedStoreBatchCommit};
 
 pub(crate) struct DeviceJoinHistory<'operation, 'storage> {
     database: StoreDatabase,
@@ -54,41 +54,6 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         self.history.load_store_ack(reference, registration).await
     }
 
-    pub(crate) async fn load_verified_attempt(
-        &mut self,
-        reference: &DeviceJoinAttemptRef,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>, StorePullError> {
-        self.history
-            .load_verified_device_join_attempt(reference, owner)
-            .await
-    }
-
-    pub(crate) async fn load_verified_attempt_and_owner(
-        &mut self,
-        reference: &DeviceJoinAttemptRef,
-    ) -> Result<
-        (
-            coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
-            coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
-        ),
-        StorePullError,
-    > {
-        self.history
-            .load_verified_device_join_attempt_and_owner(reference)
-            .await
-    }
-
-    pub(crate) async fn load_outcome(
-        &self,
-        reference: &DeviceJoinOutcomeRef,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<coven_protocol::objects::VerifiedObject<DeviceJoinOutcome>, StoreObjectError> {
-        self.history
-            .load_device_join_outcome(reference, owner)
-            .await
-    }
-
     pub(crate) async fn verify_accepted_provider_access_activation(
         &mut self,
         access: &coven_protocol::provider::ActivatedStoreMemberProviderAccessGrant,
@@ -110,12 +75,11 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
 
     pub(crate) async fn verify_attempt_and_prepare_bootstrap(
         &mut self,
-        attempt: &DeviceJoinAttemptRef,
-        attempt_owner: &StoreDeviceRegistration,
+        attempt_id: DeviceJoinAttemptId,
         attempt_activation: &StoreBatchCommitRef,
     ) -> Result<
         (
-            coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
+            coven_protocol::store_commit::StoreHistoryCut,
             DeviceJoinBootstrapPlan,
         ),
         StorePullError,
@@ -127,8 +91,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         let installed = self.database.snapshot_coverage_frontier().await?;
         self.history
             .verify_attempt_and_prepare_device_join_bootstrap(
-                attempt,
-                attempt_owner,
+                attempt_id,
                 attempt_activation,
                 &installed,
             )
@@ -137,14 +100,15 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
 
     pub(crate) async fn prepare_same_principal_installation(
         &mut self,
-        attempt: &DeviceJoinAttempt,
-        outcome: coven_protocol::store_commit::DeviceJoinOutcome,
         attempt_activation: &StoreBatchCommitRef,
     ) -> Result<SamePrincipalStoreInstallation, DeviceJoinError> {
         let root = self.root().reference().clone();
-        if attempt.store_root != root {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
+        // The activation commit is the attempt: its predecessor cut is the
+        // history the joining device installs from, and its membership state is
+        // the authority that cut is read under.
+        let activation = self.load_commit(attempt_activation).await?;
+        let bootstrap_cut = activation.value().order.predecessor_cut()?;
+        let membership_state = activation.value().membership_state.clone();
         let mut timings = coven_foundation::stage_timing::StageTimings::counting(
             "Same-provider join installation plan",
             self.storage.provider_requests(),
@@ -160,7 +124,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         // as far as the image does. A snapshot published past the attempt's cut
         // would hand the joiner rows its plan then disagrees with, which the
         // installation refuses — so it is never offered in the first place.
-        let bootstrap_frontier = attempt.bootstrap_cut.frontier();
+        let bootstrap_frontier = bootstrap_cut.frontier();
         let candidates = snapshots
             .into_iter()
             .filter(|snapshot| bootstrap_frontier.covers(&snapshot.meta.coverage))
@@ -195,9 +159,9 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             .stage(
                 "walk the plan history",
                 self.history.prepare_device_join_bootstrap(
-                    &attempt.bootstrap_cut,
+                    &bootstrap_cut,
                     attempt_activation,
-                    &attempt.membership,
+                    &membership_state,
                     &snapshot.meta.coverage,
                 ),
             )
@@ -209,8 +173,6 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         timings.report();
         Ok(SamePrincipalStoreInstallation {
             store_root: self.root().protocol().clone(),
-            attempt: attempt.clone(),
-            outcome,
             snapshot: snapshot.reference,
             metadata: snapshot.meta,
             authority: authority.into_authority(),
@@ -282,8 +244,8 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
     pub(super) async fn bootstrap_pending_device(
         &self,
         identity: &UserKeypair,
-        attempt_ref: DeviceJoinAttemptRef,
-        verified_attempt: coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
+        attempt_id: DeviceJoinAttemptId,
+        request: &DeviceRegistrationRequest,
         bootstrap: coven_database::ResolvedDeviceJoinBootstrap,
         attempt_activation: StoreBatchCommitRef,
         owner: &StoreDeviceRegistration,
@@ -294,8 +256,8 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             &self.database,
             self.storage,
             identity,
-            attempt_ref,
-            verified_attempt,
+            attempt_id,
+            request,
             bootstrap,
             attempt_activation,
             owner,
@@ -330,22 +292,22 @@ pub(crate) async fn bootstrap_pending_device_on(
     database: &StoreDatabase,
     storage: &dyn coven_storage::CloudSyncObjectStorage,
     identity: &UserKeypair,
-    attempt_ref: DeviceJoinAttemptRef,
-    verified_attempt: coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
+    attempt_id: DeviceJoinAttemptId,
+    request: &DeviceRegistrationRequest,
     bootstrap: coven_database::ResolvedDeviceJoinBootstrap,
     attempt_activation: StoreBatchCommitRef,
     owner: &StoreDeviceRegistration,
     published_at: &str,
     timings: &mut coven_foundation::stage_timing::StageTimings,
 ) -> Result<DeviceReadinessProof, StoreRegistrationError> {
-    if verified_attempt.semantic_hash != attempt_ref.attempt_hash
-        || verified_attempt.object != attempt_ref.object
-    {
-        return Err(StoreRegistrationError::Invalid(
-            "verified device join attempt differs from its exact reference".to_string(),
-        ));
-    }
-    let attempt = verified_attempt.value;
+    // Everything this step needs about the attempt is in the request this
+    // device signed and the commit that activated it. There is no separate
+    // attempt file to agree with.
+    let offer = &request.approval().request.offer;
+    let expected_registration = request.expected_registration().clone();
+    let registration_slot = request.registration_slot().clone();
+    let store_root = offer.store_root.clone();
+    let owner_registration = offer.owner_registration.clone();
     let activation_stream = attempt_activation.coord.stream_id.to_string();
     let verified_activation = bootstrap
         .plan
@@ -363,14 +325,14 @@ pub(crate) async fn bootstrap_pending_device_on(
         .find(|commit| commit.reference == attempt_activation)
         .and_then(|commit| {
             commit.registrations.iter().find(|registration| {
-                registration.value().device_id == attempt.expected_registration.device_id
+                registration.value().device_id == expected_registration.device_id
             })
         })
         .map(|registration| registration.activation().clone());
     timings
         .stage(
             "materialize the carried history",
-            Box::pin(database.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap)),
+            Box::pin(database.install_device_join_bootstrap(store_root.clone(), bootstrap)),
         )
         .await
         .map_err(registration_database_error)?;
@@ -386,28 +348,27 @@ pub(crate) async fn bootstrap_pending_device_on(
     }
     let activation_commit = verified_activation.value();
     if verified_activation.author() != owner
-        || activation_commit.author_registration != attempt.owner_registration
+        || activation_commit.author_registration != owner_registration
         || !activation_commit
             .device_join_attempt_decisions()
             .iter()
             .any(|decision| {
                 matches!(
                     decision,
-                    DeviceJoinAttemptDecisionRef::Attempt(reference)
-                        if reference == &attempt_ref
+                    DeviceJoinAttemptDecisionRef::Attempt(opened) if *opened == attempt_id
                 )
             })
-        || activation_commit
-            .order
-            .predecessor_cut()
-            .map_err(StoreRegistrationError::from)?
-            != attempt.bootstrap_cut
-        || activation_commit.membership_state != attempt.membership
     {
         return Err(StoreRegistrationError::Invalid(
             "device join attempt is not activated by the named exact Store commit".to_string(),
         ));
     }
+    // The commit that opened the attempt declared the history this device
+    // installs from; the readiness proof below commits to the same cut.
+    let bootstrap_cut = activation_commit
+        .order
+        .predecessor_cut()
+        .map_err(StoreRegistrationError::from)?;
     let provider = timings
         .stage(
             "read the provider binding",
@@ -415,12 +376,11 @@ pub(crate) async fn bootstrap_pending_device_on(
         )
         .await
         .map_err(StoreObjectError::from)?;
-    if provider.device != attempt.expected_registration.provider {
+    if provider.device != expected_registration.provider {
         return Err(StoreRegistrationError::Invalid(
             "joiner provider principal differs from the signed device join attempt".to_string(),
         ));
     }
-    let expected_registration = attempt.expected_registration.clone();
     if expected_registration.author_pubkey != coven_keys::keys::public_key_hex(identity) {
         return Err(StoreRegistrationError::Invalid(
             "joiner identity differs from the signed device registration request".to_string(),
@@ -431,8 +391,8 @@ pub(crate) async fn bootstrap_pending_device_on(
         .map_err(registration_database_error)?;
     if let Some(existing) = existing.as_ref() {
         if existing.registration_bytes != expected_registration.to_bytes()
-            || existing.prepared.reference().slot() != &attempt.registration_slot
-            || existing.initial_ack.value.store_cut != attempt.bootstrap_cut
+            || existing.prepared.reference().slot() != &registration_slot
+            || existing.initial_ack.value.store_cut != bootstrap_cut
         {
             return Err(StoreRegistrationError::Invalid(
                 "local join journal owns different exact registration bytes".to_string(),
@@ -442,7 +402,7 @@ pub(crate) async fn bootstrap_pending_device_on(
         let registration_prepared = prepare_registration_object(
             storage,
             &expected_registration,
-            attempt.registration_slot.clone(),
+            registration_slot.clone(),
         )?;
         let registration_ref = StoreDeviceRegistrationRef::from_registration(
             &expected_registration,
@@ -456,7 +416,7 @@ pub(crate) async fn bootstrap_pending_device_on(
             ));
         };
         let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            attempt.store_root.store_root_hash,
+            store_root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
         let next_slot = timings
@@ -476,16 +436,16 @@ pub(crate) async fn bootstrap_pending_device_on(
         let (device_state, _) = timings
             .stage(
                 "resolve the device state",
-                Box::pin(database.store_device_state_for_history_cut(&attempt.bootstrap_cut)),
+                Box::pin(database.store_device_state_for_history_cut(&bootstrap_cut)),
             )
             .await
             .map_err(registration_database_error)?;
         let initial_ack = StoreAck::signed(
-            attempt.store_root.store_root_hash,
+            store_root.store_root_hash,
             1,
             coven_protocol::store_commit::StoreAckAssertion {
                 registration: registration_ref.clone(),
-                store_cut: attempt.bootstrap_cut.clone(),
+                store_cut: bootstrap_cut.clone(),
                 device_state,
                 snapshot: None,
                 exclusions: StoreAckExclusionState {
@@ -569,7 +529,7 @@ pub(crate) async fn bootstrap_pending_device_on(
     }
     let registration = StoreDeviceRegistration::parse_at(
         &durable.registration_bytes,
-        &attempt.store_root,
+        &store_root,
         durable.device_id,
     )
     .map_err(StoreRegistrationError::from)?;
@@ -581,10 +541,10 @@ pub(crate) async fn bootstrap_pending_device_on(
         .device_signer(identity)
         .map_err(StoreRegistrationError::from)?;
     DeviceReadinessProof::signed(
-        attempt_ref,
+        attempt_id,
         registration_ref,
         durable.initial_ack_ref,
-        attempt.bootstrap_cut.clone(),
+        bootstrap_cut.clone(),
         &registration,
         &device_signer,
     )

@@ -29,19 +29,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         self.local_writer
             .verify_cross_principal_challenge(challenge, context, store)
             .map_err(DeviceJoinError::ProviderProbe)?;
-        if authorization.attempt.attempt_id != context.attempt_id {
+        if authorization.attempt_id != context.attempt_id {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let attempt = self
-            .join_history()
-            .load_verified_attempt(&authorization.attempt, attempt_owner)
-            .await?;
-        if attempt.value.store_root != context.root
-            || attempt.value.attempt_id != context.attempt_id
-            || attempt.value.owner_registration != context.owner_registration
-        {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
+        // The commit that opened the attempt is what the challenge is
+        // authorized against; there is no separate attempt file to agree with.
         let activation = self
             .join_history()
             .load_commit(&authorization.attempt_activation)
@@ -53,8 +45,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 .any(|decision| {
                     matches!(
                         decision,
-                        DeviceJoinAttemptDecisionRef::Attempt(reference)
-                            if reference == &authorization.attempt
+                        DeviceJoinAttemptDecisionRef::Attempt(opened)
+                            if *opened == authorization.attempt_id
                     )
                 })
         {
@@ -294,7 +286,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     .request
                     .cross_challenge_context();
                 let authorization = DeviceJoinChallengePublicationAuthorization {
-                    attempt: bootstrap.publication_authorization.attempt.clone(),
+                    attempt_id: bootstrap.publication_authorization.attempt_id,
                     attempt_activation: bootstrap
                         .publication_authorization
                         .attempt_activation
@@ -356,7 +348,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         readiness: DeviceJoinReadiness,
     ) -> Result<DeviceProviderAdmissionCompletion, DeviceJoinError> {
-        let attempt_id = readiness.proof.attempt.attempt_id;
+        let attempt_id = readiness.proof.attempt_id;
         let database = self.database.clone();
         let journal = self.journal(attempt_id);
         let current = journal.current().await?;
@@ -380,7 +372,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }
             _ => return Err(DeviceJoinError::JournalConflict),
         };
-        if readiness.proof.attempt != bootstrap.bootstrap.publication_authorization.attempt {
+        if readiness.proof.attempt_id != bootstrap.bootstrap.publication_authorization.attempt_id {
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let offer = &bootstrap.bootstrap.request.approval().request.offer;
@@ -428,6 +420,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             _ => return Err(DeviceJoinError::AttemptMismatch),
         };
         let completion = DeviceProviderAdmissionCompletion::CrossPrincipal {
+            bootstrap: Box::new(bootstrap.clone()),
             readiness: Box::new(readiness.clone()),
             receipt,
         };
@@ -444,11 +437,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         bootstrap: ProviderReadyDeviceBootstrap,
     ) -> Result<DeviceProviderAdmissionCompletion, DeviceJoinError> {
-        let attempt_id = bootstrap
-            .bootstrap
-            .publication_authorization
-            .attempt
-            .attempt_id;
+        let attempt_id = bootstrap.bootstrap.publication_authorization.attempt_id;
         if !matches!(
             (
                 &bootstrap.bootstrap.request.approval().admission,

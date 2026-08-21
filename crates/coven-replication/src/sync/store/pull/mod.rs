@@ -122,9 +122,7 @@ pub(crate) struct StorePullExecution {
     pub membership: MembershipChain,
 }
 
-pub(crate) use crate::sync::store::commit_verification::commit::{
-    CommitCoverageError, LoadedDeviceJoinAttemptEvidence,
-};
+pub(crate) use crate::sync::store::commit_verification::commit::CommitCoverageError;
 pub(crate) use coven_protocol::membership::LocalStoreMembership;
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use discovery::*;

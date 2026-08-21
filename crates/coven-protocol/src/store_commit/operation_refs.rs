@@ -114,20 +114,6 @@ pub(super) fn validate_device_join_attempt_decision_refs(
     Ok(())
 }
 
-pub(super) fn validate_device_join_outcome_refs(
-    outcomes: &[DeviceJoinOutcomeRef],
-) -> Result<(), StoreProtocolError> {
-    let mut attempts = BTreeSet::new();
-    if outcomes.windows(2).any(|pair| pair[0] >= pair[1])
-        || outcomes
-            .iter()
-            .any(|outcome| !attempts.insert(outcome.attempt().attempt_id))
-    {
-        return Err(StoreProtocolError::JoinOutcomeMismatch);
-    }
-    Ok(())
-}
-
 pub(super) fn validate_provider_access_refs(
     grants: &[crate::provider::StoreMemberProviderAccessGrantRef],
 ) -> Result<(), StoreProtocolError> {

@@ -42,8 +42,6 @@ pub struct InstalledDeviceJoinSnapshot {
     root: coven_protocol::store_commit::StoreRootRef,
     verified_root:
         coven_protocol::objects::VerifiedObject<coven_protocol::store_commit::StoreProtocolRoot>,
-    attempt: coven_protocol::store_commit::DeviceJoinAttempt,
-    outcome: coven_protocol::store_commit::DeviceJoinOutcome,
     bootstrap: coven_database::DeviceJoinBootstrapPlan,
 }
 

@@ -696,7 +696,7 @@ impl DeviceJoinClient {
     > {
         let offer = &bootstrap.bootstrap.request.approval().request.offer;
         self.require_offer(offer)?;
-        let attempt = &bootstrap.bootstrap.publication_authorization.attempt;
+        let attempt_id = bootstrap.bootstrap.publication_authorization.attempt_id;
         let pending = self.open_pending_journal()?;
         if *cancel.borrow() {
             return Err(BootstrapError::Cancelled);
@@ -706,7 +706,7 @@ impl DeviceJoinClient {
             .stage("open Store storage", self.build_storage(cloud, &signer))
             .await?;
         let store_dir = self.layout.store_dir(&self.admission.store_id);
-        if let Some(readiness) = pending.completed_joiner_readiness(attempt)? {
+        if let Some(readiness) = pending.completed_joiner_readiness(attempt_id)? {
             if store_dir.db_path().exists() {
                 return Ok(readiness);
             }
@@ -814,7 +814,7 @@ impl DeviceJoinClient {
         on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
         timings: &mut StageTimings,
     ) -> Result<Config, BootstrapError> {
-        let attempt_id = activation.outcome.attempt().attempt_id;
+        let attempt_id = activation.attempt_id;
         let pending = self.open_pending_journal()?;
         let store_dir = self.layout.store_dir(&self.admission.store_id);
         let completed_config = if store_dir.config_path().exists() {

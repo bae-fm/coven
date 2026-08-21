@@ -1,21 +1,18 @@
 use super::registration::*;
 use super::*;
 
-pub(crate) struct LoadedCommitJoinEvidence {
-    pub(crate) attempts:
-        BTreeMap<super::store_commit::DeviceJoinAttemptRef, LoadedDeviceJoinAttemptEvidence>,
-}
-
-pub(crate) struct VerifiedCommitJoinEvidence {
-    pub(crate) commit: StoreBatchCommit,
-    pub(crate) attempts: BTreeMap<super::store_commit::DeviceJoinAttemptRef, DeviceJoinAttempt>,
-}
-
+/// The checks a commit that opens a device-join attempt has to pass.
+///
+/// There is nothing to compare the commit against any more. The attempt used to
+/// be restated in a signed file naming the owner, the membership state and the
+/// bootstrap cut, and every one of those was checked against this same commit —
+/// signed by this same device. What decides the attempt is the commit: its
+/// author is an active Owner at its predecessor, and its own order and
+/// membership state are the history the joining device installs from.
 pub(crate) fn validate_commit_join_attempts(
-    commit: &StoreBatchCommit,
+    _commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
-    join_evidence: &VerifiedCommitJoinEvidence,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -28,39 +25,6 @@ pub(crate) fn validate_commit_join_attempts(
             "device join attempt activation author is not an active Owner at its predecessor"
                 .to_string(),
         ));
-    }
-    let bootstrap_cut = commit
-        .order
-        .predecessor_cut()
-        .map_err(RegistrationLoadError::from)?;
-    for reference in commit
-        .device_join_attempt_decisions()
-        .iter()
-        .filter_map(|decision| match decision {
-            DeviceJoinAttemptDecisionRef::Attempt(reference) => Some(reference),
-            DeviceJoinAttemptDecisionRef::Abandoned(_) => None,
-        })
-    {
-        let attempt = join_evidence.attempts.get(reference).ok_or_else(|| {
-            RegistrationLoadError::Invalid(
-                "device join activation has no verified exact attempt".to_string(),
-            )
-        })?;
-        if attempt.owner_registration != commit.author_registration
-            || attempt.membership != commit.membership_state
-            || attempt.bootstrap_cut != bootstrap_cut
-            || !predecessor_verifies_owner(
-                predecessor,
-                &attempt.membership,
-                &activating_author.author_pubkey,
-                &attempt.owner_grant,
-            )
-        {
-            return Err(RegistrationLoadError::Invalid(
-                "device join attempt differs from its exact activating predecessor authority"
-                    .to_string(),
-            ));
-        }
     }
     Ok(())
 }

@@ -115,37 +115,14 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let root = self.root.clone();
         let binding = self.storage.provider_binding().await?;
         let attempt_id = self.database.new_device_join_attempt_id();
-        let attempt_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::DeviceJoinAttempt,
-        );
-        let attempt_slot = self
-            .storage
-            .allocate_protocol_slot(
-                &attempt_context,
-                &coven_protocol::store_commit::device_join_attempt_semantic_prefix(attempt_id),
-                ".json",
-            )
-            .await?;
-        let outcome_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::DeviceJoinOutcome,
-        );
-        let outcome_slot = self
-            .storage
-            .allocate_protocol_slot(
-                &outcome_context,
-                &coven_protocol::store_commit::device_join_outcome_semantic_prefix(attempt_id),
-                ".json",
-            )
-            .await?;
+        // An offer reserves no slots. It used to reserve two, for an attempt
+        // file and an outcome file that only restated what the commits carrying
+        // them already said, and every join paid both round trips up front.
         let offer = self.local_writer.sign_device_join_offer(
             attempt_id,
             member_pubkey.to_string(),
             root,
             binding.store,
-            attempt_slot,
-            outcome_slot,
             owner_grant,
             provider_admin,
         )?;
@@ -248,9 +225,15 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         );
         let prefix =
             coven_protocol::store_commit::device_join_abandonment_semantic_prefix(offer.attempt_id);
+        // The offer reserves nothing, so the abandonment gets its slot when it
+        // is written — which is the rare path, and every join was paying for it.
+        let slot = self
+            .storage
+            .allocate_protocol_slot(&context, &prefix, ".json")
+            .await?;
         let prepared = self.storage.prepare_protocol_object(
             &context,
-            offer.attempt_slot.clone(),
+            slot,
             &prefix,
             abandonment_object.to_bytes(),
         )?;
@@ -378,54 +361,21 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 )
                 .await?
         };
-        let attempt = self.local_writer.sign_device_join_attempt(
-            offer.store_root.clone(),
-            offer.attempt_id,
-            offer.attempt_slot.clone(),
-            request.expected_registration().clone(),
-            request.registration_slot().clone(),
-            offer.outcome_slot.clone(),
-            cut,
-            plan.membership_state().clone(),
-            offer.provider_admin.grant_id.clone(),
-            request.approval().clone(),
-            request.response(),
-            offer.owner_grant.clone(),
-        )?;
-        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            offer.store_root.store_root_hash,
-            ProtocolObjectDomain::DeviceJoinAttempt,
-        );
-        let prefix =
-            coven_protocol::store_commit::device_join_attempt_semantic_prefix(offer.attempt_id);
-        let prepared = self.storage.prepare_protocol_object(
-            &context,
-            offer.attempt_slot.clone(),
-            &prefix,
-            attempt.to_bytes(),
-        )?;
-        self.storage
-            .create_verified_protocol_object(&context, &prepared, &prefix, &attempt.to_bytes())
-            .await
-            .map_err(|error| {
-                DeviceJoinError::prepared_object(error, DeviceJoinError::AttemptMismatch)
-            })?;
-        let attempt_ref = DeviceJoinAttemptRef {
-            attempt_id: offer.attempt_id,
-            attempt_hash: attempt.attempt_hash(),
-            object: prepared.reference().clone(),
-        };
+        // The commit is the attempt. Its predecessor cut is the history the
+        // joining device installs from and its membership state is the
+        // authority that cut is read under, so a signed file restating both,
+        // from the same key that signs the commit, established nothing.
         let activation = self
             .writer
             .activate(
                 plan,
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Attempt(attempt_ref.clone()),
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Attempt(offer.attempt_id),
             )
             .await?;
         let bootstrap = ProvisionalDeviceBootstrap {
             request: Box::new(request),
             publication_authorization: DeviceJoinChallengePublicationAuthorization {
-                attempt: attempt_ref,
+                attempt_id: offer.attempt_id,
                 attempt_activation: activation,
             },
         };
@@ -442,8 +392,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         completion: DeviceProviderAdmissionCompletion,
     ) -> Result<DeviceJoinActivation, DeviceJoinError> {
-        let attempt_ref = completion.attempt().clone();
-        let attempt_id = attempt_ref.attempt_id;
+        let attempt_id = completion.attempt_id();
         let journal = self.journal(attempt_id);
         let current = journal.current().await?;
         if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared {
@@ -466,12 +415,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }) if durable_completion == &completion => {}
             _ => return Err(DeviceJoinError::JournalConflict),
         }
-        let local_writer = std::sync::Arc::clone(&self.local_writer);
-        let attempt = local_writer
-            .load_verified_device_join_attempt(&mut self.writer.join_history(), &attempt_ref)
-            .await?
-            .value;
-        let offer = &attempt.provider_approval.request.offer.clone();
+        // Everything this step used to read back from a signed attempt file is
+        // in the completion it was handed: the request the joining device
+        // signed, and the approval this device signed over it.
+        let bootstrap = completion.bootstrap().clone();
+        let request = &bootstrap.bootstrap.request;
+        let offer = request.approval().request.offer.clone();
         if self.root != offer.store_root {
             return Err(DeviceJoinError::OfferMismatch);
         }
@@ -481,14 +430,16 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
-        match (&attempt.provider_approval.admission, &completion) {
+        match (&request.approval().admission, &completion) {
             (
                 DeviceProviderAdmission::SamePrincipal,
-                DeviceProviderAdmissionCompletion::SamePrincipal { bootstrap },
-            ) if bootstrap.bootstrap.publication_authorization.attempt == attempt_ref => {}
+                DeviceProviderAdmissionCompletion::SamePrincipal { .. },
+            ) => {}
             (
                 DeviceProviderAdmission::CrossPrincipal { challenge, .. },
-                DeviceProviderAdmissionCompletion::CrossPrincipal { readiness, receipt },
+                DeviceProviderAdmissionCompletion::CrossPrincipal {
+                    readiness, receipt, ..
+                },
             ) => {
                 let registration = self
                     .join_history()
@@ -499,9 +450,21 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     .join_history()
                     .load_acknowledgement(&readiness.proof.initial_ack, &registration)
                     .await?;
+                let attempt_cut = self
+                    .join_history()
+                    .load_commit(
+                        &bootstrap
+                            .bootstrap
+                            .publication_authorization
+                            .attempt_activation,
+                    )
+                    .await?
+                    .value()
+                    .order
+                    .predecessor_cut()?;
                 readiness.proof.verify(
-                    &attempt_ref,
-                    &attempt,
+                    attempt_id,
+                    &attempt_cut,
                     &registration,
                     &readiness.proof.initial_ack,
                     &ack,
@@ -515,17 +478,17 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     .load_registration(&provider_admin.administrator)
                     .await?
                     .value;
-                let response_slot = match &attempt.provider_response {
+                let response_slot = match request.response() {
                     DeviceProviderResponseReservation::CrossPrincipal { response_slot } => {
-                        response_slot.clone()
+                        response_slot
                     }
                     DeviceProviderResponseReservation::SamePrincipal => {
                         return Err(DeviceJoinError::AttemptMismatch);
                     }
                 };
                 let context = coven_protocol::provider::CrossPrincipalResponseContext {
-                    challenge: attempt.provider_approval.request.cross_challenge_context(),
-                    expected_registration_hash: attempt.expected_registration.registration_hash(),
+                    challenge: request.approval().request.cross_challenge_context(),
+                    expected_registration_hash: request.expected_registration().registration_hash(),
                     response_slot,
                 };
                 receipt
@@ -544,69 +507,30 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
         let registration_prepared = super::prepare_registration_object(
             self.storage.as_ref(),
-            &attempt.expected_registration,
-            attempt.registration_slot.clone(),
+            request.expected_registration(),
+            request.registration_slot().clone(),
         )?;
         let registration_ref = StoreDeviceRegistrationRef::from_registration(
-            &attempt.expected_registration,
+            request.expected_registration(),
             registration_prepared.reference().clone(),
         );
         let registration_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             offer.store_root.store_root_hash,
             ProtocolObjectDomain::StoreDeviceRegistration,
         );
-        let outcome = self.local_writer.sign_device_join_outcome(
-            attempt_ref.clone(),
-            coven_protocol::store_commit::DeviceJoinDisposition::Activated {
-                registration: registration_ref.clone(),
-            },
-            offer.owner_grant.clone(),
-        )?;
-        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            offer.store_root.store_root_hash,
-            ProtocolObjectDomain::DeviceJoinOutcome,
-        );
-        let prefix = coven_protocol::store_commit::device_join_outcome_semantic_prefix(attempt_id);
-        let outcome_hash = outcome.outcome_hash();
-        let (prepared, outcome_ref, intent) = match &*current.progress {
+        let intent = match &*current.progress {
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Completed(_)) => {
-                let prepared = self.storage.prepare_protocol_object(
-                    &context,
-                    attempt.outcome_slot.clone(),
-                    &prefix,
-                    outcome.to_bytes(),
-                )?;
-                let outcome_ref = DeviceJoinOutcomeRef::Activated {
-                    attempt: attempt_ref.clone(),
-                    outcome_hash,
-                    object: prepared.reference().clone(),
-                };
-                let intent = journal
+                journal
                     .advance(
                         &current,
                         OwnerJoinProgress::ActivationCreateIntent {
                             completion: completion.clone(),
-                            outcome: outcome_ref.clone(),
-                            prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
                         },
                     )
-                    .await?;
-                (prepared, outcome_ref, intent)
+                    .await?
             }
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationCreateIntent {
-                outcome: durable_outcome,
-                prepared: durable_prepared,
-                ..
-            }) => {
-                let expected = DeviceJoinOutcomeRef::Activated {
-                    attempt: attempt_ref.clone(),
-                    outcome_hash,
-                    object: durable_prepared.object.clone(),
-                };
-                if durable_outcome != &expected {
-                    return Err(DeviceJoinError::JournalConflict);
-                }
-                (durable_prepared.restore()?, expected, current.clone())
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationCreateIntent { .. }) => {
+                current.clone()
             }
             _ => return Err(DeviceJoinError::JournalConflict),
         };
@@ -615,28 +539,21 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 &registration_context,
                 &registration_prepared,
                 &coven_protocol::store_commit::registration_semantic_prefix(
-                    &attempt.expected_registration.device_id.to_string(),
+                    &request.expected_registration().device_id.to_string(),
                 ),
-                &attempt.expected_registration.to_bytes(),
+                &request.expected_registration().to_bytes(),
             )
             .await
             .map_err(DeviceJoinError::Storage)?;
-        self.storage
-            .create_verified_protocol_object(&context, &prepared, &prefix, &outcome.to_bytes())
-            .await
-            .map_err(|error| {
-                DeviceJoinError::prepared_object(error, DeviceJoinError::AttemptMismatch)
-            })?;
         let joined_registration = registration_ref.clone();
         let activated_registration =
             coven_protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
                 coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
                     registration_ref,
-                    attempt.expected_registration.clone(),
+                    request.expected_registration().clone(),
                 )?,
                 coven_protocol::store_commit::StoreDeviceRegistrationActivation::Join {
                     attempt_id,
-                    outcome: outcome_ref.clone(),
                 },
             )?;
         let plan = self.writer.prepare_plan().await?;
@@ -644,14 +561,13 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .writer
             .activate(
                 plan,
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Outcome {
-                    outcome: outcome_ref.clone(),
-                    registration: Some(Box::new(activated_registration)),
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::JoinActivation {
+                    registration: Box::new(activated_registration),
                 },
             )
             .await?;
         let activation = DeviceJoinActivation {
-            outcome: outcome_ref,
+            attempt_id,
             outcome_activation: activation_ref,
         };
         journal

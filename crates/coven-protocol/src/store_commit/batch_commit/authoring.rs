@@ -210,7 +210,6 @@ impl StoreBatchCommit {
             circle_acknowledgements,
             control,
             device_join_attempt_decisions,
-            device_join_outcomes,
             provider_access_grants,
             device_registrations,
             device_exclusion_proposals,
@@ -249,7 +248,6 @@ impl StoreBatchCommit {
             })
             .transpose()?;
         validate_device_join_attempt_decision_refs(&device_join_attempt_decisions)?;
-        validate_device_join_outcome_refs(&device_join_outcomes)?;
         validate_provider_access_refs(&provider_access_grants)?;
         validate_device_registration_refs(&device_registrations)?;
         validate_device_exclusion_refs(&device_exclusion_proposals, &device_exclusion_outcomes)?;
@@ -294,7 +292,6 @@ impl StoreBatchCommit {
             circle_acknowledgements,
             control,
             device_join_attempt_decisions,
-            device_join_outcomes,
             provider_access_grants,
             device_registrations,
             device_exclusion_proposals,

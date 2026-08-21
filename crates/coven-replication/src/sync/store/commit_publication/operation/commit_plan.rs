@@ -7,9 +7,8 @@ use coven_protocol::objects::ExactObjectRef;
 #[cfg(test)]
 use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::store_commit::{
-    ActivatedStoreDeviceRegistration, DeviceJoinAttemptRef, DeviceJoinOutcomeRef, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder, StoreHistoryCut,
-    StoreOperationMembershipAuthority, StoreRootRef,
+    ActivatedStoreDeviceRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreCommitOrder, StoreHistoryCut, StoreOperationMembershipAuthority, StoreRootRef,
 };
 use coven_protocol::{circle_control, membership, provider, remote_object, store_commit};
 mod candidate;

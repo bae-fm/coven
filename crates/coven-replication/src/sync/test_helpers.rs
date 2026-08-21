@@ -455,44 +455,6 @@ mod test_device {
             &self.registration
         }
 
-        #[allow(clippy::too_many_arguments)]
-        pub fn sign_device_join_attempt_for_test(
-            &self,
-            store_root: coven_protocol::store_commit::StoreRootRef,
-            attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
-            attempt_slot: coven_protocol::objects::ObjectSlot,
-            expected_registration: coven_protocol::store_commit::StoreDeviceRegistration,
-            registration_slot: coven_protocol::objects::ObjectSlot,
-            outcome_slot: coven_protocol::objects::ObjectSlot,
-            bootstrap_cut: coven_protocol::store_commit::StoreHistoryCut,
-            membership: coven_protocol::circle_control::StoreMembershipStateRef,
-            provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId,
-            provider_approval: coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
-            provider_response: coven_protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation,
-            owner_grant: coven_protocol::membership::MembershipGrantId,
-        ) -> Result<
-            coven_protocol::store_commit::DeviceJoinAttempt,
-            coven_protocol::store_commit::StoreProtocolError,
-        > {
-            coven_protocol::store_commit::DeviceJoinAttempt::signed(
-                store_root,
-                attempt_id,
-                attempt_slot,
-                expected_registration,
-                registration_slot,
-                outcome_slot,
-                bootstrap_cut,
-                membership,
-                provider_admin_grant,
-                provider_approval,
-                provider_response,
-                self.registration.reference().clone(),
-                owner_grant,
-                self.registration.value(),
-                &self.device_signer,
-            )
-        }
-
         pub fn sign_provider_admission_approval_without_shape_validation_for_test(
             &self,
             request: coven_protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
@@ -1312,16 +1274,6 @@ mod test_device {
         ) -> Result<(), crate::sync::store::StoreError> {
             self.store
                 .assert_deep_membership_projection_for_test(heads)
-                .await
-        }
-
-        pub async fn verify_device_join_attempt_for_test(
-            &self,
-            reference: &coven_protocol::store_commit::DeviceJoinAttemptRef,
-            owner: &coven_protocol::store_commit::StoreDeviceRegistration,
-        ) -> Result<(), crate::sync::store::StoreError> {
-            self.store
-                .verify_device_join_attempt_for_test(reference, owner)
                 .await
         }
 

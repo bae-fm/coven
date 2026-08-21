@@ -212,10 +212,6 @@ pub fn store_protocol_root_logical_key() -> &'static str {
     STORE_PROTOCOL_ROOT_SEMANTIC_PATH
 }
 
-pub fn device_join_attempt_semantic_prefix(attempt_id: DeviceJoinAttemptId) -> String {
-    format!("{STORE_DEVICE_JOIN_ATTEMPT_PREFIX}{attempt_id}")
-}
-
 pub fn circle_access_leaf_semantic_prefix(
     circle_id: CircleId,
     family: CandidateFamilyId,
@@ -243,12 +239,8 @@ pub fn circle_access_envelope_semantic_prefix(
     )
 }
 
-pub fn device_join_outcome_semantic_prefix(attempt_id: DeviceJoinAttemptId) -> String {
-    format!("{STORE_DEVICE_JOIN_OUTCOME_PREFIX}{attempt_id}")
-}
-
 pub fn device_join_abandonment_semantic_prefix(attempt_id: DeviceJoinAttemptId) -> String {
-    device_join_attempt_semantic_prefix(attempt_id)
+    format!("{STORE_DEVICE_JOIN_ABANDONMENT_PREFIX}{attempt_id}")
 }
 
 pub fn device_join_cleanup_receipt_semantic_prefix(attempt_id: DeviceJoinAttemptId) -> String {

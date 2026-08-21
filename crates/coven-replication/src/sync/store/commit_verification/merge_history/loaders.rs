@@ -173,31 +173,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.commit_verifier.load_registration(&self.founder).await
     }
 
-    pub(crate) async fn load_device_join_attempt_and_owner(
-        &self,
-        reference: &DeviceJoinAttemptRef,
-    ) -> Result<
-        (
-            VerifiedObject<DeviceJoinAttempt>,
-            VerifiedObject<StoreDeviceRegistration>,
-        ),
-        StoreObjectError,
-    > {
-        self.commit_verifier
-            .load_device_join_attempt_and_owner(reference)
-            .await
-    }
-
-    pub(crate) async fn load_device_join_outcome(
-        &self,
-        reference: &DeviceJoinOutcomeRef,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<VerifiedObject<DeviceJoinOutcome>, StoreObjectError> {
-        self.commit_verifier
-            .load_device_join_outcome(reference, owner)
-            .await
-    }
-
     pub(crate) async fn load_device_exclusion_proposal(
         &self,
         reference: &StoreDeviceExclusionProposalRef,
@@ -350,11 +325,8 @@ impl<'a> MergeHistoryVerifier<'a> {
         accepted_frontier: &[StoreBatchCommitRef],
     ) -> Result<Vec<ActivatedStoreDeviceRegistration>, StorePullError> {
         let accepted = VerifiedMergePredecessorHistory::new(&self.history, accepted_frontier);
-        let loaded = self.load_commit_join_evidence(commit).await;
-        let loaded = loaded.map_err(StorePullError::from)?;
-        let join_evidence = accepted.verify_commit_join_evidence(commit, loaded, membership)?;
         let registrations = self
-            .load_commit_registrations(commit, author, Some(membership), &join_evidence, accepted)
+            .load_commit_registrations(commit, author, Some(membership), accepted)
             .await;
         registrations.map_err(StorePullError::from)
     }
@@ -364,14 +336,8 @@ impl<'a> MergeHistoryVerifier<'a> {
         commit: &StoreBatchCommit,
         activating_author: &StoreDeviceRegistration,
         predecessor: Option<&MembershipChain>,
-        join_evidence: &VerifiedCommitJoinEvidence,
         accepted: VerifiedMergePredecessorHistory<'_>,
     ) -> Result<Vec<ActivatedStoreDeviceRegistration>, RegistrationLoadError> {
-        if join_evidence.commit != *commit {
-            return Err(RegistrationLoadError::Invalid(
-                "verified device-join evidence belongs to another Store commit".to_string(),
-            ));
-        }
         if commit.acknowledgement().is_some() {
             self.validate_commit_acknowledgement(commit, activating_author)
                 .await?;
@@ -465,20 +431,15 @@ impl<'a> MergeHistoryVerifier<'a> {
             .iter()
             .any(|decision| matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(_)));
         if has_join_attempt {
-            validate_commit_join_attempts(commit, activating_author, predecessor, join_evidence)?;
+            validate_commit_join_attempts(commit, activating_author, predecessor)?;
         }
-        let verified_join_outcomes = if commit.device_join_outcomes().is_empty() {
-            BTreeMap::new()
-        } else {
-            Box::pin(self.validate_commit_join_outcomes(
-                commit,
-                activating_author,
-                predecessor,
-                join_evidence,
-                accepted,
-            ))
-            .await?
-        };
+        let activated_join_attempts = Box::pin(self.validate_commit_join_activations(
+            commit,
+            activating_author,
+            predecessor,
+            accepted,
+        ))
+        .await?;
         let has_join_abandonment = commit
             .device_join_attempt_decisions()
             .iter()
@@ -504,7 +465,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 &registration,
                 activating_author,
                 predecessor,
-                &verified_join_outcomes,
+                &activated_join_attempts,
             ))
             .await?;
             let registration = ReferencedStoreDeviceRegistration::verified(

@@ -301,18 +301,6 @@ impl Store {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn verify_device_join_attempt_for_test(
-        &self,
-        reference: &coven_protocol::store_commit::DeviceJoinAttemptRef,
-        owner: &coven_protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<(), StoreError> {
-        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
-        history
-            .verify_device_join_attempt_for_test(reference, owner)
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn exact_next_announcement_slot_for_test(
         &self,
         registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,

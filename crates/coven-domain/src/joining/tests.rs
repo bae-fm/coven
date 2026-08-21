@@ -204,7 +204,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     assert!(matches!(
         owner_database
             .device_join_status(
-                completion.attempt().attempt_id,
+                completion.attempt_id(),
                 coven_replication::sync::DeviceJoinRole::Owner,
             )
         .await
@@ -218,7 +218,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .expect("enumerate Store join actions")
         .contains(
             &coven_replication::sync::DeviceJoinAction::ResumeOperation {
-                attempt_id: completion.attempt().attempt_id,
+                attempt_id: completion.attempt_id(),
                 role: coven_replication::sync::DeviceJoinRole::Owner,
             }
         ));
@@ -243,7 +243,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     );
     assert!(matches!(
         new_client()
-            .device_join_status(activation.outcome.attempt().attempt_id)
+            .device_join_status(activation.attempt_id)
             .expect("load interrupted joiner completion"),
         Some(coven_replication::sync::DeviceJoinStatus::AwaitingCompletion { activation: durable })
             if durable == activation

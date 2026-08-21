@@ -108,7 +108,7 @@ pub use coven_protocol::{
     CircleControlCoord, CircleEpochCloseId, CircleId, CircleMemberInfo, CircleOperationBlock,
     CircleOperationId, CircleOperationInfo, CircleOperationKind, CircleOperationState, CircleRole,
     CircleState, CommitFrontier, CrossPrincipalProbeReceipt, DeviceJoinAttemptId,
-    DeviceJoinAttemptRef, ExactSlotProbeReceipt, MemberInfo, MemberRole, MembershipConflictChoice,
+    ExactSlotProbeReceipt, MemberInfo, MemberRole, MembershipConflictChoice,
     MembershipConflictInfo, ObjectHash, ProviderAccessLocator, ProviderAccessWithdrawal,
     ProviderAdminGrantId, ProviderAdminGrantRecord, ProviderCapabilityProof, StoreBatchCommitRef,
     StoreCommitCoord, StoreDeviceId, StoreMemberProviderAccessGrantRef,

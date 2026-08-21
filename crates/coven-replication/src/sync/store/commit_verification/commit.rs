@@ -22,11 +22,9 @@ use coven_protocol::remote_object;
 use coven_protocol::store_commit::*;
 use coven_protocol::store_commit::{
     ack_slot_prefix, device_exclusion_outcome_semantic_prefix,
-    device_exclusion_proposal_semantic_prefix, device_join_attempt_semantic_prefix,
-    device_join_outcome_semantic_prefix, founder_registration_semantic_prefix,
+    device_exclusion_proposal_semantic_prefix, founder_registration_semantic_prefix,
     package_semantic_prefix, provider_access_grant_semantic_prefix, registration_semantic_prefix,
-    snapshot_slot_prefix, DeviceJoinAttemptRef, DeviceJoinOutcome, DeviceJoinOutcomeRef,
-    SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef,
+    snapshot_slot_prefix, SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef,
     StoreDeviceExclusionProposal, StoreDeviceExclusionProposalRef, StoreDeviceHeadRef,
     StoreSnapshotRef,
 };
@@ -419,8 +417,4 @@ pub(crate) enum CommitCoverageError {
     Object(#[from] StoreObjectError),
     #[error("exact Store ancestry is missing commit {commit_hash}")]
     MissingAncestry { commit_hash: ObjectHash },
-}
-
-pub(crate) struct LoadedDeviceJoinAttemptEvidence {
-    pub(crate) attempt: VerifiedObject<DeviceJoinAttempt>,
 }

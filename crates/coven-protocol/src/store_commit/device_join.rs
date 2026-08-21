@@ -101,184 +101,13 @@ impl fmt::Display for DeviceRecoveryId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeviceJoinAttemptRef {
-    pub attempt_id: DeviceJoinAttemptId,
-    pub attempt_hash: ObjectHash,
-    pub object: ExactObjectRef,
-}
-
-/// The wire body of a device-join attempt. Every field here is signed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeviceJoinAttemptBody {
-    pub store_root: StoreRootRef,
-    pub attempt_id: DeviceJoinAttemptId,
-    pub attempt_slot: ObjectSlot,
-    pub expected_registration: StoreDeviceRegistration,
-    pub registration_slot: ObjectSlot,
-    pub outcome_slot: ObjectSlot,
-    pub bootstrap_cut: StoreHistoryCut,
-    pub membership: StoreMembershipStateRef,
-    pub provider_admin_grant: crate::provider::ProviderAdminGrantId,
-    pub provider_approval:
-        crate::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
-    pub provider_response:
-        crate::store_commit::device_join_exchange::DeviceProviderResponseReservation,
-    pub owner_registration: StoreDeviceRegistrationRef,
-    pub owner_grant: MembershipGrantId,
-}
-
-impl SignedBody for DeviceJoinAttemptBody {
-    const DOMAIN: &'static [u8] = DEVICE_JOIN_ATTEMPT_DOMAIN;
-}
-
-pub type DeviceJoinAttempt = Signed<DeviceJoinAttemptBody>;
-
-pub(crate) struct UnverifiedDeviceJoinAttempt(DeviceJoinAttempt);
-
-impl UnverifiedDeviceJoinAttempt {
-    pub(crate) fn verify_at(
-        self,
-        expected: &DeviceJoinAttemptRef,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<DeviceJoinAttempt, StoreProtocolError> {
-        let attempt = self.0;
-        attempt.body().validate_shape()?;
-        if attempt.attempt_id != expected.attempt_id
-            || attempt.attempt_hash() != expected.attempt_hash
-            || &attempt.attempt_slot != expected.object.slot()
-        {
-            return Err(StoreProtocolError::JoinAttemptMismatch);
-        }
-        attempt.owner_registration.verify_registration(owner)?;
-        attempt.verify_by(&owner.device_signing_pubkey)?;
-        Ok(attempt)
-    }
-}
-
-impl DeviceJoinAttempt {
-    #[allow(clippy::too_many_arguments)]
-    pub fn signed(
-        store_root: StoreRootRef,
-        attempt_id: DeviceJoinAttemptId,
-        attempt_slot: ObjectSlot,
-        expected_registration: StoreDeviceRegistration,
-        registration_slot: ObjectSlot,
-        outcome_slot: ObjectSlot,
-        bootstrap_cut: StoreHistoryCut,
-        membership: StoreMembershipStateRef,
-        provider_admin_grant: crate::provider::ProviderAdminGrantId,
-        provider_approval: crate::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
-        provider_response: crate::store_commit::device_join_exchange::DeviceProviderResponseReservation,
-        owner_registration: StoreDeviceRegistrationRef,
-        owner_grant: MembershipGrantId,
-        owner: &StoreDeviceRegistration,
-        owner_device_signer: &UserKeypair,
-    ) -> Result<Self, StoreProtocolError> {
-        owner_registration.verify_registration(owner)?;
-        if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        let body = DeviceJoinAttemptBody {
-            store_root,
-            attempt_id,
-            attempt_slot,
-            expected_registration,
-            registration_slot,
-            outcome_slot,
-            bootstrap_cut,
-            membership,
-            provider_admin_grant,
-            provider_approval,
-            provider_response,
-            owner_registration,
-            owner_grant,
-        };
-        body.validate_shape()?;
-        Ok(Signed::sign(body, owner_device_signer))
-    }
-
-    pub fn attempt_hash(&self) -> ObjectHash {
-        self.hash()
-    }
-
-    pub fn parse_at(
-        bytes: &[u8],
-        expected: &DeviceJoinAttemptRef,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<Self, StoreProtocolError> {
-        expected.object.verify(bytes)?;
-        Self::parse_unverified(bytes)?.verify_at(expected, owner)
-    }
-
-    pub(crate) fn parse_unverified(
-        bytes: &[u8],
-    ) -> Result<UnverifiedDeviceJoinAttempt, StoreProtocolError> {
-        serde_json::from_slice(bytes)
-            .map(UnverifiedDeviceJoinAttempt)
-            .map_err(StoreProtocolError::from)
-    }
-}
-
-impl DeviceJoinAttemptBody {
-    fn validate_shape(&self) -> Result<(), StoreProtocolError> {
-        validate_store_history_cut(&self.bootstrap_cut)?;
-        if self.expected_registration.store_root != self.store_root
-            || self.expected_registration.device_id
-                != StoreDeviceId::derive(&self.store_root, &self.expected_registration.origin)
-            || self.attempt_slot == self.registration_slot
-            || self.attempt_slot == self.outcome_slot
-            || self.registration_slot == self.outcome_slot
-            || self.provider_admin_grant
-                != self.provider_approval.request.offer.provider_admin.grant_id
-            || self.provider_approval.request.offer.store_root != self.store_root
-            || self.provider_approval.request.offer.attempt_id != self.attempt_id
-            || self.provider_approval.request.offer.attempt_slot != self.attempt_slot
-            || self.provider_approval.request.offer.outcome_slot != self.outcome_slot
-            || self.provider_approval.request.offer.owner_registration != self.owner_registration
-            || self.provider_approval.request.offer.owner_grant != self.owner_grant
-            || self.provider_approval.request.offer.member_pubkey
-                != self.expected_registration.author_pubkey
-            || self.provider_approval.request.peer_provider != self.expected_registration.provider
-        {
-            return Err(StoreProtocolError::JoinAttemptMismatch);
-        }
-        match (&self.provider_approval.admission, &self.provider_response) {
-            (
-                crate::store_commit::device_join_exchange::DeviceProviderAdmission::SamePrincipal,
-                crate::store_commit::device_join_exchange::DeviceProviderResponseReservation::SamePrincipal,
-            )
-            | (
-                crate::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal { .. },
-                crate::store_commit::device_join_exchange::DeviceProviderResponseReservation::CrossPrincipal { .. },
-            ) => {}
-            _ => return Err(StoreProtocolError::JoinAttemptMismatch),
-        }
-        match &self.expected_registration.origin {
-            StoreDeviceRegistrationOrigin::Join {
-                attempt_id,
-                attempt_slot,
-                outcome_slot,
-            } if *attempt_id == self.attempt_id
-                && attempt_slot == &self.attempt_slot
-                && outcome_slot == &self.outcome_slot =>
-            {
-                Ok(())
-            }
-            _ => Err(StoreProtocolError::JoinAttemptMismatch),
-        }
-    }
-}
-
 /// The wire body of a joining device's readiness proof. Every field here is
 /// signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceReadinessProofBody {
     pub store_root_hash: ObjectHash,
-    pub attempt: DeviceJoinAttemptRef,
+    pub attempt_id: DeviceJoinAttemptId,
     pub registration: StoreDeviceRegistrationRef,
     pub initial_ack: StoreAckRef,
     pub bootstrap_cut: StoreHistoryCut,
@@ -292,7 +121,7 @@ pub type DeviceReadinessProof = Signed<DeviceReadinessProofBody>;
 
 impl DeviceReadinessProof {
     pub fn signed(
-        attempt: DeviceJoinAttemptRef,
+        attempt_id: DeviceJoinAttemptId,
         registration: StoreDeviceRegistrationRef,
         initial_ack: StoreAckRef,
         bootstrap_cut: StoreHistoryCut,
@@ -305,7 +134,7 @@ impl DeviceReadinessProof {
         }
         let body = DeviceReadinessProofBody {
             store_root_hash: registration_value.store_root.store_root_hash,
-            attempt,
+            attempt_id,
             registration,
             initial_ack,
             bootstrap_cut,
@@ -314,20 +143,23 @@ impl DeviceReadinessProof {
         Ok(Signed::sign(body, device_signer))
     }
 
+    /// Check a readiness proof against the attempt commit it answers.
+    ///
+    /// `attempt_cut` is that commit's predecessor cut — the history the
+    /// admitting device declared the joining device would install from. The
+    /// joiner echoes it here, so the two have to agree.
     pub fn verify(
         &self,
-        attempt_ref: &DeviceJoinAttemptRef,
-        attempt: &DeviceJoinAttempt,
+        attempt_id: DeviceJoinAttemptId,
+        attempt_cut: &StoreHistoryCut,
         registration: &StoreDeviceRegistration,
         initial_ack_ref: &StoreAckRef,
         initial_ack: &StoreAck,
     ) -> Result<(), StoreProtocolError> {
-        if &self.attempt != attempt_ref
-            || attempt_ref.attempt_id != attempt.attempt_id
-            || attempt_ref.attempt_hash != attempt.attempt_hash()
+        if self.attempt_id != attempt_id
             || self.store_root_hash != registration.store_root.store_root_hash
             || self.registration.device_id != registration.device_id
-            || self.bootstrap_cut != attempt.bootstrap_cut
+            || &self.bootstrap_cut != attempt_cut
         {
             return Err(StoreProtocolError::DeviceReadinessMismatch);
         }
@@ -345,129 +177,6 @@ impl DeviceReadinessProof {
         }
         validate_store_history_cut(&self.bootstrap_cut)?;
         self.verify_by(&registration.device_signing_pubkey)
-    }
-}
-
-/// How a join attempt ended. An attempt that reaches an outcome activated the
-/// joining device: there is no way to take an approval back, because the
-/// approval is what granted the device storage access, and revoking that is
-/// member removal and a key rotation.
-///
-/// Sentinel: still an enum because the outcome object class is deleted in the
-/// change that stops writing join proof files, which removes this with it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum DeviceJoinDisposition {
-    Activated {
-        registration: StoreDeviceRegistrationRef,
-    },
-}
-
-/// The wire body of a join attempt's outcome. Every field here is signed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeviceJoinOutcomeBody {
-    pub store_root_hash: ObjectHash,
-    pub attempt: DeviceJoinAttemptRef,
-    pub disposition: DeviceJoinDisposition,
-    pub owner_registration: StoreDeviceRegistrationRef,
-    pub owner_grant: MembershipGrantId,
-}
-
-impl SignedBody for DeviceJoinOutcomeBody {
-    const DOMAIN: &'static [u8] = DEVICE_JOIN_OUTCOME_DOMAIN;
-}
-
-pub type DeviceJoinOutcome = Signed<DeviceJoinOutcomeBody>;
-
-impl DeviceJoinOutcome {
-    pub fn signed(
-        attempt: DeviceJoinAttemptRef,
-        disposition: DeviceJoinDisposition,
-        owner_registration: StoreDeviceRegistrationRef,
-        owner_grant: MembershipGrantId,
-        owner: &StoreDeviceRegistration,
-        owner_device_signer: &UserKeypair,
-    ) -> Result<Self, StoreProtocolError> {
-        owner_registration.verify_registration(owner)?;
-        if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        Ok(Signed::sign(
-            DeviceJoinOutcomeBody {
-                store_root_hash: owner.store_root.store_root_hash,
-                attempt,
-                disposition,
-                owner_registration,
-                owner_grant,
-            },
-            owner_device_signer,
-        ))
-    }
-
-    pub fn outcome_hash(&self) -> ObjectHash {
-        self.hash()
-    }
-
-    pub fn verify_at(
-        &self,
-        expected: &DeviceJoinOutcomeRef,
-        attempt: &DeviceJoinAttempt,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<(), StoreProtocolError> {
-        let bytes = self.to_bytes();
-        expected.object().verify(&bytes)?;
-        expected.verify_outcome(self)?;
-        if &self.attempt != expected.attempt()
-            || self.attempt.attempt_id != attempt.attempt_id
-            || self.store_root_hash != attempt.store_root.store_root_hash
-            || self.owner_registration != attempt.owner_registration
-            || self.owner_grant != attempt.owner_grant
-        {
-            return Err(StoreProtocolError::JoinOutcomeMismatch);
-        }
-        self.owner_registration.verify_registration(owner)?;
-        self.verify_by(&owner.device_signing_pubkey)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum DeviceJoinOutcomeRef {
-    Activated {
-        attempt: DeviceJoinAttemptRef,
-        outcome_hash: ObjectHash,
-        object: ExactObjectRef,
-    },
-}
-
-impl DeviceJoinOutcomeRef {
-    pub fn slot(&self) -> &ObjectSlot {
-        self.object().slot()
-    }
-
-    pub fn object(&self) -> &ExactObjectRef {
-        match self {
-            Self::Activated { object, .. } => object,
-        }
-    }
-
-    pub fn attempt(&self) -> &DeviceJoinAttemptRef {
-        match self {
-            Self::Activated { attempt, .. } => attempt,
-        }
-    }
-
-    pub fn verify_outcome(&self, outcome: &DeviceJoinOutcome) -> Result<(), StoreProtocolError> {
-        let Self::Activated {
-            attempt,
-            outcome_hash,
-            ..
-        } = self;
-        if &outcome.attempt != attempt || outcome.outcome_hash() != *outcome_hash {
-            return Err(StoreProtocolError::JoinOutcomeMismatch);
-        }
-        Ok(())
     }
 }
 

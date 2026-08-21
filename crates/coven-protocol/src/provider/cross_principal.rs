@@ -80,7 +80,7 @@ pub struct CrossPrincipalResponseContext {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceJoinChallengePublicationAuthorization {
-    pub attempt: DeviceJoinAttemptRef,
+    pub attempt_id: DeviceJoinAttemptId,
     pub attempt_activation: StoreBatchCommitRef,
 }
 

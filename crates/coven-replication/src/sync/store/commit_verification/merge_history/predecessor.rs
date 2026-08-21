@@ -116,11 +116,11 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
 
     pub(super) fn contains_join_attempt(
         &self,
-        expected: &DeviceJoinAttemptRef,
+        expected: coven_protocol::store_commit::DeviceJoinAttemptId,
     ) -> Result<bool, StorePullError> {
         self.find(None, |_, commit| {
             commit.device_join_attempt_decisions().iter().any(|decision| {
-                matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(reference) if reference == expected)
+                matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(opened) if *opened == expected)
             })
         })
         .map(|found| matches!(found, PredecessorSearch::Found(_)))
@@ -246,60 +246,5 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
             ));
         }
         Ok(())
-    }
-
-    pub(super) fn verify_commit_join_evidence(
-        &self,
-        commit: &StoreBatchCommit,
-        loaded: LoadedCommitJoinEvidence,
-        predecessor: &MembershipChain,
-    ) -> Result<VerifiedCommitJoinEvidence, StorePullError> {
-        if loaded.attempts.is_empty() {
-            return Ok(VerifiedCommitJoinEvidence {
-                commit: commit.clone(),
-                attempts: BTreeMap::new(),
-            });
-        }
-        let mut attempts = BTreeMap::new();
-        for (reference, evidence) in loaded.attempts {
-            let approval = &evidence.attempt.value.provider_approval;
-            let provider_admin = &approval.request.offer.provider_admin;
-            let verifies_administrator = match approval.access_grant() {
-                None => predecessor_verifies_provider_administrator(
-                    predecessor,
-                    &provider_admin.grant_id,
-                    &provider_admin.administrator,
-                    provider_admin,
-                ),
-                Some(access) => match self.find(Some(&access.activation), |candidate, _| {
-                    candidate == &access.activation
-                })? {
-                    PredecessorSearch::Found(verified) => {
-                        predecessor_verifies_provider_administrator(
-                            &verified.predecessor_membership,
-                            &access.grant.administrator_grant,
-                            &verified.verified.value().author_registration,
-                            provider_admin,
-                        )
-                    }
-                    // The activation is under the replay baseline, which the
-                    // device only holds because it verified that grant when it
-                    // materialized the commit carrying it.
-                    PredecessorSearch::Covered => true,
-                    PredecessorSearch::Absent => false,
-                },
-            };
-            if !verifies_administrator {
-                return Err(StorePullError::InvalidState(
-                    "device join attempt lacks exact Merge provider-administrator authority"
-                        .to_string(),
-                ));
-            }
-            attempts.insert(reference, evidence.attempt.value);
-        }
-        Ok(VerifiedCommitJoinEvidence {
-            commit: commit.clone(),
-            attempts,
-        })
     }
 }

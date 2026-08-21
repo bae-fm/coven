@@ -59,8 +59,6 @@ impl Fixture {
             self.root_ref.clone(),
             StoreDeviceRegistrationOrigin::Join {
                 attempt_id: DeviceJoinAttemptId::from_hash(ObjectHash::digest(label.as_bytes())),
-                attempt_slot: slot(format!("store-v1/tests/{label}/join-attempt.json")),
-                outcome_slot: slot(format!("store-v1/tests/{label}/join-outcome.json")),
             },
             crate::objects::ProviderDeviceBinding {
                 principal: crate::objects::ProviderPrincipalId::CustomS3Credential {
@@ -986,210 +984,6 @@ fn unknown_fields_and_versions_are_rejected() {
 }
 
 #[test]
-fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
-    let fixture = fixture();
-    let joiner = UserKeypair::generate();
-    let attempt_id = DeviceJoinAttemptId::from_hash(ObjectHash::digest(b"join attempt"));
-    let attempt_slot = slot("store-v1/device-join-attempts/test.json".to_string());
-    let outcome_slot = slot("store-v1/device-join-outcomes/test.json".to_string());
-    let registration_slot = slot("store-v1/device-registrations/joiner.json".to_string());
-    let provider_admin = crate::provider::ProviderAdminState::founder_from_root(
-        fixture.root_ref.clone(),
-        fixture.registration_ref.clone(),
-        &fixture.root.descriptor.founder_provider_admin,
-    )
-    .records()
-    .values()
-    .next()
-    .expect("founder provider administrator exists")
-    .clone();
-    let registration = StoreDeviceRegistration::signed(
-        fixture.root_ref.clone(),
-        StoreDeviceRegistrationOrigin::Join {
-            attempt_id,
-            attempt_slot: attempt_slot.clone(),
-            outcome_slot: outcome_slot.clone(),
-        },
-        provider_admin.provider.clone(),
-        DeviceStreamAnchor::StoreAnnouncements {
-            first_slot: slot("store-v1/heads/joiner/1.json".to_string()),
-        },
-        DeviceStreamAnchor::StoreAcknowledgements {
-            first_slot: slot("store-v1/acks/joiner/1.json".to_string()),
-        },
-        DeviceStreamAnchor::StoreSnapshots {
-            first_slot: slot("store-v1/snapshots/joiner/1.json".to_string()),
-        },
-        &joiner,
-    )
-    .unwrap();
-    let registration_ref = StoreDeviceRegistrationRef::from_registration(
-        &registration,
-        ExactObjectRef::new(
-            registration_slot.clone(),
-            registration.to_bytes().len() as u64,
-            ObjectHash::digest(&registration.to_bytes()),
-        ),
-    );
-    let membership = StoreMembershipStateRef::from_parts(
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        ObjectHash::digest(b"membership"),
-    )
-    .unwrap();
-    let attempt_cut = StoreHistoryCut(BTreeMap::new());
-    let owner_device_signer = fixture.registration.device_signer(&fixture.signer).unwrap();
-    let offer = crate::store_commit::device_join_exchange::DeviceJoinOffer::signed(
-        attempt_id,
-        keys::public_key_hex(&joiner),
-        fixture.root_ref.clone(),
-        fixture.root.descriptor.provider.clone(),
-        attempt_slot.clone(),
-        outcome_slot.clone(),
-        fixture.registration_ref.clone(),
-        fixture.root.descriptor.founder_grant.clone(),
-        provider_admin.clone(),
-        &fixture.registration,
-        &owner_device_signer,
-    )
-    .unwrap();
-    let access_request =
-        crate::store_commit::device_join_exchange::DeviceProviderAccessRequest::signed(
-            offer,
-            provider_admin.provider.clone(),
-            registration.clone(),
-            registration_slot.clone(),
-            &joiner,
-        )
-        .unwrap();
-    let verified_root = crate::objects::VerifiedObject {
-        value: fixture.root.clone(),
-        bytes: fixture.root.to_bytes(),
-        semantic_hash: fixture.root_ref.store_root_hash,
-        object: fixture.root_ref.object.clone(),
-    };
-    let approval =
-        crate::store_commit::device_join_exchange::DeviceProviderAdmissionApproval::signed(
-            access_request,
-            crate::store_commit::device_join_exchange::DeviceProviderAdmission::SamePrincipal,
-            &verified_root,
-            &fixture.registration,
-            &owner_device_signer,
-        )
-        .unwrap();
-    let attempt = DeviceJoinAttempt::signed(
-        fixture.root_ref.clone(),
-        attempt_id,
-        attempt_slot.clone(),
-        registration.clone(),
-        registration_slot,
-        outcome_slot,
-        attempt_cut,
-        membership,
-        provider_admin.grant_id,
-        approval,
-        crate::store_commit::device_join_exchange::DeviceProviderResponseReservation::SamePrincipal,
-        fixture.registration_ref.clone(),
-        fixture.root.descriptor.founder_grant.clone(),
-        &fixture.registration,
-        &owner_device_signer,
-    )
-    .unwrap();
-    let attempt_ref = DeviceJoinAttemptRef {
-        attempt_id,
-        attempt_hash: attempt.attempt_hash(),
-        object: ExactObjectRef::new(
-            attempt_slot,
-            attempt.to_bytes().len() as u64,
-            ObjectHash::digest(&attempt.to_bytes()),
-        ),
-    };
-    let stream_id = AuthorStreamId::from_digest(ObjectHash::digest(b"other stream"));
-    let other_commit_hash = ObjectHash::digest(b"other commit");
-    let other_commit = StoreBatchCommitRef {
-        coord: StoreCommitCoord {
-            stream_id,
-            sequence: 1,
-        },
-        commit_hash: other_commit_hash,
-        object: exact(
-            format!(
-                "{}.json",
-                commit_semantic_prefix(
-                    CandidateFamilyId::from_hash(ObjectHash::digest(
-                        b"other commit candidate family",
-                    )),
-                    &stream_id.to_string(),
-                    1,
-                    other_commit_hash,
-                )
-            ),
-            b"other commit",
-        ),
-    };
-    let other_frontier = BTreeMap::from([(stream_id, other_commit)]);
-    let other_cut = StoreHistoryCut(other_frontier.clone());
-    let mut other_resolved_devices = ResolvedStoreDeviceState::founder(
-        &fixture.root_ref,
-        registration_ref.clone(),
-        &fixture.root.descriptor.founder_pubkey,
-        fixture.root.descriptor.founder_grant.clone(),
-        &fixture.root.descriptor.founder_recovery,
-    )
-    .expect("derive other device state");
-    other_resolved_devices.state_hash = ObjectHash::digest(b"other device state");
-    let other_device_state =
-        StoreDeviceStateRef::from_resolved(CommitFrontier(other_frontier), &other_resolved_devices)
-            .expect("bind other device state frontier");
-    let device_signer = registration.device_signer(&joiner).unwrap();
-    let ack = StoreAck::signed(
-        fixture.root_ref.store_root_hash,
-        1,
-        StoreAckAssertion {
-            registration: registration_ref.clone(),
-            store_cut: other_cut.clone(),
-            device_state: other_device_state,
-            snapshot: None,
-            exclusions: StoreAckExclusionState {
-                proposal_freezes: Vec::new(),
-            },
-        },
-        "2026-07-16T00:00:00Z".to_string(),
-        SuccessorLink {
-            activation: registration
-                .store_acknowledgement_activation(&registration_ref)
-                .expect("derive exact Store acknowledgement activation")
-                .activation_id(),
-            predecessor: None,
-            next_slot: slot("store-v1/acks/joiner/2.json".to_string()),
-        },
-        &device_signer,
-    )
-    .unwrap();
-    let ack_ref = StoreAckRef {
-        registration: registration_ref.clone(),
-        sequence: 1,
-        ack_hash: ack.ack_hash(),
-        object: exact("store-v1/acks/joiner/1.json".to_string(), &ack.to_bytes()),
-    };
-    let proof = DeviceReadinessProof::signed(
-        attempt_ref.clone(),
-        registration_ref,
-        ack_ref.clone(),
-        other_cut,
-        &registration,
-        &device_signer,
-    )
-    .unwrap();
-
-    assert!(matches!(
-        proof.verify(&attempt_ref, &attempt, &registration, &ack_ref, &ack),
-        Err(StoreProtocolError::DeviceReadinessMismatch)
-    ));
-}
-
-#[test]
 fn store_ack_semantic_hash_is_distinct_from_its_stored_json_hash() {
     let ack = fixture().signed_ack("2026-07-16T00:00:00Z");
     let bytes = ack.to_bytes();
@@ -1288,14 +1082,6 @@ fn operations_commit_uses_the_closed_body_and_signed_manifest_shape() {
 #[test]
 fn one_join_attempt_cannot_be_activated_and_abandoned_in_the_same_commit() {
     let attempt_id = DeviceJoinAttemptId::from_hash(ObjectHash::digest(b"join attempt"));
-    let attempt = DeviceJoinAttemptRef {
-        attempt_id,
-        attempt_hash: ObjectHash::digest(b"attempt body"),
-        object: exact(
-            "store-v1/device-join-attempts/attempt.json".to_string(),
-            b"attempt body",
-        ),
-    };
     let abandonment = crate::store_commit::DeviceJoinAbandonmentRef {
         attempt_id,
         abandonment_hash: ObjectHash::digest(b"abandonment body"),
@@ -1307,7 +1093,7 @@ fn one_join_attempt_cannot_be_activated_and_abandoned_in_the_same_commit() {
 
     assert!(matches!(
         validate_device_join_attempt_decision_refs(&[
-            DeviceJoinAttemptDecisionRef::Attempt(attempt),
+            DeviceJoinAttemptDecisionRef::Attempt(attempt_id),
             DeviceJoinAttemptDecisionRef::Abandoned(abandonment),
         ]),
         Err(StoreProtocolError::JoinAttemptMismatch)

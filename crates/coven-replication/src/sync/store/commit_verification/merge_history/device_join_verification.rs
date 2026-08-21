@@ -1,6 +1,62 @@
 use super::*;
 
 impl<'a> MergeHistoryVerifier<'a> {
+    /// The attempts this commit activates a registration under.
+    ///
+    /// A registration is activated by a commit whose author is an active Owner
+    /// at its predecessor, naming the attempt it was opened under. That attempt
+    /// has to have been opened by a commit already in this device's history —
+    /// or by this same commit, which is what a same-provider join does in one
+    /// step. Nothing else is read: an outcome file restating the owner, the
+    /// grant, and the registration it activates said nothing this commit does
+    /// not say itself.
+    pub(super) async fn validate_commit_join_activations(
+        &self,
+        commit: &StoreBatchCommit,
+        activating_author: &StoreDeviceRegistration,
+        predecessor: Option<&MembershipChain>,
+        accepted: VerifiedMergePredecessorHistory<'_>,
+    ) -> Result<BTreeSet<store_commit::DeviceJoinAttemptId>, RegistrationLoadError> {
+        let mut activated = BTreeSet::new();
+        for registration in commit.device_registrations() {
+            let StoreDeviceRegistrationActivationRef::Join { attempt_id } = &registration.authority
+            else {
+                continue;
+            };
+            let predecessor = predecessor.ok_or_else(|| {
+                RegistrationLoadError::Invalid(
+                    "device join activation has no exact predecessor authority".to_string(),
+                )
+            })?;
+            if !predecessor.is_owner_now(&activating_author.author_pubkey) {
+                return Err(RegistrationLoadError::Invalid(
+                    "device join activation author is not an active Owner at its predecessor"
+                        .to_string(),
+                ));
+            }
+            let opened_here = commit
+                .device_join_attempt_decisions()
+                .iter()
+                .any(|decision| {
+                    matches!(
+                        decision,
+                        DeviceJoinAttemptDecisionRef::Attempt(opened) if opened == attempt_id
+                    )
+                });
+            let opened_before = accepted
+                .contains_join_attempt(*attempt_id)
+                .map_err(registration_attempt_error)?;
+            if !(opened_here || opened_before) {
+                return Err(RegistrationLoadError::Invalid(
+                    "device join activation names an attempt absent from its predecessor history"
+                        .to_string(),
+                ));
+            }
+            activated.insert(*attempt_id);
+        }
+        Ok(activated)
+    }
+
     pub(super) async fn validate_commit_join_abandonments(
         &self,
         commit: &StoreBatchCommit,
@@ -40,7 +96,6 @@ impl<'a> MergeHistoryVerifier<'a> {
                 serde_json::from_slice(&bytes).map_err(RegistrationLoadError::from)?;
             if abandonment.store_root_hash != self.root.reference().store_root_hash
                 || abandonment.owner_registration != commit.author_registration
-                || abandonment.attempt_slot != *reference.object.slot()
             {
                 return Err(RegistrationLoadError::Invalid(
                     "device join abandonment differs from its activating commit".to_string(),
@@ -51,16 +106,6 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .map_err(RegistrationLoadError::from)?;
         }
         Ok(())
-    }
-
-    pub(crate) async fn validate_device_join_attempt_evidence(
-        &self,
-        attempt: VerifiedObject<DeviceJoinAttempt>,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<LoadedDeviceJoinAttemptEvidence, StorePullError> {
-        self.commit_verifier
-            .validate_device_join_attempt_evidence(attempt, owner)
-            .await
     }
 
     pub(crate) async fn verify_author_exclusion_nonactivation(
@@ -90,18 +135,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
     }
 
-    pub(crate) async fn load_verified_device_join_attempt(
-        &mut self,
-        reference: &store_commit::DeviceJoinAttemptRef,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<VerifiedObject<store_commit::DeviceJoinAttempt>, StorePullError> {
-        let evidence = self
-            .commit_verifier
-            .load_device_join_attempt_evidence(reference, owner)
-            .await?;
-        self.verify_device_join_attempt_evidence(evidence).await
-    }
-
     pub(crate) async fn authenticate_blocked_candidate(
         &mut self,
         candidate: &coven_database::BlockedMergeCandidate,
@@ -122,28 +155,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(verified)
     }
 
-    pub(crate) async fn load_verified_device_join_attempt_and_owner(
-        &mut self,
-        reference: &store_commit::DeviceJoinAttemptRef,
-    ) -> Result<
-        (
-            VerifiedObject<store_commit::DeviceJoinAttempt>,
-            VerifiedObject<StoreDeviceRegistration>,
-        ),
-        StorePullError,
-    > {
-        let (attempt, owner) = self
-            .commit_verifier
-            .load_device_join_attempt_and_owner(reference)
-            .await?;
-        let evidence = self
-            .commit_verifier
-            .validate_device_join_attempt_evidence(attempt, &owner.value)
-            .await?;
-        let attempt = self.verify_device_join_attempt_evidence(evidence).await?;
-        Ok((attempt, owner))
-    }
-
     /// Verify the attempt this device is joining under and build the history
     /// it has to carry.
     ///
@@ -153,33 +164,60 @@ impl<'a> MergeHistoryVerifier<'a> {
     /// at all on a store that reclaims: every commit the plan carries is read
     /// from its package, and a package behind an acknowledged snapshot is
     /// exactly what reclaim deletes.
+    /// Verify the commit that opened this attempt and build the history the
+    /// joining device has to carry.
+    ///
+    /// The commit is the attempt: its predecessor cut is the history the
+    /// admitting device declared this device would install from, and its
+    /// membership state is the authority that cut is read under. Both used to
+    /// be restated in a separate signed file by the same device that signed the
+    /// commit, which established nothing the commit did not.
+    ///
+    /// `installed` is the coverage of the Store snapshot the joining device has
+    /// already installed into its database — empty only when it truly starts
+    /// from nothing. Passing the real coverage is what keeps the plan buildable
+    /// at all on a store that reclaims: every commit the plan carries is read
+    /// from its package, and a package behind an acknowledged snapshot is
+    /// exactly what reclaim deletes.
     pub(crate) async fn verify_attempt_and_prepare_device_join_bootstrap(
         &mut self,
-        attempt: &store_commit::DeviceJoinAttemptRef,
-        attempt_owner: &StoreDeviceRegistration,
+        attempt_id: store_commit::DeviceJoinAttemptId,
         attempt_activation: &StoreBatchCommitRef,
         installed: &CommitFrontier,
-    ) -> Result<
-        (
-            VerifiedObject<store_commit::DeviceJoinAttempt>,
-            DeviceJoinBootstrapPlan,
-        ),
-        StorePullError,
-    > {
-        let evidence = self
-            .commit_verifier
-            .load_device_join_attempt_evidence(attempt, attempt_owner)
-            .await?;
-        let verified_attempt = self.verify_device_join_attempt_evidence(evidence).await?;
+    ) -> Result<(StoreHistoryCut, DeviceJoinBootstrapPlan), StorePullError> {
+        self.verify_refs([attempt_activation.clone()]).await?;
+        let activation = self.load_ref(attempt_activation).await?;
+        let opens_this_attempt = activation
+            .value()
+            .device_join_attempt_decisions()
+            .iter()
+            .any(|decision| {
+                matches!(
+                    decision,
+                    store_commit::DeviceJoinAttemptDecisionRef::Attempt(opened)
+                        if *opened == attempt_id
+                )
+            });
+        if !opens_this_attempt {
+            return Err(StorePullError::InvalidState(
+                "device join attempt activation does not open this attempt".to_string(),
+            ));
+        }
+        let bootstrap_cut = activation
+            .value()
+            .order
+            .predecessor_cut()
+            .map_err(StorePullError::Protocol)?;
+        let membership_state = activation.value().membership_state.clone();
         let plan = self
             .prepare_device_join_bootstrap(
-                &verified_attempt.value.bootstrap_cut,
+                &bootstrap_cut,
                 attempt_activation,
-                &verified_attempt.value.membership,
+                &membership_state,
                 installed,
             )
             .await?;
-        Ok((verified_attempt, plan))
+        Ok((bootstrap_cut, plan))
     }
 
     /// The commits a joining device has to materialize to stand at
@@ -324,152 +362,5 @@ impl<'a> MergeHistoryVerifier<'a> {
             },
             commits: ordered,
         })
-    }
-
-    pub(crate) async fn load_commit_join_evidence(
-        &self,
-        commit: &StoreBatchCommit,
-    ) -> Result<LoadedCommitJoinEvidence, RegistrationLoadError> {
-        let mut attempts = BTreeMap::new();
-        let references = commit
-            .device_join_attempt_decisions()
-            .iter()
-            .filter_map(|decision| match decision {
-                DeviceJoinAttemptDecisionRef::Attempt(reference) => Some(reference),
-                DeviceJoinAttemptDecisionRef::Abandoned(_) => None,
-            })
-            .chain(
-                commit
-                    .device_join_outcomes()
-                    .iter()
-                    .map(|outcome| outcome.attempt()),
-            )
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        for reference in references {
-            if attempts.contains_key(&reference) {
-                continue;
-            }
-            let (attempt, owner) = self
-                .load_device_join_attempt_and_owner(&reference)
-                .await
-                .map_err(RegistrationLoadError::Object)?;
-            let evidence = self
-                .validate_device_join_attempt_evidence(attempt, &owner.value)
-                .await
-                .map_err(registration_attempt_error)?;
-            attempts.insert(reference, evidence);
-        }
-        Ok(LoadedCommitJoinEvidence { attempts })
-    }
-
-    pub(crate) async fn validate_commit_join_outcomes(
-        &self,
-        commit: &StoreBatchCommit,
-        activating_author: &StoreDeviceRegistration,
-        predecessor: Option<&MembershipChain>,
-        join_evidence: &VerifiedCommitJoinEvidence,
-        accepted: VerifiedMergePredecessorHistory<'_>,
-    ) -> Result<BTreeMap<DeviceJoinOutcomeRef, VerifiedCommitJoinOutcome>, RegistrationLoadError>
-    {
-        let predecessor = predecessor.ok_or_else(|| {
-            RegistrationLoadError::Invalid(
-                "device join outcome activation has no exact predecessor authority".to_string(),
-            )
-        })?;
-        if !predecessor.is_owner_now(&activating_author.author_pubkey) {
-            return Err(RegistrationLoadError::Invalid(
-                "device join outcome activation author is not an active Owner at its predecessor"
-                    .to_string(),
-            ));
-        }
-        let mut verified = BTreeMap::new();
-        for outcome_ref in commit.device_join_outcomes() {
-            let attempt = join_evidence
-                .attempts
-                .get(outcome_ref.attempt())
-                .ok_or_else(|| {
-                    RegistrationLoadError::Invalid(
-                        "device join outcome has no verified exact attempt".to_string(),
-                    )
-                })?;
-            let attempt_activated_here =
-                commit
-                    .device_join_attempt_decisions()
-                    .iter()
-                    .any(|decision| {
-                        matches!(
-                            decision,
-                            DeviceJoinAttemptDecisionRef::Attempt(reference)
-                                if reference == outcome_ref.attempt()
-                        )
-                    });
-            let accepted_before = accepted
-                .contains_join_attempt(outcome_ref.attempt())
-                .map_err(registration_attempt_error)?;
-            let same_principal_attempt_activated_here = attempt_activated_here
-                && matches!(
-                    attempt.provider_approval.admission,
-                    coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::SamePrincipal
-                );
-            if !(accepted_before || same_principal_attempt_activated_here) {
-                return Err(RegistrationLoadError::Invalid(
-                    "device join outcome names an attempt absent from its predecessor history"
-                        .to_string(),
-                ));
-            }
-            if attempt.owner_registration != commit.author_registration
-                || outcome_ref.slot() != &attempt.outcome_slot
-            {
-                return Err(RegistrationLoadError::Invalid(
-                    "device join outcome differs from its exact Owner attempt".to_string(),
-                ));
-            }
-            let outcome = self
-                .load_device_join_outcome(outcome_ref, activating_author)
-                .await
-                .map_err(RegistrationLoadError::Object)?
-                .value;
-            if outcome.owner_registration != attempt.owner_registration
-                || outcome.owner_grant != attempt.owner_grant
-            {
-                return Err(RegistrationLoadError::Invalid(
-                    "device join outcome signer differs from its attempt".to_string(),
-                ));
-            }
-            let activation = commit.device_registrations().iter().find(|activation| {
-                matches!(
-                    &activation.authority,
-                    StoreDeviceRegistrationActivationRef::Join { outcome, .. }
-                        if outcome == outcome_ref
-                )
-            });
-            if matches!(
-                &outcome.disposition,
-                DeviceJoinDisposition::Activated { .. }
-            ) != activation.is_some()
-            {
-                return Err(RegistrationLoadError::Invalid(
-                    "device join outcome and registration activation are not one closed operation"
-                        .to_string(),
-                ));
-            }
-            if verified
-                .insert(
-                    outcome_ref.clone(),
-                    VerifiedCommitJoinOutcome {
-                        attempt: attempt.clone(),
-                        owner: activating_author.clone(),
-                        outcome,
-                    },
-                )
-                .is_some()
-            {
-                return Err(RegistrationLoadError::Invalid(
-                    "device join outcome is duplicated in one commit".to_string(),
-                ));
-            }
-        }
-        Ok(verified)
     }
 }

@@ -43,12 +43,6 @@ impl From<RegistrationLoadError> for StorePullError {
     }
 }
 
-pub(crate) struct VerifiedCommitJoinOutcome {
-    pub(crate) attempt: DeviceJoinAttempt,
-    pub(crate) owner: StoreDeviceRegistration,
-    pub(crate) outcome: super::store_commit::DeviceJoinOutcome,
-}
-
 pub(crate) fn registration_attempt_error(error: StorePullError) -> RegistrationLoadError {
     match error {
         StorePullError::Object(error) => RegistrationLoadError::Object(error),

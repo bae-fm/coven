@@ -567,6 +567,25 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
         .into_iter()
         .filter(|slot| slot.logical_key().contains("device-join-transport"))
         .collect::<Vec<_>>();
+    // A join publishes no proof of itself. The attempt and the outcome used to
+    // be signed files whose every field was checked against the commit that
+    // named them — the same device signing the same facts twice.
+    let written = fixture
+        .home
+        .exact_creates()
+        .into_iter()
+        .map(|slot| slot.logical_key().to_string())
+        .collect::<Vec<_>>();
+    for class in [
+        "store-v1/device-join-attempts/",
+        "store-v1/device-join-outcomes/",
+    ] {
+        assert!(
+            written.iter().all(|key| !key.starts_with(class)),
+            "the join wrote a {class} object, which nothing reads: {written:?}",
+        );
+    }
+
     // One device admits, so the exchange has no handoff to carry between an
     // owner machine and a storage-administrator machine: the attempt's
     // namespace holds exactly what crosses between the two devices.
@@ -644,10 +663,7 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
         .store_dir(&config.store_id)
         .config_path()
         .exists());
-    assert_eq!(
-        activation.outcome.attempt().attempt_id,
-        bundle.offer.attempt_id,
-    );
+    assert_eq!(activation.attempt_id, bundle.offer.attempt_id,);
     assert!(fixture
         .client()
         .resume_device_joins()
@@ -829,10 +845,7 @@ async fn run_transport_carries_a_cross_principal_join() {
         .store_dir(&config.store_id)
         .config_path()
         .exists());
-    assert_eq!(
-        activation.outcome.attempt().attempt_id,
-        bundle.offer.attempt_id,
-    );
+    assert_eq!(activation.attempt_id, bundle.offer.attempt_id,);
     for kind in DeviceJoinTransportKind::ALL {
         assert!(
             fixture.slot_bytes(&bundle, kind).await.is_none(),
@@ -891,10 +904,7 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
     // owner can publish both the library bootstrap and activation without
     // another response from the joining device.
     let activation = activated(fixture.drive_owner_with(&bundle, one_shot()).await);
-    assert_eq!(
-        activation.outcome.attempt().attempt_id,
-        bundle.offer.attempt_id
-    );
+    assert_eq!(activation.attempt_id, bundle.offer.attempt_id);
     assert!(fixture
         .slot_bytes(&bundle, DeviceJoinTransportKind::SamePrincipalJoin)
         .await
@@ -1859,7 +1869,25 @@ async fn carried_join_over(store_id: &str, covered: usize) -> CarriedJoin {
     };
     CarriedJoin {
         root: join.installation.authority.store_root.clone(),
-        bootstrap_cut: join.installation.attempt.bootstrap_cut.clone(),
+        // The cut the attempt named is the activation commit's own predecessor
+        // cut; the closure carries that commit, so the test reads it from there
+        // rather than from a separate attempt file.
+        bootstrap_cut: {
+            let activation = join
+                .installation
+                .bootstrap
+                .commits
+                .iter()
+                .find(|commit| commit.reference == join.activation.outcome_activation)
+                .expect("the closure carries the attempt's activation commit");
+            let commit: coven_protocol::store_commit::StoreBatchCommit =
+                serde_json::from_slice(&activation.canonical_commit)
+                    .expect("the carried activation commit parses");
+            commit
+                .order
+                .predecessor_cut()
+                .expect("the activation commit names a predecessor cut")
+        },
         coverage,
         closure: join.installation.bootstrap,
         journal_bytes,

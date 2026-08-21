@@ -377,10 +377,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             _ => None,
         };
         let retained_registration_evidence = match &batch {
-            commit_plan::StoreOperationBatch::Outcome {
-                registration: Some(registration),
-                ..
-            } => vec![registration.registration().clone()],
+            commit_plan::StoreOperationBatch::JoinActivation { registration } => {
+                vec![registration.registration().clone()]
+            }
             commit_plan::StoreOperationBatch::SamePrincipalDeviceJoin { registration, .. } => {
                 vec![registration.registration().clone()]
             }
