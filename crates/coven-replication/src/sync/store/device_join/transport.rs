@@ -681,39 +681,43 @@ impl<'a> DeviceJoinTransport<'a> {
         }
     }
 
-    /// Remove every slot this attempt reserved.
+    /// Remove everything under this attempt's namespace.
     ///
     /// Called once the exchange has reached an end the joining device has
-    /// consumed — its completed join, its accepted abandonment, or its accepted
-    /// cleanup activation. The joining device is the last reader on all three,
-    /// which is why the deletion is its to make: the owner has no artifact by
-    /// which it could learn that the joiner read the last thing it published.
-    /// There is no sweep behind this — an attempt that reaches none of those
-    /// ends keeps its slots until its cancellation removes them.
+    /// consumed — its completed join or its accepted abandonment. The joining
+    /// device is the last reader on both, which is why the deletion is its to
+    /// make: the admitting device has no artifact by which it could learn that
+    /// the joiner read the last thing it published. There is no sweep behind
+    /// this.
+    ///
+    /// The namespace is listed rather than probed kind by kind. Probing asks
+    /// for every name this build knows and so leaves behind anything written
+    /// under a name it does not — an artifact from a different version, or from
+    /// anyone else who can write to the provider. A listing names what is
+    /// actually there, which is what "remove the namespace" has to mean.
+    ///
+    /// Each object is still deleted by the exact reference its own stored bytes
+    /// produce, so a delete cannot race a concurrent write: the reference
+    /// carries the size and hash observed, and the delete refuses if what sits
+    /// there no longer matches. Nothing is opened — this is removing a
+    /// namespace, not reading it, and an object this device cannot decrypt is
+    /// exactly as much garbage as one it can.
     pub async fn delete_attempt_slots(&self) -> Result<(), DeviceJoinTransportError> {
-        let deletions =
-            futures_util::future::join_all(DeviceJoinTransportKind::ALL.into_iter().map(
-                |kind| async move {
-                    let prepared = match self
-                        .storage
-                        .read_prepared_protocol_slot(
-                            &slot_context(self.store_root_hash),
-                            self.params.slot(kind)?,
-                            &self.semantic_prefix(kind),
-                        )
-                        .await
-                    {
-                        Ok((_, prepared)) => prepared,
-                        Err(StorageError::NotFound(_)) => return Ok(()),
-                        Err(error) => return Err(DeviceJoinTransportError::from(error)),
-                    };
-                    self.storage
-                        .delete_protocol_object(prepared.reference())
-                        .await
-                        .map_err(DeviceJoinTransportError::from)
-                },
-            ))
-            .await;
+        let context = slot_context(self.store_root_hash);
+        let listed = self
+            .storage
+            .list_protocol_slots(&context, &format!("{}/", self.params.attempt_namespace))
+            .await?;
+        let deletions = futures_util::future::join_all(listed.iter().map(|slot| async move {
+            let Some(object) = self.storage.observe_exact_slot(slot).await? else {
+                return Ok(());
+            };
+            self.storage
+                .delete_protocol_object(&object)
+                .await
+                .map_err(DeviceJoinTransportError::from)
+        }))
+        .await;
         for result in deletions {
             result?;
         }

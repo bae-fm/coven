@@ -448,6 +448,19 @@ impl TransportFixture {
             .expect("open the transport")
     }
 
+    /// Every provider key still under this attempt's transport namespace.
+    ///
+    /// The teardown deletes what a listing names rather than the kinds it was
+    /// compiled with, so what it has to leave behind is nothing at all.
+    fn attempt_namespace_keys(&self, bundle: &DeviceJoinOfferBundle) -> Vec<String> {
+        let prefix = format!("{}/", bundle.transport.attempt_namespace);
+        self.home
+            .keys()
+            .into_iter()
+            .filter(|key| key.starts_with(&prefix))
+            .collect()
+    }
+
     async fn slot_bytes(
         &self,
         bundle: &DeviceJoinOfferBundle,
@@ -500,6 +513,19 @@ fn transport_carries_a_whole_join_between_two_drivers() {
 async fn run_transport_carries_a_whole_join_between_two_drivers() {
     let fixture = TransportFixture::build("device-join-transport-happy-path").await;
     let bundle = fixture.begin().await;
+    // An object under the attempt's namespace at a name this build does not
+    // know: a future protocol's artifact, or anything else a writer with
+    // provider access can put there. Tearing the namespace down means this goes
+    // too, and a teardown that asks for the names it was compiled with cannot
+    // see it.
+    let stray = fixture.home.insert_exact_object(
+        &format!(
+            "{}/from-another-version.json",
+            bundle.transport.attempt_namespace
+        ),
+        b"an artifact this build has no kind for".to_vec(),
+    );
+    assert!(fixture.home.get(stray.logical_key()).is_some());
     fixture.home.clear_exact_creates();
 
     let joiner = fixture.client();
@@ -628,13 +654,13 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
         .expect("enumerate completed joins")
         .is_empty());
     // The joiner's completion is the point every artifact has been consumed,
-    // so the attempt's namespace is empty again.
-    for kind in DeviceJoinTransportKind::ALL {
-        assert!(
-            fixture.slot_bytes(&bundle, kind).await.is_none(),
-            "{kind:?} slot outlived the completed join",
-        );
-    }
+    // so the attempt's namespace is empty again — all of it, not only the names
+    // this version of the protocol happens to know.
+    assert!(
+        fixture.attempt_namespace_keys(&bundle).is_empty(),
+        "the completed join left objects in its attempt namespace: {:?}",
+        fixture.attempt_namespace_keys(&bundle),
+    );
 }
 
 /// The bundle is what the host encodes as its join code, so it has to survive
@@ -1410,6 +1436,16 @@ async fn republishing_is_idempotent_and_a_different_artifact_is_refused() {
             "a different artifact at an occupied slot is refused, got {conflict:?}",
         );
 
+        // A second object in the namespace, so the teardown has two independent
+        // deletions to overlap. It reads what the listing names and nothing
+        // else, so what it overlaps is objects that are really there.
+        fixture.home.insert_exact_object(
+            &format!(
+                "{}/from-another-version.json",
+                bundle.transport.attempt_namespace
+            ),
+            b"an artifact this build has no kind for".to_vec(),
+        );
         fixture
             .home
             .delay_exact_full_reads(Duration::from_millis(10));
@@ -1419,7 +1455,15 @@ async fn republishing_is_idempotent_and_a_different_artifact_is_refused() {
             .expect("delete the attempt transport");
         assert!(
             fixture.home.exact_full_read_max_inflight() > 1,
-            "attempt cleanup reads independent slots concurrently",
+            "attempt cleanup reads the objects it found concurrently",
+        );
+        assert!(
+            fixture
+                .home
+                .keys()
+                .iter()
+                .all(|key| !key.starts_with(&bundle.transport.attempt_namespace)),
+            "the teardown removed the namespace, including what it has no kind for",
         );
     })
     .await
@@ -2185,14 +2229,12 @@ async fn run_a_join_that_never_waits_spends_a_fixed_number_of_transport_operatio
     // Six artifacts the exchange moves, the request this resume republishes and
     // the read that confirms its slot, the step waits' first look at the
     // abandonment slot, and the teardown's probe of every slot an attempt can
-    // hold before it deletes the ones it finds. Six of those probes are gone
-    // with the kinds that no longer exist: two owner-to-administrator handoffs,
-    // because one device admits and never hands an artifact to itself, and four
-    // belonging to the post-approval unwind, which a regretted approval no
-    // longer has — member removal and a key rotation are the remedy.
+    // hold before it deletes the ones it finds — which is now one listing and a
+    // read per object that is really there, rather than a probe for every name
+    // the build knows.
     assert_eq!(
         artifacts.len(),
-        15,
+        9,
         "the joining device made {} artifact operations on a join with no waiting in it: {artifacts:?}",
         artifacts.len(),
     );
