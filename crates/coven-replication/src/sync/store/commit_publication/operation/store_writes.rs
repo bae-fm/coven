@@ -7,6 +7,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.writer.device_id()
     }
 
+    pub(crate) fn membership(&self) -> &coven_protocol::membership::MembershipChain {
+        &self.membership
+    }
+
     pub(crate) fn local_registration_ref(
         &self,
     ) -> &coven_protocol::store_commit::StoreDeviceRegistrationRef {
@@ -341,8 +345,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) async fn reclaim_packages(
         &mut self,
+        settled: &crate::sync::store::SettledCycle,
     ) -> Result<reclaim::StoreReclaimResult, reclaim::StoreReclaimError> {
-        self.reclaim().run().await
+        self.reclaim().run(settled).await
     }
 
     pub(crate) fn reclaim(&mut self) -> reclaim::AuthorizedReclaim<'_, 'storage> {

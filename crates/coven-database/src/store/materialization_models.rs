@@ -290,6 +290,10 @@ pub struct InstalledReplayBaseline {
         coven_protocol::store_commit::ResolvedStoreDeviceState,
     >,
     summary: Option<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
+    /// The snapshot this baseline was installed or advanced from, when it came
+    /// from one. Naming it is what lets a device answer "am I already standing
+    /// on that?" without reading the snapshot back to compare coverages.
+    snapshot: Option<coven_protocol::store_commit::StoreSnapshotRef>,
 }
 
 impl Default for InstalledReplayBaseline {
@@ -303,6 +307,7 @@ impl Default for InstalledReplayBaseline {
             ),
             covered_states: std::collections::BTreeMap::new(),
             summary: None,
+            snapshot: None,
         }
     }
 }
@@ -315,12 +320,19 @@ impl InstalledReplayBaseline {
             coven_protocol::store_commit::ResolvedStoreDeviceState,
         >,
         summary: Option<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
+        snapshot: Option<coven_protocol::store_commit::StoreSnapshotRef>,
     ) -> Self {
         Self {
             coverage,
             covered_states,
             summary,
+            snapshot,
         }
+    }
+
+    /// Whether this baseline was installed from `snapshot` itself.
+    pub fn stands_on(&self, snapshot: &coven_protocol::store_commit::StoreSnapshotRef) -> bool {
+        self.snapshot.as_ref() == Some(snapshot)
     }
 
     /// The signed history summary standing for everything under the coverage.

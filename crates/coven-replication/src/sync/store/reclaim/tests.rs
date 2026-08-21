@@ -115,7 +115,7 @@ impl ReclaimJourneyFixture {
             .authorize_writer()
             .await
             .map_err(StoreReclaimError::from)?
-            .reclaim_packages()
+            .reclaim_packages(&crate::sync::store::SettledCycle::default())
             .await
     }
 

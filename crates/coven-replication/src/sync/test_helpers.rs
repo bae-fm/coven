@@ -270,6 +270,9 @@ impl CrossPrincipalTestDevice {
 
 pub struct TestStore {
     home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
+    /// Every provider operation this Store's devices have asked for, counted at
+    /// the same boundary a shipped home counts them.
+    provider_requests: Option<std::sync::Arc<dyn coven_foundation::stage_timing::ProviderRequests>>,
     storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
     root: coven_protocol::store_commit::StoreRootRef,
     signer: UserKeypair,
@@ -551,6 +554,9 @@ mod test_device {
         device_id: String,
         storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
         identity: UserKeypair,
+        /// One per device, for the device's life — the shape a sync loop has,
+        /// so repeated cycles here cost what repeated cycles cost there.
+        settled: std::sync::Arc<crate::sync::store::SettledCycle>,
     }
 
     impl TestDevice {
@@ -642,6 +648,7 @@ mod test_device {
                 device_id,
                 storage,
                 identity,
+                settled: std::sync::Arc::default(),
             })
         }
 
@@ -669,6 +676,7 @@ mod test_device {
                 device_id,
                 storage,
                 identity: identity.clone(),
+                settled: std::sync::Arc::default(),
             })
         }
 
@@ -920,6 +928,7 @@ mod test_device {
                 device_id,
                 storage,
                 identity,
+                settled: std::sync::Arc::default(),
             })
         }
 
@@ -2224,6 +2233,7 @@ mod test_device {
                 self.storage.store_id().to_string(),
                 self.device_id.clone(),
                 master_keys.unwrap_or_else(|| std::sync::Arc::new(super::TestCustody::default())),
+                self.settled.clone(),
             );
             components.run_cycle(clock, observer).await
         }
@@ -2428,7 +2438,7 @@ mod test_device {
                 .authorize_writer()
                 .await
                 .map_err(crate::sync::store::StoreReclaimError::from)?
-                .reclaim_packages()
+                .reclaim_packages(&crate::sync::store::SettledCycle::default())
                 .await
         }
 
@@ -3612,8 +3622,14 @@ impl TestStore {
         cipher: coven_storage::CloudCipher,
         blob_paths: coven_storage::BlobPathScheme,
     ) -> Result<TestStoreParts, TestError> {
+        // Counted the way a shipped home is counted, at the one boundary every
+        // provider call crosses, so a test can assert a settled cycle's budget
+        // in the same unit the cycle log reports it in.
+        let counted: std::sync::Arc<dyn coven_storage::ExactCloudHome> =
+            std::sync::Arc::new(coven_storage::cloud::CountingCloudHome::new(home.clone()));
+        let provider_requests = coven_storage::cloud::CloudHome::provider_requests(&*counted);
         let storage = std::sync::Arc::new(coven_storage::CloudSyncConnection::new(
-            home.clone(),
+            counted,
             cipher,
             blob_paths,
             store_id,
@@ -3630,6 +3646,7 @@ impl TestStore {
         let root = founder.store_root().clone();
         let store = Arc::new(Self {
             home,
+            provider_requests,
             storage: storage.clone(),
             root,
             signer,
@@ -3640,6 +3657,15 @@ impl TestStore {
             })),
         });
         Ok((store, storage))
+    }
+
+    /// Provider operations asked for so far. The unit the cycle log reports in,
+    /// so a budget written here is the budget read there.
+    pub fn provider_requests_issued(&self) -> u64 {
+        self.provider_requests
+            .as_ref()
+            .expect("test Store home is counted")
+            .issued()
     }
 
     pub fn protocol_founder_pubkey(&self) -> String {

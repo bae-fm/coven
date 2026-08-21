@@ -29,6 +29,7 @@ pub(super) mod protocol_root;
 pub(crate) mod pull;
 mod registration_object;
 pub(crate) mod restore;
+mod settled;
 pub(crate) mod snapshots;
 use registration_object::prepare_registration_object;
 
@@ -103,6 +104,7 @@ pub use reclaim::StorePackageReclaimCoverage;
 pub use reclaim::StorePackageReclaimReport;
 pub use reclaim::StoreReclaimError;
 pub use reclaim::StoreReclaimResult;
+pub(crate) use settled::{CycleInputs, SettledCycle};
 
 pub use authorization::StoreInitializationError;
 pub use authorization::StoreRegistrationError;

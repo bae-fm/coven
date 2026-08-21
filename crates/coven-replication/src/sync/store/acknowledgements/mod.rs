@@ -145,6 +145,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         &mut self,
         sync_time: &str,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        settled: &crate::sync::store::SettledCycle,
     ) -> Result<Option<coven_database::AdvancedReplayBaseline>, SyncCycleFailure> {
         Box::pin(self.drain_acknowledgements())
             .await
@@ -171,10 +172,11 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         let StagedStoreAcknowledgement {
             acknowledgement,
             baseline_advance,
-        } = Box::pin(self.stage_acknowledgement(
+        } = Box::pin(self.stage_acknowledgement_against(
             frontier.clone(),
             sync_time.to_owned(),
             routing_encryption,
+            Some(settled),
         ))
         .await
         .map_err(|error| SyncCycleFailure::operation("stage Store acknowledgement", error))?;
@@ -251,6 +253,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         frontier: &CommitFrontier,
         device_state: &coven_protocol::store_commit::StoreDeviceStateRef,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        settled: Option<&crate::sync::store::SettledCycle>,
     ) -> Result<
         (
             Option<StoreSnapshotLocator>,
@@ -258,11 +261,38 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         ),
         StoreAckError,
     > {
-        let Some(selected) = self
+        // Which snapshot a device could acknowledge next is settled by the same
+        // local facts reclaim's answer is, and reaching it means reading every
+        // activated device's snapshot stream. A device with nothing new to say
+        // asks that question every cycle and gets the same answer, so the
+        // answer is remembered against the facts it was reached from and the
+        // read is skipped until one of them moves.
+        let inputs = match settled {
+            Some(settled) => {
+                let inputs =
+                    crate::sync::store::CycleInputs::read(&self.database, self.writer.membership())
+                        .await?;
+                if let Some(remembered) = settled.acknowledgeable_snapshot(&inputs) {
+                    return Ok((remembered, None));
+                }
+                Some((settled, inputs))
+            }
+            None => None,
+        };
+        let selected = self
             .writer
             .select_acknowledgement_snapshot(frontier, device_state)
-            .await?
-        else {
+            .await?;
+        if let Some((settled, inputs)) = &inputs {
+            settled.record_acknowledgeable_snapshot(
+                inputs.clone(),
+                selected.as_ref().map(|selected| StoreSnapshotLocator {
+                    author_registration: selected.snapshot.meta.author_registration.clone(),
+                    snapshot: selected.snapshot.reference.clone(),
+                }),
+            );
+        }
+        let Some(selected) = selected else {
             return Ok((None, None));
         };
         let locator = StoreSnapshotLocator {
@@ -311,11 +341,23 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
     ///
     /// Returns the acknowledgement it staged, or `None` when the standing one
     /// still holds, alongside what advancing the baseline retired.
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn stage_acknowledgement(
         &mut self,
         frontier: CommitFrontier,
         sync_time: String,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<StagedStoreAcknowledgement, StoreAckError> {
+        self.stage_acknowledgement_against(frontier, sync_time, routing_encryption, None)
+            .await
+    }
+
+    async fn stage_acknowledgement_against(
+        &mut self,
+        frontier: CommitFrontier,
+        sync_time: String,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        settled: Option<&crate::sync::store::SettledCycle>,
     ) -> Result<StagedStoreAcknowledgement, StoreAckError> {
         let history_cut =
             coven_protocol::store_commit::StoreHistoryCut::from_commits(frontier.commits().clone());
@@ -325,7 +367,12 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             .await?;
         let previous = self.database.latest_local_store_ack().await?;
         let (snapshot, baseline_advance) = self
-            .stand_on_the_snapshot_it_will_name(&frontier, &device_state, routing_encryption)
+            .stand_on_the_snapshot_it_will_name(
+                &frontier,
+                &device_state,
+                routing_encryption,
+                settled,
+            )
             .await?;
         let acknowledgement = self
             .say_acknowledgement(history_cut, device_state, previous, snapshot, sync_time)

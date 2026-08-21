@@ -119,26 +119,29 @@ impl StoreSession<'_> {
             )?;
         // A genesis baseline covers nothing, so there is nothing under it to
         // summarize and every walk runs to the bottom as it always did.
-        let summary =
+        let (summary, snapshot) =
             match crate::store::retained_replay::load_replay_baseline_metadata_on(records)? {
-                Some(baseline)
-                    if matches!(
-                        baseline.authority,
-                        crate::RetainedReplayAuthority::InstalledSnapshot(_)
-                    ) =>
-                {
-                    Some(
-                        crate::StoreDatabase::open_installed_baseline_history_summary(
-                            records, &baseline,
-                        )?,
-                    )
-                }
-                _ => None,
+                Some(baseline) => match &baseline.authority {
+                    crate::RetainedReplayAuthority::InstalledSnapshot(authority) => {
+                        let snapshot = authority.snapshot.clone();
+                        (
+                            Some(
+                                crate::StoreDatabase::open_installed_baseline_history_summary(
+                                    records, &baseline,
+                                )?,
+                            ),
+                            Some(snapshot),
+                        )
+                    }
+                    crate::RetainedReplayAuthority::Genesis(_) => (None, None),
+                },
+                None => (None, None),
             };
         Ok(crate::InstalledReplayBaseline::new(
             coverage,
             covered_states,
             summary,
+            snapshot,
         ))
     }
 

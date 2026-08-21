@@ -203,6 +203,17 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             return Ok(Err(ReplayBaselineDecline::NoAcknowledgedSnapshot));
         };
         let generation = locator.snapshot.generation;
+        // The steady state, answered without asking the provider anything: this
+        // baseline was installed from that very snapshot, so there is nothing
+        // to load and nothing to stand on again.
+        if self
+            .history_verifier
+            .replay_baseline_stands_on(&locator.snapshot)
+        {
+            return Ok(Err(ReplayBaselineDecline::BaselineAtCoverage {
+                generation,
+            }));
+        }
         let author = self
             .database
             .activated_store_device_registration_records()

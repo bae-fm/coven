@@ -1208,6 +1208,22 @@ impl AcknowledgedHistory {
             .expect("load retained verified Merge history")
     }
 
+    /// Provider operations a cycle with nothing new to do asks for — every
+    /// call, not only the reads, which is the unit the cycle log budgets in.
+    async fn settled_cycle_requests(&self) -> u64 {
+        self.device.run_cycle(None).await.expect("settle the cycle");
+        self.device
+            .run_cycle(None)
+            .await
+            .expect("settle the acknowledgement it just made");
+        let before = self._store.provider_requests_issued();
+        self.device
+            .run_cycle(None)
+            .await
+            .expect("run a settled cycle");
+        self._store.provider_requests_issued() - before
+    }
+
     /// Provider reads made by a cycle that has nothing new to do. The first
     /// settling cycle publishes this device's own acknowledgement of what it
     /// just pulled; the one measured after that is the steady state.
@@ -1294,6 +1310,52 @@ async fn acknowledged_history_depth_does_not_change_what_a_settled_cycle_reads()
         shallow, deep,
         "a settled cycle's provider reads grew with two-device history depth: \
          two rounds read {shallow}, six read {deep}",
+    );
+}
+
+/// A settled store's cycle is local.
+///
+/// Everything a cycle asks the provider for at rest is a probe for something
+/// new: one announcement slot per author stream, one owner-recovery slot, and
+/// the membership heads. Everything else it needs it already knows, and the
+/// three stages that used to re-derive their answers every thirty seconds —
+/// which snapshot to acknowledge, whether to stand on one, and whether any
+/// package may be reclaimed — now ask only when a local fact they depend on has
+/// moved. A live store spent thirty-one of its thirty-nine cycle seconds and
+/// 391 of its 457 requests re-deriving "nothing to do".
+///
+/// The number is exact on purpose. A budget written as "not too many" is one
+/// nobody notices doubling.
+#[tokio::test]
+async fn a_settled_cycle_asks_the_provider_only_for_what_could_be_new() {
+    let settled = AcknowledgedHistory::publish(4)
+        .await
+        .settled_cycle_requests()
+        .await;
+
+    assert_eq!(
+        settled, 14,
+        "a settled two-device cycle asked the provider for {settled} operations",
+    );
+}
+
+/// And the budget is a property of the store's shape, not of how much has
+/// happened in it.
+#[tokio::test]
+async fn history_depth_does_not_change_what_a_settled_cycle_asks_for() {
+    let shallow = AcknowledgedHistory::publish(2)
+        .await
+        .settled_cycle_requests()
+        .await;
+    let deep = AcknowledgedHistory::publish(6)
+        .await
+        .settled_cycle_requests()
+        .await;
+
+    assert_eq!(
+        shallow, deep,
+        "a settled cycle's provider operations grew with history depth: two \
+         rounds asked for {shallow}, six asked for {deep}",
     );
 }
 

@@ -528,6 +528,18 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.history.baseline.coverage().covers(coverage)
     }
 
+    /// Whether this device's replay baseline was installed from `snapshot`.
+    ///
+    /// The local answer to "am I already standing on that?", which is what
+    /// keeps a settled cycle from reading a snapshot back to compare coverages
+    /// it already stands at.
+    pub(crate) fn replay_baseline_stands_on(
+        &self,
+        snapshot: &store_commit::StoreSnapshotRef,
+    ) -> bool {
+        self.history.baseline.stands_on(snapshot)
+    }
+
     /// The newest snapshot `registration` has published an acknowledgement of.
     pub(crate) fn newest_acknowledged_snapshot(
         &self,

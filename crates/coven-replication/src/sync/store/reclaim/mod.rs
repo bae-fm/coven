@@ -223,6 +223,10 @@ pub enum StorePackageReclaimCoverage {
     MissingAcknowledgement { member: String, device_id: String },
     /// This device is not the current owner, so it does not reclaim at all.
     NotOwner,
+    /// Nothing this evaluation depends on has changed since the last one, so
+    /// its answer is the last one. The steady state of a settled store, and the
+    /// only outcome here that reaches the provider not at all.
+    InputsUnchanged,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -333,9 +337,16 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         self.writer.reclaim_history()
     }
 
-    pub(super) async fn run(&mut self) -> Result<StoreReclaimResult, StoreReclaimError> {
+    pub(super) async fn run(
+        &mut self,
+        settled: &crate::sync::store::SettledCycle,
+    ) -> Result<StoreReclaimResult, StoreReclaimError> {
         let database = self.database.clone();
         let membership = self.membership.clone();
+        // Journalled work first, always. An operation this device authorized and
+        // did not finish is durable state waiting on its author, and gating that
+        // behind "did anything change" would leave it waiting on an unrelated
+        // event.
         let mut packages_deleted = Box::pin(self.resume_operations()).await?;
         if !self.writer.is_current_owner(&membership) {
             return Ok(StoreReclaimResult {
@@ -343,6 +354,22 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 physical_copies_deleted: packages_deleted,
                 store_packages: StorePackageReclaimReport::declined(
                     StorePackageReclaimCoverage::NotOwner,
+                ),
+            });
+        }
+        // The evaluation below walks every candidate snapshot's stability and
+        // every device's acknowledgement chain. Its answer is a function of
+        // facts this database holds, so running it again against the same ones
+        // spends the provider to reach a conclusion already reached.
+        let inputs = crate::sync::store::CycleInputs::read(&database, &membership)
+            .await
+            .map_err(StoreReclaimError::Database)?;
+        if settled.reclaim_evaluated(&inputs) {
+            return Ok(StoreReclaimResult {
+                packages_deleted,
+                physical_copies_deleted: packages_deleted,
+                store_packages: StorePackageReclaimReport::declined(
+                    StorePackageReclaimCoverage::InputsUnchanged,
                 ),
             });
         }
@@ -421,6 +448,9 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             .ok_or_else(|| {
                 StoreReclaimError::Authorization("reclaimed package count exceeded u64".to_string())
             })?;
+        // Recorded only once the evaluation has run all the way through, so a
+        // run that failed partway is re-run rather than remembered as settled.
+        settled.record_reclaim_evaluated(inputs);
         Ok(StoreReclaimResult {
             packages_deleted,
             physical_copies_deleted: packages_deleted,

@@ -219,6 +219,7 @@ struct AuthorizedSyncCycle<'cycle, 'store> {
     routing_encryption: Option<&'cycle coven_keys::encryption::EncryptionService>,
     local_blob_access: &'cycle super::store::blob::LocalStoreBlobAccess,
     observer: Option<&'cycle dyn BlobTransitionObserver>,
+    settled: &'cycle super::store::SettledCycle,
     authorization: AuthorizedWriterOperation<'store>,
 }
 
@@ -287,11 +288,11 @@ impl AuthorizedSyncCycle<'_, '_> {
             timings
                 .stage(
                     "publish acknowledgements",
-                    Box::pin(
-                        self.authorization
-                            .acknowledgements()
-                            .stage_and_publish(&completed.sync_time, routing_encryption),
-                    ),
+                    Box::pin(self.authorization.acknowledgements().stage_and_publish(
+                        &completed.sync_time,
+                        routing_encryption,
+                        self.settled,
+                    )),
                 )
                 .await
                 .map(Self::report_baseline_advance)?;
@@ -630,7 +631,7 @@ impl AuthorizedSyncCycle<'_, '_> {
     async fn reclaim_packages(&mut self) -> Result<(), SyncCycleFailure> {
         use super::store::StorePackageReclaimCoverage;
 
-        let result = match self.authorization.reclaim_packages().await {
+        let result = match self.authorization.reclaim_packages(self.settled).await {
             Ok(result) => result,
             Err(error) => return Err(SyncCycleFailure::operation("reclaim Store packages", error)),
         };
@@ -647,6 +648,9 @@ impl AuthorizedSyncCycle<'_, '_> {
             }
             StorePackageReclaimCoverage::NotOwner => {
                 "this device is not the current owner".to_string()
+            }
+            StorePackageReclaimCoverage::InputsUnchanged => {
+                "inputs unchanged since the last evaluation".to_string()
             }
         };
         info!(
@@ -844,6 +848,7 @@ impl PreparedSyncComponents {
             master_keys: self.master_keys,
             blob_transitions,
             blob_access,
+            settled: std::sync::Arc::default(),
         })
     }
 
@@ -884,6 +889,10 @@ pub struct SyncComponents {
     master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
     blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
     blob_access: std::sync::Arc<super::store::blob::RemoteStoreBlobAccess>,
+    /// What this loop's provider-side evaluations last ran against, so a cycle
+    /// over an unchanged store re-derives none of them. Lives here because it
+    /// is the only thing that outlives a cycle.
+    settled: std::sync::Arc<super::store::SettledCycle>,
 }
 
 impl SyncComponents {
@@ -1442,6 +1451,7 @@ impl SyncComponents {
             routing_encryption: self.routing_encryption.as_ref(),
             local_blob_access: &self.local_blob_access,
             observer,
+            settled: self.settled.as_ref(),
             authorization,
         }
         .run()
@@ -1449,6 +1459,7 @@ impl SyncComponents {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_retained_test_device<S>(
         store: std::sync::Arc<Store>,
         database: coven_database::StoreDatabase,
@@ -1457,6 +1468,11 @@ impl SyncComponents {
         store_id: String,
         device_id: String,
         master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
+        // Carried in rather than defaulted: a sync loop keeps one of these for
+        // its whole life, so a fixture that built a fresh one per cycle would
+        // measure a device that forgets everything between cycles — which is
+        // the opposite of what the memo is for.
+        settled: std::sync::Arc<super::store::SettledCycle>,
     ) -> Self
     where
         S: CloudSyncCycleConnection + 'static,
@@ -1491,6 +1507,7 @@ impl SyncComponents {
             master_keys,
             blob_transitions,
             blob_access,
+            settled,
         }
     }
 
