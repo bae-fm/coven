@@ -604,7 +604,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let database = self.database.clone();
         let storage = Arc::clone(self.storage);
         let root = self.store_root().clone();
-        let protocol_root = self.protocol_root().clone();
         let verified_root = self.history.verified_root_object().clone();
         let membership = self.membership.clone();
         let local_writer = Arc::clone(&self.writer);
@@ -613,7 +612,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             database,
             storage,
             root,
-            protocol_root,
             verified_root,
             membership,
             local_writer,

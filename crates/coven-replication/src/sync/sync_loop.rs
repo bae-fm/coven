@@ -427,31 +427,6 @@ impl SyncLoopHandle {
             .await
     }
 
-    pub async fn cancel_device_join_transport(
-        &self,
-        bundle: &crate::sync::DeviceJoinOfferBundle,
-        timing: crate::sync::DeviceJoinTransportTiming,
-    ) -> Result<
-        crate::sync::DeviceJoinCleanupActivation,
-        crate::sync::store::DeviceJoinTransportError,
-    > {
-        self.inner
-            .components
-            .cancel_device_join_transport(bundle, timing)
-            .await
-    }
-
-    pub async fn abort_device_join_transport(
-        &self,
-        bundle: &crate::sync::DeviceJoinOfferBundle,
-        timing: crate::sync::DeviceJoinTransportTiming,
-    ) -> Result<(), crate::sync::store::DeviceJoinTransportError> {
-        self.inner
-            .components
-            .abort_device_join_transport(bundle, timing)
-            .await
-    }
-
     pub async fn abandon_device_join_transport(
         &self,
         bundle: &crate::sync::DeviceJoinOfferBundle,
@@ -460,6 +435,16 @@ impl SyncLoopHandle {
         self.inner
             .components
             .abandon_device_join_transport(bundle)
+            .await
+    }
+
+    pub async fn abort_device_join_transport(
+        &self,
+        bundle: &crate::sync::DeviceJoinOfferBundle,
+    ) -> Result<(), crate::sync::store::DeviceJoinTransportError> {
+        self.inner
+            .components
+            .abort_device_join_transport(bundle)
             .await
     }
 
@@ -523,54 +508,6 @@ impl SyncLoopHandle {
         completion: crate::sync::DeviceProviderAdmissionCompletion,
     ) -> Result<crate::sync::DeviceJoinActivation, crate::sync::DeviceJoinError> {
         self.inner.components.finalize_device_join(completion).await
-    }
-
-    pub async fn cancel_device_join(
-        &self,
-        attempt: coven_protocol::DeviceJoinAttemptRef,
-    ) -> Result<crate::sync::DeviceJoinCancellation, crate::sync::DeviceJoinError> {
-        self.inner.components.cancel_device_join(attempt).await
-    }
-
-    pub async fn close_device_provider_admission(
-        &self,
-        cancellation: crate::sync::DeviceJoinCancellation,
-    ) -> Result<crate::sync::ProviderAdminJoinTerminal, crate::sync::DeviceJoinError> {
-        self.inner
-            .components
-            .close_device_provider_admission(cancellation)
-            .await
-    }
-
-    pub async fn revoke_joining_device_writes(
-        &self,
-        cancellation: crate::sync::DeviceJoinCancellation,
-        executor: &dyn crate::sync::DeviceJoinWriteRevocationExecutor,
-    ) -> Result<crate::sync::JoinerJoinTerminal, crate::sync::DeviceJoinError> {
-        self.inner
-            .components
-            .revoke_joining_device_writes(cancellation, executor)
-            .await
-    }
-
-    pub async fn activate_device_join_cleanup(
-        &self,
-        receipt: crate::sync::DeviceJoinCleanupReceipt,
-    ) -> Result<crate::sync::DeviceJoinCleanupActivation, crate::sync::DeviceJoinError> {
-        self.inner
-            .components
-            .activate_device_join_cleanup(receipt)
-            .await
-    }
-
-    pub async fn complete_owner_device_join_cleanup(
-        &self,
-        activation: crate::sync::DeviceJoinCleanupActivation,
-    ) -> Result<crate::sync::DeviceJoinCleanupActivation, crate::sync::DeviceJoinError> {
-        self.inner
-            .components
-            .complete_owner_device_join_cleanup(activation)
-            .await
     }
 
     pub fn config(&self) -> &Config {

@@ -282,7 +282,6 @@ fn merge_candidate_matches_finalization(
         && operations.acknowledgement.is_none()
         && operations.device_join_attempt_decisions.is_empty()
         && operations.device_join_outcomes.is_empty()
-        && operations.device_join_cleanup_receipts.is_empty()
         && operations.provider_access_grants.is_empty()
         && operations.device_registrations.is_empty()
         && operations.device_exclusion_proposals.is_empty()

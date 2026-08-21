@@ -348,14 +348,19 @@ impl DeviceReadinessProof {
     }
 }
 
-/// How a join attempt ended: with the joining device active, or cancelled.
+/// How a join attempt ended. An attempt that reaches an outcome activated the
+/// joining device: there is no way to take an approval back, because the
+/// approval is what granted the device storage access, and revoking that is
+/// member removal and a key rotation.
+///
+/// Sentinel: still an enum because the outcome object class is deleted in the
+/// change that stops writing join proof files, which removes this with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceJoinDisposition {
     Activated {
         registration: StoreDeviceRegistrationRef,
     },
-    Cancelled,
 }
 
 /// The wire body of a join attempt's outcome. Every field here is signed.
@@ -434,11 +439,6 @@ pub enum DeviceJoinOutcomeRef {
         outcome_hash: ObjectHash,
         object: ExactObjectRef,
     },
-    Cancelled {
-        attempt: DeviceJoinAttemptRef,
-        outcome_hash: ObjectHash,
-        object: ExactObjectRef,
-    },
 }
 
 impl DeviceJoinOutcomeRef {
@@ -448,35 +448,23 @@ impl DeviceJoinOutcomeRef {
 
     pub fn object(&self) -> &ExactObjectRef {
         match self {
-            Self::Activated { object, .. } | Self::Cancelled { object, .. } => object,
+            Self::Activated { object, .. } => object,
         }
     }
 
     pub fn attempt(&self) -> &DeviceJoinAttemptRef {
         match self {
-            Self::Activated { attempt, .. } | Self::Cancelled { attempt, .. } => attempt,
+            Self::Activated { attempt, .. } => attempt,
         }
     }
 
     pub fn verify_outcome(&self, outcome: &DeviceJoinOutcome) -> Result<(), StoreProtocolError> {
-        let (attempt, expected_hash, expects_activated) = match self {
-            Self::Activated {
-                attempt,
-                outcome_hash,
-                ..
-            } => (attempt, outcome_hash, true),
-            Self::Cancelled {
-                attempt,
-                outcome_hash,
-                ..
-            } => (attempt, outcome_hash, false),
-        };
-        if &outcome.attempt != attempt || outcome.outcome_hash() != *expected_hash {
-            return Err(StoreProtocolError::JoinOutcomeMismatch);
-        }
-        if expects_activated
-            != matches!(outcome.disposition, DeviceJoinDisposition::Activated { .. })
-        {
+        let Self::Activated {
+            attempt,
+            outcome_hash,
+            ..
+        } = self;
+        if &outcome.attempt != attempt || outcome.outcome_hash() != *outcome_hash {
             return Err(StoreProtocolError::JoinOutcomeMismatch);
         }
         Ok(())
@@ -537,13 +525,5 @@ pub struct OwnerRecoveryCursor {
 pub struct DeviceJoinAbandonmentRef {
     pub attempt_id: DeviceJoinAttemptId,
     pub abandonment_hash: ObjectHash,
-    pub object: ExactObjectRef,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeviceJoinCleanupReceiptRef {
-    pub attempt_id: DeviceJoinAttemptId,
-    pub receipt_hash: ObjectHash,
     pub object: ExactObjectRef,
 }

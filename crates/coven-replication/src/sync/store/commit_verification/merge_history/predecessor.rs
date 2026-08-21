@@ -126,19 +126,6 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         .map(|found| matches!(found, PredecessorSearch::Found(_)))
     }
 
-    fn contains_join_outcome(
-        &self,
-        expected: &DeviceJoinOutcomeRef,
-    ) -> Result<bool, StorePullError> {
-        self.find(None, |_, commit| {
-            commit
-                .device_join_outcomes()
-                .binary_search(expected)
-                .is_ok()
-        })
-        .map(|found| matches!(found, PredecessorSearch::Found(_)))
-    }
-
     /// Bind a row blob to the package that published it. The blob is never named in a
     /// commit body — only inside the package's bindings — so what a commit establishes
     /// is that the named package was activated by a commit in this device's
@@ -261,53 +248,6 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         Ok(())
     }
 
-    pub(super) fn validate_commit_join_cleanup_receipts(
-        &self,
-        activating_author: &StoreDeviceRegistration,
-        predecessor: Option<&MembershipChain>,
-        join_evidence: &VerifiedCommitJoinEvidence,
-    ) -> Result<(), RegistrationLoadError> {
-        let predecessor = predecessor.ok_or_else(|| {
-            RegistrationLoadError::Invalid(
-                "device join cleanup activation has no exact predecessor authority".to_string(),
-            )
-        })?;
-        if !predecessor.is_owner_now(&activating_author.author_pubkey) {
-            return Err(RegistrationLoadError::Invalid(
-                "device join cleanup activation author is not an active Owner".to_string(),
-            ));
-        }
-        for loaded in &join_evidence.cleanup_receipts {
-            if !self
-                .contains_join_outcome(&loaded.receipt.cancellation)
-                .map_err(registration_attempt_error)?
-            {
-                return Err(RegistrationLoadError::Invalid(
-                    "device join cleanup receipt outcome is absent from its verified predecessor history"
-                        .to_string(),
-                ));
-            }
-            let attempt = join_evidence.attempts.get(&loaded.attempt).ok_or_else(|| {
-                RegistrationLoadError::Invalid(
-                    "device join cleanup receipt has no verified exact attempt".to_string(),
-                )
-            })?;
-            let expected_administrator = &attempt.provider_approval.request.offer.provider_admin;
-            if !predecessor_verifies_provider_administrator(
-                predecessor,
-                &loaded.receipt.provider_admin_grant,
-                &loaded.receipt.executor,
-                expected_administrator,
-            ) {
-                return Err(RegistrationLoadError::Invalid(
-                    "device join cleanup executor is not the exact effective provider administrator"
-                        .to_string(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
     pub(super) fn verify_commit_join_evidence(
         &self,
         commit: &StoreBatchCommit,
@@ -318,7 +258,6 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
             return Ok(VerifiedCommitJoinEvidence {
                 commit: commit.clone(),
                 attempts: BTreeMap::new(),
-                cleanup_receipts: loaded.cleanup_receipts,
             });
         }
         let mut attempts = BTreeMap::new();
@@ -361,7 +300,6 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         Ok(VerifiedCommitJoinEvidence {
             commit: commit.clone(),
             attempts,
-            cleanup_receipts: loaded.cleanup_receipts,
         })
     }
 }

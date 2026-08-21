@@ -1,69 +1,6 @@
 use super::*;
 
 impl<'a> MergeHistoryVerifier<'a> {
-    pub(crate) async fn load_device_join_cleanup_activation(
-        &mut self,
-        activation: &device_join::DeviceJoinCleanupActivation,
-    ) -> Result<LoadedDeviceJoinCleanupActivation, StorePullError> {
-        let verified_commit = self.load_ref(&activation.activation).await?;
-        if verified_commit.value().device_join_cleanup_receipts()
-            != std::slice::from_ref(&activation.receipt)
-        {
-            return Err(StorePullError::InvalidState(
-                "device join cleanup activation does not contain its exact sole receipt"
-                    .to_string(),
-            ));
-        }
-        let receipts = self
-            .load_commit_join_cleanup_receipts(verified_commit.value(), verified_commit.author())
-            .await
-            .map_err(StorePullError::from)?;
-        Ok(LoadedDeviceJoinCleanupActivation {
-            verified_commit,
-            receipts,
-        })
-    }
-
-    pub(crate) async fn verify_device_join_cleanup_activation(
-        &mut self,
-        activation: LoadedDeviceJoinCleanupActivation,
-    ) -> Result<
-        coven_protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
-        StorePullError,
-    > {
-        let membership = self
-            .load_predecessor_membership(&activation.verified_commit.value().membership_state)
-            .await
-            .map_err(StorePullError::from)?;
-        if !membership.is_owner_now(&activation.verified_commit.author().author_pubkey) {
-            return Err(StorePullError::InvalidState(
-                "device join cleanup activation author is not an active Merge Owner".to_string(),
-            ));
-        }
-        let [loaded] = <[_; 1]>::try_from(activation.receipts).map_err(|_| {
-            StorePullError::InvalidState(
-                "device join cleanup activation does not resolve to one verified receipt"
-                    .to_string(),
-            )
-        })?;
-        let attempt = self
-            .verify_device_join_attempt_evidence(loaded.attempt)
-            .await?;
-        let expected = &attempt.value.provider_approval.request.offer.provider_admin;
-        if !predecessor_verifies_provider_administrator(
-            &membership,
-            &loaded.receipt.provider_admin_grant,
-            &loaded.receipt.executor,
-            expected,
-        ) {
-            return Err(StorePullError::InvalidState(
-                "device join cleanup executor is not the effective Merge provider administrator"
-                    .to_string(),
-            ));
-        }
-        Ok(loaded.receipt.joiner_terminal.clone())
-    }
-
     pub(super) async fn validate_commit_join_abandonments(
         &self,
         commit: &StoreBatchCommit,
@@ -114,103 +51,6 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .map_err(RegistrationLoadError::from)?;
         }
         Ok(())
-    }
-
-    async fn load_commit_join_cleanup_receipts(
-        &self,
-        commit: &StoreBatchCommit,
-        activating_author: &StoreDeviceRegistration,
-    ) -> Result<Vec<LoadedCommitJoinCleanupReceipt>, RegistrationLoadError> {
-        let mut receipts = Vec::with_capacity(commit.device_join_cleanup_receipts().len());
-        for reference in commit.device_join_cleanup_receipts() {
-            let context = ProtocolObjectContext::signed_plaintext(
-                self.root.reference().store_root_hash,
-                ProtocolObjectDomain::DeviceJoinCleanupReceipt,
-            );
-            let semantic_prefix =
-                store_commit::device_join_cleanup_receipt_semantic_prefix(reference.attempt_id);
-            let bytes = self
-                .commit_verifier
-                .read_protocol_object(&context, &reference.object, &semantic_prefix)
-                .await
-                .map_err(RegistrationLoadError::Object)?;
-            let receipt: device_join::DeviceJoinCleanupReceiptObject =
-                serde_json::from_slice(&bytes).map_err(RegistrationLoadError::from)?;
-            if receipt.executor != commit.author_registration
-                || receipt.membership != commit.membership_state
-            {
-                return Err(RegistrationLoadError::Invalid(
-                    "device join cleanup receipt differs from its activating predecessor"
-                        .to_string(),
-                ));
-            }
-            let attempt_ref = receipt.cancellation.attempt();
-            let (attempt, owner) = self
-                .load_device_join_attempt_and_owner(attempt_ref)
-                .await
-                .map_err(RegistrationLoadError::Object)?;
-            let attempt = self
-                .validate_device_join_attempt_evidence(attempt, &owner.value)
-                .await
-                .map_err(registration_attempt_error)?;
-            let expected_administrator = &attempt
-                .attempt
-                .value
-                .provider_approval
-                .request
-                .offer
-                .provider_admin;
-            if activating_author.provider != expected_administrator.provider
-                || attempt
-                    .attempt
-                    .value
-                    .provider_approval
-                    .request
-                    .offer
-                    .provider
-                    != self.root.protocol().descriptor.provider
-            {
-                return Err(RegistrationLoadError::Invalid(
-                    "device join cleanup executor differs from its exact provider authority"
-                        .to_string(),
-                ));
-            }
-            reference
-                .verify(&receipt, activating_author)
-                .and_then(|_| receipt.verify(&attempt.attempt.value, activating_author))
-                .map_err(RegistrationLoadError::from)?;
-            match &receipt.administrator_terminal {
-                device_join::ProviderAdminJoinTerminal::Completed(_) => {}
-                device_join::ProviderAdminJoinTerminal::Cancelled(closure) => {
-                    let administrator = self
-                        .load_registration(&closure.administrator_registration)
-                        .await
-                        .map_err(RegistrationLoadError::Object)?
-                        .value;
-                    closure
-                        .verify(&administrator)
-                        .map_err(RegistrationLoadError::from)?;
-                }
-            }
-            match &receipt.joiner_terminal {
-                device_join::JoinerJoinTerminal::Ready(_) => {}
-                device_join::JoinerJoinTerminal::Cancelled(closure) => {
-                    closure.verify().map_err(RegistrationLoadError::from)?
-                }
-                device_join::JoinerJoinTerminal::WriteRevoked(revocation) => {
-                    let executor = self
-                        .load_registration(&revocation.executor)
-                        .await
-                        .map_err(RegistrationLoadError::Object)?
-                        .value;
-                    revocation
-                        .verify(&executor)
-                        .map_err(RegistrationLoadError::from)?;
-                }
-            }
-            receipts.push(LoadedCommitJoinCleanupReceipt { receipt, attempt });
-        }
-        Ok(receipts)
     }
 
     pub(crate) async fn validate_device_join_attempt_evidence(
@@ -489,21 +329,8 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn load_commit_join_evidence(
         &self,
         commit: &StoreBatchCommit,
-        activating_author: &StoreDeviceRegistration,
     ) -> Result<LoadedCommitJoinEvidence, RegistrationLoadError> {
-        let loaded_cleanup = self
-            .load_commit_join_cleanup_receipts(commit, activating_author)
-            .await?;
         let mut attempts = BTreeMap::new();
-        let mut cleanup_receipts = Vec::with_capacity(loaded_cleanup.len());
-        for loaded in loaded_cleanup {
-            let attempt = loaded.receipt.cancellation.attempt().clone();
-            attempts.entry(attempt.clone()).or_insert(loaded.attempt);
-            cleanup_receipts.push(CommitJoinCleanupReceiptEvidence {
-                receipt: loaded.receipt,
-                attempt,
-            });
-        }
         let references = commit
             .device_join_attempt_decisions()
             .iter()
@@ -533,10 +360,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .map_err(registration_attempt_error)?;
             attempts.insert(reference, evidence);
         }
-        Ok(LoadedCommitJoinEvidence {
-            attempts,
-            cleanup_receipts,
-        })
+        Ok(LoadedCommitJoinEvidence { attempts })
     }
 
     pub(crate) async fn validate_commit_join_outcomes(

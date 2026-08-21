@@ -119,7 +119,7 @@ impl StoreDevicePairing {
         if let Some(bytes) = host.cancellation_invitation(request)? {
             let invitation = coven_domain::joining::DeviceJoinInvite::from_bytes(&bytes)?;
             self.sync
-                .abort_device_join_transport(&invitation.bundle, timing)
+                .abort_device_join_transport(&invitation.bundle)
                 .await?;
             host.finish()?;
             return Err(ApproveDevicePairingError::Cancelled);
@@ -148,7 +148,7 @@ impl StoreDevicePairing {
             () = &mut cancellation => {
                 host.cancel()?;
                 self.sync
-                    .abort_device_join_transport(&invitation.bundle, timing)
+                    .abort_device_join_transport(&invitation.bundle)
                     .await?;
                 host.finish()?;
                 return Err(ApproveDevicePairingError::Cancelled);
@@ -164,11 +164,10 @@ impl StoreDevicePairing {
         &self,
         host: &DevicePairingHost,
     ) -> Result<(), ApproveDevicePairingError> {
-        let timing = crate::DeviceJoinTransportTiming::interactive();
         if let Some(bytes) = host.cancel()? {
             let invitation = coven_domain::joining::DeviceJoinInvite::from_bytes(&bytes)?;
             self.sync
-                .abort_device_join_transport(&invitation.bundle, timing)
+                .abort_device_join_transport(&invitation.bundle)
                 .await?;
         }
         host.finish()?;

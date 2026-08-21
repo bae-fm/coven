@@ -17,10 +17,9 @@ use crate::joining::client::{
 };
 use coven_foundation::config::Config;
 use coven_replication::sync::store::{
-    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
-    DeviceJoinCleanupActivation, DeviceJoinOfferBundle, DeviceJoinRole, DeviceJoinStatus,
-    DeviceJoinStep, DeviceJoinTransport, DeviceJoinTransportTiming,
-    DeviceProviderAdmissionApproval, ProviderReadyDeviceBootstrap,
+    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinOfferBundle,
+    DeviceJoinRole, DeviceJoinStatus, DeviceJoinStep, DeviceJoinTransport,
+    DeviceJoinTransportTiming, DeviceProviderAdmissionApproval, ProviderReadyDeviceBootstrap,
 };
 
 use coven_replication::sync::MemberAdmission;
@@ -442,9 +441,6 @@ pub enum DeviceJoinTransportOutcome {
     Joined(Config),
     /// The owner gave up on the attempt before it completed.
     Abandoned(DeviceJoinAbandonment),
-    /// The owner cancelled after the Store attempt had started; this device
-    /// completed the signed cleanup and removed its partial local Store.
-    Cancelled(DeviceJoinCancellation),
 }
 
 async fn publish_once(
@@ -468,6 +464,11 @@ impl DeviceJoinClient {
     /// a crash picks up where the last durable step left off — a republished
     /// artifact that is already at its slot is accepted as the same transfer,
     /// and an awaited artifact is simply read again.
+    ///
+    /// The admitting side can give up until it approves the join, and every
+    /// wait below watches for that. After it approves there is nothing to watch
+    /// for: the approval is what grants this device storage access, and taking
+    /// it back is member removal and a key rotation, not a message.
     pub(crate) async fn join_via_transport(
         &self,
         bundle: &DeviceJoinOfferBundle,
@@ -477,19 +478,8 @@ impl DeviceJoinClient {
     ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
         let storage = self.transport_storage().await?;
         let transport = DeviceJoinTransport::open(&storage, bundle, DeviceJoinRole::Joiner)?;
-        let joining =
-            self.drive_join_via_transport(&transport, bundle, timing, &on_progress, cancel);
-        let cancellation = transport.observe_artifact::<DeviceJoinCancellation>(timing);
-        tokio::pin!(joining);
-        tokio::pin!(cancellation);
-        tokio::select! {
-            result = &mut joining => result,
-            cancellation = &mut cancellation => {
-                let cancellation = cancellation?;
-                self.close_cancelled_join(&transport, cancellation.clone(), timing).await?;
-                Ok(DeviceJoinTransportOutcome::Cancelled(cancellation))
-            }
-        }
+        self.drive_join_via_transport(&transport, bundle, timing, &on_progress, cancel)
+            .await
     }
 
     async fn drive_join_via_transport(
@@ -679,40 +669,6 @@ impl DeviceJoinClient {
         }
     }
 
-    async fn close_cancelled_join(
-        &self,
-        transport: &DeviceJoinTransport<'_>,
-        cancellation: DeviceJoinCancellation,
-        timing: DeviceJoinTransportTiming,
-    ) -> Result<(), BootstrapError> {
-        let attempt_id = cancellation.outcome.attempt().attempt_id;
-        match self.device_join_status(attempt_id)? {
-            Some(DeviceJoinStatus::CleanupActivated { activation }) => {
-                self.complete_cancelled_device_join(activation).await?;
-                transport.delete_attempt_slots().await?;
-                return Ok(());
-            }
-            Some(DeviceJoinStatus::JoinerClosed { terminal }) => {
-                transport
-                    .publish(&DeviceJoinAction::TransferJoinerTerminal(terminal))
-                    .await?;
-            }
-            _ => {
-                let terminal = self.close_pending_device_join(cancellation).await?;
-                transport
-                    .publish(&DeviceJoinAction::TransferJoinerTerminal(terminal))
-                    .await?;
-            }
-        }
-
-        let activation = transport
-            .await_artifact::<DeviceJoinCleanupActivation>(timing)
-            .await?;
-        self.complete_cancelled_device_join(activation).await?;
-        transport.delete_attempt_slots().await?;
-        Ok(())
-    }
-
     /// Save the store and clear the attempt's namespace: the join is complete,
     /// so every artifact has been consumed and neither side has anything left
     /// to read.
@@ -752,29 +708,5 @@ impl DeviceJoinClient {
         let accepted = self.accept_device_join_abandonment(abandonment).await?;
         transport.delete_attempt_slots().await?;
         Ok(DeviceJoinTransportOutcome::Abandoned(accepted))
-    }
-
-    /// Carry a cancelled attempt through the transport to its activated
-    /// cleanup, then remove the attempt's transport slots.
-    ///
-    /// The joiner is the last reader in the unwind — it consumes the cleanup
-    /// activation the owner publishes last — so the deletion belongs here, at
-    /// the same point the joiner discards the rest of its pending join state.
-    #[cfg(test)]
-    pub(crate) async fn close_device_join_via_transport(
-        &self,
-        bundle: &DeviceJoinOfferBundle,
-        timing: DeviceJoinTransportTiming,
-    ) -> Result<(), BootstrapError> {
-        let storage = self.transport_storage().await?;
-        let transport = DeviceJoinTransport::open(&storage, bundle, DeviceJoinRole::Joiner)?;
-        let attempt_id = bundle.offer.attempt_id;
-
-        let cancellation = transport
-            .await_artifact::<DeviceJoinCancellation>(timing)
-            .await?;
-        debug_assert_eq!(cancellation.outcome.attempt().attempt_id, attempt_id);
-        self.close_cancelled_join(&transport, cancellation, timing)
-            .await
     }
 }

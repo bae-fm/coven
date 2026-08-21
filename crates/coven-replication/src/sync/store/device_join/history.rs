@@ -79,21 +79,6 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             .await
     }
 
-    pub(crate) async fn load_attempt_and_owner(
-        &self,
-        reference: &DeviceJoinAttemptRef,
-    ) -> Result<
-        (
-            coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
-            coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
-        ),
-        StoreObjectError,
-    > {
-        self.history
-            .load_device_join_attempt_and_owner(reference)
-            .await
-    }
-
     pub(crate) async fn load_outcome(
         &self,
         reference: &DeviceJoinOutcomeRef,

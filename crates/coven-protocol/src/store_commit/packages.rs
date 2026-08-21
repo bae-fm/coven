@@ -564,7 +564,6 @@ pub struct StoreCommitOperations {
     pub control: Option<StoreControl>,
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
-    pub device_join_cleanup_receipts: Vec<crate::store_commit::DeviceJoinCleanupReceiptRef>,
     pub provider_access_grants: Vec<crate::provider::StoreMemberProviderAccessGrantRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
@@ -586,7 +585,6 @@ impl StoreCommitOperations {
             && self.control.is_none()
             && self.device_join_attempt_decisions.is_empty()
             && self.device_join_outcomes.is_empty()
-            && self.device_join_cleanup_receipts.is_empty()
             && self.provider_access_grants.is_empty()
             && self.device_registrations.is_empty()
             && self.device_exclusion_proposals.is_empty()
@@ -601,7 +599,6 @@ impl StoreCommitOperations {
             && self.control.is_none()
             && self.device_join_attempt_decisions.is_empty()
             && self.device_join_outcomes.is_empty()
-            && self.device_join_cleanup_receipts.is_empty()
             && self.provider_access_grants.is_empty()
             && self.device_registrations.is_empty()
             && self.device_exclusion_proposals.is_empty()
@@ -637,7 +634,6 @@ pub struct StoreCommitOperationsInput<'a> {
     pub control: Option<StoreControl>,
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
-    pub device_join_cleanup_receipts: Vec<crate::store_commit::DeviceJoinCleanupReceiptRef>,
     pub provider_access_grants: Vec<crate::provider::StoreMemberProviderAccessGrantRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
@@ -657,7 +653,6 @@ impl StoreCommitOperationsInput<'_> {
             control: None,
             device_join_attempt_decisions: Vec::new(),
             device_join_outcomes: Vec::new(),
-            device_join_cleanup_receipts: Vec::new(),
             provider_access_grants: Vec::new(),
             device_registrations: Vec::new(),
             device_exclusion_proposals: Vec::new(),

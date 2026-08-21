@@ -1,4 +1,3 @@
-use super::join_validation::*;
 use super::*;
 
 #[derive(Debug, thiserror::Error)]
@@ -58,11 +57,6 @@ pub(crate) fn registration_attempt_error(error: StorePullError) -> RegistrationL
         }
         error => RegistrationLoadError::from(error),
     }
-}
-
-pub(crate) struct LoadedDeviceJoinCleanupActivation {
-    pub(crate) verified_commit: VerifiedStoreBatchCommit,
-    pub(crate) receipts: Vec<LoadedCommitJoinCleanupReceipt>,
 }
 
 /// Bind a reclaim target to the Circle snapshot generation that published it.

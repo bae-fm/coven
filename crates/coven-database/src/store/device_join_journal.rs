@@ -39,21 +39,6 @@ pub fn require_initial(record: &DeviceJoinJournalRecord) -> Result<(), DeviceJoi
     validate_initial_progress(&record.progress)
 }
 
-/// A replacement of an attempt this device never ran opens the journal at a
-/// terminal, so only the write-revoked terminal may be installed first.
-pub fn require_replacement_terminal(
-    record: &DeviceJoinJournalRecord,
-) -> Result<(), DeviceJoinJournalError> {
-    if matches!(
-        &*record.progress,
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(_))
-    ) {
-        Ok(())
-    } else {
-        Err(DeviceJoinJournalError::JournalConflict)
-    }
-}
-
 pub fn validate_successor(
     previous: &DeviceJoinJournalRecord,
     next: &DeviceJoinJournalRecord,
@@ -117,6 +102,11 @@ fn validate_transition(
 /// request, prepares the storage grant, signs the approval, registers the
 /// joining device and activates it, so every step below follows the previous
 /// one on the same journal row.
+///
+/// The chain ends where it ends. Up to the attempt commit the admitting device
+/// can still give up, and abandonment says so; past it there is nothing to take
+/// back, because approving the join is what granted the joining device storage
+/// access and undoing that is member removal with a key rotation.
 fn owner_adjacent(previous: &OwnerJoinProgress, next: &OwnerJoinProgress) -> bool {
     if let (
         OwnerJoinProgress::AccessRequested(request),
@@ -199,39 +189,6 @@ fn owner_adjacent(previous: &OwnerJoinProgress, next: &OwnerJoinProgress) -> boo
         ) | (
             OwnerJoinProgress::ActivationCreateIntent { .. },
             OwnerJoinProgress::ActivationPrepared { .. }
-        ) | (
-            OwnerJoinProgress::AttemptActivated(_),
-            OwnerJoinProgress::CancellationCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::ChallengeCreateIntent(_),
-            OwnerJoinProgress::CancellationCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::ProviderReady(_),
-            OwnerJoinProgress::CancellationCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::ResponseObserved(_),
-            OwnerJoinProgress::CancellationCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::CancellationCreateIntent { .. },
-            OwnerJoinProgress::Cancelled(_)
-        ) | (
-            OwnerJoinProgress::Cancelled(_),
-            OwnerJoinProgress::ProviderClosureIntent { .. }
-        ) | (
-            OwnerJoinProgress::ProviderClosureIntent { .. },
-            OwnerJoinProgress::ProviderClosed { .. }
-        ) | (
-            OwnerJoinProgress::ProviderClosed { .. },
-            OwnerJoinProgress::CleanupReceiptCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::CleanupReceiptCreateIntent { .. },
-            OwnerJoinProgress::CleanupReceipt(_)
-        ) | (
-            OwnerJoinProgress::CleanupReceipt(_),
-            OwnerJoinProgress::CleanupActivated(_)
-        ) | (
-            OwnerJoinProgress::CleanupActivated(_),
-            OwnerJoinProgress::CancelledComplete(_)
         )
     )
 }
@@ -258,32 +215,11 @@ fn joiner_adjacent(previous: &JoinerJoinProgress, next: &JoinerJoinProgress) -> 
             JoinerJoinProgress::RegistrationPrepared(_),
             JoinerJoinProgress::Ready(_)
         ) | (
-            JoinerJoinProgress::RegistrationPrepared(_),
-            JoinerJoinProgress::CleanupIntent { .. }
-        ) | (
             JoinerJoinProgress::Ready(_),
             JoinerJoinProgress::ActivationObserved { .. }
         ) | (
-            JoinerJoinProgress::Ready(_),
-            JoinerJoinProgress::CleanupIntent { .. }
-        ) | (
-            JoinerJoinProgress::RegistrationPrepared(_),
-            JoinerJoinProgress::WriteRevoked(_)
-        ) | (
-            JoinerJoinProgress::CleanupIntent { .. },
-            JoinerJoinProgress::Cancelled(_)
-        ) | (
             JoinerJoinProgress::ActivationObserved { .. },
             JoinerJoinProgress::Activated(_)
-        ) | (
-            JoinerJoinProgress::Cancelled(_),
-            JoinerJoinProgress::CleanupActivated(_)
-        ) | (
-            JoinerJoinProgress::WriteRevoked(_),
-            JoinerJoinProgress::CleanupActivated(_)
-        ) | (
-            JoinerJoinProgress::CleanupActivated(_),
-            JoinerJoinProgress::CancelledComplete(_)
         )
     )
 }

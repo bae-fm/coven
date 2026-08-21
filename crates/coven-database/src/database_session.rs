@@ -62,14 +62,6 @@ impl<'session> DatabaseSession<'session> {
         crate::store::advance_device_join_on(self.conn, key, previous, next)
     }
 
-    pub(crate) fn begin_device_join_replacement_terminal(
-        &mut self,
-        key: &str,
-        value: &str,
-    ) -> Result<String, DbError> {
-        crate::store::begin_device_join_replacement_terminal_on(self.conn, key, value)
-    }
-
     pub(crate) fn device_join_records(&mut self) -> Result<Vec<(String, String)>, DbError> {
         crate::store::device_join_records_on(self.conn)
     }

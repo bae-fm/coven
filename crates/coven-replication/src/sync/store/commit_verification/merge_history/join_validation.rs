@@ -1,26 +1,14 @@
 use super::registration::*;
 use super::*;
 
-pub(crate) struct LoadedCommitJoinCleanupReceipt {
-    pub(crate) receipt: super::device_join::DeviceJoinCleanupReceiptObject,
-    pub(crate) attempt: LoadedDeviceJoinAttemptEvidence,
-}
-
-pub(crate) struct CommitJoinCleanupReceiptEvidence {
-    pub(crate) receipt: super::device_join::DeviceJoinCleanupReceiptObject,
-    pub(crate) attempt: super::store_commit::DeviceJoinAttemptRef,
-}
-
 pub(crate) struct LoadedCommitJoinEvidence {
     pub(crate) attempts:
         BTreeMap<super::store_commit::DeviceJoinAttemptRef, LoadedDeviceJoinAttemptEvidence>,
-    pub(crate) cleanup_receipts: Vec<CommitJoinCleanupReceiptEvidence>,
 }
 
 pub(crate) struct VerifiedCommitJoinEvidence {
     pub(crate) commit: StoreBatchCommit,
     pub(crate) attempts: BTreeMap<super::store_commit::DeviceJoinAttemptRef, DeviceJoinAttempt>,
-    pub(crate) cleanup_receipts: Vec<CommitJoinCleanupReceiptEvidence>,
 }
 
 pub(crate) fn validate_commit_join_attempts(

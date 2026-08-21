@@ -7,18 +7,14 @@ use crate::objects::ExactObjectRef;
 use crate::provider::StoreMemberProviderAccessGrant;
 use crate::store_commit::device_join::{DeviceJoinAttemptRef, DeviceJoinOutcomeRef};
 use crate::store_commit::device_join_exchange::{
-    DeviceJoinAbandonment, DeviceJoinActivation, DeviceJoinCancellation,
-    DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt, DeviceJoinOffer,
-    DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceProviderAccessRequest,
-    DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceRegistrationRequest,
-    JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, JoinerResponseDisposition,
-    ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderChallengeDisposition,
+    DeviceJoinAbandonment, DeviceJoinActivation, DeviceJoinOffer, DeviceJoinReadiness,
+    DeviceProviderAccessRequest, DeviceProviderAdmissionApproval,
+    DeviceProviderAdmissionCompletion, DeviceRegistrationRequest, JoinedStore,
     ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap, SamePrincipalDeviceJoin,
-    SlotDisposition,
 };
 
 use super::*;
-use crate::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
+use crate::store_commit::DeviceJoinAbandonmentRef;
 
 /// Derived from a journal record on demand and never stored, so it carries no
 /// wire form of its own.
@@ -70,38 +66,6 @@ pub enum DeviceJoinStatus {
     AbandonmentCreatePending {
         abandonment: DeviceJoinAbandonmentRef,
     },
-    CancellationCreatePending {
-        cancellation: DeviceJoinOutcomeRef,
-    },
-    ProviderClosurePending {
-        cancellation: DeviceJoinCancellation,
-    },
-    JoinerClosurePending {
-        cancellation: DeviceJoinCancellation,
-    },
-    ProviderClosed {
-        cancellation: DeviceJoinCancellation,
-        terminal: ProviderAdminJoinTerminal,
-    },
-    JoinerClosed {
-        terminal: JoinerJoinTerminal,
-    },
-    CleanupReceiptCreatePending {
-        cancellation: DeviceJoinCancellation,
-        receipt: DeviceJoinCleanupReceiptRef,
-    },
-    Cancelled {
-        cancellation: DeviceJoinCancellation,
-    },
-    CleanupPending {
-        cancellation: DeviceJoinCancellation,
-    },
-    AwaitingCleanupActivation {
-        receipt: DeviceJoinCleanupReceipt,
-    },
-    CleanupActivated {
-        activation: DeviceJoinCleanupActivation,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,11 +80,7 @@ pub enum DeviceJoinAction {
     TransferSamePrincipalJoin(SamePrincipalDeviceJoin),
     TransferActivation(DeviceJoinActivation),
     TransferAbandonment(DeviceJoinAbandonment),
-    TransferCancellation(DeviceJoinCancellation),
-    TransferJoinerTerminal(JoinerJoinTerminal),
-    TransferCleanupActivation(DeviceJoinCleanupActivation),
     CompleteJoin(DeviceJoinActivation),
-    CompleteCleanup(DeviceJoinCleanupActivation),
     ResumeOperation {
         attempt_id: DeviceJoinAttemptId,
         role: DeviceJoinRole,
@@ -193,30 +153,6 @@ pub enum OwnerJoinProgress {
         registration: StoreDeviceRegistrationRef,
     },
     Abandoned(DeviceJoinAbandonment),
-    CancellationCreateIntent {
-        attempt: DeviceJoinAttemptRef,
-        cancellation: DeviceJoinOutcomeRef,
-        prepared: PreparedDeviceJoinObject,
-    },
-    Cancelled(DeviceJoinCancellation),
-    ProviderClosureIntent {
-        cancellation: DeviceJoinCancellation,
-        challenge: ProviderChallengeDisposition,
-        prior_state_hash: ObjectHash,
-    },
-    ProviderClosed {
-        cancellation: DeviceJoinCancellation,
-        closure: ProviderAdminJoinClosure,
-    },
-    CleanupReceiptCreateIntent {
-        cancellation: DeviceJoinCancellation,
-        receipt: DeviceJoinCleanupReceiptRef,
-        receipt_bytes: Vec<u8>,
-        prepared: PreparedDeviceJoinObject,
-    },
-    CleanupReceipt(DeviceJoinCleanupReceipt),
-    CleanupActivated(DeviceJoinCleanupActivation),
-    CancelledComplete(DeviceJoinCleanupActivation),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,30 +194,6 @@ pub enum JoinerJoinProgress {
     },
     Activated(JoinedStore),
     Abandoned(DeviceJoinAbandonment),
-    CleanupIntent {
-        cancellation: DeviceJoinCancellation,
-        registration: SlotDisposition,
-        initial_ack: SlotDisposition,
-        response: JoinerResponseDisposition,
-        prior_state_hash: ObjectHash,
-    },
-    Cancelled(JoinerJoinClosure),
-    WriteRevoked(DeviceJoinProducerWriteRevocation),
-    CleanupActivated(DeviceJoinCleanupActivation),
-    CancelledComplete(DeviceJoinCleanupActivation),
-}
-
-impl JoinerJoinProgress {
-    /// Whether the joiner holds staged join work a cancellation has to retract:
-    /// every state that can enter a cleanup intent, and the cleanup intent
-    /// itself. Before these the joiner published nothing to retract; after them
-    /// the attempt has reached a terminal the cleanup cannot revisit.
-    pub fn holds_staged_work(&self) -> bool {
-        matches!(
-            self,
-            Self::RegistrationPrepared(_) | Self::Ready(_) | Self::CleanupIntent { .. }
-        )
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,68 +395,6 @@ pub(crate) fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoin
         }) => DeviceJoinStatus::AbandonmentCreatePending {
             abandonment: abandonment.clone(),
         },
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CancellationCreateIntent {
-            cancellation,
-            ..
-        }) => DeviceJoinStatus::CancellationCreatePending {
-            cancellation: cancellation.clone(),
-        },
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(cancellation)) => {
-            DeviceJoinStatus::CleanupPending {
-                cancellation: cancellation.clone(),
-            }
-        }
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderClosureIntent {
-            cancellation,
-            ..
-        }) => DeviceJoinStatus::ProviderClosurePending {
-            cancellation: cancellation.clone(),
-        },
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CleanupIntent {
-            cancellation, ..
-        }) => DeviceJoinStatus::JoinerClosurePending {
-            cancellation: cancellation.clone(),
-        },
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderClosed {
-            cancellation,
-            closure,
-        }) => DeviceJoinStatus::ProviderClosed {
-            cancellation: cancellation.clone(),
-            terminal: ProviderAdminJoinTerminal::Cancelled(closure.clone()),
-        },
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Cancelled(closure)) => {
-            DeviceJoinStatus::JoinerClosed {
-                terminal: JoinerJoinTerminal::Cancelled(closure.clone()),
-            }
-        }
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(revocation)) => {
-            DeviceJoinStatus::JoinerClosed {
-                terminal: JoinerJoinTerminal::WriteRevoked(revocation.clone()),
-            }
-        }
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupReceiptCreateIntent {
-            cancellation,
-            receipt,
-            ..
-        }) => DeviceJoinStatus::CleanupReceiptCreatePending {
-            cancellation: cancellation.clone(),
-            receipt: receipt.clone(),
-        },
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupReceipt(receipt)) => {
-            DeviceJoinStatus::AwaitingCleanupActivation {
-                receipt: receipt.clone(),
-            }
-        }
-        DeviceJoinRoleProgress::Owner(
-            OwnerJoinProgress::CleanupActivated(activation)
-            | OwnerJoinProgress::CancelledComplete(activation),
-        )
-        | DeviceJoinRoleProgress::Joiner(
-            JoinerJoinProgress::CleanupActivated(activation)
-            | JoinerJoinProgress::CancelledComplete(activation),
-        ) => DeviceJoinStatus::CleanupActivated {
-            activation: activation.clone(),
-        },
     }
 }
 
@@ -567,12 +417,7 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
             | OwnerJoinProgress::Completed(_)
             | OwnerJoinProgress::SamePrincipalActivationCreateIntent { .. }
             | OwnerJoinProgress::AbandonmentCreateIntent { .. }
-            | OwnerJoinProgress::ActivationCreateIntent { .. }
-            | OwnerJoinProgress::CancellationCreateIntent { .. }
-            | OwnerJoinProgress::ProviderClosureIntent { .. }
-            | OwnerJoinProgress::ProviderClosed { .. }
-            | OwnerJoinProgress::CleanupReceipt(_)
-            | OwnerJoinProgress::CleanupReceiptCreateIntent { .. },
+            | OwnerJoinProgress::ActivationCreateIntent { .. },
         ) => Some(resume()),
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ApprovalPrepared(approval)) => Some(
             DeviceJoinAction::TransferProviderAdmissionApproval(approval.clone()),
@@ -589,20 +434,9 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Abandoned(abandonment)) => {
             Some(DeviceJoinAction::TransferAbandonment(abandonment.clone()))
         }
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(cancellation)) => {
-            Some(DeviceJoinAction::TransferCancellation(cancellation.clone()))
-        }
-        DeviceJoinRoleProgress::Owner(
-            OwnerJoinProgress::CleanupActivated(activation)
-            | OwnerJoinProgress::CancelledComplete(activation),
-        ) => Some(DeviceJoinAction::TransferCleanupActivation(
-            activation.clone(),
-        )),
 
         DeviceJoinRoleProgress::Joiner(
-            JoinerJoinProgress::OfferReceived(_)
-            | JoinerJoinProgress::ApprovalReceived(_)
-            | JoinerJoinProgress::CleanupIntent { .. },
+            JoinerJoinProgress::OfferReceived(_) | JoinerJoinProgress::ApprovalReceived(_),
         ) => Some(resume()),
         DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::AccessRequested(request)) => Some(
             DeviceJoinAction::TransferProviderAccessRequest(request.clone()),
@@ -617,23 +451,8 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
             activation,
             ..
         }) => Some(DeviceJoinAction::CompleteJoin(activation.clone())),
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Cancelled(closure)) => {
-            Some(DeviceJoinAction::TransferJoinerTerminal(
-                JoinerJoinTerminal::Cancelled(closure.clone()),
-            ))
-        }
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(revocation)) => {
-            Some(DeviceJoinAction::TransferJoinerTerminal(
-                JoinerJoinTerminal::WriteRevoked(revocation.clone()),
-            ))
-        }
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CleanupActivated(activation)) => {
-            Some(DeviceJoinAction::CompleteCleanup(activation.clone()))
-        }
         DeviceJoinRoleProgress::Joiner(
-            JoinerJoinProgress::Activated(_)
-            | JoinerJoinProgress::Abandoned(_)
-            | JoinerJoinProgress::CancelledComplete(_),
+            JoinerJoinProgress::Activated(_) | JoinerJoinProgress::Abandoned(_),
         ) => None,
     }
 }

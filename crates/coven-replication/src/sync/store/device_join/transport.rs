@@ -23,11 +23,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::sync::store::{
-    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
-    DeviceJoinCleanupActivation, DeviceJoinError, DeviceJoinOffer, DeviceJoinReadiness,
-    DeviceJoinRole, DeviceJoinStatus, DeviceProviderAccessAdministrator,
-    DeviceProviderAccessRequest, DeviceProviderAdmissionApproval, DeviceRegistrationRequest,
-    JoinerJoinTerminal, SamePrincipalDeviceJoin, Store,
+    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinError,
+    DeviceJoinOffer, DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus,
+    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest,
+    DeviceProviderAdmissionApproval, DeviceRegistrationRequest, SamePrincipalDeviceJoin, Store,
 };
 use coven_keys::encryption::{EncryptionService, MasterKeyring, SealError};
 use coven_protocol::objects::ObjectSlot;
@@ -57,15 +56,12 @@ pub enum DeviceJoinTransportKind {
     SamePrincipalJoin,
     Activation,
     Abandonment,
-    Cancellation,
-    JoinerTerminal,
-    CleanupActivation,
 }
 
 impl DeviceJoinTransportKind {
     /// Every kind, in protocol order. An attempt's namespace holds one slot per
     /// entry — allocated together, deleted together.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 8] = [
         Self::ProviderAccessRequest,
         Self::ProviderAdmissionApproval,
         Self::RegistrationRequest,
@@ -74,9 +70,6 @@ impl DeviceJoinTransportKind {
         Self::SamePrincipalJoin,
         Self::Activation,
         Self::Abandonment,
-        Self::Cancellation,
-        Self::JoinerTerminal,
-        Self::CleanupActivation,
     ];
 
     /// The last path component of this kind's slot.
@@ -90,9 +83,6 @@ impl DeviceJoinTransportKind {
             Self::SamePrincipalJoin => "same-principal-join",
             Self::Activation => "activation",
             Self::Abandonment => "abandonment",
-            Self::Cancellation => "cancellation",
-            Self::JoinerTerminal => "joiner-terminal",
-            Self::CleanupActivation => "cleanup-activation",
         }
     }
 
@@ -100,24 +90,20 @@ impl DeviceJoinTransportKind {
     /// other role is refused before it reaches storage.
     fn producer(self) -> DeviceJoinRole {
         match self {
-            Self::ProviderAccessRequest
-            | Self::RegistrationRequest
-            | Self::Readiness
-            | Self::JoinerTerminal => DeviceJoinRole::Joiner,
+            Self::ProviderAccessRequest | Self::RegistrationRequest | Self::Readiness => {
+                DeviceJoinRole::Joiner
+            }
             Self::ProviderAdmissionApproval
             | Self::ProviderReadyBootstrap
             | Self::SamePrincipalJoin
             | Self::Activation
-            | Self::Abandonment
-            | Self::Cancellation
-            | Self::CleanupActivation => DeviceJoinRole::Owner,
+            | Self::Abandonment => DeviceJoinRole::Owner,
         }
     }
 
     /// The kind an action's artifact belongs in, or `None` for the actions that
     /// name local work rather than a transfer (`CompleteJoin`,
-    /// `CompleteCleanup`, `ResumeOperation`) and for the offer, which travels
-    /// out of band.
+    /// `ResumeOperation`) and for the offer, which travels out of band.
     fn of(action: &DeviceJoinAction) -> Option<Self> {
         match action {
             DeviceJoinAction::TransferProviderAccessRequest(_) => Some(Self::ProviderAccessRequest),
@@ -132,12 +118,8 @@ impl DeviceJoinTransportKind {
             DeviceJoinAction::TransferSamePrincipalJoin(_) => Some(Self::SamePrincipalJoin),
             DeviceJoinAction::TransferActivation(_) => Some(Self::Activation),
             DeviceJoinAction::TransferAbandonment(_) => Some(Self::Abandonment),
-            DeviceJoinAction::TransferCancellation(_) => Some(Self::Cancellation),
-            DeviceJoinAction::TransferJoinerTerminal(_) => Some(Self::JoinerTerminal),
-            DeviceJoinAction::TransferCleanupActivation(_) => Some(Self::CleanupActivation),
             DeviceJoinAction::TransferOffer(_)
             | DeviceJoinAction::CompleteJoin(_)
-            | DeviceJoinAction::CompleteCleanup(_)
             | DeviceJoinAction::ResumeOperation { .. } => None,
         }
     }
@@ -194,13 +176,6 @@ device_join_artifact!(
 );
 device_join_artifact!(DeviceJoinActivation, Activation, TransferActivation);
 device_join_artifact!(DeviceJoinAbandonment, Abandonment, TransferAbandonment);
-device_join_artifact!(DeviceJoinCancellation, Cancellation, TransferCancellation);
-device_join_artifact!(JoinerJoinTerminal, JoinerTerminal, TransferJoinerTerminal);
-device_join_artifact!(
-    DeviceJoinCleanupActivation,
-    CleanupActivation,
-    TransferCleanupActivation
-);
 
 /// The slots and seal key one attempt's artifacts travel through.
 ///
@@ -840,33 +815,21 @@ impl<'store> StoreDeviceJoinTransport<'store> {
         Ok(abandonment)
     }
 
-    pub async fn cancel(
-        &self,
-        bundle: &DeviceJoinOfferBundle,
-        timing: DeviceJoinTransportTiming,
-    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
-        retrying_activation_conflicts(|| async {
-            AttemptTransport::open(self.store, bundle)
-                .await?
-                .cancel_once(timing)
-                .await
-        })
-        .await
-    }
-
-    /// End an admitted-side attempt from its durable owner state. Before the
-    /// attempt exists this publishes abandonment; after activation it performs
-    /// the signed cancellation cleanup.
+    /// Give up on an attempt this device offered.
+    ///
+    /// Only an attempt that has not reached its Store commit can be given up on:
+    /// up to that point nothing is published about the joining device, so an
+    /// abandonment is the whole story. Past it the device has been approved and
+    /// holds storage access, and taking that back is member removal with a key
+    /// rotation — not something a pairing window can do.
     pub async fn abort(
         &self,
         bundle: &DeviceJoinOfferBundle,
-        timing: DeviceJoinTransportTiming,
     ) -> Result<(), DeviceJoinTransportError> {
         let attempt = AttemptTransport::open(self.store, bundle).await?;
         match attempt.owner_status().await? {
-            // Nothing is committed to the Store until the attempt is, so up to
-            // that point an abort is an abandonment.
-            Some(
+            None
+            | Some(
                 DeviceJoinStatus::AwaitingAccessRequest { .. }
                 | DeviceJoinStatus::AwaitingProviderAdmission { .. }
                 | DeviceJoinStatus::ProviderAccessGrantCreatePending { .. }
@@ -876,30 +839,14 @@ impl<'store> StoreDeviceJoinTransport<'store> {
                 | DeviceJoinStatus::Abandoned { .. },
             ) => {
                 self.abandon(bundle).await?;
+                Ok(())
             }
-            Some(
-                DeviceJoinStatus::AwaitingChallengePublication { .. }
-                | DeviceJoinStatus::AwaitingReadiness { .. }
-                | DeviceJoinStatus::AwaitingProviderCompletion { .. }
-                | DeviceJoinStatus::CancellationCreatePending { .. }
-                | DeviceJoinStatus::CleanupPending { .. }
-                | DeviceJoinStatus::ProviderClosurePending { .. }
-                | DeviceJoinStatus::ProviderClosed { .. }
-                | DeviceJoinStatus::CleanupReceiptCreatePending { .. }
-                | DeviceJoinStatus::AwaitingCleanupActivation { .. }
-                | DeviceJoinStatus::CleanupActivated { .. },
-            ) => {
-                self.cancel(bundle, timing).await?;
-            }
-            status => {
-                return Err(DeviceJoinError::Store(format!(
-                    "device join {} cannot be aborted from {status:?}",
-                    bundle.offer.attempt_id
-                ))
-                .into());
-            }
+            status => Err(DeviceJoinError::Store(format!(
+                "device join {} is past the point it could be given up on: {status:?}",
+                bundle.offer.attempt_id
+            ))
+            .into()),
         }
-        Ok(())
     }
 }
 
@@ -1223,105 +1170,6 @@ impl<'attempt> AttemptTransport<'attempt> {
         .await;
         timings.report();
         outcome
-    }
-
-    async fn cancel_once(
-        &self,
-        timing: DeviceJoinTransportTiming,
-    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
-        let receipt = match self.owner_status().await? {
-            // The unwind already reached its end; republish what it settled on.
-            Some(DeviceJoinStatus::CleanupActivated { activation }) => {
-                self.publish(DeviceJoinAction::TransferCleanupActivation(
-                    activation.clone(),
-                ))
-                .await?;
-                self.store
-                    .complete_owner_device_join_cleanup(activation.clone())
-                    .await?;
-                return Ok(activation);
-            }
-            Some(DeviceJoinStatus::AwaitingCleanupActivation { receipt }) => receipt,
-            _ => {
-                let cancellation = self.cancel_and_publish().await?;
-                let administrator_terminal = self
-                    .store
-                    .close_device_provider_admission(cancellation.clone())
-                    .await?;
-                let joiner_terminal = self.await_artifact::<JoinerJoinTerminal>(timing).await?;
-                self.store
-                    .prepare_device_join_cleanup(
-                        cancellation,
-                        administrator_terminal,
-                        joiner_terminal,
-                    )
-                    .await?
-            }
-        };
-        let activation = self.store.activate_device_join_cleanup(receipt).await?;
-        self.publish(DeviceJoinAction::TransferCleanupActivation(
-            activation.clone(),
-        ))
-        .await?;
-        self.store
-            .complete_owner_device_join_cleanup(activation.clone())
-            .await?;
-        Ok(activation)
-    }
-
-    /// The attempt's cancellation, taken from the owner journal when it already
-    /// holds one — `cancel_device_join` refuses to run again once the unwind has
-    /// moved on to preparing the cleanup receipt.
-    ///
-    /// The attempt reference the first cancellation needs comes from the journal
-    /// too, rather than from a caller: the journal is what decided which attempt
-    /// this join activated, so a supplied reference could only agree with it or be
-    /// wrong.
-    async fn cancel_and_publish(&self) -> Result<DeviceJoinCancellation, DeviceJoinTransportError> {
-        let attempt_id = self.attempt_id;
-        let cancellation = match self.owner_status().await? {
-            Some(
-                DeviceJoinStatus::CleanupPending { cancellation, .. }
-                | DeviceJoinStatus::ProviderClosurePending { cancellation, .. }
-                | DeviceJoinStatus::ProviderClosed { cancellation, .. }
-                | DeviceJoinStatus::CleanupReceiptCreatePending { cancellation, .. },
-            ) => cancellation,
-            Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
-                self.store
-                    .cancel_device_join(bootstrap.publication_authorization.attempt.clone())
-                    .await?
-            }
-            Some(DeviceJoinStatus::AwaitingReadiness { bootstrap }) => {
-                self.store
-                    .cancel_device_join(
-                        bootstrap
-                            .bootstrap
-                            .publication_authorization
-                            .attempt
-                            .clone(),
-                    )
-                    .await?
-            }
-            Some(DeviceJoinStatus::AwaitingProviderCompletion { readiness }) => {
-                self.store
-                    .cancel_device_join(readiness.proof.attempt.clone())
-                    .await?
-            }
-            Some(DeviceJoinStatus::CancellationCreatePending { cancellation }) => {
-                self.store
-                    .cancel_device_join(cancellation.attempt().clone())
-                    .await?
-            }
-            other => {
-                return Err(DeviceJoinError::Store(format!(
-                    "device join {attempt_id} has no attempt to cancel: {other:?}"
-                ))
-                .into())
-            }
-        };
-        self.publish(DeviceJoinAction::TransferCancellation(cancellation.clone()))
-            .await?;
-        Ok(cancellation)
     }
 
     async fn approve_access_request(

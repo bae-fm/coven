@@ -128,15 +128,6 @@ pub(super) fn validate_device_join_outcome_refs(
     Ok(())
 }
 
-pub(super) fn validate_device_join_cleanup_receipt_refs(
-    receipts: &[crate::store_commit::DeviceJoinCleanupReceiptRef],
-) -> Result<(), StoreProtocolError> {
-    if receipts.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(StoreProtocolError::JoinOutcomeMismatch);
-    }
-    Ok(())
-}
-
 pub(super) fn validate_provider_access_refs(
     grants: &[crate::provider::StoreMemberProviderAccessGrantRef],
 ) -> Result<(), StoreProtocolError> {

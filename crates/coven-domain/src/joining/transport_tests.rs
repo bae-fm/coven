@@ -467,9 +467,6 @@ fn joined(
         crate::joining::DeviceJoinTransportOutcome::Abandoned(_) => {
             panic!("the join was abandoned, not completed")
         }
-        crate::joining::DeviceJoinTransportOutcome::Cancelled(_) => {
-            panic!("the join was cancelled, not completed")
-        }
     }
 }
 
@@ -1122,130 +1119,6 @@ fn assert_owner_waited_for(
     }
 }
 
-/// A cancelled attempt unwinds through the same slots it advanced through, and
-/// the joiner's last step — the one that consumes the cleanup activation —
-/// removes the attempt's namespace. Nothing sweeps behind it.
-#[test]
-fn cancelling_mid_join_removes_the_attempts_slots() {
-    on_a_deep_stack(run_cancelling_mid_join_removes_the_attempts_slots);
-}
-
-async fn run_cancelling_mid_join_removes_the_attempts_slots() {
-    let fixture = TransportFixture::build_cross_principal("device-join-transport-cancel").await;
-    let bundle = fixture.begin().await;
-    let cancel = never_cancelled();
-
-    // Advance the cross-principal flow far enough that the owner has accepted
-    // the registration and is waiting for the joining device's provider proof.
-    let joiner = fixture.client();
-    assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
-        DeviceJoinTransportKind::ProviderAdmissionApproval,
-    );
-    assert_owner_waited_for(
-        fixture.drive_owner_with(&bundle, one_shot()).await,
-        DeviceJoinTransportKind::RegistrationRequest,
-    );
-    assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
-        DeviceJoinTransportKind::ProviderReadyBootstrap,
-    );
-    assert_owner_waited_for(
-        fixture.drive_owner_with(&bundle, one_shot()).await,
-        DeviceJoinTransportKind::Readiness,
-    );
-    assert!(
-        fixture
-            .slot_bytes(&bundle, DeviceJoinTransportKind::RegistrationRequest)
-            .await
-            .is_some(),
-        "the attempt reached the transport before it was cancelled",
-    );
-
-    let closing_joiner = fixture.client();
-    let owner_transport = fixture.owner_store.device_join_transport();
-    let (owner_unwind, joiner_unwind) = tokio::join!(
-        Box::pin(owner_transport.cancel(&bundle, timing())),
-        Box::pin(closing_joiner.close_device_join_via_transport(&bundle, timing())),
-    );
-    owner_unwind.expect("the owner carries the cancellation to its activated cleanup");
-    joiner_unwind.expect("the joining device closes and discards its pending join");
-
-    // The unwind's own two steps happen on one device: it closes its provider
-    // admission and signs the cleanup receipt, then activates that receipt
-    // itself. Neither has a reader on the other side, so neither is written.
-    let written = fixture
-        .home
-        .exact_creates()
-        .into_iter()
-        .map(|slot| slot.logical_key().to_string())
-        .collect::<Vec<_>>();
-    for unread in ["/provider-admin-terminal.json", "/cleanup-receipt.json"] {
-        assert!(
-            written.iter().all(|key| !key.ends_with(unread)),
-            "the unwind wrote {unread}, which nothing ever reads: {written:?}",
-        );
-    }
-
-    for kind in DeviceJoinTransportKind::ALL {
-        assert!(
-            fixture.slot_bytes(&bundle, kind).await.is_none(),
-            "{kind:?} slot outlived the cancelled attempt",
-        );
-    }
-}
-
-/// A joining app runs the ordinary join entrypoint while the owner cancels.
-/// It must enter the unwind itself; requiring a separate test-only close call
-/// is the deadlock the product flow cannot perform.
-#[test]
-fn the_joining_flow_observes_owner_cancellation() {
-    on_a_deep_stack(run_the_joining_flow_observes_owner_cancellation);
-}
-
-async fn run_the_joining_flow_observes_owner_cancellation() {
-    let fixture =
-        TransportFixture::build_cross_principal("device-join-transport-live-cancel").await;
-    let bundle = fixture.begin().await;
-    let cancel = never_cancelled();
-    let joiner = fixture.client();
-
-    assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
-        DeviceJoinTransportKind::ProviderAdmissionApproval,
-    );
-    assert_owner_waited_for(
-        fixture.drive_owner_with(&bundle, one_shot()).await,
-        DeviceJoinTransportKind::RegistrationRequest,
-    );
-    assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
-        DeviceJoinTransportKind::ProviderReadyBootstrap,
-    );
-    assert_owner_waited_for(
-        fixture.drive_owner_with(&bundle, one_shot()).await,
-        DeviceJoinTransportKind::Readiness,
-    );
-
-    let owner_transport = fixture.owner_store.device_join_transport();
-    let owner_cancel = Box::pin(owner_transport.cancel(&bundle, timing()));
-    let joining_client = fixture.client();
-    let joining =
-        Box::pin(joining_client.join_via_transport(&bundle, timing(), no_join_progress(), &cancel));
-    let (owner, joined) = tokio::join!(owner_cancel, joining);
-    owner.expect("owner completes cancellation");
-    assert!(matches!(
-        joined.expect("joining flow accepts cancellation"),
-        crate::joining::DeviceJoinTransportOutcome::Cancelled(_)
-    ));
-    for kind in DeviceJoinTransportKind::ALL {
-        assert!(
-            fixture.slot_bytes(&bundle, kind).await.is_none(),
-            "{kind:?} slot outlived the cancelled attempt",
-        );
-    }
-}
-
 /// An owner that gives up before the attempt exists publishes its abandonment,
 /// and the joining device — sitting in its wait for the library — reads that
 /// instead and converges on the same terminal, clearing the namespace behind it.
@@ -1299,9 +1172,6 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
         crate::joining::DeviceJoinTransportOutcome::Joined(_) => {
             panic!("an abandoned attempt must not produce a member config")
         }
-        crate::joining::DeviceJoinTransportOutcome::Cancelled(_) => {
-            panic!("an abandoned attempt must not report cancellation")
-        }
     }
     for kind in DeviceJoinTransportKind::ALL {
         assert!(
@@ -1324,137 +1194,6 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
             panic!("an abandoned attempt has no activation")
         }
     }
-}
-
-/// The cancellation unwind resumes the same way the admission does: run each
-/// side alone, dying at every artifact it has to wait for, and the join still
-/// converges on an activated cleanup with the namespace cleared.
-#[test]
-fn the_cancellation_unwind_resumes_at_every_boundary() {
-    on_a_deep_stack(run_the_cancellation_unwind_resumes_at_every_boundary);
-}
-
-async fn run_the_cancellation_unwind_resumes_at_every_boundary() {
-    let fixture =
-        TransportFixture::build_cross_principal("device-join-transport-cancel-resume").await;
-    let bundle = fixture.begin().await;
-    let cancel = never_cancelled();
-    let joiner = fixture.client();
-
-    assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
-        DeviceJoinTransportKind::ProviderAdmissionApproval,
-    );
-    assert_owner_waited_for(
-        fixture.drive_owner_with(&bundle, one_shot()).await,
-        DeviceJoinTransportKind::RegistrationRequest,
-    );
-    assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
-        DeviceJoinTransportKind::ProviderReadyBootstrap,
-    );
-    assert_owner_waited_for(
-        fixture.drive_owner_with(&bundle, one_shot()).await,
-        DeviceJoinTransportKind::Readiness,
-    );
-
-    // The owner cancels and dies waiting for the joiner's terminal.
-    let owner_cancel = |timing| {
-        let fixture = &fixture;
-        let bundle = &bundle;
-        async move {
-            fixture
-                .owner_store
-                .device_join_transport()
-                .cancel(bundle, timing)
-                .await
-        }
-    };
-    match Box::pin(owner_cancel(one_shot())).await {
-        Err(DeviceJoinTransportError::Timeout {
-            kind: DeviceJoinTransportKind::JoinerTerminal,
-            ..
-        }) => {}
-        other => panic!("the owner should have died waiting for the joiner's terminal: {other:?}"),
-    }
-    let cancellation = fixture
-        .slot_bytes(&bundle, DeviceJoinTransportKind::Cancellation)
-        .await
-        .expect("the cancellation survived the owner's death");
-
-    // The joining device closes and dies waiting for the cleanup activation.
-    match Box::pin(
-        fixture
-            .client()
-            .close_device_join_via_transport(&bundle, one_shot()),
-    )
-    .await
-    {
-        Err(crate::joining::BootstrapError::DeviceJoinTransport(
-            DeviceJoinTransportError::Timeout {
-                kind: DeviceJoinTransportKind::CleanupActivation,
-                ..
-            },
-        )) => {}
-        other => {
-            panic!("the joiner should have died waiting for the cleanup activation: {other:?}")
-        }
-    }
-
-    // The owner resumes: its cancellation is already published and its journal
-    // is past producing one, so it picks up at the joiner's terminal.
-    let activation = Box::pin(owner_cancel(one_shot()))
-        .await
-        .expect("the owner resumes the unwind to an activated cleanup");
-    assert_eq!(
-        fixture
-            .slot_bytes(&bundle, DeviceJoinTransportKind::Cancellation)
-            .await
-            .as_ref(),
-        Some(&cancellation),
-        "a resumed unwind left its first cancellation's exact bytes in place",
-    );
-    // The owner must leave the cleanup activation readable: the joining device
-    // has not consumed it yet.
-    assert!(
-        fixture
-            .slot_bytes(&bundle, DeviceJoinTransportKind::CleanupActivation)
-            .await
-            .is_some(),
-        "the owner deleted the activation the joining device still has to read",
-    );
-
-    Box::pin(
-        fixture
-            .client()
-            .close_device_join_via_transport(&bundle, timing()),
-    )
-    .await
-    .expect("the joining device resumes and accepts the cleanup");
-    assert_eq!(
-        activation.receipt.attempt_id, bundle.offer.attempt_id,
-        "the cleanup settled this attempt",
-    );
-    for kind in DeviceJoinTransportKind::ALL {
-        assert!(
-            fixture.slot_bytes(&bundle, kind).await.is_none(),
-            "{kind:?} slot outlived the cancelled attempt",
-        );
-    }
-
-    // The owner tolerates one more run after the unwind has finished — a
-    // retry whose reply was lost lands on the same activated cleanup.
-    Box::pin(owner_cancel(one_shot()))
-        .await
-        .expect("the owner's unwind is idempotent once settled");
-
-    // The joining device has nothing left: its pending join state, including
-    // the identity every step signs with, is discarded with the attempt.
-    assert!(fixture
-        .client()
-        .resume_device_joins()
-        .expect("enumerate the settled device's pending joins")
-        .is_empty(),);
 }
 
 /// `AutoApproveSelfIssued` admits only attempts this device issued. A device
@@ -2432,7 +2171,7 @@ async fn run_a_join_that_never_waits_spends_a_fixed_number_of_transport_operatio
     fixture.home.clear_exact_reads();
     joined(Box::pin(join_once(timing())).await);
 
-    let (watched, artifacts): (Vec<_>, Vec<_>) = fixture
+    let artifacts = fixture
         .home
         .exact_reads()
         .into_iter()
@@ -2441,73 +2180,29 @@ async fn run_a_join_that_never_waits_spends_a_fixed_number_of_transport_operatio
                 .strip_prefix("store-v1/device-join-transport/")
                 .map(|tail| tail.to_string())
         })
-        .partition(|tail| tail.ends_with("/cancellation.json"));
+        .collect::<Vec<_>>();
 
     // Six artifacts the exchange moves, the request this resume republishes and
     // the read that confirms its slot, the step waits' first look at the
     // abandonment slot, and the teardown's probe of every slot an attempt can
-    // hold before it deletes the ones it finds. Four of those probes are gone:
-    // two with the owner-to-administrator handoff kinds, because one device
-    // admits and never hands an artifact to itself, and two with the unwind's
-    // own steps, which no counterpart ever read.
+    // hold before it deletes the ones it finds. Six of those probes are gone
+    // with the kinds that no longer exist: two owner-to-administrator handoffs,
+    // because one device admits and never hands an artifact to itself, and four
+    // belonging to the post-approval unwind, which a regretted approval no
+    // longer has — member removal and a key rotation are the remedy.
     assert_eq!(
         artifacts.len(),
-        17,
+        15,
         "the joining device made {} artifact operations on a join with no waiting in it: {artifacts:?}",
         artifacts.len(),
     );
+    // Every one of those is a step of the exchange. A joining device used to
+    // spend the whole join watching a slot for the owner cancelling, which now
+    // cannot happen: nothing here is a watch.
     assert!(
-        !watched.is_empty(),
-        "the cancellation watch never looked, so the split above proves nothing",
-    );
-}
-
-/// The watch that runs alongside a whole join backs off instead of asking at
-/// the cadence a prompt-response wait wants.
-///
-/// It is the longest-running wait in a join and the one least likely to find
-/// anything: it watches for the owner cancelling, through the snapshot download
-/// and the install. Asking every hundred milliseconds for all of that is a
-/// provider read ten times a second to be told "not yet" — and a provider that
-/// rate-limits them makes the join slower, not faster.
-///
-/// Counted on a clock this test controls, because the number is the span
-/// divided by the cadence and no wall-clock run of a fixture can hold either
-/// still. Over ten seconds the interactive cadence would look a hundred times
-/// flat out; backing off to the ceiling it looks about nine.
-#[test]
-fn the_cancellation_watch_backs_off_instead_of_polling_flat_out() {
-    on_a_deep_stack(run_the_cancellation_watch_backs_off_instead_of_polling_flat_out);
-}
-
-async fn run_the_cancellation_watch_backs_off_instead_of_polling_flat_out() {
-    let fixture = TransportFixture::build("device-join-watch-cadence").await;
-    let bundle = fixture.begin().await;
-    let transport = fixture.transport(&bundle);
-
-    tokio::time::pause();
-    fixture.home.clear_exact_reads();
-    let watched = tokio::time::timeout(
-        Duration::from_secs(10),
-        transport.observe_artifact::<coven_replication::sync::DeviceJoinCancellation>(
-            DeviceJoinTransportTiming::interactive(),
-        ),
-    )
-    .await;
-    assert!(
-        watched.is_err(),
-        "nobody cancelled, so the watch has to be the thing that timed out"
-    );
-
-    let looks = fixture
-        .home
-        .exact_reads()
-        .into_iter()
-        .filter(|slot| slot.logical_key().ends_with("/cancellation.json"))
-        .count();
-    assert!(
-        (2..=20).contains(&looks),
-        "the watch looked {looks} times over ten seconds; at the interactive \
-         cadence that is either flat-out polling or a watch that stopped looking",
+        artifacts
+            .iter()
+            .all(|tail| !tail.ends_with("/cancellation.json")),
+        "the joining device watched for a cancellation that cannot come: {artifacts:?}",
     );
 }

@@ -1167,7 +1167,6 @@ impl<'storage> ExactPublishedCommit<'storage> {
                 control: self.commit.control().cloned(),
                 device_join_attempt_decisions: self.commit.device_join_attempt_decisions().to_vec(),
                 device_join_outcomes: self.commit.device_join_outcomes().to_vec(),
-                device_join_cleanup_receipts: self.commit.device_join_cleanup_receipts().to_vec(),
                 provider_access_grants: self.commit.provider_access_grants().to_vec(),
                 device_registrations: self.commit.device_registrations().to_vec(),
                 device_exclusion_proposals: self.commit.device_exclusion_proposals().to_vec(),

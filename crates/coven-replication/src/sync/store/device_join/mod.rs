@@ -12,13 +12,12 @@ use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier
 use crate::sync::store::{Store, StoreDatabase};
 use coven_database::DeviceJoinBootstrapPlan;
 use coven_keys::keys::UserKeypair;
-use coven_protocol::objects::ObjectSlot;
 use coven_protocol::objects::{ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding};
 use coven_protocol::provider::{
     ActivatedStoreMemberProviderAccessGrant, CrossPrincipalProbeChallenge,
     CrossPrincipalProbeResponse, DeviceJoinChallengePublicationAuthorization,
-    ProviderAccessGrantId, ProviderAccessWithdrawal, ProviderAdminGrantId,
-    ProviderAdminGrantRecord, StoreMemberProviderAccessGrantRef,
+    ProviderAccessGrantId, ProviderAdminGrantId, ProviderAdminGrantRecord,
+    StoreMemberProviderAccessGrantRef,
 };
 use coven_protocol::store_commit::{
     DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef,
@@ -28,7 +27,6 @@ use coven_protocol::store_commit::{
 use coven_storage::CloudSyncObjectStorage;
 
 mod authorized_join;
-mod cleanup;
 mod error;
 pub(super) mod history;
 mod joiner;
@@ -41,7 +39,6 @@ pub(super) use authorized_join::AuthorizedJoin;
 pub(crate) struct PendingDeviceJoinHistoryConstruction;
 
 pub use authorized_join::DeviceProviderAccessAdministrator;
-pub use cleanup::*;
 pub use coven_protocol::store_commit::device_join_exchange::*;
 pub use error::*;
 pub(crate) use joiner::*;

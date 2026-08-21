@@ -300,13 +300,11 @@ impl StoreSync {
     pub(crate) async fn abort_device_join_transport(
         &self,
         bundle: &crate::DeviceJoinOfferBundle,
-        timing: crate::DeviceJoinTransportTiming,
     ) -> Result<(), SyncError> {
-        active_sync!(self)
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
-            .abort_device_join_transport(bundle, timing)
-            .await?;
-        Ok(())
+            .abort_device_join_transport(bundle)
+            .await?)
     }
 
     pub(crate) async fn begin_device_join(
@@ -399,57 +397,5 @@ impl StoreSync {
             sync.finalize_device_join(completion),
         )
         .await?)
-    }
-
-    pub(crate) async fn cancel_device_join(
-        &self,
-        attempt: crate::DeviceJoinAttemptRef,
-    ) -> Result<crate::DeviceJoinCancellation, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .cancel_device_join(attempt)
-            .await?)
-    }
-
-    pub(crate) async fn close_device_provider_admission(
-        &self,
-        cancellation: crate::DeviceJoinCancellation,
-    ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .close_device_provider_admission(cancellation)
-            .await?)
-    }
-
-    pub(crate) async fn revoke_joining_device_writes(
-        &self,
-        cancellation: crate::DeviceJoinCancellation,
-        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
-    ) -> Result<crate::JoinerJoinTerminal, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .revoke_joining_device_writes(cancellation, executor)
-            .await?)
-    }
-
-    pub(crate) async fn activate_device_join_cleanup(
-        &self,
-        receipt: crate::DeviceJoinCleanupReceipt,
-    ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .activate_device_join_cleanup(receipt)
-            .await?)
-    }
-
-    pub(crate) async fn complete_owner_device_join_cleanup(
-        &self,
-        activation: crate::DeviceJoinCleanupActivation,
-    ) -> Result<(), SyncError> {
-        active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .complete_owner_device_join_cleanup(activation)
-            .await?;
-        Ok(())
     }
 }

@@ -724,7 +724,6 @@ async fn run_owner_cancellation_reaches_a_joiner_through_the_facade() {
     assert!(matches!(
         joined.expect("joining device completes cancellation"),
         crate::DeviceJoinTransportOutcome::Abandoned(_)
-            | crate::DeviceJoinTransportOutcome::Cancelled(_)
     ));
     assert!(!fixture
         .layout
@@ -821,7 +820,6 @@ async fn run_facade_cancellation_unwinds_a_persisted_invitation_without_an_appro
     assert!(matches!(
         joining.await.expect("joining device receives cancellation"),
         crate::DeviceJoinTransportOutcome::Abandoned(_)
-            | crate::DeviceJoinTransportOutcome::Cancelled(_)
     ));
     assert!(!fixture
         .layout

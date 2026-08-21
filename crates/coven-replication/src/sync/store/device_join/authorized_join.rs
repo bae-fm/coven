@@ -1,8 +1,6 @@
 use super::history::DeviceJoinHistory;
-use super::journal::database_error;
 use super::*;
-use coven_protocol::store_commit::device_join_exchange::require_cancelled_outcome;
-use coven_protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
+use coven_protocol::store_commit::DeviceJoinAbandonmentRef;
 
 mod admission;
 mod same_principal;
@@ -18,7 +16,6 @@ pub(crate) struct AuthorizedJoin<'operation, 'storage> {
     database: StoreDatabase,
     storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
     root: StoreRootRef,
-    protocol_root: StoreProtocolRoot,
     verified_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
     membership: coven_protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
@@ -31,7 +28,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         database: StoreDatabase,
         storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
         root: StoreRootRef,
-        protocol_root: StoreProtocolRoot,
         verified_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
         membership: coven_protocol::membership::MembershipChain,
         local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
@@ -41,7 +37,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             database,
             storage,
             root,
-            protocol_root,
             verified_root,
             membership,
             local_writer,
@@ -443,132 +438,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         Ok(bootstrap)
     }
 
-    pub(super) async fn cancel(
-        &mut self,
-        attempt_ref: DeviceJoinAttemptRef,
-    ) -> Result<DeviceJoinCancellation, DeviceJoinError> {
-        let journal = self.journal(attempt_ref.attempt_id);
-        let current = journal.current().await?;
-        if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(existing)) =
-            &*current.progress
-        {
-            if existing.outcome.attempt() == &attempt_ref {
-                return Ok(existing.clone());
-            }
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        let expected_attempt = match &*current.progress {
-            DeviceJoinRoleProgress::Owner(
-                OwnerJoinProgress::AttemptActivated(bootstrap)
-                | OwnerJoinProgress::ChallengeCreateIntent(bootstrap),
-            ) => &bootstrap.publication_authorization.attempt,
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderReady(ready)) => {
-                &ready.bootstrap.publication_authorization.attempt
-            }
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ResponseObserved(readiness)) => {
-                &readiness.proof.attempt
-            }
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CancellationCreateIntent {
-                attempt,
-                ..
-            }) => attempt,
-            _ => return Err(DeviceJoinError::JournalConflict),
-        };
-        if expected_attempt != &attempt_ref {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
-        let local_writer = std::sync::Arc::clone(&self.local_writer);
-        let attempt = local_writer
-            .load_verified_device_join_attempt(&mut self.writer.join_history(), &attempt_ref)
-            .await?
-            .value;
-        if !self
-            .local_writer
-            .is_authored_by_registration(&attempt.owner_registration)
-            || !self.local_writer.is_current_owner(&self.membership)
-        {
-            return Err(DeviceJoinError::OwnerAuthorityRequired);
-        }
-        let outcome = self.local_writer.sign_device_join_outcome(
-            attempt_ref.clone(),
-            coven_protocol::store_commit::DeviceJoinDisposition::Cancelled,
-            attempt.owner_grant.clone(),
-        )?;
-        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
-            ProtocolObjectDomain::DeviceJoinOutcome,
-        );
-        let prefix = coven_protocol::store_commit::device_join_outcome_semantic_prefix(
-            attempt_ref.attempt_id,
-        );
-        let prepared = self.storage.prepare_protocol_object(
-            &context,
-            attempt.outcome_slot.clone(),
-            &prefix,
-            outcome.to_bytes(),
-        )?;
-        let outcome_ref = DeviceJoinOutcomeRef::Cancelled {
-            attempt: attempt_ref.clone(),
-            outcome_hash: outcome.outcome_hash(),
-            object: prepared.reference().clone(),
-        };
-        let intent = journal.record(OwnerJoinProgress::CancellationCreateIntent {
-            attempt: attempt_ref.clone(),
-            cancellation: outcome_ref.clone(),
-            prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
-        });
-        match &*current.progress {
-            DeviceJoinRoleProgress::Owner(
-                OwnerJoinProgress::AttemptActivated(_)
-                | OwnerJoinProgress::ChallengeCreateIntent(_)
-                | OwnerJoinProgress::ProviderReady(_)
-                | OwnerJoinProgress::ResponseObserved(_),
-            ) => {
-                journal.advance_to(&current, &intent).await?;
-            }
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CancellationCreateIntent {
-                attempt,
-                cancellation,
-                prepared: durable_prepared,
-            }) if attempt == &attempt_ref
-                && cancellation == &outcome_ref
-                && durable_prepared == &PreparedDeviceJoinObject::from_prepared(&prepared) => {}
-            _ => return Err(DeviceJoinError::JournalConflict),
-        }
-        self.storage
-            .create_verified_protocol_object(&context, &prepared, &prefix, &outcome.to_bytes())
-            .await
-            .map_err(|error| {
-                DeviceJoinError::prepared_object(error, DeviceJoinError::AttemptMismatch)
-            })?;
-        let local_writer = std::sync::Arc::clone(&self.local_writer);
-        let verified_outcome = local_writer
-            .load_own_device_join_outcome(&self.writer.join_history(), &outcome_ref)
-            .await?;
-        if verified_outcome.value != outcome {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
-        let plan = self.writer.prepare_plan().await?;
-        let outcome_activation = self
-            .writer
-            .activate(
-                plan,
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Outcome {
-                    outcome: outcome_ref.clone(),
-                    registration: None,
-                },
-            )
-            .await?;
-        let cancellation = DeviceJoinCancellation {
-            outcome: outcome_ref,
-            outcome_activation,
-        };
-        journal
-            .advance(&intent, OwnerJoinProgress::Cancelled(cancellation.clone()))
-            .await?;
-        Ok(cancellation)
-    }
-
     pub(super) async fn finalize(
         &mut self,
         completion: DeviceProviderAdmissionCompletion,
@@ -797,315 +666,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .await?;
         Ok(activation)
     }
-
-    pub(super) async fn complete_cleanup(
-        &mut self,
-        activation: DeviceJoinCleanupActivation,
-    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
-        let journal = self.journal(activation.receipt.attempt_id);
-        let current = journal.current().await?;
-        if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CancelledComplete(existing)) =
-            &*current.progress
-        {
-            if existing == &activation {
-                return Ok(existing.clone());
-            }
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupActivated(durable)) =
-            &*current.progress
-        else {
-            return Err(DeviceJoinError::JournalConflict);
-        };
-        if durable != &activation {
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        journal
-            .advance(
-                &current,
-                OwnerJoinProgress::CancelledComplete(activation.clone()),
-            )
-            .await?;
-        Ok(activation)
-    }
-
-    pub(super) async fn prepare_cleanup(
-        &mut self,
-        cancellation: DeviceJoinCancellation,
-        administrator_terminal: ProviderAdminJoinTerminal,
-        joiner_terminal: JoinerJoinTerminal,
-    ) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
-        require_cancelled_outcome(&cancellation.outcome)?;
-        let attempt_ref = cancellation.outcome.attempt().clone();
-        let journal = self.journal(attempt_ref.attempt_id);
-        let current = journal.current().await?;
-        if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupReceipt(existing)) =
-            &*current.progress
-        {
-            return Ok(existing.clone());
-        }
-        match &*current.progress {
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderClosed {
-                cancellation: durable,
-                ..
-            }) if durable == &cancellation => {}
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupReceiptCreateIntent {
-                cancellation: durable,
-                ..
-            }) if durable == &cancellation => {}
-            _ => return Err(DeviceJoinError::JournalConflict),
-        }
-        let (attempt, owner) = self
-            .join_history()
-            .load_attempt_and_owner(&attempt_ref)
-            .await?;
-        let outcome = self
-            .join_history()
-            .load_outcome(&cancellation.outcome, &owner.value)
-            .await?
-            .value;
-        if !matches!(
-            outcome.disposition,
-            coven_protocol::store_commit::DeviceJoinDisposition::Cancelled
-        ) {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
-        coven_protocol::store_commit::device_join_exchange::validate_terminals(
-            &cancellation.outcome,
-            &administrator_terminal,
-            &joiner_terminal,
-        )?;
-        self.verify_cleanup_terminals(&administrator_terminal, &joiner_terminal)
-            .await?;
-        if !self.local_writer.is_current_owner(&self.membership) {
-            return Err(DeviceJoinError::OwnerAuthorityRequired);
-        }
-        let executor_admin = self.resolve_provider_admin(
-            &attempt
-                .value
-                .provider_approval
-                .request
-                .offer
-                .provider_admin
-                .grant_id,
-        )?;
-        if executor_admin != *attempt.value.provider_approval.request.offer.provider_admin
-            || !self
-                .local_writer
-                .is_effective_provider_administrator(&executor_admin)
-        {
-            return Err(DeviceJoinError::ProviderAdministratorRequired);
-        }
-        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
-            ProtocolObjectDomain::DeviceJoinCleanupReceipt,
-        );
-        let prefix = coven_protocol::store_commit::device_join_cleanup_receipt_semantic_prefix(
-            attempt_ref.attempt_id,
-        );
-        let (receipt_object, receipt_ref, prepared, intent) = match &*current.progress {
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderClosed { .. }) => {
-                let plan = self.writer.prepare_plan().await?;
-                let receipt_object = self.local_writer.sign_device_join_cleanup_receipt(
-                    &attempt.value,
-                    cancellation.outcome.clone(),
-                    administrator_terminal.clone(),
-                    joiner_terminal.clone(),
-                    canonical_cleanup_slots(&attempt.value)?,
-                    plan.membership_state().clone(),
-                    attempt
-                        .value
-                        .provider_approval
-                        .request
-                        .offer
-                        .provider_admin
-                        .grant_id
-                        .clone(),
-                )?;
-                let slot = self
-                    .storage
-                    .allocate_protocol_slot(&context, &prefix, ".json")
-                    .await?;
-                let prepared = self.storage.prepare_protocol_object(
-                    &context,
-                    slot,
-                    &prefix,
-                    receipt_object.to_bytes(),
-                )?;
-                let receipt_ref = DeviceJoinCleanupReceiptRef {
-                    attempt_id: attempt_ref.attempt_id,
-                    receipt_hash: receipt_object.receipt_hash(),
-                    object: prepared.reference().clone(),
-                };
-                let intent = journal
-                    .advance(
-                        &current,
-                        OwnerJoinProgress::CleanupReceiptCreateIntent {
-                            cancellation: cancellation.clone(),
-                            receipt: receipt_ref.clone(),
-                            receipt_bytes: receipt_object.to_bytes(),
-                            prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
-                        },
-                    )
-                    .await?;
-                (Box::new(receipt_object), receipt_ref, prepared, intent)
-            }
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupReceiptCreateIntent {
-                receipt,
-                receipt_bytes,
-                prepared,
-                ..
-            }) => {
-                let receipt_object: DeviceJoinCleanupReceiptObject =
-                    serde_json::from_slice(receipt_bytes)?;
-                if receipt_object.to_bytes() != *receipt_bytes
-                    || receipt_object.cancellation != cancellation.outcome
-                    || receipt_object.administrator_terminal != administrator_terminal
-                    || receipt_object.joiner_terminal != joiner_terminal
-                    || receipt.attempt_id != attempt_ref.attempt_id
-                    || receipt.receipt_hash != receipt_object.receipt_hash()
-                    || receipt.object != prepared.object
-                {
-                    return Err(DeviceJoinError::JournalConflict);
-                }
-                (
-                    Box::new(receipt_object),
-                    receipt.clone(),
-                    prepared.restore()?,
-                    current.clone(),
-                )
-            }
-            _ => return Err(DeviceJoinError::JournalConflict),
-        };
-        self.local_writer.verify_device_join_cleanup_receipt(
-            &receipt_ref,
-            &receipt_object,
-            &attempt.value,
-        )?;
-        for slot in &receipt_object.deleted_slots {
-            self.storage
-                .delete_exact_slot_and_verify_absent(slot)
-                .await
-                .map_err(DeviceJoinError::ProviderStorage)?;
-        }
-        self.storage
-            .create_verified_protocol_object(
-                &context,
-                &prepared,
-                &prefix,
-                &receipt_object.to_bytes(),
-            )
-            .await
-            .map_err(|error| {
-                DeviceJoinError::prepared_object(error, DeviceJoinError::CleanupMismatch)
-            })?;
-        let receipt = DeviceJoinCleanupReceipt {
-            receipt: receipt_ref,
-        };
-        journal
-            .advance(&intent, OwnerJoinProgress::CleanupReceipt(receipt.clone()))
-            .await?;
-        Ok(receipt)
-    }
-
-    async fn verify_cleanup_terminals(
-        &self,
-        administrator: &ProviderAdminJoinTerminal,
-        joiner: &JoinerJoinTerminal,
-    ) -> Result<(), DeviceJoinError> {
-        match administrator {
-            ProviderAdminJoinTerminal::Completed(_) => {}
-            ProviderAdminJoinTerminal::Cancelled(closure) => {
-                let registration = self
-                    .database
-                    .activated_store_device_registration(closure.administrator_registration.clone())
-                    .await
-                    .map_err(database_error)?;
-                closure.verify(registration.value())?;
-            }
-        }
-        match joiner {
-            JoinerJoinTerminal::Ready(_) => {}
-            JoinerJoinTerminal::Cancelled(closure) => closure.verify()?,
-            JoinerJoinTerminal::WriteRevoked(revocation) => {
-                let registration = self
-                    .database
-                    .activated_store_device_registration(revocation.executor.clone())
-                    .await
-                    .map_err(database_error)?;
-                revocation.verify(registration.value())?;
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) async fn activate_cleanup(
-        &mut self,
-        receipt: DeviceJoinCleanupReceipt,
-    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
-        let journal = self.journal(receipt.receipt.attempt_id);
-        let current = journal.current().await?;
-        if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupActivated(existing)) =
-            &*current.progress
-        {
-            if existing.receipt == receipt.receipt {
-                return Ok(existing.clone());
-            }
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupReceipt(durable)) =
-            &*current.progress
-        else {
-            return Err(DeviceJoinError::JournalConflict);
-        };
-        if durable != &receipt {
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        let plan = self.writer.prepare_plan().await?;
-        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
-            ProtocolObjectDomain::DeviceJoinCleanupReceipt,
-        );
-        let prefix = coven_protocol::store_commit::device_join_cleanup_receipt_semantic_prefix(
-            receipt.receipt.attempt_id,
-        );
-        let bytes = self
-            .storage
-            .read_protocol_object(&context, &receipt.receipt.object, &prefix)
-            .await?;
-        let receipt_object: DeviceJoinCleanupReceiptObject = serde_json::from_slice(&bytes)?;
-        let executor = self
-            .database
-            .activated_store_device_registration(receipt_object.executor.clone())
-            .await
-            .map_err(database_error)?;
-        receipt.receipt.verify(&receipt_object, executor.value())?;
-        if receipt_object.store_root_hash != self.root.store_root_hash
-            || plan.membership_state() != &receipt_object.membership
-        {
-            return Err(DeviceJoinError::CleanupMismatch);
-        }
-        let activation_ref = self
-            .writer
-            .activate(
-                plan,
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::CleanupReceipt(
-                    receipt.receipt.clone(),
-                ),
-            )
-            .await?;
-        let activation = DeviceJoinCleanupActivation {
-            receipt: receipt.receipt,
-            activation: activation_ref,
-        };
-        journal
-            .advance(
-                &current,
-                OwnerJoinProgress::CleanupActivated(activation.clone()),
-            )
-            .await?;
-        Ok(activation)
-    }
 }
 
 impl Store {
@@ -1151,18 +711,6 @@ impl Store {
     }
 
     #[doc(hidden)]
-    pub(crate) async fn cancel_device_join(
-        &self,
-        attempt: DeviceJoinAttemptRef,
-    ) -> Result<DeviceJoinCancellation, DeviceJoinError> {
-        let mut writer = self
-            .authorize_writer()
-            .await
-            .map_err(DeviceJoinError::from)?;
-        writer.join_operation().cancel(attempt).await
-    }
-
-    #[doc(hidden)]
     pub(crate) async fn finalize_device_join(
         &self,
         completion: DeviceProviderAdmissionCompletion,
@@ -1172,17 +720,5 @@ impl Store {
             .await
             .map_err(DeviceJoinError::from)?;
         writer.join_operation().finalize(completion).await
-    }
-
-    #[doc(hidden)]
-    pub(crate) async fn complete_owner_device_join_cleanup(
-        &self,
-        activation: DeviceJoinCleanupActivation,
-    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
-        let mut writer = self
-            .authorize_writer()
-            .await
-            .map_err(DeviceJoinError::from)?;
-        writer.join_operation().complete_cleanup(activation).await
     }
 }

@@ -1,6 +1,6 @@
 use crate::query_mapped_rows;
 use crate::store::device_join_journal::{
-    require_initial, require_replacement_terminal, validate_successor, DeviceJoinJournalError,
+    require_initial, validate_successor, DeviceJoinJournalError,
 };
 use crate::StoreDatabase;
 use coven_protocol::store_commit::device_join_journal::{
@@ -301,19 +301,6 @@ pub(crate) fn advance_device_join_on(
     .map_err(crate::DbError::from)
 }
 
-pub(crate) fn begin_device_join_replacement_terminal_on(
-    conn: &rusqlite::Connection,
-    key: &str,
-    value: &str,
-) -> Result<String, crate::DbError> {
-    conn.execute(
-        "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
-        (key, value),
-    )
-    .map_err(crate::DbError::from)?;
-    crate::required_protocol_state_on(conn, key)
-}
-
 pub(crate) fn device_join_records_on(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<(String, String)>, crate::DbError> {
@@ -395,25 +382,6 @@ impl StoreDatabase {
         } else {
             Err(DeviceJoinJournalError::JournalConflict)
         }
-    }
-
-    pub async fn begin_device_join_replacement_terminal(
-        &self,
-        record: DeviceJoinJournalRecord,
-    ) -> Result<(), DeviceJoinJournalError> {
-        require_replacement_terminal(&record)?;
-        let key = record.store_key();
-        let value = serde_json::to_string(&record)?;
-        let durable = self
-            .call_database(move |session| {
-                session.begin_device_join_replacement_terminal(&key, &value)
-            })
-            .await
-            .map_err(DeviceJoinJournalError::Database)?;
-        if durable != serde_json::to_string(&record)? {
-            return Err(DeviceJoinJournalError::JournalConflict);
-        }
-        Ok(())
     }
 
     /// Every attempt's journal record, for the sweeps that look across attempts.

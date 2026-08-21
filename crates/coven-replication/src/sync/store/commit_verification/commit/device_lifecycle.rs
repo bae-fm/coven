@@ -87,10 +87,11 @@ impl<'a> StoreCommitVerifier<'a> {
             ProtocolObjectDomain::DeviceJoinOutcome,
         );
         let semantic_prefix = device_join_outcome_semantic_prefix(reference.attempt().attempt_id);
-        let expected_hash = match reference {
-            DeviceJoinOutcomeRef::Activated { outcome_hash, .. }
-            | DeviceJoinOutcomeRef::Cancelled { outcome_hash, .. } => *outcome_hash,
-        };
+        let DeviceJoinOutcomeRef::Activated {
+            outcome_hash: expected_hash,
+            ..
+        } = reference;
+        let expected_hash = *expected_hash;
         let expected = reference.clone();
         let expected_owner = owner.clone();
         let expected_store_root_hash = self.root.reference().store_root_hash;

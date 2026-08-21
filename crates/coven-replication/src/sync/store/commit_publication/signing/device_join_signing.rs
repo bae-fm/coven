@@ -150,68 +150,6 @@ impl LocalStoreWriter {
         )
     }
 
-    pub(crate) async fn load_own_device_join_outcome(
-        &self,
-        history: &crate::sync::store::device_join::history::DeviceJoinHistory<'_, '_>,
-        reference: &coven_protocol::store_commit::DeviceJoinOutcomeRef,
-    ) -> Result<
-        coven_protocol::objects::VerifiedObject<coven_protocol::store_commit::DeviceJoinOutcome>,
-        coven_protocol::objects::StoreObjectError,
-    > {
-        history
-            .load_outcome(reference, self.registration.value())
-            .await
-    }
-
-    pub(crate) fn is_effective_provider_administrator(
-        &self,
-        record: &coven_protocol::provider::ProviderAdminGrantRecord,
-    ) -> bool {
-        record.administrator == *self.registration.reference()
-            && record.provider == self.registration.value().provider
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn sign_device_join_cleanup_receipt(
-        &self,
-        attempt: &coven_protocol::store_commit::DeviceJoinAttempt,
-        cancellation: coven_protocol::store_commit::DeviceJoinOutcomeRef,
-        administrator_terminal: coven_protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
-        joiner_terminal: coven_protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
-        deleted_slots: Vec<coven_protocol::objects::ObjectSlot>,
-        membership: coven_protocol::circle_control::StoreMembershipStateRef,
-        provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId,
-    ) -> Result<
-        coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceiptObject,
-        crate::sync::store::device_join::DeviceJoinError,
-    > {
-        coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceiptObject::signed(
-            attempt,
-            cancellation,
-            administrator_terminal,
-            joiner_terminal,
-            deleted_slots,
-            membership,
-            provider_admin_grant,
-            self.registration.reference().clone(),
-            self.registration.value(),
-            &self.device_signer,
-        )
-        .map_err(crate::sync::store::device_join::DeviceJoinError::from)
-    }
-
-    pub(crate) fn verify_device_join_cleanup_receipt(
-        &self,
-        reference: &coven_protocol::store_commit::DeviceJoinCleanupReceiptRef,
-        receipt: &coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceiptObject,
-        attempt: &coven_protocol::store_commit::DeviceJoinAttempt,
-    ) -> Result<(), crate::sync::store::device_join::DeviceJoinError> {
-        receipt.verify(attempt, self.registration.value())?;
-        reference
-            .verify(receipt, self.registration.value())
-            .map_err(crate::sync::store::device_join::DeviceJoinError::from)
-    }
-
     pub(crate) fn sign_device_admission_approval(
         &self,
         request: coven_protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
@@ -271,52 +209,5 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
-    }
-
-    pub(crate) fn sign_provider_join_closure(
-        &self,
-        cancellation: coven_protocol::store_commit::DeviceJoinOutcomeRef,
-        administrator_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
-        challenge: coven_protocol::store_commit::device_join_exchange::ProviderChallengeDisposition,
-        prior_state_hash: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<
-        coven_protocol::store_commit::device_join_exchange::ProviderAdminJoinClosure,
-        crate::sync::store::device_join::DeviceJoinError,
-    > {
-        coven_protocol::store_commit::device_join_exchange::ProviderAdminJoinClosure::signed(
-            cancellation,
-            administrator_registration,
-            challenge,
-            prior_state_hash,
-            self.registration.value(),
-            &self.device_signer,
-        )
-        .map_err(crate::sync::store::device_join::DeviceJoinError::from)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn sign_device_join_write_revocation(
-        &self,
-        cancellation: coven_protocol::store_commit::DeviceJoinOutcomeRef,
-        authority: coven_protocol::provider::StoreMemberProviderAccessGrantRef,
-        protected_slots: Vec<coven_protocol::objects::ObjectSlot>,
-        withdrawal: coven_protocol::provider::ProviderAccessWithdrawal,
-        executor_grant: coven_protocol::provider::ProviderAdminGrantId,
-        executor_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
-    ) -> Result<
-        coven_protocol::store_commit::device_join_exchange::DeviceJoinProducerWriteRevocation,
-        crate::sync::store::device_join::DeviceJoinError,
-    > {
-        coven_protocol::store_commit::device_join_exchange::DeviceJoinProducerWriteRevocation::signed(
-            cancellation,
-            authority,
-            protected_slots,
-            withdrawal,
-            executor_grant,
-            executor_registration,
-            self.registration.value(),
-            &self.device_signer,
-        )
-        .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 }

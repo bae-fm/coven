@@ -309,12 +309,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 }
                 let DeviceJoinDisposition::Activated {
                     registration: outcome_registration,
-                } = &outcome_value.disposition
-                else {
-                    return Err(RegistrationLoadError::Invalid(
-                        "cancelled device join outcome cannot activate a registration".to_string(),
-                    ));
-                };
+                } = &outcome_value.disposition;
                 if outcome_registration != &activated.registration {
                     return Err(RegistrationLoadError::Invalid(
                         "join outcome registration differs from its activation".to_string(),

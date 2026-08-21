@@ -358,17 +358,6 @@ impl LocalStoreWriter {
                     },
                 )
             }
-            StoreOperationBatch::CleanupReceipt(receipt) => sign_ops(
-                context,
-                write_id,
-                registration_ref,
-                registration,
-                signer,
-                StoreCommitOperationsInput {
-                    device_join_cleanup_receipts: vec![receipt],
-                    ..StoreCommitOperationsInput::empty()
-                },
-            ),
             StoreOperationBatch::DeviceExclusionProposal(proposal) => sign_ops(
                 context,
                 write_id,

@@ -1625,18 +1625,6 @@ mod test_device {
                 .await
         }
 
-        pub async fn close_device_provider_admission(
-            &self,
-            cancellation: coven_protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
-        ) -> Result<
-            coven_protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
-            crate::sync::DeviceJoinError,
-        > {
-            self.store
-                .close_device_provider_admission(cancellation)
-                .await
-        }
-
         pub async fn abandon_device_join(
             &self,
             offer: coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
@@ -1675,16 +1663,6 @@ mod test_device {
                 .await
         }
 
-        pub async fn cancel_device_join(
-            &self,
-            attempt: coven_protocol::store_commit::DeviceJoinAttemptRef,
-        ) -> Result<
-            coven_protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
-            crate::sync::DeviceJoinError,
-        > {
-            self.store.cancel_device_join(attempt).await
-        }
-
         pub async fn finalize_device_join(
             &self,
             completion: coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionCompletion,
@@ -1693,55 +1671,6 @@ mod test_device {
             crate::sync::DeviceJoinError,
         > {
             self.store.finalize_device_join(completion).await
-        }
-
-        pub async fn complete_owner_device_join_cleanup(
-            &self,
-            activation: coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
-        ) -> Result<
-            coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
-            crate::sync::DeviceJoinError,
-        > {
-            self.store
-                .complete_owner_device_join_cleanup(activation)
-                .await
-        }
-
-        pub async fn revoke_joining_device_writes(
-            &self,
-            cancellation: coven_protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
-            revocation_executor: &dyn crate::sync::store::DeviceJoinWriteRevocationExecutor,
-        ) -> Result<
-            coven_protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
-            crate::sync::DeviceJoinError,
-        > {
-            self.store
-                .revoke_joining_device_writes(cancellation, revocation_executor)
-                .await
-        }
-
-        pub async fn prepare_device_join_cleanup(
-            &self,
-            cancellation: coven_protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
-            administrator_terminal: coven_protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
-            joiner_terminal: coven_protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
-        ) -> Result<
-            coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceipt,
-            crate::sync::DeviceJoinError,
-        > {
-            self.store
-                .prepare_device_join_cleanup(cancellation, administrator_terminal, joiner_terminal)
-                .await
-        }
-
-        pub async fn activate_device_join_cleanup(
-            &self,
-            receipt: coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceipt,
-        ) -> Result<
-            coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
-            crate::sync::DeviceJoinError,
-        > {
-            self.store.activate_device_join_cleanup(receipt).await
         }
 
         pub async fn device_exclusion_operations_for_test(

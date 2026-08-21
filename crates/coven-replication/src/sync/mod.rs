@@ -39,17 +39,14 @@ pub use store::MemberAdmission;
 pub use store::Store;
 pub use store::{
     AdmittingDeviceJoinProgress, DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation,
-    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinCancellation,
-    DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt, DeviceJoinDriveOutcome, DeviceJoinError,
+    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinDriveOutcome, DeviceJoinError,
     DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinOfferBundle,
-    DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus,
-    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
-    DeviceJoinTransportTiming, DeviceJoinWriteRevocationExecutor,
+    DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus, DeviceJoinTransportError,
+    DeviceJoinTransportKind, DeviceJoinTransportParams, DeviceJoinTransportTiming,
     DeviceProviderAccessAdministrator, DeviceProviderAccessRequest,
     DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
-    DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
-    JoiningDeviceJoinProgress, JoiningDeviceJoinProgressObserver, ProviderAdminJoinClosure,
-    ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap,
+    DeviceRegistrationRequest, JoinedStore, JoiningDeviceJoinProgress,
+    JoiningDeviceJoinProgressObserver, ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap,
     SamePrincipalDeviceJoin,
 };
 pub use store::{

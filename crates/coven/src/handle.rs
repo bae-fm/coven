@@ -1116,48 +1116,6 @@ impl CovenHandle {
         self.sync.finalize_device_join(completion).await
     }
 
-    pub async fn cancel_device_join(
-        &self,
-        attempt: crate::DeviceJoinAttemptRef,
-    ) -> Result<crate::DeviceJoinCancellation, SyncError> {
-        self.sync.cancel_device_join(attempt).await
-    }
-
-    pub async fn close_device_provider_admission(
-        &self,
-        cancellation: crate::DeviceJoinCancellation,
-    ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        self.sync
-            .close_device_provider_admission(cancellation)
-            .await
-    }
-
-    pub async fn revoke_joining_device_writes(
-        &self,
-        cancellation: crate::DeviceJoinCancellation,
-        revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
-    ) -> Result<crate::JoinerJoinTerminal, SyncError> {
-        self.sync
-            .revoke_joining_device_writes(cancellation, revocation_executor)
-            .await
-    }
-
-    pub async fn activate_device_join_cleanup(
-        &self,
-        receipt: crate::DeviceJoinCleanupReceipt,
-    ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        self.sync.activate_device_join_cleanup(receipt).await
-    }
-
-    pub async fn complete_cancelled_device_join(
-        &self,
-        activation: crate::DeviceJoinCleanupActivation,
-    ) -> Result<(), SyncError> {
-        self.sync
-            .complete_owner_device_join_cleanup(activation)
-            .await
-    }
-
     pub async fn device_join_status(
         &self,
         attempt_id: crate::DeviceJoinAttemptId,

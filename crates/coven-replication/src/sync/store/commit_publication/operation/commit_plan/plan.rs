@@ -19,7 +19,6 @@ pub(crate) enum StoreOperationBatch {
         outcome: DeviceJoinOutcomeRef,
         registration: Option<Box<ActivatedStoreDeviceRegistration>>,
     },
-    CleanupReceipt(coven_protocol::store_commit::DeviceJoinCleanupReceiptRef),
     DeviceExclusionProposal(super::store_commit::RetainedStoreDeviceExclusionProposal),
     DeviceExclusionOutcome(super::store_commit::RetainedStoreDeviceExclusionOutcome),
     ReclaimAuthorization(Box<coven_protocol::reclaim::ReclaimAuthorizationRef>),

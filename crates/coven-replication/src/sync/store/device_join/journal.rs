@@ -3,7 +3,7 @@ use coven_protocol::store_commit::DeviceJoinAttemptId;
 use super::DeviceJoinError;
 use coven_database::StoreDatabase;
 use coven_protocol::store_commit::device_join_exchange::{
-    DeviceJoinActivation, DeviceJoinCleanupActivation, DeviceJoinReadiness,
+    DeviceJoinActivation, DeviceJoinReadiness,
 };
 use coven_protocol::store_commit::DeviceJoinAttemptRef;
 use coven_protocol::store_commit::DeviceJoinOutcomeRef;
@@ -69,18 +69,6 @@ impl<Progress: DeviceJoinRoleProgressKind> StoreJoinJournal<Progress> {
         let next = self.record(progress);
         self.advance_to(previous, &next).await?;
         Ok(next)
-    }
-
-    /// Install a terminal record for a role that never opened a journal, so a
-    /// replacement of an attempt this device never ran still records how it ended.
-    pub(super) async fn begin_replacement_terminal(
-        &self,
-        progress: Progress,
-    ) -> Result<(), DeviceJoinError> {
-        Ok(self
-            .database
-            .begin_device_join_replacement_terminal(self.record(progress))
-            .await?)
     }
 
     /// Advance from `previous` to a record the caller already built — the shape a
@@ -285,62 +273,6 @@ impl DeviceJoinJournalDatabase {
             .complete_into(database, current, activated)
             .await
             .map_err(DeviceJoinError::from)
-    }
-
-    pub(super) fn advance_joiner_cleanup_from_replacement(
-        &self,
-        previous: &DeviceJoinJournalRecord,
-        next: DeviceJoinJournalRecord,
-    ) -> Result<(), DeviceJoinError> {
-        if previous.attempt_id != next.attempt_id
-            || !matches!(
-                &*previous.progress,
-                DeviceJoinRoleProgress::Joiner(progress) if progress.holds_staged_work()
-            )
-            || !matches!(
-                &*next.progress,
-                DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CleanupActivated(_))
-            )
-        {
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        self.swap(previous, &next)
-    }
-
-    pub fn complete_joiner_cleanup(
-        &self,
-        activation: DeviceJoinCleanupActivation,
-    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
-        let attempt_id = activation.receipt.attempt_id;
-        let current = self
-            .load(attempt_id, DeviceJoinRole::Joiner)?
-            .ok_or(DeviceJoinError::JournalConflict)?;
-        if let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CancelledComplete(existing)) =
-            &*current.progress
-        {
-            if existing == &activation {
-                return Ok(existing.clone());
-            }
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CleanupActivated(durable)) =
-            &*current.progress
-        else {
-            return Err(DeviceJoinError::JournalConflict);
-        };
-        if durable != &activation {
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        self.advance(
-            &current,
-            DeviceJoinJournalRecord {
-                attempt_id,
-                progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                    JoinerJoinProgress::CancelledComplete(activation.clone()),
-                )),
-            },
-        )?;
-        Ok(activation)
     }
 }
 

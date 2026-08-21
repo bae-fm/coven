@@ -350,7 +350,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         accepted_frontier: &[StoreBatchCommitRef],
     ) -> Result<Vec<ActivatedStoreDeviceRegistration>, StorePullError> {
         let accepted = VerifiedMergePredecessorHistory::new(&self.history, accepted_frontier);
-        let loaded = self.load_commit_join_evidence(commit, author).await;
+        let loaded = self.load_commit_join_evidence(commit).await;
         let loaded = loaded.map_err(StorePullError::from)?;
         let join_evidence = accepted.verify_commit_join_evidence(commit, loaded, membership)?;
         let registrations = self
@@ -486,13 +486,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         if has_join_abandonment {
             self.validate_commit_join_abandonments(commit, activating_author, predecessor)
                 .await?;
-        }
-        if !commit.device_join_cleanup_receipts().is_empty() {
-            accepted.validate_commit_join_cleanup_receipts(
-                activating_author,
-                predecessor,
-                join_evidence,
-            )?;
         }
         let mut registrations = Vec::with_capacity(commit.device_registrations().len());
         for activated in commit.device_registrations() {

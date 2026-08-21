@@ -48,7 +48,6 @@ pub(super) fn validate_commit_body(
             validate_commit_circle_acknowledgements(&operations.circle_acknowledgements, author)?;
             validate_device_join_attempt_decision_refs(&operations.device_join_attempt_decisions)?;
             validate_device_join_outcome_refs(&operations.device_join_outcomes)?;
-            validate_device_join_cleanup_receipt_refs(&operations.device_join_cleanup_receipts)?;
             validate_provider_access_refs(&operations.provider_access_grants)?;
             validate_device_registration_refs(&operations.device_registrations)?;
             validate_device_exclusion_refs(

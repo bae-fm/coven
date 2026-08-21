@@ -15,8 +15,8 @@ use store_session::{
 pub use store_session::{candidate_records, payload_store::PayloadStoreError, reclaim};
 mod device_join;
 pub(crate) use device_join::{
-    advance_device_join_on, begin_device_join_on, begin_device_join_replacement_terminal_on,
-    complete_device_join_from_pending_on, device_join_records_on, forget_device_join_on,
+    advance_device_join_on, begin_device_join_on, complete_device_join_from_pending_on,
+    device_join_records_on, forget_device_join_on,
 };
 pub mod device_join_journal;
 mod host_sql;
