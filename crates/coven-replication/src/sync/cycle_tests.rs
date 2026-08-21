@@ -766,15 +766,16 @@ fn exercise_post_attempt_cancellation<'a>(
             .expect("retry exact joining-device closure");
         assert_eq!(joiner_retry, joiner_terminal);
         assert!(matches!(&joiner_terminal, JoinerJoinTerminal::Cancelled(_)));
+        // The closed admission is this device's own state: it has nothing to
+        // hand anyone, only work to resume.
         assert!(owner_db
             .device_join_actions()
             .await
             .expect("enumerate terminal Store join actions")
-            .contains(
-                &crate::sync::store::DeviceJoinAction::TransferProviderAdminTerminal(
-                    administrator_terminal.clone(),
-                ),
-            ));
+            .contains(&crate::sync::store::DeviceJoinAction::ResumeOperation {
+                attempt_id: cancellation.outcome.attempt().attempt_id,
+                role: crate::sync::store::DeviceJoinRole::Owner,
+            }));
         let joiner_action =
             crate::sync::store::DeviceJoinAction::TransferJoinerTerminal(joiner_terminal.clone());
         assert_eq!(

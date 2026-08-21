@@ -1171,6 +1171,22 @@ async fn run_cancelling_mid_join_removes_the_attempts_slots() {
     owner_unwind.expect("the owner carries the cancellation to its activated cleanup");
     joiner_unwind.expect("the joining device closes and discards its pending join");
 
+    // The unwind's own two steps happen on one device: it closes its provider
+    // admission and signs the cleanup receipt, then activates that receipt
+    // itself. Neither has a reader on the other side, so neither is written.
+    let written = fixture
+        .home
+        .exact_creates()
+        .into_iter()
+        .map(|slot| slot.logical_key().to_string())
+        .collect::<Vec<_>>();
+    for unread in ["/provider-admin-terminal.json", "/cleanup-receipt.json"] {
+        assert!(
+            written.iter().all(|key| !key.ends_with(unread)),
+            "the unwind wrote {unread}, which nothing ever reads: {written:?}",
+        );
+    }
+
     for kind in DeviceJoinTransportKind::ALL {
         assert!(
             fixture.slot_bytes(&bundle, kind).await.is_none(),
@@ -2430,12 +2446,13 @@ async fn run_a_join_that_never_waits_spends_a_fixed_number_of_transport_operatio
     // Six artifacts the exchange moves, the request this resume republishes and
     // the read that confirms its slot, the step waits' first look at the
     // abandonment slot, and the teardown's probe of every slot an attempt can
-    // hold before it deletes the ones it finds. Two of those probes went with
-    // the owner-to-administrator handoff kinds: one device admits, so it never
-    // hands an artifact to itself.
+    // hold before it deletes the ones it finds. Four of those probes are gone:
+    // two with the owner-to-administrator handoff kinds, because one device
+    // admits and never hands an artifact to itself, and two with the unwind's
+    // own steps, which no counterpart ever read.
     assert_eq!(
         artifacts.len(),
-        19,
+        17,
         "the joining device made {} artifact operations on a join with no waiting in it: {artifacts:?}",
         artifacts.len(),
     );

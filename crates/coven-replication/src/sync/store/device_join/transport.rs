@@ -24,10 +24,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
-    DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt, DeviceJoinError, DeviceJoinOffer,
-    DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus, DeviceProviderAccessAdministrator,
+    DeviceJoinCleanupActivation, DeviceJoinError, DeviceJoinOffer, DeviceJoinReadiness,
+    DeviceJoinRole, DeviceJoinStatus, DeviceProviderAccessAdministrator,
     DeviceProviderAccessRequest, DeviceProviderAdmissionApproval, DeviceRegistrationRequest,
-    JoinerJoinTerminal, ProviderAdminJoinTerminal, SamePrincipalDeviceJoin, Store,
+    JoinerJoinTerminal, SamePrincipalDeviceJoin, Store,
 };
 use coven_keys::encryption::{EncryptionService, MasterKeyring, SealError};
 use coven_protocol::objects::ObjectSlot;
@@ -58,16 +58,14 @@ pub enum DeviceJoinTransportKind {
     Activation,
     Abandonment,
     Cancellation,
-    ProviderAdminTerminal,
     JoinerTerminal,
-    CleanupReceipt,
     CleanupActivation,
 }
 
 impl DeviceJoinTransportKind {
     /// Every kind, in protocol order. An attempt's namespace holds one slot per
     /// entry — allocated together, deleted together.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 11] = [
         Self::ProviderAccessRequest,
         Self::ProviderAdmissionApproval,
         Self::RegistrationRequest,
@@ -77,9 +75,7 @@ impl DeviceJoinTransportKind {
         Self::Activation,
         Self::Abandonment,
         Self::Cancellation,
-        Self::ProviderAdminTerminal,
         Self::JoinerTerminal,
-        Self::CleanupReceipt,
         Self::CleanupActivation,
     ];
 
@@ -95,9 +91,7 @@ impl DeviceJoinTransportKind {
             Self::Activation => "activation",
             Self::Abandonment => "abandonment",
             Self::Cancellation => "cancellation",
-            Self::ProviderAdminTerminal => "provider-admin-terminal",
             Self::JoinerTerminal => "joiner-terminal",
-            Self::CleanupReceipt => "cleanup-receipt",
             Self::CleanupActivation => "cleanup-activation",
         }
     }
@@ -112,12 +106,10 @@ impl DeviceJoinTransportKind {
             | Self::JoinerTerminal => DeviceJoinRole::Joiner,
             Self::ProviderAdmissionApproval
             | Self::ProviderReadyBootstrap
-            | Self::ProviderAdminTerminal
             | Self::SamePrincipalJoin
             | Self::Activation
             | Self::Abandonment
             | Self::Cancellation
-            | Self::CleanupReceipt
             | Self::CleanupActivation => DeviceJoinRole::Owner,
         }
     }
@@ -141,9 +133,7 @@ impl DeviceJoinTransportKind {
             DeviceJoinAction::TransferActivation(_) => Some(Self::Activation),
             DeviceJoinAction::TransferAbandonment(_) => Some(Self::Abandonment),
             DeviceJoinAction::TransferCancellation(_) => Some(Self::Cancellation),
-            DeviceJoinAction::TransferProviderAdminTerminal(_) => Some(Self::ProviderAdminTerminal),
             DeviceJoinAction::TransferJoinerTerminal(_) => Some(Self::JoinerTerminal),
-            DeviceJoinAction::TransferCleanupReceipt(_) => Some(Self::CleanupReceipt),
             DeviceJoinAction::TransferCleanupActivation(_) => Some(Self::CleanupActivation),
             DeviceJoinAction::TransferOffer(_)
             | DeviceJoinAction::CompleteJoin(_)
@@ -205,17 +195,7 @@ device_join_artifact!(
 device_join_artifact!(DeviceJoinActivation, Activation, TransferActivation);
 device_join_artifact!(DeviceJoinAbandonment, Abandonment, TransferAbandonment);
 device_join_artifact!(DeviceJoinCancellation, Cancellation, TransferCancellation);
-device_join_artifact!(
-    ProviderAdminJoinTerminal,
-    ProviderAdminTerminal,
-    TransferProviderAdminTerminal
-);
 device_join_artifact!(JoinerJoinTerminal, JoinerTerminal, TransferJoinerTerminal);
-device_join_artifact!(
-    DeviceJoinCleanupReceipt,
-    CleanupReceipt,
-    TransferCleanupReceipt
-);
 device_join_artifact!(
     DeviceJoinCleanupActivation,
     CleanupActivation,
@@ -1268,10 +1248,6 @@ impl<'attempt> AttemptTransport<'attempt> {
                     .store
                     .close_device_provider_admission(cancellation.clone())
                     .await?;
-                self.publish(DeviceJoinAction::TransferProviderAdminTerminal(
-                    administrator_terminal.clone(),
-                ))
-                .await?;
                 let joiner_terminal = self.await_artifact::<JoinerJoinTerminal>(timing).await?;
                 self.store
                     .prepare_device_join_cleanup(
@@ -1282,9 +1258,6 @@ impl<'attempt> AttemptTransport<'attempt> {
                     .await?
             }
         };
-        self.publish(DeviceJoinAction::TransferCleanupReceipt(receipt.clone()))
-            .await?;
-
         let activation = self.store.activate_device_join_cleanup(receipt).await?;
         self.publish(DeviceJoinAction::TransferCleanupActivation(
             activation.clone(),

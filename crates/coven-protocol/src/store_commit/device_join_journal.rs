@@ -117,9 +117,7 @@ pub enum DeviceJoinAction {
     TransferActivation(DeviceJoinActivation),
     TransferAbandonment(DeviceJoinAbandonment),
     TransferCancellation(DeviceJoinCancellation),
-    TransferProviderAdminTerminal(ProviderAdminJoinTerminal),
     TransferJoinerTerminal(JoinerJoinTerminal),
-    TransferCleanupReceipt(DeviceJoinCleanupReceipt),
     TransferCleanupActivation(DeviceJoinCleanupActivation),
     CompleteJoin(DeviceJoinActivation),
     CompleteCleanup(DeviceJoinCleanupActivation),
@@ -572,6 +570,8 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
             | OwnerJoinProgress::ActivationCreateIntent { .. }
             | OwnerJoinProgress::CancellationCreateIntent { .. }
             | OwnerJoinProgress::ProviderClosureIntent { .. }
+            | OwnerJoinProgress::ProviderClosed { .. }
+            | OwnerJoinProgress::CleanupReceipt(_)
             | OwnerJoinProgress::CleanupReceiptCreateIntent { .. },
         ) => Some(resume()),
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ApprovalPrepared(approval)) => Some(
@@ -591,14 +591,6 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
         }
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(cancellation)) => {
             Some(DeviceJoinAction::TransferCancellation(cancellation.clone()))
-        }
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderClosed { closure, .. }) => {
-            Some(DeviceJoinAction::TransferProviderAdminTerminal(
-                ProviderAdminJoinTerminal::Cancelled(closure.clone()),
-            ))
-        }
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupReceipt(receipt)) => {
-            Some(DeviceJoinAction::TransferCleanupReceipt(receipt.clone()))
         }
         DeviceJoinRoleProgress::Owner(
             OwnerJoinProgress::CleanupActivated(activation)
