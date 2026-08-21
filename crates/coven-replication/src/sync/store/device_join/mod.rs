@@ -35,7 +35,7 @@ mod joiner;
 mod journal;
 pub(crate) mod transport;
 
-pub(super) use authorized_join::{AuthorizedJoin, AuthorizedProviderAdministratorJoin};
+pub(super) use authorized_join::AuthorizedJoin;
 
 #[derive(Clone, Copy)]
 pub(crate) struct PendingDeviceJoinHistoryConstruction;

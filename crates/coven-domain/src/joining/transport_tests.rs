@@ -12,7 +12,7 @@ use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::objects::ObjectSlot;
 use coven_replication::sync::store::{
-    DeviceJoinAction, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinTransport,
+    DeviceJoinAction, DeviceJoinOfferBundle, DeviceJoinRole, DeviceJoinTransport,
     DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportTiming,
 };
 use coven_replication::sync::test_helpers::*;
@@ -444,12 +444,8 @@ impl TransportFixture {
     }
 
     fn transport<'a>(&'a self, bundle: &'a DeviceJoinOfferBundle) -> DeviceJoinTransport<'a> {
-        DeviceJoinTransport::open(
-            &*self.owner_storage,
-            bundle,
-            DeviceJoinRoles::admitting(true, true),
-        )
-        .expect("open the transport")
+        DeviceJoinTransport::open(&*self.owner_storage, bundle, DeviceJoinRole::Owner)
+            .expect("open the transport")
     }
 
     async fn slot_bytes(
@@ -548,17 +544,26 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
         .into_iter()
         .filter(|slot| slot.logical_key().contains("device-join-transport"))
         .collect::<Vec<_>>();
-    assert!(
-        transport_creates.iter().all(|slot| !slot
-            .logical_key()
-            .ends_with("/provisional-bootstrap.json")),
-        "one admitting device does not transfer an owner artifact to its own provider-administrator role",
-    );
-    assert!(
-        transport_creates.iter().all(|slot| !slot
-            .logical_key()
-            .ends_with("/provider-admission-completion.json")),
-        "one admitting device does not transfer a provider-administrator artifact to its own owner role",
+    // One device admits, so the exchange has no handoff to carry between an
+    // owner machine and a storage-administrator machine: the attempt's
+    // namespace holds exactly what crosses between the two devices.
+    let created_kinds = transport_creates
+        .iter()
+        .map(|slot| {
+            slot.logical_key()
+                .rsplit('/')
+                .next()
+                .expect("a transport slot key ends in its kind")
+                .to_string()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        created_kinds,
+        std::collections::BTreeSet::from([
+            "provider-access-request.json".to_string(),
+            "same-principal-join.json".to_string(),
+        ]),
+        "a same-provider join creates only the artifacts that cross between the two devices",
     );
     for kind in ["provider-access-request", "same-principal-join"] {
         assert_eq!(
@@ -570,21 +575,6 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
             "the uninterrupted join attempts one create for {kind}",
         );
     }
-    for kind in [
-        "provider-admission-approval",
-        "registration-request",
-        "provider-ready-bootstrap",
-        "readiness",
-        "activation",
-    ] {
-        assert!(
-            transport_creates
-                .iter()
-                .all(|slot| !slot.logical_key().ends_with(&format!("/{kind}.json"))),
-            "a same-provider join must not create {kind}",
-        );
-    }
-
     {
         let progress = progress.lock().expect("progress lock");
         assert!(progress.contains(
@@ -686,7 +676,7 @@ async fn the_offer_bundle_round_trips_through_its_encoded_form() {
             .transport_storage()
             .await
             .expect("joining device transport storage");
-        DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRoles::joiner())
+        DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRole::Joiner)
             .expect("open transport")
             .publish(&DeviceJoinAction::TransferProviderAccessRequest(
                 request.clone(),
@@ -694,7 +684,7 @@ async fn the_offer_bundle_round_trips_through_its_encoded_form() {
             .await
             .expect("publish the access request");
         let read_back =
-            DeviceJoinTransport::open(&joiner_storage, &decoded, DeviceJoinRoles::joiner())
+            DeviceJoinTransport::open(&joiner_storage, &decoded, DeviceJoinRole::Joiner)
                 .expect("open the decoded transport")
                 .read(DeviceJoinTransportKind::ProviderAccessRequest)
                 .await
@@ -894,17 +884,6 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
         Some(&access_request),
         "the owner left the joining device's exact request in place",
     );
-    assert!(
-        fixture
-            .slot_bytes(
-                &bundle,
-                DeviceJoinTransportKind::ProviderAdmissionCompletion
-            )
-            .await
-            .is_none(),
-        "one admitting device must not publish an artifact to itself",
-    );
-
     // The joiner's restart republishes its identical request, installs the
     // library, consumes the activation, and saves the store.
     let config = joined(Box::pin(join_once(timing())).await);
@@ -1615,9 +1594,8 @@ async fn republishing_is_idempotent_and_a_different_artifact_is_refused() {
             .transport_storage()
             .await
             .expect("joining device transport storage");
-        let transport =
-            DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRoles::joiner())
-                .expect("open transport");
+        let transport = DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRole::Joiner)
+            .expect("open transport");
 
         let mut conflicting_request = request.clone();
         conflicting_request
@@ -1783,7 +1761,7 @@ async fn tampered_slot_bytes_refuse_to_open() {
             .transport_storage()
             .await
             .expect("joining device transport storage");
-        DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRoles::joiner())
+        DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRole::Joiner)
             .expect("open transport")
             .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
             .await
@@ -1873,7 +1851,7 @@ async fn concurrent_attempts_keep_separate_namespaces() {
             .transport_storage()
             .await
             .expect("joining device transport storage");
-        DeviceJoinTransport::open(&joiner_storage, &first, DeviceJoinRoles::joiner())
+        DeviceJoinTransport::open(&joiner_storage, &first, DeviceJoinRole::Joiner)
             .expect("open the first attempt's transport")
             .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
             .await
@@ -2452,10 +2430,12 @@ async fn run_a_join_that_never_waits_spends_a_fixed_number_of_transport_operatio
     // Six artifacts the exchange moves, the request this resume republishes and
     // the read that confirms its slot, the step waits' first look at the
     // abandonment slot, and the teardown's probe of every slot an attempt can
-    // hold before it deletes the ones it finds.
+    // hold before it deletes the ones it finds. Two of those probes went with
+    // the owner-to-administrator handoff kinds: one device admits, so it never
+    // hands an artifact to itself.
     assert_eq!(
         artifacts.len(),
-        21,
+        19,
         "the joining device made {} artifact operations on a join with no waiting in it: {artifacts:?}",
         artifacts.len(),
     );

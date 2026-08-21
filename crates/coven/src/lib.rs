@@ -111,7 +111,7 @@ pub use coven_protocol::{
     DeviceJoinAttemptRef, ExactSlotProbeReceipt, MemberInfo, MemberRole, MembershipConflictChoice,
     MembershipConflictInfo, ObjectHash, ProviderAccessLocator, ProviderAccessWithdrawal,
     ProviderAdminGrantId, ProviderAdminGrantRecord, ProviderCapabilityProof, StoreBatchCommitRef,
-    StoreCommitCoord, StoreDeviceId,
+    StoreCommitCoord, StoreDeviceId, StoreMemberProviderAccessGrantRef,
 };
 pub use coven_protocol::{
     AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
@@ -126,17 +126,16 @@ pub use coven_replication::sync::{
     DeviceJoinAction, DeviceJoinActivation, DeviceJoinApproval, DeviceJoinApprovalPolicy,
     DeviceJoinCancellation, DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt,
     DeviceJoinDriveOutcome, DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
-    DeviceJoinOffer, DeviceJoinOfferBundle, DeviceJoinProducer, DeviceJoinProducerWriteRevocation,
-    DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus, DeviceJoinTransportError,
-    DeviceJoinTransportKind, DeviceJoinTransportParams, DeviceJoinTransportTiming,
-    DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
-    DeviceProviderAccessRequest, DeviceProviderAdmissionApproval,
-    DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
-    EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus, JoinedStore,
-    JoinerJoinClosure, JoinerJoinTerminal, JoiningDeviceJoinProgress,
+    DeviceJoinOffer, DeviceJoinOfferBundle, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness,
+    DeviceJoinRole, DeviceJoinStatus, DeviceJoinTransportError, DeviceJoinTransportKind,
+    DeviceJoinTransportParams, DeviceJoinTransportTiming, DeviceJoinWriteRevocationExecutor,
+    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest,
+    DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
+    DeviceRegistrationRequest, EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus,
+    JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, JoiningDeviceJoinProgress,
     JoiningDeviceJoinProgressObserver, ProviderAdminJoinClosure, ProviderAdminJoinTerminal,
-    ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap, SyncError,
-    SyncLoopAlerts, SyncLoopStatus, SyncLoopSuccess,
+    ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap, SyncError, SyncLoopAlerts,
+    SyncLoopStatus, SyncLoopSuccess,
 };
 #[cfg(feature = "oauth-providers")]
 pub use coven_storage::fetch_account_email;

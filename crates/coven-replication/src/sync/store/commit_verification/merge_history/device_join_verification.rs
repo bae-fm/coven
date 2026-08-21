@@ -191,16 +191,6 @@ impl<'a> MergeHistoryVerifier<'a> {
                         .verify(&administrator)
                         .map_err(RegistrationLoadError::from)?;
                 }
-                device_join::ProviderAdminJoinTerminal::WriteRevoked(revocation) => {
-                    let executor = self
-                        .load_registration(&revocation.executor)
-                        .await
-                        .map_err(RegistrationLoadError::Object)?
-                        .value;
-                    revocation
-                        .verify(&executor)
-                        .map_err(RegistrationLoadError::from)?;
-                }
             }
             match &receipt.joiner_terminal {
                 device_join::JoinerJoinTerminal::Ready(_) => {}

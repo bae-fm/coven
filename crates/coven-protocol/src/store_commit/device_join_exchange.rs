@@ -82,7 +82,6 @@ impl DeviceJoinOfferBody {
     fn validate_shape(&self) -> Result<(), DeviceJoinExchangeError> {
         if self.member_pubkey.is_empty()
             || self.provider_admin.administrator != self.owner_registration
-                && self.provider_admin.administrator.device_id == self.owner_registration.device_id
             || self.attempt_slot == self.outcome_slot
         {
             return Err(DeviceJoinExchangeError::OfferMismatch);
@@ -274,7 +273,7 @@ impl DeviceProviderAdmissionApprovalBody {
     fn validate_shape(
         &self,
         store_root: &crate::objects::VerifiedObject<StoreProtocolRoot>,
-        administrator: &StoreDeviceRegistration,
+        owner: &StoreDeviceRegistration,
     ) -> Result<(), DeviceJoinExchangeError> {
         let offer = &self.request.offer;
         if store_root.object != offer.store_root.object
@@ -296,7 +295,7 @@ impl DeviceProviderAdmissionApprovalBody {
                     && access_grant.grant.administrator_grant == offer.provider_admin.grant_id
                     && access_grant.grant.administrator == offer.provider_admin.administrator =>
             {
-                access_grant.grant.verify(&offer.provider, administrator)?;
+                access_grant.grant.verify(&offer.provider, owner)?;
             }
             _ => return Err(DeviceJoinExchangeError::ApprovalMismatch),
         }
@@ -316,30 +315,32 @@ impl DeviceProviderAdmissionApproval {
         request: DeviceProviderAccessRequest,
         admission: DeviceProviderAdmission,
         store_root: &crate::objects::VerifiedObject<StoreProtocolRoot>,
-        administrator: &StoreDeviceRegistration,
-        administrator_device_signer: &UserKeypair,
+        owner: &StoreDeviceRegistration,
+        owner_device_signer: &UserKeypair,
     ) -> Result<Self, DeviceJoinExchangeError> {
-        if keys::public_key_hex(administrator_device_signer) != administrator.device_signing_pubkey
-        {
+        if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey {
             return Err(DeviceJoinExchangeError::InvalidSignature);
         }
         let body = DeviceProviderAdmissionApprovalBody {
             request: Box::new(request),
             admission,
         };
-        body.validate_shape(store_root, administrator)?;
-        Ok(Signed::sign(body, administrator_device_signer))
+        body.validate_shape(store_root, owner)?;
+        Ok(Signed::sign(body, owner_device_signer))
     }
 
+    /// One registration answers the whole approval: the device that signed the
+    /// offer is the device that holds the store's provider-administrator grant,
+    /// so it is also the signer of this approval and of the access grant inside
+    /// it.
     pub fn verify(
         &self,
         store_root: &crate::objects::VerifiedObject<StoreProtocolRoot>,
         owner: &StoreDeviceRegistration,
-        administrator: &StoreDeviceRegistration,
     ) -> Result<(), DeviceJoinExchangeError> {
         self.request.verify(owner)?;
-        self.body().validate_shape(store_root, administrator)?;
-        self.verify_by(&administrator.device_signing_pubkey)
+        self.body().validate_shape(store_root, owner)?;
+        self.verify_by(&owner.device_signing_pubkey)
             .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
 
@@ -347,14 +348,14 @@ impl DeviceProviderAdmissionApproval {
     pub fn signed_without_shape_validation_for_test(
         request: DeviceProviderAccessRequest,
         admission: DeviceProviderAdmission,
-        administrator_device_signer: &UserKeypair,
+        owner_device_signer: &UserKeypair,
     ) -> Self {
         Signed::sign(
             DeviceProviderAdmissionApprovalBody {
                 request: Box::new(request),
                 admission,
             },
-            administrator_device_signer,
+            owner_device_signer,
         )
     }
 }
@@ -896,27 +897,16 @@ impl JoinerJoinClosure {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceJoinProducer {
-    ProviderAdministrator,
-    Joiner,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum ProviderWriteAuthorityRef {
-    ProviderAdministrator(ProviderAdminGrantId),
-    MemberAccess(StoreMemberProviderAccessGrantRef),
-}
-
-/// The wire body of a write-authority revocation against a join producer.
+/// The wire body of a write-authority revocation against the joining device.
+///
+/// Only the joining device is ever revoked this way. The device that admits a
+/// join holds the store's provider-administrator grant itself, so it closes the
+/// objects it wrote rather than withdrawing its own write authority.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceJoinProducerWriteRevocationBody {
     pub cancellation: DeviceJoinOutcomeRef,
-    pub producer: DeviceJoinProducer,
-    pub authority: ProviderWriteAuthorityRef,
+    pub authority: StoreMemberProviderAccessGrantRef,
     pub protected_slots: Vec<ObjectSlot>,
     pub withdrawal: ProviderAccessWithdrawal,
     pub executor_grant: ProviderAdminGrantId,
@@ -933,8 +923,7 @@ impl DeviceJoinProducerWriteRevocation {
     #[allow(clippy::too_many_arguments)]
     pub fn signed(
         cancellation: DeviceJoinOutcomeRef,
-        producer: DeviceJoinProducer,
-        authority: ProviderWriteAuthorityRef,
+        authority: StoreMemberProviderAccessGrantRef,
         mut protected_slots: Vec<ObjectSlot>,
         withdrawal: ProviderAccessWithdrawal,
         executor_grant: ProviderAdminGrantId,
@@ -952,7 +941,6 @@ impl DeviceJoinProducerWriteRevocation {
         Ok(Signed::sign(
             DeviceJoinProducerWriteRevocationBody {
                 cancellation,
-                producer,
                 authority,
                 protected_slots,
                 withdrawal,
@@ -980,7 +968,6 @@ impl DeviceJoinProducerWriteRevocation {
 pub enum ProviderAdminJoinTerminal {
     Completed(DeviceProviderAdmissionCompletion),
     Cancelled(ProviderAdminJoinClosure),
-    WriteRevoked(DeviceJoinProducerWriteRevocation),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1188,7 +1175,6 @@ pub fn validate_terminals(
             None
         }
         ProviderAdminJoinTerminal::Cancelled(closure) => Some(&closure.cancellation),
-        ProviderAdminJoinTerminal::WriteRevoked(revocation) => Some(&revocation.cancellation),
     };
     let joiner_cancellation = match joiner {
         JoinerJoinTerminal::Ready(readiness) => {

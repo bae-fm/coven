@@ -73,19 +73,19 @@ pub use device_join::transport::{
     DeviceJoinTransportKind, DeviceJoinTransportParams, DeviceJoinTransportTiming,
     JoiningDeviceJoinProgress, JoiningDeviceJoinProgressObserver,
 };
-pub use device_join::transport::{DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport};
+pub use device_join::transport::{DeviceJoinStep, DeviceJoinTransport};
 pub(crate) use device_join::JoiningStore;
 pub use device_join::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt, DeviceJoinError,
-    DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinProducer,
+    DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer,
     DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus,
     DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
     DeviceProviderAccessRequest, DeviceProviderAdmissionApproval,
     DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
     JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
-    ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
-    ProvisionalDeviceBootstrap, SamePrincipalDeviceJoin,
+    ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap,
+    SamePrincipalDeviceJoin,
 };
 pub use device_join::{
     PendingDeviceJoinAuthority, PendingDeviceJoinObservation,

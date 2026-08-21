@@ -1132,16 +1132,6 @@ impl CovenHandle {
             .await
     }
 
-    pub async fn revoke_device_provider_admission_writes(
-        &self,
-        cancellation: crate::DeviceJoinCancellation,
-        revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
-    ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        self.sync
-            .revoke_device_provider_admission_writes(cancellation, revocation_executor)
-            .await
-    }
-
     pub async fn revoke_joining_device_writes(
         &self,
         cancellation: crate::DeviceJoinCancellation,

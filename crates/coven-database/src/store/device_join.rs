@@ -341,19 +341,6 @@ pub(crate) fn forget_device_join_on(
         .map_err(crate::DbError::from)
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn forget_provider_administrator_device_joins_on(
-    conn: &rusqlite::Connection,
-) -> Result<(), crate::DbError> {
-    conn.execute(
-        "DELETE FROM protocol_state
-                 WHERE key GLOB 'device_join/*/provider_administrator'",
-        [],
-    )
-    .map(|_| ())
-    .map_err(crate::DbError::from)
-}
-
 impl StoreDatabase {
     pub fn new_device_join_attempt_id(&self) -> DeviceJoinAttemptId {
         DeviceJoinAttemptId::from_hash(ObjectHash::digest(
@@ -555,15 +542,6 @@ impl StoreDatabase {
     ) -> Result<(), DeviceJoinJournalError> {
         let key = DeviceJoinJournalRecord::store_key_for(attempt_id, role);
         self.call_database(move |session| session.forget_device_join(&key))
-            .await
-            .map_err(DeviceJoinJournalError::Database)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn forget_provider_administrator_journals_for_test(
-        &self,
-    ) -> Result<(), DeviceJoinJournalError> {
-        self.call_database(|session| session.forget_provider_administrator_device_joins())
             .await
             .map_err(DeviceJoinJournalError::Database)
     }

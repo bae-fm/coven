@@ -5,11 +5,11 @@ use coven::{
     CloudFileReadError, CloudHome, CloudHomeError, CloudKitAcceptedShareRecord,
     CloudKitAtomicCreateBatch, CloudKitEnvironment, CloudKitOps, CloudKitProviderIdentity,
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudObjectStream,
-    CloudVersionedObject, CovenHandle, DeviceJoinCancellation, DeviceJoinError, DeviceJoinProducer,
+    CloudVersionedObject, CovenHandle, DeviceJoinCancellation, DeviceJoinError,
     DeviceJoinWriteRevocationExecutor, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
     JoinerJoinTerminal, ObjectSlot, PhysicalObjectLocator, ProviderAccessLocator,
-    ProviderAccessWithdrawal, ProviderAdminJoinTerminal, ProviderDeviceBinding,
-    ProviderPrincipalId, ProviderWriteAuthorityRef, ResolvedProviderBinding, StoreProviderBinding,
+    ProviderAccessWithdrawal, ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
+    StoreMemberProviderAccessGrantRef, StoreProviderBinding,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -26,8 +26,7 @@ struct ExternalWriteRevocationExecutor;
 impl DeviceJoinWriteRevocationExecutor for ExternalWriteRevocationExecutor {
     async fn revoke_write_authority(
         &self,
-        _producer: DeviceJoinProducer,
-        _authority: &ProviderWriteAuthorityRef,
+        _authority: &StoreMemberProviderAccessGrantRef,
         locator: &ProviderAccessLocator,
         _protected_slots: &[ObjectSlot],
     ) -> Result<ProviderAccessWithdrawal, DeviceJoinError> {
@@ -38,14 +37,11 @@ impl DeviceJoinWriteRevocationExecutor for ExternalWriteRevocationExecutor {
     }
 }
 
-async fn external_host_can_revoke_missing_device_join_producers(
+async fn external_host_can_revoke_a_missing_joining_device(
     handle: &CovenHandle,
     cancellation: DeviceJoinCancellation,
 ) -> Result<(), coven::SyncError> {
     let executor = ExternalWriteRevocationExecutor;
-    let _: ProviderAdminJoinTerminal = handle
-        .revoke_device_provider_admission_writes(cancellation.clone(), &executor)
-        .await?;
     let _: JoinerJoinTerminal = handle
         .revoke_joining_device_writes(cancellation, &executor)
         .await?;
@@ -112,7 +108,7 @@ fn external_host_can_classify_cloud_home_setup(
 fn external_host_can_name_device_join_revocation_surface() {
     fn assert_executor<T: DeviceJoinWriteRevocationExecutor>() {}
     assert_executor::<ExternalWriteRevocationExecutor>();
-    let _ = external_host_can_revoke_missing_device_join_producers;
+    let _ = external_host_can_revoke_a_missing_joining_device;
 }
 
 #[test]

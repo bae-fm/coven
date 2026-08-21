@@ -1637,19 +1637,6 @@ mod test_device {
                 .await
         }
 
-        pub async fn revoke_device_provider_admission_writes(
-            &self,
-            cancellation: coven_protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
-            revocation_executor: &dyn crate::sync::store::DeviceJoinWriteRevocationExecutor,
-        ) -> Result<
-            coven_protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
-            crate::sync::DeviceJoinError,
-        > {
-            self.store
-                .revoke_device_provider_admission_writes(cancellation, revocation_executor)
-                .await
-        }
-
         pub async fn abandon_device_join(
             &self,
             offer: coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,

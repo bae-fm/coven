@@ -720,17 +720,7 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             .verify_at(&join.activation.outcome, &attempt, &owner)?;
         let approval = join.bootstrap.bootstrap.request.approval();
         let database = installed.database;
-        let administrator = timings
-            .stage(
-                "read the administrator registration",
-                joining_device_registration(
-                    &database,
-                    &installed.bootstrap,
-                    &approval.request.offer.provider_admin.administrator,
-                ),
-            )
-            .await?;
-        approval.verify(&installed.verified_root, &owner, &administrator)?;
+        approval.verify(&installed.verified_root, &owner)?;
         // The installed snapshot image covers the history behind it; every
         // commit between that snapshot and the bootstrap cut still carries its
         // rows in a package this device has to read before it installs.
@@ -875,42 +865,6 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
 /// The registration a joining device's checks name, from the two places it can
 /// hold one.
 ///
-/// The carried plan covers only the history published after the snapshot this
-/// device installed, so a device registered before that snapshot is not in it —
-/// it is in the installed image, activated there under the same owner
-/// signatures that put it in the plan's history in the first place.
-async fn joining_device_registration(
-    database: &StoreDatabase,
-    plan: &DeviceJoinBootstrapPlan,
-    reference: &StoreDeviceRegistrationRef,
-) -> Result<StoreDeviceRegistration, DeviceJoinError> {
-    if let Some(registration) = registration_in_bootstrap(plan, reference) {
-        return Ok(registration.clone());
-    }
-    let activated =
-        Box::pin(database.activated_store_device_registration(reference.clone())).await?;
-    Ok(activated.value().clone())
-}
-
-fn registration_in_bootstrap<'plan>(
-    plan: &'plan DeviceJoinBootstrapPlan,
-    reference: &StoreDeviceRegistrationRef,
-) -> Option<&'plan StoreDeviceRegistration> {
-    if &plan.founder_reference == reference {
-        return Some(&plan.founder);
-    }
-    plan.commits.iter().find_map(|commit| {
-        if &commit.commit.value().author_registration == reference {
-            return Some(commit.commit.author());
-        }
-        commit
-            .registrations
-            .iter()
-            .find(|registration| registration.reference() == reference)
-            .map(|registration| registration.value())
-    })
-}
-
 async fn joined_store_from_materialized(
     database: &StoreDatabase,
     attempt: &DeviceJoinAttempt,
@@ -1268,11 +1222,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             .load_registration(&approval.request.offer.provider_admin.administrator)
             .await?
             .value;
-        approval.verify(
-            self.history_verifier.verified_root().object(),
-            &owner,
-            &administrator,
-        )?;
+        approval.verify(self.history_verifier.verified_root().object(), &owner)?;
         if let Some(access_grant) = approval.access_grant() {
             self.history_verifier
                 .verify_accepted_provider_access_activation(
@@ -1492,12 +1442,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             Some(terminal) if terminal != &receipt_terminal => {
                 return Err(DeviceJoinError::JournalConflict);
             }
-            None if !matches!(
-                &receipt_terminal,
-                JoinerJoinTerminal::WriteRevoked(revocation)
-                    if revocation.producer == DeviceJoinProducer::Joiner
-            ) =>
-            {
+            None if !matches!(&receipt_terminal, JoinerJoinTerminal::WriteRevoked(_)) => {
                 return Err(DeviceJoinError::JournalConflict);
             }
             _ => {}

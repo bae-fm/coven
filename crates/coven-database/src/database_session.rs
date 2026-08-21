@@ -78,11 +78,6 @@ impl<'session> DatabaseSession<'session> {
         crate::store::forget_device_join_on(self.conn, key)
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn forget_provider_administrator_device_joins(&mut self) -> Result<(), DbError> {
-        crate::store::forget_provider_administrator_device_joins_on(self.conn)
-    }
-
     pub(crate) fn local_blob_cleanup_intents(
         &self,
     ) -> Result<

@@ -36,8 +36,7 @@ const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WriteRevocationRequest {
-    producer: coven_protocol::store_commit::device_join_exchange::DeviceJoinProducer,
-    authority: coven_protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef,
+    authority: coven_protocol::provider::StoreMemberProviderAccessGrantRef,
     locator: coven_protocol::provider::ProviderAccessLocator,
     protected_slots: Vec<coven_protocol::objects::ObjectSlot>,
 }
@@ -70,8 +69,7 @@ impl ConfirmedWriteRevocation {
 impl crate::sync::store::DeviceJoinWriteRevocationExecutor for ConfirmedWriteRevocation {
     async fn revoke_write_authority(
         &self,
-        producer: coven_protocol::store_commit::device_join_exchange::DeviceJoinProducer,
-        authority: &coven_protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef,
+        authority: &coven_protocol::provider::StoreMemberProviderAccessGrantRef,
         locator: &coven_protocol::provider::ProviderAccessLocator,
         protected_slots: &[coven_protocol::objects::ObjectSlot],
     ) -> Result<
@@ -82,7 +80,6 @@ impl crate::sync::store::DeviceJoinWriteRevocationExecutor for ConfirmedWriteRev
             .lock()
             .expect("write-revocation request lock")
             .push(WriteRevocationRequest {
-                producer,
                 authority: authority.clone(),
                 locator: locator.clone(),
                 protected_slots: protected_slots.to_vec(),
@@ -652,7 +649,7 @@ fn exercise_provider_access_grant_create_interruption<'a>(
                 );
                 assert!(matches!(
                     owner_db
-                        .device_join_status(attempt_id, DeviceJoinRole::ProviderAdministrator,)
+                        .device_join_status(attempt_id, DeviceJoinRole::Owner)
                         .await
                         .expect("load provider create status"),
                     Some(DeviceJoinStatus::ProviderAccessGrantCreatePending { .. })
@@ -672,7 +669,7 @@ fn exercise_provider_access_grant_create_interruption<'a>(
         assert_eq!(retry, approval);
         assert!(matches!(
             owner_db
-                .device_join_status(attempt_id, DeviceJoinRole::ProviderAdministrator)
+                .device_join_status(attempt_id, DeviceJoinRole::Owner)
                 .await
                 .expect("load completed provider access status"),
             Some(DeviceJoinStatus::AwaitingRegistrationRequest { .. })
@@ -881,7 +878,7 @@ fn exercise_post_attempt_cancellation<'a>(
 }
 
 #[tokio::test]
-async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
+async fn a_missing_joining_device_has_its_writes_revoked_and_the_attempt_cleaned_up() {
     use coven_protocol::membership::MemberRole;
     use coven_protocol::objects::{
         ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
@@ -981,7 +978,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .begin_device_join(&pubkey_hex(member))
             .await
             .expect("begin cross-principal device join");
-        let provider_locator = offer.provider_admin.access.clone();
+
         let join_history =
             crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
                 .open_pinned(peer_storage.as_ref(), &offer.store_root)
@@ -1015,18 +1012,6 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .prepare_registration_request(approval)
             .await
             .expect("prepare cross-principal registration request");
-        let join_history =
-            crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
-                .open_pinned(peer_storage.as_ref(), &offer.store_root)
-                .await
-                .expect("open cross-principal closure history");
-        let mut joiner_closure = crate::sync::store::PendingDeviceJoinObservation::new(
-            &pending,
-            &peer_storage,
-            join_history,
-            offer.attempt_id,
-        )
-        .authorize_closure(member);
         let provisional = owner_device
             .accept_device_registration_request(registration_request)
             .await
@@ -1035,54 +1020,63 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .cancel_device_join(provisional.publication_authorization.attempt.clone())
             .await
             .expect("cancel cross-principal join attempt");
-        owner_db
-            .forget_provider_administrator_journals_for_test()
-            .await
-            .expect("remove unavailable provider administrator's local journal");
-        let revocation = ConfirmedWriteRevocation::direct(provider_locator.clone());
+        // The device that admits holds the store's provider-administrator
+        // grant, so it closes its own challenge object. The joining device is
+        // the one that may never come back, so its member access is what the
+        // unwind withdraws.
         let administrator_terminal = owner_device
-            .revoke_device_provider_admission_writes(cancellation.clone(), &revocation)
+            .close_device_provider_admission(cancellation.clone())
             .await
-            .expect("revoke absent provider-administrator writes");
-        let coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal { challenge, .. } =
-            &provisional.request.approval().admission
-        else {
-            panic!("missing-provider test did not create a cross-principal challenge");
-        };
+            .expect("close the admitting side of a cancelled attempt");
+        assert!(matches!(
+            &administrator_terminal,
+            ProviderAdminJoinTerminal::Cancelled(_)
+        ));
+        let access_grant = provisional
+            .request
+            .approval()
+            .access_grant()
+            .expect("a cross-principal approval carries a member access grant")
+            .clone();
+        let member_locator = access_grant.grant.locator.clone();
+        let revocation = ConfirmedWriteRevocation::direct(member_locator.clone());
+        let joiner_terminal = owner_device
+            .revoke_joining_device_writes(cancellation.clone(), &revocation)
+            .await
+            .expect("revoke the absent joining device's writes");
+        let mut protected_slots = vec![
+            provisional.request.registration_slot().clone(),
+            provisional
+                .request
+                .expected_registration()
+                .acknowledgements
+                .first_slot()
+                .clone(),
+        ];
+        if let coven_protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation::CrossPrincipal { response_slot } =
+            provisional.request.response()
+        {
+            protected_slots.push(response_slot);
+        }
         assert_eq!(
             revocation.requests(),
             vec![WriteRevocationRequest {
-                producer: coven_protocol::store_commit::device_join_exchange::DeviceJoinProducer::ProviderAdministrator,
-                authority: coven_protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef::ProviderAdministrator(
-                    provisional
-                        .request
-                        .approval()
-                        .request
-                        .offer
-                        .provider_admin
-                        .grant_id
-                        .clone(),
-                ),
-                locator: provider_locator.clone(),
-                protected_slots: vec![challenge.administrator_object.slot.clone()],
+                authority: access_grant.grant_ref.clone(),
+                locator: member_locator.clone(),
+                protected_slots,
             }],
         );
-        let retry_revocation = ConfirmedWriteRevocation::direct(provider_locator);
-        let administrator_retry = owner_device
-            .revoke_device_provider_admission_writes(cancellation.clone(), &retry_revocation)
+        let retry_revocation = ConfirmedWriteRevocation::direct(member_locator);
+        let joiner_retry = owner_device
+            .revoke_joining_device_writes(cancellation.clone(), &retry_revocation)
             .await
-            .expect("retry provider-administrator write revocation");
+            .expect("retry the joining device's write revocation");
         assert!(retry_revocation.requests().is_empty());
-        assert_eq!(administrator_retry, administrator_terminal);
+        assert_eq!(joiner_retry, joiner_terminal);
         assert!(matches!(
-            &administrator_terminal,
-            ProviderAdminJoinTerminal::WriteRevoked(_)
+            &joiner_terminal,
+            JoinerJoinTerminal::WriteRevoked(_)
         ));
-        let joiner_terminal = joiner_closure
-            .close(cancellation.clone())
-            .await
-            .expect("close cross-principal joining device");
-        assert!(matches!(&joiner_terminal, JoinerJoinTerminal::Cancelled(_)));
         let receipt = owner_device
             .prepare_device_join_cleanup(cancellation, administrator_terminal, joiner_terminal)
             .await
@@ -1095,24 +1089,6 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .complete_owner_device_join_cleanup(activation.clone())
             .await
             .expect("complete owner cleanup");
-        let join_history =
-            crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
-                .open_pinned(peer_storage.as_ref(), &offer.store_root)
-                .await
-                .expect("open cross-principal cleanup history");
-        let mut cleanup_observation = crate::sync::store::PendingDeviceJoinObservation::new(
-            &pending,
-            &peer_storage,
-            join_history,
-            offer.attempt_id,
-        );
-        cleanup_observation
-            .accept_cleanup(activation.clone())
-            .await
-            .expect("accept exact joiner cleanup activation");
-        pending
-            .complete_joiner_cleanup(activation)
-            .expect("complete joiner cleanup");
     })
     .await;
 }

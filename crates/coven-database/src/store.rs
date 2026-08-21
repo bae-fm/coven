@@ -14,8 +14,6 @@ use store_session::{
 };
 pub use store_session::{candidate_records, payload_store::PayloadStoreError, reclaim};
 mod device_join;
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use device_join::forget_provider_administrator_device_joins_on;
 pub(crate) use device_join::{
     advance_device_join_on, begin_device_join_on, begin_device_join_replacement_terminal_on,
     complete_device_join_from_pending_on, device_join_records_on, forget_device_join_on,

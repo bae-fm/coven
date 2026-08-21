@@ -38,8 +38,7 @@ pub trait DeviceJoinWriteRevocationExecutor: Send + Sync {
     /// returning its provider-specific evidence.
     async fn revoke_write_authority(
         &self,
-        producer: DeviceJoinProducer,
-        authority: &ProviderWriteAuthorityRef,
+        authority: &StoreMemberProviderAccessGrantRef,
         locator: &coven_protocol::provider::ProviderAccessLocator,
         protected_slots: &[ObjectSlot],
     ) -> Result<ProviderAccessWithdrawal, DeviceJoinError>;

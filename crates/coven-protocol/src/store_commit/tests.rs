@@ -1929,10 +1929,16 @@ fn a_write_revocation_with_unsorted_protected_slots_is_refused() {
 
     let revocation = exchange::DeviceJoinProducerWriteRevocation::signed(
         parts.cancellation.clone(),
-        exchange::DeviceJoinProducer::Joiner,
-        exchange::ProviderWriteAuthorityRef::ProviderAdministrator(
-            parts.provider_admin_grant.clone(),
-        ),
+        crate::provider::StoreMemberProviderAccessGrantRef {
+            grant_id: crate::provider::ProviderAccessGrantId::from_random_bytes(
+                *ObjectHash::digest(b"revoked member access").as_bytes(),
+            ),
+            grant_hash: ObjectHash::digest(b"revoked member access grant"),
+            object: exact(
+                "store-v1/provider-access-grants/revoked.json".to_string(),
+                b"revoked member access grant",
+            ),
+        },
         slots,
         crate::provider::ProviderAccessWithdrawal::Direct {
             locator: parts.access_locator.clone(),

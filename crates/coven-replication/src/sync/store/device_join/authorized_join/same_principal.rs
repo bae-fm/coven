@@ -51,8 +51,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
 
         let requested =
             match &*current.progress {
-                DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Offered(durable))
-                    if durable == &offer =>
+                DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ApprovalPrepared(approval))
+                    if approval == request.approval() =>
                 {
                     journal
                         .advance(

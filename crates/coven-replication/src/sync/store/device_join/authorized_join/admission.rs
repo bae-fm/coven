@@ -1,36 +1,14 @@
 use super::{require_cancelled_outcome, *};
 
-impl<'operation, 'storage>
-    AuthorizedJoin<'operation, 'storage, ProviderAdministratorJoinAuthority>
-{
-    fn join_history(&mut self) -> DeviceJoinHistory<'_, 'storage> {
-        self.writer.join_history()
-    }
-
-    fn journal(
-        &self,
-        attempt_id: DeviceJoinAttemptId,
-    ) -> StoreJoinJournal<ProviderAdminJoinProgress> {
-        StoreJoinJournal::new(&self.database, attempt_id)
-    }
-
-    /// The joining device's journal in this Store's database. An administrator
-    /// revoking a joiner's write authority records that terminal on the joiner's
-    /// behalf, since the joining device may never reach the Store again.
+impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
+    /// The joining device's journal in this Store's database. Revoking a
+    /// joiner's write authority records that terminal on the joiner's behalf,
+    /// since the joining device may never reach the Store again.
     fn joiner_journal(
         &self,
         attempt_id: DeviceJoinAttemptId,
     ) -> StoreJoinJournal<JoinerJoinProgress> {
         StoreJoinJournal::new(&self.database, attempt_id)
-    }
-
-    fn verify_device_admission_approval(
-        &self,
-        approval: &DeviceProviderAdmissionApproval,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<(), DeviceJoinError> {
-        self.local_writer
-            .verify_device_admission_approval_as_administrator(approval, &self.verified_root, owner)
     }
 
     fn sign_device_admission_approval(
@@ -48,16 +26,6 @@ impl<'operation, 'storage>
     ) -> Result<StoreBatchCommitRef, crate::sync::store::StoreError> {
         let plan = self.writer.prepare_plan().await?;
         self.writer.activate(plan, batch).await
-    }
-
-    fn require_grant(
-        &self,
-        grant_id: &ProviderAdminGrantId,
-    ) -> Result<&ProviderAdminGrantRecord, DeviceJoinError> {
-        self.authority
-            .grants
-            .get(grant_id)
-            .ok_or(DeviceJoinError::ProviderAdministratorRequired)
     }
 
     async fn publish_cross_principal_challenge(
@@ -119,9 +87,7 @@ impl<'operation, 'storage>
         request: DeviceProviderAccessRequest,
         access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
     ) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
-        let provider_admin = self
-            .require_grant(&request.offer.provider_admin.grant_id)?
-            .clone();
+        let provider_admin = self.resolve_provider_admin(&request.offer.provider_admin.grant_id)?;
         if provider_admin != *request.offer.provider_admin {
             return Err(DeviceJoinError::OfferMismatch);
         }
@@ -139,16 +105,27 @@ impl<'operation, 'storage>
         }
         let database = self.database.clone();
         let journal = self.journal(request.offer.attempt_id);
-        let initial = journal.record(ProviderAdminJoinProgress::AccessRequested(request.clone()));
-        let durable = journal.begin(&initial).await?;
+        let current = journal.current().await?;
+        let durable = match &*current.progress {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Offered(_)) => {
+                journal
+                    .advance(
+                        &current,
+                        OwnerJoinProgress::AccessRequested(request.clone()),
+                    )
+                    .await?
+            }
+            _ => current,
+        };
+        let initial = durable.clone();
         if provider_admin.provider == request.peer_provider {
             return match &*durable.progress {
-                DeviceJoinRoleProgress::ProviderAdministrator(
-                    ProviderAdminJoinProgress::ApprovalPrepared(approval),
-                ) => Ok(approval.clone()),
-                DeviceJoinRoleProgress::ProviderAdministrator(
-                    ProviderAdminJoinProgress::AccessRequested(durable_request),
-                ) if durable_request == &request => {
+                DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ApprovalPrepared(approval)) => {
+                    Ok(approval.clone())
+                }
+                DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AccessRequested(
+                    durable_request,
+                )) if durable_request == &request => {
                     let approval = self.sign_device_admission_approval(
                         request,
                         DeviceProviderAdmission::SamePrincipal,
@@ -156,7 +133,7 @@ impl<'operation, 'storage>
                     journal
                         .advance(
                             &durable,
-                            ProviderAdminJoinProgress::ApprovalPrepared(approval.clone()),
+                            OwnerJoinProgress::ApprovalPrepared(approval.clone()),
                         )
                         .await?;
                     Ok(approval)
@@ -165,21 +142,19 @@ impl<'operation, 'storage>
             };
         }
         let (grant, prepared, prepared_progress) = match &*durable.progress {
-            DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::ApprovalPrepared(approval),
-            ) => return Ok(approval.clone()),
-            DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::AccessGrantPrepared {
-                    request: durable_request,
-                    grant,
-                    prepared,
-                },
-            ) if durable_request == &request => {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ApprovalPrepared(approval)) => {
+                return Ok(approval.clone())
+            }
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AccessGrantPrepared {
+                request: durable_request,
+                grant,
+                prepared,
+            }) if durable_request == &request => {
                 (grant.clone(), prepared.restore()?, durable.clone())
             }
-            DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::AccessRequested(durable_request),
-            ) if durable_request == &request => {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AccessRequested(durable_request))
+                if durable_request == &request =>
+            {
                 let administrator =
                     access_administrator.ok_or(DeviceJoinError::ProviderAdministratorRequired)?;
                 let locator = administrator
@@ -226,7 +201,7 @@ impl<'operation, 'storage>
                 let prepared_progress = journal
                     .advance(
                         &initial,
-                        ProviderAdminJoinProgress::AccessGrantPrepared {
+                        OwnerJoinProgress::AccessGrantPrepared {
                             request: request.clone(),
                             grant: grant.clone(),
                             prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
@@ -293,7 +268,7 @@ impl<'operation, 'storage>
         journal
             .advance(
                 &prepared_progress,
-                ProviderAdminJoinProgress::ApprovalPrepared(approval.clone()),
+                OwnerJoinProgress::ApprovalPrepared(approval.clone()),
             )
             .await?;
         Ok(approval)
@@ -304,7 +279,9 @@ impl<'operation, 'storage>
         bootstrap: ProvisionalDeviceBootstrap,
     ) -> Result<ProviderReadyDeviceBootstrap, DeviceJoinError> {
         let offer = &bootstrap.request.approval().request.offer;
-        if self.require_grant(&offer.provider_admin.grant_id)? != offer.provider_admin.as_ref() {
+        if &self.resolve_provider_admin(&offer.provider_admin.grant_id)?
+            != offer.provider_admin.as_ref()
+        {
             return Err(DeviceJoinError::OfferMismatch);
         }
         let owner = self
@@ -312,7 +289,10 @@ impl<'operation, 'storage>
             .load_registration(&offer.owner_registration)
             .await?
             .value;
-        self.verify_device_admission_approval(bootstrap.request.approval(), &owner)?;
+        self.local_writer.verify_own_device_admission_approval(
+            bootstrap.request.approval(),
+            &self.verified_root,
+        )?;
         let challenge_publication = match &bootstrap.request.approval().admission {
             DeviceProviderAdmission::SamePrincipal => {
                 DeviceProviderChallengePublication::SamePrincipal
@@ -350,37 +330,34 @@ impl<'operation, 'storage>
             challenge_publication,
         };
         let journal = self.journal(attempt_id);
-        if let Some(current) = journal.load().await? {
-            match &*current.progress {
-                DeviceJoinRoleProgress::ProviderAdministrator(
-                    ProviderAdminJoinProgress::ProviderReady(existing),
-                ) if existing == &ready => return Ok(ready),
-                DeviceJoinRoleProgress::ProviderAdministrator(
-                    ProviderAdminJoinProgress::ApprovalPrepared(approval),
-                ) if approval == ready.bootstrap.request.approval() => {
-                    let observed = journal
-                        .advance(
-                            &current,
-                            ProviderAdminJoinProgress::AttemptObserved(*ready.bootstrap.clone()),
-                        )
-                        .await?;
-                    let intent = journal
-                        .advance(
-                            &observed,
-                            ProviderAdminJoinProgress::ChallengeCreateIntent(
-                                *ready.bootstrap.clone(),
-                            ),
-                        )
-                        .await?;
-                    journal
-                        .advance(
-                            &intent,
-                            ProviderAdminJoinProgress::ProviderReady(ready.clone()),
-                        )
-                        .await?;
-                }
-                _ => return Err(DeviceJoinError::JournalConflict),
+        let current = journal.current().await?;
+        match &*current.progress {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderReady(existing))
+                if existing == &ready =>
+            {
+                return Ok(ready)
             }
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap))
+                if bootstrap == ready.bootstrap.as_ref() =>
+            {
+                let intent = journal
+                    .advance(
+                        &current,
+                        OwnerJoinProgress::ChallengeCreateIntent(*ready.bootstrap.clone()),
+                    )
+                    .await?;
+                journal
+                    .advance(&intent, OwnerJoinProgress::ProviderReady(ready.clone()))
+                    .await?;
+            }
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ChallengeCreateIntent(bootstrap))
+                if bootstrap == ready.bootstrap.as_ref() =>
+            {
+                journal
+                    .advance(&current, OwnerJoinProgress::ProviderReady(ready.clone()))
+                    .await?;
+            }
+            _ => return Err(DeviceJoinError::JournalConflict),
         }
         Ok(ready)
     }
@@ -393,9 +370,8 @@ impl<'operation, 'storage>
         let database = self.database.clone();
         let journal = self.journal(attempt_id);
         let current = journal.current().await?;
-        if let DeviceJoinRoleProgress::ProviderAdministrator(
-            ProviderAdminJoinProgress::Completed(existing),
-        ) = &*current.progress
+        if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Completed(existing)) =
+            &*current.progress
         {
             if matches!(
                 existing,
@@ -409,17 +385,17 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::JournalConflict);
         }
         let bootstrap = match &*current.progress {
-            DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::ProviderReady(bootstrap),
-            ) => bootstrap.clone(),
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderReady(bootstrap)) => {
+                bootstrap.clone()
+            }
             _ => return Err(DeviceJoinError::JournalConflict),
         };
         if readiness.proof.attempt != bootstrap.bootstrap.publication_authorization.attempt {
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let offer = &bootstrap.bootstrap.request.approval().request.offer;
-        let provider_admin = self.require_grant(&offer.provider_admin.grant_id)?;
-        if provider_admin != offer.provider_admin.as_ref() {
+        let provider_admin = self.resolve_provider_admin(&offer.provider_admin.grant_id)?;
+        if &provider_admin != offer.provider_admin.as_ref() {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
         let receipt = match (
@@ -466,16 +442,10 @@ impl<'operation, 'storage>
             receipt,
         };
         let observed = journal
-            .advance(
-                &current,
-                ProviderAdminJoinProgress::ResponseObserved(readiness),
-            )
+            .advance(&current, OwnerJoinProgress::ResponseObserved(readiness))
             .await?;
         journal
-            .advance(
-                &observed,
-                ProviderAdminJoinProgress::Completed(completion.clone()),
-            )
+            .advance(&observed, OwnerJoinProgress::Completed(completion.clone()))
             .await?;
         Ok(completion)
     }
@@ -505,9 +475,8 @@ impl<'operation, 'storage>
         }
         let journal = self.journal(attempt_id);
         let current = journal.current().await?;
-        if let DeviceJoinRoleProgress::ProviderAdministrator(
-            ProviderAdminJoinProgress::Completed(existing),
-        ) = &*current.progress
+        if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Completed(existing)) =
+            &*current.progress
         {
             return match existing {
                 DeviceProviderAdmissionCompletion::SamePrincipal { bootstrap: durable }
@@ -519,19 +488,15 @@ impl<'operation, 'storage>
             };
         }
         match &*current.progress {
-            DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::ProviderReady(durable),
-            ) if durable == &bootstrap => {}
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderReady(durable))
+                if durable == &bootstrap => {}
             _ => return Err(DeviceJoinError::JournalConflict),
         }
         let completion = DeviceProviderAdmissionCompletion::SamePrincipal {
             bootstrap: Box::new(bootstrap),
         };
         journal
-            .advance(
-                &current,
-                ProviderAdminJoinProgress::Completed(completion.clone()),
-            )
+            .advance(&current, OwnerJoinProgress::Completed(completion.clone()))
             .await?;
         Ok(completion)
     }
@@ -545,15 +510,12 @@ impl<'operation, 'storage>
         let journal = self.journal(attempt_ref.attempt_id);
         let current = journal.current().await?;
         match &*current.progress {
-            DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::Completed(completion),
-            ) => return Ok(ProviderAdminJoinTerminal::Completed(completion.clone())),
-            DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::Cancelled(closure),
-            ) => return Ok(ProviderAdminJoinTerminal::Cancelled(closure.clone())),
-            DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::WriteRevoked(revocation),
-            ) => return Ok(ProviderAdminJoinTerminal::WriteRevoked(revocation.clone())),
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Completed(completion)) => {
+                return Ok(ProviderAdminJoinTerminal::Completed(completion.clone()))
+            }
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderClosed {
+                closure, ..
+            }) => return Ok(ProviderAdminJoinTerminal::Cancelled(closure.clone())),
             _ => {}
         }
         let (attempt, owner) = self
@@ -572,25 +534,19 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let offer = &attempt.value.provider_approval.request.offer;
-        let provider_admin = self.require_grant(&offer.provider_admin.grant_id)?;
-        if provider_admin != offer.provider_admin.as_ref() {
+        let provider_admin = self.resolve_provider_admin(&offer.provider_admin.grant_id)?;
+        if &provider_admin != offer.provider_admin.as_ref() {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
         let (challenge, prior_state_hash) = match &*current.progress {
-            DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::CleanupIntent {
-                    cancellation: durable,
-                    challenge,
-                    prior_state_hash,
-                },
-            ) if durable == &cancellation => (challenge.clone(), *prior_state_hash),
-            DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::ApprovalPrepared(_)
-                | ProviderAdminJoinProgress::AttemptObserved(_)
-                | ProviderAdminJoinProgress::ChallengeCreateIntent(_)
-                | ProviderAdminJoinProgress::ProviderReady(_)
-                | ProviderAdminJoinProgress::ResponseObserved(_),
-            ) => {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderClosureIntent {
+                cancellation: durable,
+                challenge,
+                prior_state_hash,
+            }) if durable == &cancellation => (challenge.clone(), *prior_state_hash),
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(durable))
+                if durable == &cancellation =>
+            {
                 let challenge = match &attempt.value.provider_approval.admission {
                     DeviceProviderAdmission::SamePrincipal => {
                         ProviderChallengeDisposition::SamePrincipal
@@ -616,7 +572,7 @@ impl<'operation, 'storage>
                 journal
                     .advance(
                         &current,
-                        ProviderAdminJoinProgress::CleanupIntent {
+                        OwnerJoinProgress::ProviderClosureIntent {
                             cancellation: cancellation.clone(),
                             challenge: challenge.clone(),
                             prior_state_hash,
@@ -637,7 +593,7 @@ impl<'operation, 'storage>
                 .map_err(DeviceJoinError::ProviderStorage)?;
         }
         let closure = self.local_writer.sign_provider_join_closure(
-            cancellation.outcome,
+            cancellation.outcome.clone(),
             offer.provider_admin.administrator.clone(),
             challenge,
             prior_state_hash,
@@ -646,16 +602,23 @@ impl<'operation, 'storage>
         journal
             .advance(
                 &intent,
-                ProviderAdminJoinProgress::Cancelled(closure.clone()),
+                OwnerJoinProgress::ProviderClosed {
+                    cancellation,
+                    closure: closure.clone(),
+                },
             )
             .await?;
         Ok(ProviderAdminJoinTerminal::Cancelled(closure))
     }
 
-    async fn sign_write_revocation(
+    /// Withdraw the joining device's provider write authority, so a cancelled
+    /// attempt can be unwound without waiting on a device that may never come
+    /// back. The admitting device closes its own challenge object directly —
+    /// it holds the provider-administrator grant that wrote it — so the joiner
+    /// is the only producer this ever names.
+    async fn sign_joiner_write_revocation(
         &mut self,
         cancellation: DeviceJoinCancellation,
-        producer: DeviceJoinProducer,
         revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
         executor_grant: &ProviderAdminGrantId,
     ) -> Result<DeviceJoinProducerWriteRevocation, DeviceJoinError> {
@@ -676,131 +639,42 @@ impl<'operation, 'storage>
         ) {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let executor_admin = self.require_grant(executor_grant)?.clone();
-        let (authority, protected_slots, locator) = match producer {
-            DeviceJoinProducer::ProviderAdministrator => {
-                let DeviceProviderAdmission::CrossPrincipal { challenge, .. } =
-                    &attempt.value.provider_approval.admission
-                else {
-                    return Err(DeviceJoinError::CleanupMismatch);
-                };
-                (
-                    ProviderWriteAuthorityRef::ProviderAdministrator(
-                        attempt
-                            .value
-                            .provider_approval
-                            .request
-                            .offer
-                            .provider_admin
-                            .grant_id
-                            .clone(),
-                    ),
-                    vec![challenge.administrator_object.slot.clone()],
-                    &attempt
-                        .value
-                        .provider_approval
-                        .request
-                        .offer
-                        .provider_admin
-                        .access,
-                )
-            }
-            DeviceJoinProducer::Joiner => {
-                let mut slots = vec![
-                    attempt.value.registration_slot.clone(),
-                    attempt
-                        .value
-                        .expected_registration
-                        .acknowledgements
-                        .first_slot()
-                        .clone(),
-                ];
-                if let DeviceProviderResponseReservation::CrossPrincipal { response_slot } =
-                    &attempt.value.provider_response
-                {
-                    slots.push(response_slot.clone());
-                }
-                let access_grant = attempt
-                    .value
-                    .provider_approval
-                    .access_grant()
-                    .ok_or(DeviceJoinError::CleanupMismatch)?;
-                (
-                    ProviderWriteAuthorityRef::MemberAccess(access_grant.grant_ref.clone()),
-                    slots,
-                    &access_grant.grant.locator,
-                )
-            }
-        };
+        let executor_admin = self.resolve_provider_admin(executor_grant)?;
+        let mut protected_slots = vec![
+            attempt.value.registration_slot.clone(),
+            attempt
+                .value
+                .expected_registration
+                .acknowledgements
+                .first_slot()
+                .clone(),
+        ];
+        if let DeviceProviderResponseReservation::CrossPrincipal { response_slot } =
+            &attempt.value.provider_response
+        {
+            protected_slots.push(response_slot.clone());
+        }
+        let access_grant = attempt
+            .value
+            .provider_approval
+            .access_grant()
+            .ok_or(DeviceJoinError::CleanupMismatch)?;
+        let authority = access_grant.grant_ref.clone();
+        let locator = &access_grant.grant.locator;
         let withdrawal = revocation_executor
-            .revoke_write_authority(producer, &authority, locator, &protected_slots)
+            .revoke_write_authority(&authority, locator, &protected_slots)
             .await?;
         withdrawal
             .verify_for_locator(locator)
             .map_err(|_| DeviceJoinError::CleanupMismatch)?;
         self.local_writer.sign_device_join_write_revocation(
             cancellation.outcome,
-            producer,
             authority,
             protected_slots,
             withdrawal,
             executor_grant.clone(),
             executor_admin.administrator,
         )
-    }
-
-    pub(super) async fn revoke_writes(
-        &mut self,
-        cancellation: DeviceJoinCancellation,
-        revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
-    ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
-        let executor_grant = self
-            .protocol_root
-            .descriptor
-            .founder_provider_admin
-            .grant_id
-            .clone();
-        let attempt_id = cancellation.outcome.attempt().attempt_id;
-        let journal = self.journal(attempt_id);
-        let current = journal.load().await?;
-        if let Some(current) = &current {
-            match &*current.progress {
-                DeviceJoinRoleProgress::ProviderAdministrator(
-                    ProviderAdminJoinProgress::Completed(completion),
-                ) => return Ok(ProviderAdminJoinTerminal::Completed(completion.clone())),
-                DeviceJoinRoleProgress::ProviderAdministrator(
-                    ProviderAdminJoinProgress::Cancelled(closure),
-                ) => return Ok(ProviderAdminJoinTerminal::Cancelled(closure.clone())),
-                DeviceJoinRoleProgress::ProviderAdministrator(
-                    ProviderAdminJoinProgress::WriteRevoked(revocation),
-                ) => return Ok(ProviderAdminJoinTerminal::WriteRevoked(revocation.clone())),
-                DeviceJoinRoleProgress::ProviderAdministrator(
-                    ProviderAdminJoinProgress::ApprovalPrepared(_)
-                    | ProviderAdminJoinProgress::AttemptObserved(_)
-                    | ProviderAdminJoinProgress::ChallengeCreateIntent(_)
-                    | ProviderAdminJoinProgress::ProviderReady(_)
-                    | ProviderAdminJoinProgress::ResponseObserved(_)
-                    | ProviderAdminJoinProgress::CleanupIntent { .. },
-                ) => {}
-                _ => return Err(DeviceJoinError::JournalConflict),
-            }
-        }
-        let revocation = self
-            .sign_write_revocation(
-                cancellation,
-                DeviceJoinProducer::ProviderAdministrator,
-                revocation_executor,
-                &executor_grant,
-            )
-            .await?;
-        let terminal = ProviderAdminJoinProgress::WriteRevoked(revocation.clone());
-        match current {
-            Some(current) => {
-                journal.advance(&current, terminal).await?;
-            }
-            None => journal.begin_replacement_terminal(terminal).await?,
-        }
-        Ok(ProviderAdminJoinTerminal::WriteRevoked(revocation))
     }
 
     async fn revoke_joiner_writes(
@@ -825,12 +699,7 @@ impl<'operation, 'storage>
             };
         }
         let revocation = self
-            .sign_write_revocation(
-                cancellation,
-                DeviceJoinProducer::Joiner,
-                revocation_executor,
-                &executor_grant,
-            )
+            .sign_joiner_write_revocation(cancellation, revocation_executor, &executor_grant)
             .await?;
         journal
             .begin_replacement_terminal(JoinerJoinProgress::WriteRevoked(revocation.clone()))
@@ -851,7 +720,7 @@ impl Store {
             .await
             .map_err(DeviceJoinError::from)?;
         writer
-            .provider_administrator_join()?
+            .join_operation()
             .revoke_joiner_writes(cancellation, revocation_executor)
             .await
     }
@@ -867,7 +736,7 @@ impl Store {
             .await
             .map_err(DeviceJoinError::from)?;
         writer
-            .provider_administrator_join()?
+            .join_operation()
             .authorize_access(request, access_administrator)
             .await
     }
@@ -881,10 +750,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(DeviceJoinError::from)?;
-        writer
-            .provider_administrator_join()?
-            .publish_challenge(bootstrap)
-            .await
+        writer.join_operation().publish_challenge(bootstrap).await
     }
 
     #[doc(hidden)]
@@ -896,10 +762,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(DeviceJoinError::from)?;
-        writer
-            .provider_administrator_join()?
-            .complete_admission(readiness)
-            .await
+        writer.join_operation().complete_admission(readiness).await
     }
 
     #[doc(hidden)]
@@ -912,7 +775,7 @@ impl Store {
             .await
             .map_err(DeviceJoinError::from)?;
         writer
-            .provider_administrator_join()?
+            .join_operation()
             .complete_same_principal(bootstrap)
             .await
     }
@@ -926,26 +789,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(DeviceJoinError::from)?;
-        writer
-            .provider_administrator_join()?
-            .close(cancellation)
-            .await
-    }
-
-    #[doc(hidden)]
-    pub(crate) async fn revoke_device_provider_admission_writes(
-        &self,
-        cancellation: DeviceJoinCancellation,
-        revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
-    ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
-        let mut writer = self
-            .authorize_writer()
-            .await
-            .map_err(DeviceJoinError::from)?;
-        writer
-            .provider_administrator_join()?
-            .revoke_writes(cancellation, revocation_executor)
-            .await
+        writer.join_operation().close(cancellation).await
     }
 }
 

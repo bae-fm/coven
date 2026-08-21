@@ -421,17 +421,6 @@ impl StoreSync {
             .await?)
     }
 
-    pub(crate) async fn revoke_device_provider_admission_writes(
-        &self,
-        cancellation: crate::DeviceJoinCancellation,
-        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
-    ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .revoke_device_provider_admission_writes(cancellation, executor)
-            .await?)
-    }
-
     pub(crate) async fn revoke_joining_device_writes(
         &self,
         cancellation: crate::DeviceJoinCancellation,

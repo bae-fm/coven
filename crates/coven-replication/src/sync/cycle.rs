@@ -1166,16 +1166,6 @@ impl SyncComponents {
             .await
     }
 
-    pub(crate) async fn revoke_device_provider_admission_writes(
-        &self,
-        cancellation: crate::sync::DeviceJoinCancellation,
-        executor: &dyn crate::sync::DeviceJoinWriteRevocationExecutor,
-    ) -> Result<crate::sync::ProviderAdminJoinTerminal, crate::sync::DeviceJoinError> {
-        self.store
-            .revoke_device_provider_admission_writes(cancellation, executor)
-            .await
-    }
-
     pub(crate) async fn revoke_joining_device_writes(
         &self,
         cancellation: crate::sync::DeviceJoinCancellation,

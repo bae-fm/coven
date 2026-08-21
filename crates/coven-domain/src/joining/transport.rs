@@ -18,7 +18,7 @@ use crate::joining::client::{
 use coven_foundation::config::Config;
 use coven_replication::sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
-    DeviceJoinCleanupActivation, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinStatus,
+    DeviceJoinCleanupActivation, DeviceJoinOfferBundle, DeviceJoinRole, DeviceJoinStatus,
     DeviceJoinStep, DeviceJoinTransport, DeviceJoinTransportTiming,
     DeviceProviderAdmissionApproval, ProviderReadyDeviceBootstrap,
 };
@@ -476,7 +476,7 @@ impl DeviceJoinClient {
         cancel: &watch::Receiver<bool>,
     ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
         let storage = self.transport_storage().await?;
-        let transport = DeviceJoinTransport::open(&storage, bundle, DeviceJoinRoles::joiner())?;
+        let transport = DeviceJoinTransport::open(&storage, bundle, DeviceJoinRole::Joiner)?;
         let joining =
             self.drive_join_via_transport(&transport, bundle, timing, &on_progress, cancel);
         let cancellation = transport.observe_artifact::<DeviceJoinCancellation>(timing);
@@ -767,7 +767,7 @@ impl DeviceJoinClient {
         timing: DeviceJoinTransportTiming,
     ) -> Result<(), BootstrapError> {
         let storage = self.transport_storage().await?;
-        let transport = DeviceJoinTransport::open(&storage, bundle, DeviceJoinRoles::joiner())?;
+        let transport = DeviceJoinTransport::open(&storage, bundle, DeviceJoinRole::Joiner)?;
         let attempt_id = bundle.offer.attempt_id;
 
         let cancellation = transport

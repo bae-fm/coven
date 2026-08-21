@@ -620,18 +620,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         )
     }
 
-    pub(crate) fn provider_administrator_join(
-        &mut self,
-    ) -> Result<
-        crate::sync::store::commit_publication::device_join::AuthorizedProviderAdministratorJoin<
-            '_,
-            'storage,
-        >,
-        crate::sync::store::commit_publication::device_join::DeviceJoinError,
-    > {
-        self.join_operation().into_provider_administrator()
-    }
-
     pub(super) async fn membership_mutation_permit(
         &self,
     ) -> coven_database::store::MembershipMutationPermit {

@@ -65,16 +65,18 @@ impl LocalStoreWriter {
             .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
-    pub(crate) fn verify_device_admission_approval_as_owner(
+    /// Check an approval this device signed while admitting a join. The offer's
+    /// owner and the approval's signer are one registration, so the local one
+    /// answers both.
+    pub(crate) fn verify_own_device_admission_approval(
         &self,
         approval: &coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
         root: &coven_protocol::objects::VerifiedObject<
             coven_protocol::store_commit::StoreProtocolRoot,
         >,
-        administrator: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<(), crate::sync::store::device_join::DeviceJoinError> {
         approval
-            .verify(root, self.registration.value(), administrator)
+            .verify(root, self.registration.value())
             .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
@@ -210,19 +212,6 @@ impl LocalStoreWriter {
             .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
-    pub(crate) fn verify_device_admission_approval_as_administrator(
-        &self,
-        approval: &coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
-        root: &coven_protocol::objects::VerifiedObject<
-            coven_protocol::store_commit::StoreProtocolRoot,
-        >,
-        owner: &coven_protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<(), crate::sync::store::device_join::DeviceJoinError> {
-        approval
-            .verify(root, owner, self.registration.value())
-            .map_err(crate::sync::store::device_join::DeviceJoinError::from)
-    }
-
     pub(crate) fn sign_device_admission_approval(
         &self,
         request: coven_protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
@@ -309,8 +298,7 @@ impl LocalStoreWriter {
     pub(crate) fn sign_device_join_write_revocation(
         &self,
         cancellation: coven_protocol::store_commit::DeviceJoinOutcomeRef,
-        producer: coven_protocol::store_commit::device_join_exchange::DeviceJoinProducer,
-        authority: coven_protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef,
+        authority: coven_protocol::provider::StoreMemberProviderAccessGrantRef,
         protected_slots: Vec<coven_protocol::objects::ObjectSlot>,
         withdrawal: coven_protocol::provider::ProviderAccessWithdrawal,
         executor_grant: coven_protocol::provider::ProviderAdminGrantId,
@@ -321,7 +309,6 @@ impl LocalStoreWriter {
     > {
         coven_protocol::store_commit::device_join_exchange::DeviceJoinProducerWriteRevocation::signed(
             cancellation,
-            producer,
             authority,
             protected_slots,
             withdrawal,

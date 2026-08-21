@@ -246,15 +246,12 @@ impl<'a> StoreCommitVerifier<'a> {
                 "device join attempt names another Store root".to_string(),
             ));
         }
-        let offer = &attempt.value.provider_approval.request.offer;
-        let administrator = self
-            .load_registration(&offer.provider_admin.administrator)
-            .await?
-            .value;
+        // The approval's signer is the attempt's owner: one device admits, so
+        // there is no second registration to read here.
         attempt
             .value
             .provider_approval
-            .verify(self.root.object(), owner, &administrator)
+            .verify(self.root.object(), owner)
             .map_err(StorePullError::DeviceJoinExchange)?;
         Ok(LoadedDeviceJoinAttemptEvidence { attempt })
     }

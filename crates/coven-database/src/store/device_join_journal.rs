@@ -4,7 +4,6 @@
 use coven_protocol::store_commit::device_join_exchange::DeviceJoinAbandonment;
 use coven_protocol::store_commit::device_join_journal::{
     DeviceJoinJournalRecord, DeviceJoinRoleProgress, JoinerJoinProgress, OwnerJoinProgress,
-    ProviderAdminJoinProgress,
 };
 
 /// A journal transition that contradicts the durable record. Workflow errors
@@ -28,9 +27,6 @@ pub fn validate_initial_progress(
     if matches!(
         progress,
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Offered(_))
-            | DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::AccessRequested(_)
-            )
             | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::OfferReceived(_))
     ) {
         Ok(())
@@ -44,14 +40,13 @@ pub fn require_initial(record: &DeviceJoinJournalRecord) -> Result<(), DeviceJoi
 }
 
 /// A replacement of an attempt this device never ran opens the journal at a
-/// terminal, so only the write-revoked terminals may be installed first.
+/// terminal, so only the write-revoked terminal may be installed first.
 pub fn require_replacement_terminal(
     record: &DeviceJoinJournalRecord,
 ) -> Result<(), DeviceJoinJournalError> {
     if matches!(
         &*record.progress,
-        DeviceJoinRoleProgress::ProviderAdministrator(ProviderAdminJoinProgress::WriteRevoked(_))
-            | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(_))
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(_))
     ) {
         Ok(())
     } else {
@@ -106,10 +101,6 @@ fn validate_transition(
         (DeviceJoinRoleProgress::Owner(previous), DeviceJoinRoleProgress::Owner(next)) => {
             owner_adjacent(previous, next)
         }
-        (
-            DeviceJoinRoleProgress::ProviderAdministrator(previous),
-            DeviceJoinRoleProgress::ProviderAdministrator(next),
-        ) => provider_admin_adjacent(previous, next),
         (DeviceJoinRoleProgress::Joiner(previous), DeviceJoinRoleProgress::Joiner(next)) => {
             joiner_adjacent(previous, next)
         }
@@ -122,65 +113,14 @@ fn validate_transition(
     }
 }
 
+/// The admitting device's steps, in one chain. One device answers the access
+/// request, prepares the storage grant, signs the approval, registers the
+/// joining device and activates it, so every step below follows the previous
+/// one on the same journal row.
 fn owner_adjacent(previous: &OwnerJoinProgress, next: &OwnerJoinProgress) -> bool {
-    matches!(
-        (previous, next),
-        (
-            OwnerJoinProgress::Offered(_),
-            OwnerJoinProgress::RegistrationRequested(_)
-        ) | (
-            OwnerJoinProgress::Offered(_),
-            OwnerJoinProgress::AbandonmentCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::RegistrationRequested(_),
-            OwnerJoinProgress::AttemptActivated(_)
-        ) | (
-            OwnerJoinProgress::RegistrationRequested(_),
-            OwnerJoinProgress::SamePrincipalActivationCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::SamePrincipalActivationCreateIntent { .. },
-            OwnerJoinProgress::SamePrincipalCompleted { .. }
-        ) | (
-            OwnerJoinProgress::RegistrationRequested(_),
-            OwnerJoinProgress::AbandonmentCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::AbandonmentCreateIntent { .. },
-            OwnerJoinProgress::Abandoned(_)
-        ) | (
-            OwnerJoinProgress::AttemptActivated(_),
-            OwnerJoinProgress::ActivationCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::AttemptActivated(_),
-            OwnerJoinProgress::CancellationCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::ActivationCreateIntent { .. },
-            OwnerJoinProgress::ActivationPrepared { .. }
-        ) | (
-            OwnerJoinProgress::CancellationCreateIntent { .. },
-            OwnerJoinProgress::Cancelled(_)
-        ) | (
-            OwnerJoinProgress::Cancelled(_),
-            OwnerJoinProgress::CleanupReceiptCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::CleanupReceiptCreateIntent { .. },
-            OwnerJoinProgress::CleanupReceipt(_)
-        ) | (
-            OwnerJoinProgress::CleanupReceipt(_),
-            OwnerJoinProgress::CleanupActivated(_)
-        ) | (
-            OwnerJoinProgress::CleanupActivated(_),
-            OwnerJoinProgress::CancelledComplete(_)
-        )
-    )
-}
-
-fn provider_admin_adjacent(
-    previous: &ProviderAdminJoinProgress,
-    next: &ProviderAdminJoinProgress,
-) -> bool {
     if let (
-        ProviderAdminJoinProgress::AccessRequested(request),
-        ProviderAdminJoinProgress::ApprovalPrepared(approval),
+        OwnerJoinProgress::AccessRequested(request),
+        OwnerJoinProgress::ApprovalPrepared(approval),
     ) = (previous, next)
     {
         return approval.request.as_ref() == request
@@ -190,8 +130,8 @@ fn provider_admin_adjacent(
             );
     }
     if let (
-        ProviderAdminJoinProgress::ProviderReady(ready),
-        ProviderAdminJoinProgress::Completed(
+        OwnerJoinProgress::ProviderReady(ready),
+        OwnerJoinProgress::Completed(
             coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionCompletion::SamePrincipal {
                 bootstrap,
             },
@@ -203,62 +143,95 @@ fn provider_admin_adjacent(
     matches!(
         (previous, next),
         (
-            ProviderAdminJoinProgress::AccessRequested(_),
-            ProviderAdminJoinProgress::AccessGrantPrepared { .. }
+            OwnerJoinProgress::Offered(_),
+            OwnerJoinProgress::AccessRequested(_)
         ) | (
-            ProviderAdminJoinProgress::AccessGrantPrepared { .. },
-            ProviderAdminJoinProgress::ApprovalPrepared(_)
+            OwnerJoinProgress::AccessRequested(_),
+            OwnerJoinProgress::AccessGrantPrepared { .. }
         ) | (
-            ProviderAdminJoinProgress::ApprovalPrepared(_),
-            ProviderAdminJoinProgress::AttemptObserved(_)
+            OwnerJoinProgress::AccessGrantPrepared { .. },
+            OwnerJoinProgress::ApprovalPrepared(_)
         ) | (
-            ProviderAdminJoinProgress::ApprovalPrepared(_),
-            ProviderAdminJoinProgress::CleanupIntent { .. }
+            OwnerJoinProgress::ApprovalPrepared(_),
+            OwnerJoinProgress::RegistrationRequested(_)
         ) | (
-            ProviderAdminJoinProgress::AttemptObserved(_),
-            ProviderAdminJoinProgress::ChallengeCreateIntent(_)
+            OwnerJoinProgress::RegistrationRequested(_),
+            OwnerJoinProgress::AttemptActivated(_)
         ) | (
-            ProviderAdminJoinProgress::AttemptObserved(_),
-            ProviderAdminJoinProgress::CleanupIntent { .. }
+            OwnerJoinProgress::RegistrationRequested(_),
+            OwnerJoinProgress::SamePrincipalActivationCreateIntent { .. }
         ) | (
-            ProviderAdminJoinProgress::ChallengeCreateIntent(_),
-            ProviderAdminJoinProgress::ProviderReady(_)
+            OwnerJoinProgress::SamePrincipalActivationCreateIntent { .. },
+            OwnerJoinProgress::SamePrincipalCompleted { .. }
         ) | (
-            ProviderAdminJoinProgress::ChallengeCreateIntent(_),
-            ProviderAdminJoinProgress::CleanupIntent { .. }
+            OwnerJoinProgress::Offered(_),
+            OwnerJoinProgress::AbandonmentCreateIntent { .. }
         ) | (
-            ProviderAdminJoinProgress::ProviderReady(_),
-            ProviderAdminJoinProgress::ResponseObserved(_)
+            OwnerJoinProgress::AccessRequested(_),
+            OwnerJoinProgress::AbandonmentCreateIntent { .. }
         ) | (
-            ProviderAdminJoinProgress::ProviderReady(_),
-            ProviderAdminJoinProgress::CleanupIntent { .. }
+            OwnerJoinProgress::AccessGrantPrepared { .. },
+            OwnerJoinProgress::AbandonmentCreateIntent { .. }
         ) | (
-            ProviderAdminJoinProgress::ResponseObserved(_),
-            ProviderAdminJoinProgress::Completed(_)
+            OwnerJoinProgress::ApprovalPrepared(_),
+            OwnerJoinProgress::AbandonmentCreateIntent { .. }
         ) | (
-            ProviderAdminJoinProgress::ResponseObserved(_),
-            ProviderAdminJoinProgress::CleanupIntent { .. }
+            OwnerJoinProgress::RegistrationRequested(_),
+            OwnerJoinProgress::AbandonmentCreateIntent { .. }
         ) | (
-            ProviderAdminJoinProgress::ApprovalPrepared(_),
-            ProviderAdminJoinProgress::WriteRevoked(_)
+            OwnerJoinProgress::AbandonmentCreateIntent { .. },
+            OwnerJoinProgress::Abandoned(_)
         ) | (
-            ProviderAdminJoinProgress::AttemptObserved(_),
-            ProviderAdminJoinProgress::WriteRevoked(_)
+            OwnerJoinProgress::AttemptActivated(_),
+            OwnerJoinProgress::ChallengeCreateIntent(_)
         ) | (
-            ProviderAdminJoinProgress::ChallengeCreateIntent(_),
-            ProviderAdminJoinProgress::WriteRevoked(_)
+            OwnerJoinProgress::ChallengeCreateIntent(_),
+            OwnerJoinProgress::ProviderReady(_)
         ) | (
-            ProviderAdminJoinProgress::ProviderReady(_),
-            ProviderAdminJoinProgress::WriteRevoked(_)
+            OwnerJoinProgress::ProviderReady(_),
+            OwnerJoinProgress::ResponseObserved(_)
         ) | (
-            ProviderAdminJoinProgress::ResponseObserved(_),
-            ProviderAdminJoinProgress::WriteRevoked(_)
+            OwnerJoinProgress::ResponseObserved(_),
+            OwnerJoinProgress::Completed(_)
         ) | (
-            ProviderAdminJoinProgress::CleanupIntent { .. },
-            ProviderAdminJoinProgress::Cancelled(_)
+            OwnerJoinProgress::Completed(_),
+            OwnerJoinProgress::ActivationCreateIntent { .. }
         ) | (
-            ProviderAdminJoinProgress::CleanupIntent { .. },
-            ProviderAdminJoinProgress::WriteRevoked(_)
+            OwnerJoinProgress::ActivationCreateIntent { .. },
+            OwnerJoinProgress::ActivationPrepared { .. }
+        ) | (
+            OwnerJoinProgress::AttemptActivated(_),
+            OwnerJoinProgress::CancellationCreateIntent { .. }
+        ) | (
+            OwnerJoinProgress::ChallengeCreateIntent(_),
+            OwnerJoinProgress::CancellationCreateIntent { .. }
+        ) | (
+            OwnerJoinProgress::ProviderReady(_),
+            OwnerJoinProgress::CancellationCreateIntent { .. }
+        ) | (
+            OwnerJoinProgress::ResponseObserved(_),
+            OwnerJoinProgress::CancellationCreateIntent { .. }
+        ) | (
+            OwnerJoinProgress::CancellationCreateIntent { .. },
+            OwnerJoinProgress::Cancelled(_)
+        ) | (
+            OwnerJoinProgress::Cancelled(_),
+            OwnerJoinProgress::ProviderClosureIntent { .. }
+        ) | (
+            OwnerJoinProgress::ProviderClosureIntent { .. },
+            OwnerJoinProgress::ProviderClosed { .. }
+        ) | (
+            OwnerJoinProgress::ProviderClosed { .. },
+            OwnerJoinProgress::CleanupReceiptCreateIntent { .. }
+        ) | (
+            OwnerJoinProgress::CleanupReceiptCreateIntent { .. },
+            OwnerJoinProgress::CleanupReceipt(_)
+        ) | (
+            OwnerJoinProgress::CleanupReceipt(_),
+            OwnerJoinProgress::CleanupActivated(_)
+        ) | (
+            OwnerJoinProgress::CleanupActivated(_),
+            OwnerJoinProgress::CancelledComplete(_)
         )
     )
 }

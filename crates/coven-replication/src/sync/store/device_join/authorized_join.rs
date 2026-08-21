@@ -4,21 +4,16 @@ use super::*;
 use coven_protocol::store_commit::device_join_exchange::require_cancelled_outcome;
 use coven_protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
 
-mod provider_administrator;
+mod admission;
 mod same_principal;
 
-pub use provider_administrator::DeviceProviderAccessAdministrator;
+pub use admission::DeviceProviderAccessAdministrator;
 
-pub(crate) struct OwnerJoinAuthority;
-
-pub(crate) struct ProviderAdministratorJoinAuthority {
-    grants: std::collections::BTreeMap<ProviderAdminGrantId, ProviderAdminGrantRecord>,
-}
-
-pub(crate) type AuthorizedProviderAdministratorJoin<'operation, 'storage> =
-    AuthorizedJoin<'operation, 'storage, ProviderAdministratorJoinAuthority>;
-
-pub(crate) struct AuthorizedJoin<'operation, 'storage, Authority = OwnerJoinAuthority> {
+/// One device admits a join: it answers the access request, prepares the
+/// storage grant, signs the approval, registers the joining device and
+/// activates it. Every step below runs against the same journal row, under the
+/// provider-administrator grant this device itself holds.
+pub(crate) struct AuthorizedJoin<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
     database: StoreDatabase,
     storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
@@ -27,10 +22,10 @@ pub(crate) struct AuthorizedJoin<'operation, 'storage, Authority = OwnerJoinAuth
     verified_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
     membership: coven_protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
-    authority: Authority,
 }
 
 impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         writer: &'operation mut AuthorizedWriterOperation<'storage>,
         database: StoreDatabase,
@@ -50,45 +45,24 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             verified_root,
             membership,
             local_writer,
-            authority: OwnerJoinAuthority,
         }
     }
 
-    pub(crate) fn into_provider_administrator(
-        self,
-    ) -> Result<AuthorizedProviderAdministratorJoin<'operation, 'storage>, DeviceJoinError> {
+    /// Every provider-administrator grant this device itself holds.
+    fn provider_admin_grants(
+        &self,
+    ) -> Result<
+        std::collections::BTreeMap<ProviderAdminGrantId, ProviderAdminGrantRecord>,
+        DeviceJoinError,
+    > {
         let coven_protocol::membership::MembershipStatus::Resolved(resolved) =
             self.membership.status()
         else {
             return Err(DeviceJoinError::MembershipConflict);
         };
-        let state = resolved.provider_admin.combined_state();
-        let grants = self.local_writer.provider_administrator_grants(state);
-        if grants.is_empty() {
-            return Err(DeviceJoinError::ProviderAdministratorRequired);
-        }
-        let Self {
-            writer,
-            database,
-            storage,
-            root,
-            protocol_root,
-            verified_root,
-            membership,
-            local_writer,
-            authority: _,
-        } = self;
-        Ok(AuthorizedJoin {
-            writer,
-            database,
-            storage,
-            root,
-            protocol_root,
-            verified_root,
-            membership,
-            local_writer,
-            authority: ProviderAdministratorJoinAuthority { grants },
-        })
+        Ok(self
+            .local_writer
+            .provider_administrator_grants(resolved.provider_admin.combined_state()))
     }
 
     fn join_history(&mut self) -> DeviceJoinHistory<'_, 'storage> {
@@ -102,13 +76,9 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
     fn verify_device_admission_approval(
         &self,
         approval: &DeviceProviderAdmissionApproval,
-        administrator: &StoreDeviceRegistration,
     ) -> Result<(), DeviceJoinError> {
-        self.local_writer.verify_device_admission_approval_as_owner(
-            approval,
-            &self.verified_root,
-            administrator,
-        )
+        self.local_writer
+            .verify_own_device_admission_approval(approval, &self.verified_root)
     }
 
     pub(crate) async fn begin(
@@ -133,18 +103,20 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }
             return Ok(offer);
         }
-        let provider_admin_grant = self
-            .protocol_root
-            .descriptor
-            .founder_provider_admin
-            .grant_id
-            .clone();
         let owner_pubkey = self.local_writer.author_pubkey();
         let owner_grant = self
             .membership
             .active_owner_grant(&owner_pubkey)
             .ok_or(DeviceJoinError::OwnerAuthorityRequired)?;
-        let provider_admin = self.resolve_provider_admin(&provider_admin_grant)?;
+        // The device that offers the join is the device that will admit it, so
+        // the offer names a provider-administrator grant this device holds. A
+        // device holding none cannot grant the joiner storage access and so
+        // cannot make the offer at all.
+        let provider_admin = self
+            .provider_admin_grants()?
+            .into_values()
+            .next()
+            .ok_or(DeviceJoinError::ProviderAdministratorRequired)?;
         let root = self.root.clone();
         let binding = self.storage.provider_binding().await?;
         let attempt_id = self.database.new_device_join_attempt_id();
@@ -201,21 +173,15 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
     }
 
+    /// The record for a grant this device holds. A grant held by some other
+    /// device is not something this device can admit under: one party answers
+    /// the access request, prepares the grant and signs the approval.
     fn resolve_provider_admin(
         &self,
         grant_id: &ProviderAdminGrantId,
     ) -> Result<ProviderAdminGrantRecord, DeviceJoinError> {
-        let coven_protocol::membership::MembershipStatus::Resolved(resolved) =
-            self.membership.status()
-        else {
-            return Err(DeviceJoinError::MembershipConflict);
-        };
-        let state = resolved.provider_admin.combined_state();
-        state
-            .records()
-            .get(grant_id)
-            .filter(|record| state.authorizes(grant_id, &record.administrator))
-            .cloned()
+        self.provider_admin_grants()?
+            .remove(grant_id)
             .ok_or(DeviceJoinError::ProviderAdministratorRequired)
     }
 
@@ -243,7 +209,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .load_registration(&provider_admin.administrator)
             .await?
             .value;
-        self.verify_device_admission_approval(request.approval(), &administrator)?;
+        self.verify_device_admission_approval(request.approval())?;
         if let Some(access_grant) = request.approval().access_grant() {
             self.join_history()
                 .verify_accepted_provider_access_activation(
@@ -303,15 +269,25 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             abandonment: abandonment_ref.clone(),
             prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
         });
-        match &*current.progress {
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Offered(durable))
-                if durable == &offer =>
-            {
-                journal.advance_to(&current, &intent).await?;
+        let durable_offer = match &*current.progress {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Offered(durable)) => Some(durable),
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AccessRequested(request)) => {
+                Some(request.offer.as_ref())
             }
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::RegistrationRequested(request))
-                if request.approval().request.offer.as_ref() == &offer =>
-            {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AccessGrantPrepared {
+                request,
+                ..
+            }) => Some(request.offer.as_ref()),
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ApprovalPrepared(approval)) => {
+                Some(approval.request.offer.as_ref())
+            }
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::RegistrationRequested(request)) => {
+                Some(request.approval().request.offer.as_ref())
+            }
+            _ => None,
+        };
+        match &*current.progress {
+            _ if durable_offer == Some(&offer) => {
                 journal.advance_to(&current, &intent).await?;
             }
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AbandonmentCreateIntent {
@@ -367,18 +343,19 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .clone();
         let offer = self.validate_registration_request(&request).await?;
         let journal = self.journal(offer.attempt_id);
-        let offered = journal.record(OwnerJoinProgress::Offered(offer.clone()));
-        let durable = journal.begin(&offered).await?;
-        if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap)) =
-            *durable.progress
-        {
-            if *bootstrap.request == request {
-                return Ok(bootstrap);
+        let durable = journal.current().await?;
+        match &*durable.progress {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap)) => {
+                if *bootstrap.request == request {
+                    return Ok(bootstrap.clone());
+                }
+                return Err(DeviceJoinError::JournalConflict);
             }
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        if durable != offered {
-            return Err(DeviceJoinError::JournalConflict);
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ApprovalPrepared(approval))
+                if approval == request.approval() => {}
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::RegistrationRequested(durable))
+                if durable == &request => {}
+            _ => return Err(DeviceJoinError::JournalConflict),
         }
         let plan = self.writer.prepare_plan().await?;
         #[cfg(any(test, feature = "test-utils"))]
@@ -393,12 +370,19 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         {
             return Err(DeviceJoinError::ApprovalActivationMissing);
         }
-        let requested = journal
-            .advance(
-                &offered,
-                OwnerJoinProgress::RegistrationRequested(request.clone()),
-            )
-            .await?;
+        let requested = if matches!(
+            &*durable.progress,
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::RegistrationRequested(_))
+        ) {
+            durable
+        } else {
+            journal
+                .advance(
+                    &durable,
+                    OwnerJoinProgress::RegistrationRequested(request.clone()),
+                )
+                .await?
+        };
         let attempt = self.local_writer.sign_device_join_attempt(
             offer.store_root.clone(),
             offer.attempt_id,
@@ -474,8 +458,15 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::JournalConflict);
         }
         let expected_attempt = match &*current.progress {
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap)) => {
-                &bootstrap.publication_authorization.attempt
+            DeviceJoinRoleProgress::Owner(
+                OwnerJoinProgress::AttemptActivated(bootstrap)
+                | OwnerJoinProgress::ChallengeCreateIntent(bootstrap),
+            ) => &bootstrap.publication_authorization.attempt,
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderReady(ready)) => {
+                &ready.bootstrap.publication_authorization.attempt
+            }
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ResponseObserved(readiness)) => {
+                &readiness.proof.attempt
             }
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CancellationCreateIntent {
                 attempt,
@@ -527,7 +518,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
         });
         match &*current.progress {
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(_)) => {
+            DeviceJoinRoleProgress::Owner(
+                OwnerJoinProgress::AttemptActivated(_)
+                | OwnerJoinProgress::ChallengeCreateIntent(_)
+                | OwnerJoinProgress::ProviderReady(_)
+                | OwnerJoinProgress::ResponseObserved(_),
+            ) => {
                 journal.advance_to(&current, &intent).await?;
             }
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CancellationCreateIntent {
@@ -592,18 +588,21 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }
             return Err(DeviceJoinError::JournalConflict);
         }
-        let provisional = match &*current.progress {
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap)) => {
-                bootstrap.clone()
-            }
+        match &*current.progress {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Completed(durable_completion))
+                if durable_completion == &completion => {}
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationCreateIntent {
-                bootstrap,
                 completion: durable_completion,
                 ..
-            }) if durable_completion == &completion => bootstrap.clone(),
+            }) if durable_completion == &completion => {}
             _ => return Err(DeviceJoinError::JournalConflict),
-        };
-        let offer = &provisional.request.approval().request.offer;
+        }
+        let local_writer = std::sync::Arc::clone(&self.local_writer);
+        let attempt = local_writer
+            .load_verified_device_join_attempt(&mut self.writer.join_history(), &attempt_ref)
+            .await?
+            .value;
+        let offer = &attempt.provider_approval.request.offer.clone();
         if self.root != offer.store_root {
             return Err(DeviceJoinError::OfferMismatch);
         }
@@ -613,17 +612,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
-        let local_writer = std::sync::Arc::clone(&self.local_writer);
-        let attempt = local_writer
-            .load_verified_device_join_attempt(&mut self.writer.join_history(), &attempt_ref)
-            .await?
-            .value;
         match (&attempt.provider_approval.admission, &completion) {
             (
                 DeviceProviderAdmission::SamePrincipal,
                 DeviceProviderAdmissionCompletion::SamePrincipal { bootstrap },
-            ) if bootstrap.bootstrap.publication_authorization.attempt == attempt_ref
-                && bootstrap.bootstrap.as_ref() == &provisional => {}
+            ) if bootstrap.bootstrap.publication_authorization.attempt == attempt_ref => {}
             (
                 DeviceProviderAdmission::CrossPrincipal { challenge, .. },
                 DeviceProviderAdmissionCompletion::CrossPrincipal { readiness, receipt },
@@ -707,7 +700,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let prefix = coven_protocol::store_commit::device_join_outcome_semantic_prefix(attempt_id);
         let outcome_hash = outcome.outcome_hash();
         let (prepared, outcome_ref, intent) = match &*current.progress {
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(_)) => {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Completed(_)) => {
                 let prepared = self.storage.prepare_protocol_object(
                     &context,
                     attempt.outcome_slot.clone(),
@@ -723,7 +716,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     .advance(
                         &current,
                         OwnerJoinProgress::ActivationCreateIntent {
-                            bootstrap: provisional.clone(),
                             completion: completion.clone(),
                             outcome: outcome_ref.clone(),
                             prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
@@ -852,16 +844,16 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         {
             return Ok(existing.clone());
         }
-        let durable_cancellation = match &*current.progress {
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(durable)) => durable,
+        match &*current.progress {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderClosed {
+                cancellation: durable,
+                ..
+            }) if durable == &cancellation => {}
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupReceiptCreateIntent {
                 cancellation: durable,
                 ..
-            }) => durable,
+            }) if durable == &cancellation => {}
             _ => return Err(DeviceJoinError::JournalConflict),
-        };
-        if durable_cancellation != &cancellation {
-            return Err(DeviceJoinError::JournalConflict);
         }
         let (attempt, owner) = self
             .join_history()
@@ -912,7 +904,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             attempt_ref.attempt_id,
         );
         let (receipt_object, receipt_ref, prepared, intent) = match &*current.progress {
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(_)) => {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderClosed { .. }) => {
                 let plan = self.writer.prepare_plan().await?;
                 let receipt_object = self.local_writer.sign_device_join_cleanup_receipt(
                     &attempt.value,
@@ -1031,14 +1023,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     .map_err(database_error)?;
                 closure.verify(registration.value())?;
             }
-            ProviderAdminJoinTerminal::WriteRevoked(revocation) => {
-                let registration = self
-                    .database
-                    .activated_store_device_registration(revocation.executor.clone())
-                    .await
-                    .map_err(database_error)?;
-                revocation.verify(registration.value())?;
-            }
         }
         match joiner {
             JoinerJoinTerminal::Ready(_) => {}
@@ -1147,6 +1131,23 @@ impl Store {
             .await
             .map_err(DeviceJoinError::from)?;
         writer.join_operation().accept_registration(request).await
+    }
+
+    /// Finish a same-provider join whose activation was already prepared but
+    /// whose journal has not reached its completion.
+    #[doc(hidden)]
+    pub(crate) async fn resume_same_principal_device_join(
+        &self,
+        request: DeviceRegistrationRequest,
+    ) -> Result<SamePrincipalDeviceJoin, DeviceJoinError> {
+        let mut writer = self
+            .authorize_writer()
+            .await
+            .map_err(DeviceJoinError::from)?;
+        writer
+            .join_operation()
+            .activate_same_principal_join(request)
+            .await
     }
 
     #[doc(hidden)]

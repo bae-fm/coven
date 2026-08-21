@@ -141,23 +141,29 @@ impl Store {
     pub(crate) async fn publish_device_join_transport_artifact(
         &self,
         bundle: &transport::DeviceJoinOfferBundle,
-        roles: transport::DeviceJoinRoles,
         action: &crate::sync::store::DeviceJoinAction,
     ) -> Result<(), transport::DeviceJoinTransportError> {
-        transport::DeviceJoinTransport::open(self.storage.as_ref(), bundle, roles)?
-            .publish(action)
-            .await
+        transport::DeviceJoinTransport::open(
+            self.storage.as_ref(),
+            bundle,
+            crate::sync::store::DeviceJoinRole::Owner,
+        )?
+        .publish(action)
+        .await
     }
 
     pub(crate) async fn await_device_join_transport_artifact<T: transport::DeviceJoinArtifact>(
         &self,
         bundle: &transport::DeviceJoinOfferBundle,
-        roles: transport::DeviceJoinRoles,
         timing: transport::DeviceJoinTransportTiming,
     ) -> Result<T, transport::DeviceJoinTransportError> {
-        transport::DeviceJoinTransport::open(self.storage.as_ref(), bundle, roles)?
-            .await_artifact::<T>(timing)
-            .await
+        transport::DeviceJoinTransport::open(
+            self.storage.as_ref(),
+            bundle,
+            crate::sync::store::DeviceJoinRole::Owner,
+        )?
+        .await_artifact::<T>(timing)
+        .await
     }
 
     pub(crate) async fn device_join_transport_status(
@@ -169,24 +175,25 @@ impl Store {
         Ok(self.database.device_join_status(attempt_id, role).await?)
     }
 
-    pub(crate) async fn device_join_transport_roles(
+    /// Refuse to drive an attempt this device is not the admitting side of.
+    ///
+    /// One party admits, and the offer says which: the device whose activated
+    /// registration the offer names as its owner. That same registration is the
+    /// offer's provider administrator, so there is nothing else to weigh.
+    pub(crate) async fn require_device_join_admitter(
         &self,
         offer: &coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
-    ) -> Result<transport::DeviceJoinRoles, transport::DeviceJoinTransportError> {
+    ) -> Result<(), transport::DeviceJoinTransportError> {
         let local = self
             .database
             .local_activated_registration_ref()
             .await
             .map_err(crate::sync::store::DeviceJoinError::from)?
             .ok_or(crate::sync::store::DeviceJoinError::ActiveDeviceRequired)?;
-        let roles = transport::DeviceJoinRoles::admitting(
-            local == offer.owner_registration,
-            local == offer.provider_admin.administrator,
-        );
-        if !roles.any() {
+        if local != offer.owner_registration {
             return Err(crate::sync::store::DeviceJoinError::ActiveDeviceRequired.into());
         }
-        Ok(roles)
+        Ok(())
     }
 
     pub(crate) fn circles(&self) -> StoreCircleCommands<'_> {

@@ -13,7 +13,7 @@ use coven_database::device_join_journal::validate_successor;
 pub(crate) use coven_protocol::store_commit::device_join_journal::attempt_key;
 pub(crate) use coven_protocol::store_commit::device_join_journal::{
     device_join_action, DeviceJoinRoleProgress, DeviceJoinRoleProgressKind, JoinerJoinProgress,
-    OwnerJoinProgress, PreparedDeviceJoinObject, ProviderAdminJoinProgress,
+    OwnerJoinProgress, PreparedDeviceJoinObject,
 };
 pub use coven_protocol::store_commit::device_join_journal::{
     DeviceJoinAction, DeviceJoinJournalRecord, DeviceJoinRole, DeviceJoinStatus,
@@ -57,16 +57,6 @@ impl<Progress: DeviceJoinRoleProgressKind> StoreJoinJournal<Progress> {
             attempt_id: self.attempt_id,
             progress: Box::new(progress.into()),
         }
-    }
-
-    /// Install `initial` as this role's first record, returning whatever the
-    /// journal durably holds — an attempt that already advanced past the initial
-    /// progress returns that later record for the caller to resume from.
-    pub(super) async fn begin(
-        &self,
-        initial: &DeviceJoinJournalRecord,
-    ) -> Result<DeviceJoinJournalRecord, DeviceJoinError> {
-        Ok(self.database.begin_device_join(initial.clone()).await?)
     }
 
     /// Advance from `previous`, returning the record now durable so the next step
