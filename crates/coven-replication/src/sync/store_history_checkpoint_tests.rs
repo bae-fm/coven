@@ -1208,6 +1208,59 @@ impl AcknowledgedHistory {
             .expect("load retained verified Merge history")
     }
 
+    /// Provider operations the cycle after a newly published snapshot asks
+    /// for — the cycle that has to verify it and acknowledge it.
+    ///
+    /// A snapshot is published over a baseline the device has already advanced
+    /// onto, so the acknowledgements under that coverage are retired rows: the
+    /// shape a store is in every time its owner publishes a generation.
+    async fn cycle_requests_after_a_new_snapshot(&self) -> u64 {
+        self.cycle_requests_after_snapshot_number(2).await
+    }
+
+    /// The same measurement with `generations` snapshots published in front of
+    /// the measured one, so the cost can be checked against how many the store
+    /// has ever published as well as against how deep its history is.
+    async fn cycle_requests_after_snapshot_number(&self, generations: u64) -> u64 {
+        for _ in 1..generations {
+            self.publish_snapshot_now().await;
+            self.device.run_cycle(None).await.expect("acknowledge it");
+            self.peer.run_cycle(None).await.expect("peer catches up");
+            self.device.run_cycle(None).await.expect("settle");
+        }
+        self.publish_snapshot_now().await;
+        let before = self._store.provider_requests_issued();
+        self.device
+            .run_cycle(None)
+            .await
+            .expect("cycle after the new snapshot");
+        self._store.provider_requests_issued() - before
+    }
+
+    /// Publish a Store snapshot over the device's current frontier.
+    async fn publish_snapshot_now(&self) {
+        let image_dir = tempfile::tempdir().expect("snapshot image dir");
+        let image = coven_database::StoreDatabase::new(&self.db)
+            .capture_snapshot_image_for_test(
+                self._store.root().clone(),
+                image_dir.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("capture a snapshot image");
+        let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+            coven_database::StoreDatabase::new(&self.db)
+                .materialized_frontier()
+                .await
+                .expect("materialized frontier"),
+        )
+        .expect("frontier");
+        self.device
+            .publish_snapshot(image, coverage)
+            .await
+            .expect("publish the snapshot");
+    }
+
     /// Provider operations a cycle with nothing new to do asks for — every
     /// call, not only the reads, which is the unit the cycle log budgets in.
     async fn settled_cycle_requests(&self) -> u64 {
@@ -1356,6 +1409,67 @@ async fn history_depth_does_not_change_what_a_settled_cycle_asks_for() {
         shallow, deep,
         "a settled cycle's provider operations grew with history depth: two \
          rounds asked for {shallow}, six asked for {deep}",
+    );
+}
+
+/// Acknowledging a new snapshot costs what the snapshot is, not what the store
+/// has been through.
+///
+/// Verifying a snapshot recomposes its history summary, and completing each
+/// device's acknowledgement chain used to walk that chain back to sequence one
+/// — over acknowledgements the device's own baseline advance had retired, so
+/// every one of them was a provider read. A live store paid 235 requests and
+/// twenty seconds to acknowledge one new generation. The signature over the
+/// snapshot the baseline stands on already states those chains; below the
+/// coverage they resolve to the coverage, like everything else.
+///
+/// Two histories of different depth, because the number itself is only
+/// interesting if it is the same one.
+#[tokio::test]
+async fn acknowledging_a_snapshot_costs_the_same_whatever_the_history_behind_it() {
+    let shallow = AcknowledgedHistory::publish(2)
+        .await
+        .cycle_requests_after_a_new_snapshot()
+        .await;
+    let deep = AcknowledgedHistory::publish(6)
+        .await
+        .cycle_requests_after_a_new_snapshot()
+        .await;
+
+    assert_eq!(
+        shallow, deep,
+        "the cycle that acknowledges a new snapshot grew with history depth: \
+         two rounds asked for {shallow} operations, six asked for {deep}",
+    );
+    assert_eq!(
+        deep, 33,
+        "the cycle that acknowledges a new snapshot asked for {deep} operations",
+    );
+}
+
+/// And the same however many generations the store has published before it.
+///
+/// Choosing which snapshot to acknowledge reads the publisher's snapshot
+/// stream and verifies a candidate out of it. Reading the stream is how a
+/// device finds a generation it has not seen; verifying every candidate to
+/// pick the one that dominates them all is not, and the dominant one is known
+/// before any of them is verified.
+#[tokio::test]
+async fn acknowledging_a_snapshot_costs_the_same_whatever_was_published_before_it() {
+    let few = AcknowledgedHistory::publish(3)
+        .await
+        .cycle_requests_after_snapshot_number(2)
+        .await;
+    let many = AcknowledgedHistory::publish(3)
+        .await
+        .cycle_requests_after_snapshot_number(5)
+        .await;
+
+    assert_eq!(
+        few, many,
+        "the cycle that acknowledges a new snapshot grew with the generations \
+         published before it: the second generation asked for {few} operations, \
+         the fifth asked for {many}",
     );
 }
 

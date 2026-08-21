@@ -61,9 +61,13 @@ impl SnapshotSelector {
     }
 }
 
+/// `verified_eligible` is how many candidates this selection verified and found
+/// eligible — not how many were eligible. The installable selector stops at the
+/// maximal candidate, so it reports one by construction; a reader comparing the
+/// two selectors' lines would otherwise read that stop as candidates vanishing.
 fn report_selected_snapshot(
     snapshot: &coven_database::PublishedStoreSnapshot,
-    eligible: usize,
+    verified_eligible: usize,
     selector: SnapshotSelector,
 ) {
     // The tips themselves, not just how many: the whole point of reading this
@@ -82,7 +86,7 @@ fn report_selected_snapshot(
         snapshot = %snapshot.reference.snapshot_hash,
         coverage_streams = snapshot.meta.coverage.position_count(),
         %coverage,
-        eligible_candidates = eligible,
+        verified_eligible,
         "Selected the Store snapshot"
     );
 }
@@ -154,16 +158,48 @@ impl<'a> MergeHistoryVerifier<'a> {
         };
         let selector = SnapshotSelector::Installable;
         let maximal_reference = maximal_candidate.reference;
+        // The maximal candidate first, and usually only it. Verifying a
+        // snapshot recomposes its whole history summary; doing that for every
+        // candidate spends one recomposition per generation the store has ever
+        // published to choose the one that dominates them all, which is known
+        // before any of them is verified. The others are verified only when the
+        // maximal one turns out to be ineligible, which is the case the
+        // fallback below exists for.
+        let maximal = candidates
+            .iter()
+            .find(|snapshot| snapshot.reference == maximal_reference)
+            .cloned()
+            .ok_or_else(|| {
+                StorePullError::InvalidState(
+                    "maximal Store snapshot is absent from its own candidates".to_string(),
+                )
+            })?;
+        let maximal_rejection = match self.verify_installable_snapshot(&maximal).await {
+            Ok(verified) => {
+                return take_maximal_eligible(
+                    vec![SelectedStoreSnapshot {
+                        snapshot: maximal,
+                        verified,
+                    }],
+                    None,
+                    selector,
+                );
+            }
+            Err(error) if disqualifies_one_candidate(&error) => {
+                report_rejected_snapshot(&maximal, &error, selector);
+                Some(error)
+            }
+            Err(error) => return Err(error),
+        };
         let mut eligible = Vec::new();
-        let mut maximal_rejection = None;
         for snapshot in candidates {
+            if snapshot.reference == maximal_reference {
+                continue;
+            }
             match self.verify_installable_snapshot(&snapshot).await {
                 Ok(verified) => eligible.push(SelectedStoreSnapshot { snapshot, verified }),
                 Err(error) if disqualifies_one_candidate(&error) => {
                     report_rejected_snapshot(&snapshot, &error, selector);
-                    if snapshot.reference == maximal_reference {
-                        maximal_rejection = Some(error);
-                    }
                 }
                 Err(error) => return Err(error),
             }

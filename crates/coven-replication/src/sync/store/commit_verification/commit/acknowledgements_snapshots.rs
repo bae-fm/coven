@@ -337,6 +337,48 @@ impl<'a> StoreCommitVerifier<'a> {
         .map(|opened| opened.value)
     }
 
+    /// Adopt a device's own published snapshots as the walked prefix of its
+    /// stream.
+    ///
+    /// The rows this device wrote when it published them, re-parsed and
+    /// signature-checked against its registration on the way out of the
+    /// database, so nothing enters here that reading the objects back would
+    /// have refused. A row is written by the transaction that *completes* a
+    /// publication — the one that retires the outbound claim — so it names a
+    /// generation the provider accepted, not one this device meant to write.
+    /// Without this, choosing which snapshot to acknowledge reads every
+    /// generation the store has ever published, every time it is asked — a
+    /// walk from generation zero over a stream this device is the author of.
+    ///
+    /// Refuses anything but a dense prefix from generation zero: the walk
+    /// resumes at the length of what it holds, so a gap would make it re-read
+    /// one generation as another.
+    pub(crate) fn remember_published_snapshot_stream(
+        &self,
+        registration: &StoreDeviceRegistrationRef,
+        snapshots: Vec<coven_database::PublishedStoreSnapshot>,
+    ) -> Result<(), StoreProtocolError> {
+        if snapshots
+            .iter()
+            .enumerate()
+            .any(|(index, snapshot)| snapshot.reference.generation != index as u64)
+        {
+            return Err(StoreProtocolError::Malformed(
+                "published Store snapshot stream is not dense from generation zero".to_string(),
+            ));
+        }
+        let mut streams = self
+            .snapshot_streams
+            .lock()
+            .expect("verified snapshot stream cache poisoned");
+        let held = streams.entry(registration.clone()).or_default();
+        // Whatever this verifier already walked wins: it read those objects.
+        if held.len() < snapshots.len() {
+            *held = snapshots;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn load_store_snapshot_stream(
         &self,
         registration_ref: &StoreDeviceRegistrationRef,

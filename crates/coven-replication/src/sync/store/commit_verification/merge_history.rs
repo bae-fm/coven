@@ -508,6 +508,23 @@ impl<'a> MergeHistoryVerifier<'a> {
                 "installed replay baseline coverage moved under its history verifier".to_string(),
             ));
         }
+        // Every acknowledgement the baseline's signed summary states, admitted
+        // before anything walks a chain. A chain walk demands contiguity from
+        // sequence one, and the acknowledgements under the coverage are exactly
+        // the rows the advance retired — so without this a device pays one
+        // provider read per acknowledgement it has ever made, every time it
+        // verifies a snapshot. The owner signed those chains into the snapshot
+        // this baseline stands on: covered positions resolve to the coverage,
+        // here as everywhere else.
+        if let Some(summary) = baseline.history_summary() {
+            for chain in summary.summary.acknowledgements.values() {
+                for (reference, value) in chain.chain.values() {
+                    self.commit_verifier
+                        .remember_acknowledgement(reference, value)
+                        .map_err(StorePullError::Protocol)?;
+                }
+            }
+        }
         self.history.baseline = baseline;
         Ok(())
     }
@@ -564,6 +581,32 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await?
             .into_iter()
             .find(|snapshot| snapshot.reference == locator.snapshot))
+    }
+
+    /// Adopt this device's own published snapshots as the walked prefix of its
+    /// snapshot stream, so choosing what to acknowledge does not re-read every
+    /// generation it has ever published.
+    pub(crate) fn admit_published_snapshots(
+        &mut self,
+        snapshots: Vec<coven_database::PublishedStoreSnapshot>,
+    ) -> Result<(), StorePullError> {
+        let Some(author) = snapshots
+            .first()
+            .map(|snapshot| snapshot.meta.author_registration.clone())
+        else {
+            return Ok(());
+        };
+        if snapshots
+            .iter()
+            .any(|snapshot| snapshot.meta.author_registration != author)
+        {
+            return Err(StorePullError::InvalidState(
+                "one Store snapshot stream carries two authors".to_string(),
+            ));
+        }
+        self.commit_verifier
+            .remember_published_snapshot_stream(&author, snapshots)
+            .map_err(StorePullError::Protocol)
     }
 
     pub(crate) fn admit_retained_history(

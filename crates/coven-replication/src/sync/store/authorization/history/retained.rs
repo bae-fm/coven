@@ -206,6 +206,18 @@ pub(crate) async fn seed_verifier_from_retained_history(
     history.admit_installed_baseline(baseline)?;
     let announcements = database.snapshot_announcement_frontier().await?;
     history.admit_snapshot_announcements(&announcements)?;
+    // This device's own snapshot stream, from the rows it wrote publishing it.
+    // Only a device whose registration is activated has authored any — a
+    // joining one is reading this before it has a registration at all.
+    if database
+        .latest_local_store_device_registration()
+        .await?
+        .is_some_and(|registration| registration.is_activated())
+    {
+        let mut published = database.local_store_snapshots().await?;
+        published.sort_by_key(|snapshot| snapshot.reference.generation);
+        history.admit_published_snapshots(published)?;
+    }
     let retained = database.retained_merge_replay_inputs(root).await?;
     history.admit_retained_history(&retained)?;
     history
