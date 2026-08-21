@@ -587,6 +587,7 @@ impl AuthorizedSyncCycle<'_, '_> {
             ReplayBaselineAdvance::Advanced(advanced) => info!(
                 commits = advanced.retired_commits,
                 pins = advanced.released_pins,
+                writes = advanced.folded_writes,
                 "Advanced the replay baseline over an acknowledged snapshot"
             ),
             // The steady state is the loudest of these only in the sense that
@@ -615,6 +616,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         info!(
             commits = advanced.retired_commits,
             pins = advanced.released_pins,
+            writes = advanced.folded_writes,
             "Advanced the replay baseline over a newly acknowledged snapshot"
         );
     }

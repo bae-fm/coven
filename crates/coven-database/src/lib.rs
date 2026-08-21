@@ -297,6 +297,7 @@ pub use write_models::{
     StoreWriteBlobFacts, StoreWriteBlobMoveDestination, StoreWriteRemoteBlob, StoreWriteRouting,
     TerminalCandidateAuthority, TerminalCandidateCleanupVerification,
 };
+pub(crate) use write_models::{ReplayWriteOverlays, SettledStoreWrite, SettledWriteFold};
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
 const HOST_DEVICE_ID_STATE_KEY: &str = "host_device_id";

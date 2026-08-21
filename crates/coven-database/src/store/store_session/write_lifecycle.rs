@@ -27,12 +27,18 @@ impl StoreSession<'_> {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(2)?,
                 ))
             })
             .map_err(DbError::from)?;
         rows.map(|row| {
             let (write_id, status, affected_rows) = row.map_err(DbError::from)?;
+            // Only a folded write has no affected rows, and the fold stops at
+            // the first write that is not settled — which every write selected
+            // here is not.
+            let affected_rows = affected_rows.ok_or_else(|| {
+                DbError::Message(format!("unpublished write {write_id} has been folded"))
+            })?;
             Ok(PendingWrite {
                 write_id: WriteId::from_generated(write_id),
                 status: serde_json::from_str(&status)
@@ -203,13 +209,19 @@ impl StoreSession<'_> {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(2)?,
                 ))
             })
             .map_err(DbError::from)?;
         let mut discarded = Vec::new();
         for row in rows {
             let (stored_id, raw_status, changeset_hash) = row.map_err(DbError::from)?;
+            // The changeset is what reversing an unpublished write needs, and
+            // only a folded write is without one. The fold stops at the first
+            // unsettled write, so no write in this suffix can have been folded.
+            let changeset_hash = changeset_hash.ok_or_else(|| {
+                DbError::Message(format!("unpublished write {stored_id} has been folded"))
+            })?;
             let status: WriteStatus = serde_json::from_str(&raw_status)
                 .map_err(|error| DbError::context("discard write status", error))?;
             if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_)) {

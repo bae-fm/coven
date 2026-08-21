@@ -69,7 +69,7 @@ impl StoreSession<'_> {
             return Ok(None);
         }
         let snapshot_hash = snapshot_authority.snapshot.snapshot_hash;
-        let image =
+        let (image, folded) =
             self.capture_replay_baseline_at_cut(root, &cut, snapshot_hash, routing_encryption)?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let schema_version = self.schema_version;
@@ -83,6 +83,7 @@ impl StoreSession<'_> {
                 routing_hash,
                 snapshot_authority,
                 image,
+                &folded,
             )?;
         tx.commit().map_err(DbError::from)?;
         if advanced.is_some() {

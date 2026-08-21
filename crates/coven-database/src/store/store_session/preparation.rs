@@ -96,7 +96,11 @@ impl StoreSession<'_> {
             &commit_ref,
         )
         .map_err(|error| DbError::context("verify prepared Store head", error))?;
-        let (stored_base, stored_status, stored_preparation): (String, String, Option<String>) = tx
+        let (stored_base, stored_status, stored_preparation): (
+            Option<String>,
+            String,
+            Option<String>,
+        ) = tx
             .query_row(
                 "SELECT base, status, prepared
                  FROM store_writes WHERE write_id = ?1",
@@ -110,6 +114,12 @@ impl StoreSession<'_> {
                 stage.write_id
             )));
         }
+        let stored_base = stored_base.ok_or_else(|| {
+            DbError::Message(format!(
+                "pending write {} carries no commit base",
+                stage.write_id
+            ))
+        })?;
         let partitions = crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
             .store_write_partitions(stage.write_id.as_str())?;
         let stored_base: StoreWriteBase = serde_json::from_str(&stored_base)

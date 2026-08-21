@@ -173,7 +173,7 @@ impl VerifiedStoreAuthorityTransaction {
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         retracted: &std::collections::BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>,
         history_cut: Option<&coven_protocol::store_commit::CommitFrontier>,
-        include_local_write_overlays: bool,
+        overlays: crate::ReplayWriteOverlays<'_>,
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
     ) -> Result<ReplayProjection, DbError> {
         let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
@@ -187,7 +187,7 @@ impl VerifiedStoreAuthorityTransaction {
             routing_key,
             retracted,
             history_cut,
-            include_local_write_overlays,
+            overlays,
             local_store_membership,
         )
     }
@@ -585,7 +585,7 @@ impl VerifiedStoreAuthority {
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         retracted: &std::collections::BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>,
         history_cut: Option<&coven_protocol::store_commit::CommitFrontier>,
-        include_local_write_overlays: bool,
+        overlays: crate::ReplayWriteOverlays<'_>,
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
     ) -> Result<ReplayProjection, DbError> {
         let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
@@ -599,7 +599,7 @@ impl VerifiedStoreAuthority {
             routing_key,
             retracted,
             history_cut,
-            include_local_write_overlays,
+            overlays,
             local_store_membership,
         )
     }

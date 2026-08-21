@@ -595,7 +595,7 @@ impl StoreSession<'_> {
                     None,
                     &BTreeSet::new(),
                     None,
-                    false,
+                    crate::ReplayWriteOverlays::Omit,
                     coven_protocol::membership::LocalStoreMembership::Current,
                 )?;
         let count = replay.row_count(table)?;
@@ -622,7 +622,7 @@ impl StoreSession<'_> {
                     Some(routing_key),
                     &BTreeSet::new(),
                     None,
-                    false,
+                    crate::ReplayWriteOverlays::Omit,
                     coven_protocol::membership::LocalStoreMembership::Current,
                 )?;
         let retained_count = retained.document_count(historical_id)?;
@@ -641,7 +641,7 @@ impl StoreSession<'_> {
                     Some(routing_key),
                     &BTreeSet::new(),
                     None,
-                    false,
+                    crate::ReplayWriteOverlays::Omit,
                     coven_protocol::membership::LocalStoreMembership::Current,
                 )?;
         let sabotaged_count = sabotaged.document_count(historical_id)?;

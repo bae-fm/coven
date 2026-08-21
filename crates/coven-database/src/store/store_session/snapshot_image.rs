@@ -726,7 +726,8 @@ impl StoreSession<'_> {
         Ok((snapshot, coverage))
     }
 
-    /// Reconstruct the Store as of `cut` and serialize it as a replay baseline.
+    /// Reconstruct the Store as of `cut` and serialize it as a replay baseline,
+    /// alongside the write-journal prefix the image now states.
     ///
     /// The live database is left exactly as it was: the projection is built
     /// inside a transaction that is rolled back, the same way a Circle close
@@ -734,13 +735,21 @@ impl StoreSession<'_> {
     /// is `cut` — checked, not assumed — which is the one property a baseline
     /// image must have, because replay applies the retained commits the cut
     /// does not cover on top of it.
+    ///
+    /// It also folds in the local partitions of the writes settled at `cut`.
+    /// A local partition is stated nowhere else — no commit carries one, and an
+    /// image projected for an audience may not — so without this the journal is
+    /// the durable home of every local row a device has ever written, replayed
+    /// in full on every rebuild and never shorter. Folding them in is what lets
+    /// the advance adopting this image delete them, and the returned write ids
+    /// are exactly what it may delete.
     pub(super) fn capture_replay_baseline_at_cut(
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
         cut: &coven_protocol::store_commit::CommitFrontier,
         snapshot_hash: crate::ObjectHash,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-    ) -> Result<Vec<u8>, DbError> {
+    ) -> Result<(Vec<u8>, Vec<crate::SettledStoreWrite>), DbError> {
         let routing_key = if self.gates.has_scoped_graph() {
             let encryption = routing_encryption.ok_or_else(|| {
                 DbError::Message(
@@ -754,6 +763,10 @@ impl StoreSession<'_> {
         } else {
             None
         };
+        let folded = crate::StoreDatabase::settled_store_write_prefix_on(
+            crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
+            cut,
+        )?;
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let replay =
             crate::store::store_session::StoreTransaction::new(&transaction, self.store_dir)
@@ -766,7 +779,7 @@ impl StoreSession<'_> {
                     routing_key.as_ref(),
                     &std::collections::BTreeSet::new(),
                     Some(cut),
-                    false,
+                    crate::ReplayWriteOverlays::Folded(&folded),
                     coven_protocol::membership::LocalStoreMembership::Current,
                 )?;
         transaction.rollback().map_err(DbError::from)?;
@@ -776,7 +789,10 @@ impl StoreSession<'_> {
                 "retained replay baseline cut is not an exact Store frontier".to_string(),
             ));
         }
-        replay.capture_replay_baseline(root, cut, snapshot_hash)
+        Ok((
+            replay.capture_replay_baseline(root, cut, snapshot_hash)?,
+            folded,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -801,7 +817,7 @@ impl StoreSession<'_> {
                     Some(routing_key),
                     &std::collections::BTreeSet::new(),
                     Some(cutoff),
-                    false,
+                    crate::ReplayWriteOverlays::Omit,
                     coven_protocol::membership::LocalStoreMembership::Current,
                 )?;
         transaction.rollback().map_err(DbError::from)?;

@@ -590,6 +590,16 @@ impl StoreTransaction<'_, '_> {
             .circle_activation_commit_ref(circle_id, control)
     }
 
+    pub(crate) fn folded_write_overlays(
+        self,
+        folded: &[crate::SettledStoreWrite],
+    ) -> Result<Vec<crate::MergeReplayWriteOverlay>, DbError> {
+        StoreDatabase::load_folded_write_overlays_on(
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            folded,
+        )
+    }
+
     pub(crate) fn merge_replay_write_overlays(
         self,
         baseline_cut: &coven_protocol::store_commit::CommitFrontier,
@@ -660,7 +670,7 @@ impl StoreTransaction<'_, '_> {
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         retracted: &BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>,
         history_cut: Option<&coven_protocol::store_commit::CommitFrontier>,
-        include_local_write_overlays: bool,
+        overlays: crate::ReplayWriteOverlays<'_>,
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
     ) -> Result<crate::store::ReplayProjection, DbError> {
         let root = authority.required_root_authority_on(
@@ -680,7 +690,7 @@ impl StoreTransaction<'_, '_> {
             routing_key,
             retracted,
             history_cut,
-            include_local_write_overlays,
+            overlays,
             local_store_membership,
         )
     }

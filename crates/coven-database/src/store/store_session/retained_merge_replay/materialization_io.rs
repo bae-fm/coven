@@ -585,6 +585,88 @@ impl StoreDatabase {
         )))
     }
 
+    /// The prefix of the write journal a baseline at `cut` absorbs.
+    ///
+    /// A write is settled at `cut` when nothing it did is still owed: a
+    /// local-only write the moment it commits, a resolved write once its
+    /// candidate is cleaned up, a published write once `cut` covers the commit
+    /// that carries it. Everything a settled write said is therefore restated
+    /// by an image captured at `cut` — its shared partition through the commit
+    /// the cut covers, its local partition through the overlay the capture
+    /// applies — so what the journal still holds for it is dead weight, and the
+    /// advance strips the row to its receipt or drops it.
+    ///
+    /// It is a *prefix* rather than a set because the journal is ordered and
+    /// its local partitions are the only record of the local rows. Baking one
+    /// write into the image while a lower-ordinal write stays an overlay would
+    /// replay the older partition on top of the newer one, so the walk stops at
+    /// the first write that is not settled and everything after it stays.
+    pub(crate) fn settled_store_write_prefix_on(
+        records: StoreRecords<'_>,
+        cut: &CommitFrontier,
+    ) -> Result<Vec<crate::SettledStoreWrite>, DbError> {
+        let mut settled = Vec::new();
+        for (encoded_write_id, raw_status) in records.store_write_status_rows()? {
+            let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
+                DbError::context(format!("settled write {encoded_write_id} status"), error)
+            })?;
+            let fold = match status {
+                WriteStatus::LocalOnly => crate::SettledWriteFold::LocalOnly,
+                WriteStatus::Published(position) => {
+                    if !cut.covers_commit(position.commit()) {
+                        break;
+                    }
+                    crate::SettledWriteFold::Published
+                }
+                WriteStatus::Resolved(_) => crate::SettledWriteFold::Reversed,
+                WriteStatus::Pending | WriteStatus::Publishing | WriteStatus::Blocked(_) => break,
+            };
+            settled.push(crate::SettledStoreWrite {
+                write_id: WriteId::from_generated(encoded_write_id),
+                fold,
+            });
+        }
+        Ok(settled)
+    }
+
+    /// The local partitions of `folded`, in journal order.
+    ///
+    /// This is what a baseline capture applies so that the image it produces
+    /// states the local rows those writes made. Their shared partitions are
+    /// already in it — the cut covers the commits carrying them — and a settled
+    /// write has no partition still owed to the cloud, so nothing else of
+    /// theirs belongs in the image.
+    pub(crate) fn load_folded_write_overlays_on(
+        records: StoreRecords<'_>,
+        folded: &[crate::SettledStoreWrite],
+    ) -> Result<Vec<MergeReplayWriteOverlay>, DbError> {
+        let mut overlays = Vec::new();
+        for settled in folded {
+            if !settled.fold.states_local_rows() {
+                continue;
+            }
+            // A settled write's shared partition is restated by the commit the
+            // cut covers, so it is deliberately dropped here: applying it again
+            // would put the same rows in twice, under the overlay path's
+            // timestamp policy rather than the one its commit carried.
+            let Some(local) = records
+                .store_write_partitions(settled.write_id.as_str())?
+                .local
+            else {
+                continue;
+            };
+            overlays.push(MergeReplayWriteOverlay {
+                write_id: settled.write_id.clone(),
+                partitions: PreparedStoreWritePartitions {
+                    store: None,
+                    circles: Vec::new(),
+                    local: Some(local),
+                },
+            });
+        }
+        Ok(overlays)
+    }
+
     /// The local write partitions replay overlays on top of the baseline image.
     ///
     /// `baseline_cut` is what the image already states. A published write whose

@@ -1242,6 +1242,161 @@ async fn an_unacknowledged_snapshot_does_not_advance_the_baseline() {
     );
 }
 
+/// Advancing the baseline folds the settled write journal into the image and
+/// deletes it, so a device's journal is bounded by what it has not yet settled
+/// rather than by everything it has ever written.
+///
+/// A local partition is stated nowhere else: no commit carries one, and a
+/// snapshot image projected for an audience may not. So before this, the journal
+/// was the durable home of every local row the device had ever written — replayed
+/// in full on every canonical rebuild, and never any shorter. The baseline image
+/// is this device's own rewind point, which is the one image that may hold them,
+/// and holding them is what lets the advance drop the rows.
+#[tokio::test]
+async fn advancing_the_baseline_folds_the_settled_write_journal_into_it() {
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let signer = UserKeypair::generate();
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let (store, _storage) = crate::sync::test_helpers::TestStore::create_with_connection(
+        &db,
+        db_store_dir.clone(),
+        "baseline-folds-writes",
+        signer.clone(),
+        home,
+    )
+    .await
+    .expect("create Store");
+    let device = store
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
+        .await
+        .expect("bind Store");
+    let changeset =
+        crate::sync::test_helpers::open_test_db(crate::sync::test_helpers::test_store_dir())
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('shared-note', 'shared', NULL, 1, \
+                 '0000000001000-0000-folding', '2026-01-01')",
+            ])
+            .await;
+    store
+        .publish_changeset("founder", 1, &changeset, db.schema_version())
+        .await
+        .expect("publish package activation");
+
+    let store_database = coven_database::StoreDatabase::new(&db);
+    // Creating the Store journalled its own writes; the local ones are counted
+    // on top of whatever those left.
+    let (settled_before, claims_before) = store_database
+        .store_write_journal_counts_for_test()
+        .await
+        .expect("read the journal the Store creation left");
+    assert_eq!(
+        (settled_before, claims_before),
+        (1, 1),
+        "creating the Store published one write of its own",
+    );
+    const LOCAL_WRITES: i64 = 12;
+    for tick in 0..LOCAL_WRITES {
+        store_database
+            .run_host_store_write_for_test(None, None, move |tx| {
+                tx.execute(
+                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                     VALUES (?1, 'local', NULL, 0, ?2, '2026-01-01')",
+                    rusqlite::params![
+                        format!("local-note-{tick}"),
+                        format!("000000000{}000-0000-folding", 2 + tick),
+                    ],
+                )?;
+                Ok::<_, coven_database::DbError>(())
+            })
+            .await
+            .expect("capture a local-only write");
+    }
+    assert_eq!(
+        store_database
+            .store_write_journal_counts_for_test()
+            .await
+            .expect("read the journal before the advance"),
+        (settled_before + LOCAL_WRITES, claims_before + LOCAL_WRITES),
+        "each local-only write is journalled while the baseline still stands behind it",
+    );
+
+    let image_dir = tempfile::tempdir().expect("snapshot image dir");
+    let image = coven_database::StoreDatabase::new(&db)
+        .capture_snapshot_image_for_test(store.root().clone(), image_dir.path().to_path_buf(), None)
+        .await
+        .expect("capture a real snapshot image");
+    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+        coven_database::StoreDatabase::new(&db)
+            .materialized_frontier()
+            .await
+            .expect("materialized frontier"),
+    )
+    .expect("frontier");
+    device
+        .publish_snapshot(image, coverage.clone())
+        .await
+        .expect("publish the snapshot");
+    let advanced = device
+        .advance_baseline_by_acknowledging(coverage)
+        .await
+        .expect("acknowledge the published snapshot")
+        .expect("acknowledging it is what licenses the advance");
+
+    assert_eq!(
+        advanced.folded_writes,
+        u64::try_from(settled_before + LOCAL_WRITES).expect("count fits"),
+        "every settled write is folded into the image the advance adopts",
+    );
+    assert_eq!(
+        store_database
+            .store_write_journal_counts_for_test()
+            .await
+            .expect("read the journal after the advance"),
+        (settled_before, 0),
+        "the local-only writes are gone outright and every payload claim with \
+         them; what is left is one receipt per write that reached the cloud, \
+         which is this device's record of where its own writes landed",
+    );
+    assert_eq!(
+        device
+            .replay_row_count_for_test("notes")
+            .await
+            .expect("replay the notes from the new baseline alone"),
+        LOCAL_WRITES + 1,
+        "the local rows are in the baseline image now, not owed by a journal",
+    );
+
+    // The bound moves with the baseline rather than with the device's lifetime:
+    // what a settled device journals from here is what it has written since the
+    // snapshot it stands on, and nothing before it.
+    for tick in LOCAL_WRITES..LOCAL_WRITES + 5 {
+        store_database
+            .run_host_store_write_for_test(None, None, move |tx| {
+                tx.execute(
+                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                     VALUES (?1, 'local', NULL, 0, ?2, '2026-01-01')",
+                    rusqlite::params![
+                        format!("local-note-{tick}"),
+                        format!("00000000{}000-0000-folding", 20 + tick),
+                    ],
+                )?;
+                Ok::<_, coven_database::DbError>(())
+            })
+            .await
+            .expect("capture a local-only write after the advance");
+    }
+    assert_eq!(
+        store_database
+            .store_write_journal_counts_for_test()
+            .await
+            .expect("read the journal after writing past the advance"),
+        (settled_before + 5, 5),
+        "only the writes the standing baseline does not state are journalled",
+    );
+}
+
 /// A single-stream commit frontier at `sequence`, deterministic in `stream`.
 fn frontier_at(stream: &str, sequence: u64) -> coven_protocol::store_commit::CommitFrontier {
     let stream_id = coven_protocol::causal_grants::AuthorStreamId::from_digest(ObjectHash::digest(

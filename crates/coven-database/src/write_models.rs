@@ -20,6 +20,65 @@ pub struct MergeReplayWriteOverlay {
     pub partitions: PreparedStoreWritePartitions,
 }
 
+/// What a replay projection owes the write journal.
+///
+/// The journal is the only record of a local partition — no commit carries one
+/// and no image built for an audience may — so what a projection has to put
+/// back from it depends on what the projection is for.
+pub(crate) enum ReplayWriteOverlays<'a> {
+    /// Nothing. An image projected for an audience carries no local rows at
+    /// all, and a projection built only to count rows does not need them.
+    Omit,
+    /// Everything the journal still owes: this projection is about to replace
+    /// the live database, so every unpublished partition and every local
+    /// partition has to land in it.
+    Owed,
+    /// Only the local partitions of `folded`, in journal order — the settled
+    /// prefix of the journal that a baseline at this cut absorbs, and that the
+    /// advance adopting it then strips down to its receipts.
+    Folded(&'a [SettledStoreWrite]),
+}
+
+/// One write of the journal prefix a baseline at some cut absorbs, and what the
+/// fold owes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SettledStoreWrite {
+    pub write_id: WriteId,
+    pub fold: SettledWriteFold,
+}
+
+/// What a baseline at some cut has to do with one settled write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettledWriteFold {
+    /// Local-only. The image takes its rows, and the journal keeps nothing:
+    /// local-only is the whole of what could ever be said about the write, and
+    /// its caller was told that when it committed. A row missing from the
+    /// journal therefore means exactly this, which is how the status of one is
+    /// still answerable afterwards.
+    LocalOnly,
+    /// Published, at a commit the cut covers. The image takes its local rows;
+    /// the row stays as this device's record of where the write landed, which
+    /// is the one answer that has to survive an advance now that the
+    /// per-position index does not.
+    Published,
+    /// Discarded or retracted. Its rows were reversed, so the image must not
+    /// put them back, and the row stays as the record of that.
+    Reversed,
+}
+
+impl SettledWriteFold {
+    /// Whether the baseline image has to state this write's local rows.
+    pub(crate) fn states_local_rows(self) -> bool {
+        matches!(self, Self::LocalOnly | Self::Published)
+    }
+
+    /// Whether the journal keeps the write's receipt — its id and status —
+    /// after the image has absorbed everything else about it.
+    pub(crate) fn keeps_receipt(self) -> bool {
+        !matches!(self, Self::LocalOnly)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum StoreWriteRouting<'a> {
     Unscoped,

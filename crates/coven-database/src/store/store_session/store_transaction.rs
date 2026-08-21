@@ -307,8 +307,19 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         } else {
             WriteStatus::Pending
         };
-        let base = serde_json::to_string(base)
-            .map_err(|error| DbError::context("serialize pending Store base", error))?;
+        // The base is the dependency frontier a commit for this write would be
+        // ordered against, so only a write that can still become a commit has
+        // one. A local-only write never publishes, and every reader of the
+        // column asks for a pending or publishing write — storing its frontier
+        // would journal several hundred bytes to forty kilobytes per write that
+        // nothing can ever read.
+        let base = match status {
+            WriteStatus::Pending => Some(
+                serde_json::to_string(base)
+                    .map_err(|error| DbError::context("serialize pending Store base", error))?,
+            ),
+            _ => None,
+        };
         let status_json = serde_json::to_string(&status)
             .map_err(|error| DbError::context("serialize write status", error))?;
         let affected_rows = serde_json::to_string(&affected_rows)

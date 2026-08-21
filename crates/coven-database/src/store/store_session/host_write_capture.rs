@@ -93,8 +93,8 @@ impl StoreSession<'_> {
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
                     ))
                 },
             )
@@ -102,6 +102,11 @@ impl StoreSession<'_> {
             .map_err(DbError::from)?;
         let Some((write_id, base, blob_facts)) = stored else {
             return Ok(None);
+        };
+        let (Some(base), Some(blob_facts)) = (base, blob_facts) else {
+            return Err(DbError::Message(format!(
+                "pending write {write_id} carries no commit base or blob facts"
+            )));
         };
         let partitions = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
             .store_write_partitions(&write_id)?;

@@ -200,10 +200,10 @@ macro_rules! coven_tables {
     ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
     write_id TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL CHECK (json_valid(status)),
-    affected_rows TEXT NOT NULL CHECK (json_valid(affected_rows)),
-    changeset_hash TEXT NOT NULL CHECK (length(changeset_hash) = 64),
-    base TEXT NOT NULL CHECK (json_valid(base)),
-    blob_facts TEXT NOT NULL CHECK (json_valid(blob_facts)),
+    affected_rows TEXT CHECK (affected_rows IS NULL OR json_valid(affected_rows)),
+    changeset_hash TEXT CHECK (changeset_hash IS NULL OR length(changeset_hash) = 64),
+    base TEXT CHECK (base IS NULL OR json_valid(base)),
+    blob_facts TEXT CHECK (blob_facts IS NULL OR json_valid(blob_facts)),
     prepared TEXT CHECK (prepared IS NULL OR json_valid(prepared))
 "
         );

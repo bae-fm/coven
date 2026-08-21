@@ -44,6 +44,9 @@ pub struct AdvancedReplayBaseline {
     /// Remote objects that lost a replay pin. One object can be pinned by
     /// several commits, so this counts pins released, not objects freed.
     pub released_pins: u64,
+    /// Journalled writes the new baseline image now states, now stripped to
+    /// their receipts or dropped outright.
+    pub folded_writes: u64,
 }
 
 impl StoreTransaction<'_, '_> {
@@ -71,6 +74,7 @@ impl StoreTransaction<'_, '_> {
         routing_hash: ObjectHash,
         snapshot_authority: RetainedReplaySnapshotAuthority,
         image: Vec<u8>,
+        folded: &[crate::SettledStoreWrite],
     ) -> Result<Option<AdvancedReplayBaseline>, DbError> {
         let records = StoreRecords::new(self.transaction, self.store_dir);
         let cut = snapshot_authority.metadata.coverage.clone();
@@ -105,7 +109,9 @@ impl StoreTransaction<'_, '_> {
         );
         prepared.validate_image(self.store_dir)?;
 
-        let retired = self.retire_superseded_history(authority, root, &cut)?;
+        let (retired_commits, released_pins) =
+            self.retire_superseded_history(authority, root, &cut)?;
+        let folded_writes = self.fold_settled_store_writes(&cut, folded)?;
         self.rewrite_snapshot_coverage(&cut, snapshot_hash)?;
 
         let mut timings =
@@ -128,7 +134,11 @@ impl StoreTransaction<'_, '_> {
         // resolving an old cut still asks for them. Keeping them costs one
         // small row each; dropping them leaves a live device unable to answer a
         // question about its own past.
-        Ok(Some(retired))
+        Ok(Some(AdvancedReplayBaseline {
+            retired_commits,
+            released_pins,
+            folded_writes,
+        }))
     }
 
     /// Drop the retained materializations at or under `cut` that the baseline
@@ -147,12 +157,14 @@ impl StoreTransaction<'_, '_> {
     /// `materialized_commits` rows go with the rows that are dropped because
     /// they carry the foreign key into the retained row; the position they
     /// recorded is restated by the coverage row written afterwards.
+    ///
+    /// Returns the commits retired and the replay pins that released.
     fn retire_superseded_history(
         &self,
         authority: &mut dyn VerifiedStoreLookup,
         root: &StoreRootRef,
         cut: &CommitFrontier,
-    ) -> Result<AdvancedReplayBaseline, DbError> {
+    ) -> Result<(u64, u64), DbError> {
         let conn = self.transaction;
         let records = StoreRecords::new(conn, self.store_dir);
         let retained_by_baseline =
@@ -197,10 +209,81 @@ impl StoreTransaction<'_, '_> {
             }
             retired_commits += 1;
         }
-        Ok(AdvancedReplayBaseline {
-            retired_commits,
-            released_pins,
-        })
+        Ok((retired_commits, released_pins))
+    }
+
+    /// Retire the write-journal prefix the new baseline image states.
+    ///
+    /// The journal does two jobs, and only one of them is history. It carries
+    /// the partitions a write still owes — to the cloud, or to the local rows a
+    /// canonical replay would otherwise lose — and it is also this device's
+    /// record of where its own writes landed, which is deliberately the one
+    /// answer that survives an advance now that `materialized_commits` does not.
+    ///
+    /// So a folded write loses its working material and keeps its receipt: the
+    /// partitions and the payload claims on them go, and with them the
+    /// changeset, the commit base, the affected rows and the blob facts — every
+    /// one of which describes work the image has absorbed. A local-only write
+    /// has no receipt worth keeping: local-only is the whole of what could ever
+    /// be said about it, and its caller was told that when it committed, so its
+    /// row goes as well. That is the one a device accumulates per host write
+    /// rather than per published write, and dropping it is what stops the
+    /// journal growing with the clock instead of with the work.
+    ///
+    /// `folded` is what the capture actually applied, and the prefix is derived
+    /// again here, inside the transaction that adopts the image, because the two
+    /// have to name the same writes: dropping a partition the image does not
+    /// state loses its local rows, and keeping one the image does state replays
+    /// them on top of themselves. They can only differ if a write landed between
+    /// the capture and this transaction, which is not something to reconcile
+    /// later — the advance fails and the next cycle captures against the newer
+    /// journal.
+    fn fold_settled_store_writes(
+        &self,
+        cut: &CommitFrontier,
+        folded: &[crate::SettledStoreWrite],
+    ) -> Result<u64, DbError> {
+        let conn = self.transaction;
+        let records = StoreRecords::new(conn, self.store_dir);
+        let derived = crate::StoreDatabase::settled_store_write_prefix_on(records, cut)?;
+        if derived != folded {
+            return Err(DbError::Message(format!(
+                "the write journal moved under the replay baseline capture: \
+                 it folded {} writes, {} are settled now",
+                folded.len(),
+                derived.len()
+            )));
+        }
+        for settled in folded {
+            let write_id = &settled.write_id;
+            crate::payload_store::release_payload_owner_on(
+                conn,
+                &crate::payload_store::store_write_owner_key(write_id),
+            )?;
+            conn.execute(
+                "DELETE FROM store_write_partitions WHERE write_id = ?1",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            let statement = if settled.fold.keeps_receipt() {
+                "UPDATE store_writes
+                 SET affected_rows = NULL, changeset_hash = NULL,
+                     base = NULL, blob_facts = NULL
+                 WHERE write_id = ?1"
+            } else {
+                "DELETE FROM store_writes WHERE write_id = ?1"
+            };
+            let touched = conn
+                .execute(statement, [write_id.as_str()])
+                .map_err(DbError::from)?;
+            if touched != 1 {
+                return Err(DbError::Message(format!(
+                    "folded Store write {write_id} disappeared"
+                )));
+            }
+        }
+        u64::try_from(folded.len())
+            .map_err(|_| DbError::Message("folded write count exceeded u64".to_string()))
     }
 
     /// Remove one commit's replay ownership from every object it pinned.

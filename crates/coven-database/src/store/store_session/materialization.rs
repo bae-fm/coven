@@ -187,7 +187,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                     routing_key.as_ref(),
                     &retracted,
                     None,
-                    true,
+                    crate::ReplayWriteOverlays::Owed,
                     local_store_membership,
                 )?;
                 let mut host_changes =

@@ -82,7 +82,7 @@ impl StoreSession<'_> {
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(1)?,
                         row.get::<_, String>(2)?,
                     ))
                 },
@@ -90,6 +90,11 @@ impl StoreSession<'_> {
             .optional()
             .map_err(DbError::from)?;
         row.map(|(write_id, base, prepared)| {
+            let base = base.ok_or_else(|| {
+                DbError::Message(format!(
+                    "publishing write {write_id} carries no commit base"
+                ))
+            })?;
             let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
                 .map_err(|error| DbError::context("prepared Store write", error))?;
             let (commit, head, graph_commit) = match &prepared {

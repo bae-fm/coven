@@ -427,7 +427,7 @@ impl RetainedReplayCache {
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         retracted: &BTreeSet<StoreBatchCommitRef>,
         history_cut: Option<&CommitFrontier>,
-        include_local_write_overlays: bool,
+        overlays: crate::ReplayWriteOverlays<'_>,
         local_store_membership: LocalStoreMembership,
     ) -> Result<ReplayProjection, DbError> {
         if self.baseline.is_none() {
@@ -549,14 +549,16 @@ impl RetainedReplayCache {
             .filter(|materialization| retracted.contains(materialization.commit_ref()))
             .map(|materialization| materialization.commit().write_id.clone())
             .collect::<BTreeSet<_>>();
-        let write_overlays = if include_local_write_overlays {
-            transaction_records.merge_replay_write_overlays(
+        let write_overlays = match overlays {
+            crate::ReplayWriteOverlays::Omit => Vec::new(),
+            crate::ReplayWriteOverlays::Owed => transaction_records.merge_replay_write_overlays(
                 &baseline.exact_cut,
                 &active_accepted_writes,
                 &retracted_writes,
-            )?
-        } else {
-            Vec::new()
+            )?,
+            crate::ReplayWriteOverlays::Folded(folded) => {
+                transaction_records.folded_write_overlays(folded)?
+            }
         };
         let mut pending = retained
             .into_iter()

@@ -58,7 +58,8 @@ impl Database {
                 .map_err(DbError::from)?;
             let write_hashes = database
                 .query(
-                    "SELECT changeset_hash FROM store_writes ORDER BY ordinal",
+                    "SELECT changeset_hash FROM store_writes
+                     WHERE changeset_hash IS NOT NULL ORDER BY ordinal",
                     [],
                     |row| row.get::<_, String>(0),
                 )
@@ -85,7 +86,8 @@ impl Database {
         self.test_sql(|database| {
             database
                 .query(
-                    "SELECT changeset_hash FROM store_writes ORDER BY ordinal",
+                    "SELECT changeset_hash FROM store_writes
+                     WHERE changeset_hash IS NOT NULL ORDER BY ordinal",
                     [],
                     |row| row.get::<_, String>(0),
                 )
@@ -105,7 +107,8 @@ impl Database {
                 .map_err(DbError::from)?;
             let write_hashes = database
                 .query(
-                    "SELECT changeset_hash FROM store_writes ORDER BY ordinal",
+                    "SELECT changeset_hash FROM store_writes
+                     WHERE changeset_hash IS NOT NULL ORDER BY ordinal",
                     [],
                     |row| row.get::<_, String>(0),
                 )
