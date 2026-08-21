@@ -218,6 +218,140 @@ impl<'a> StoreCommitVerifier<'a> {
         Ok((reference.clone(), opened.value))
     }
 
+    /// Every snapshot slot the provider holds, by author device and generation.
+    ///
+    /// A snapshot stream is generation-linked, so the only way to enumerate one
+    /// by following it is a read per generation the store has ever published —
+    /// inside a device join, that is a walk of history to answer a question
+    /// about its newest point. The slots name their own coordinates
+    /// (`store-v1/snapshots/{device}/{generation}.json`), so one listing names
+    /// every candidate there is.
+    ///
+    /// The listing decides what is worth reading and nothing else. Each slot it
+    /// yields is authenticated against this Store's root, its author's
+    /// registration, and the generation its own key claims, exactly as a stream
+    /// walk authenticates it; a key this domain does not write is dropped here
+    /// rather than read.
+    pub(crate) async fn listed_store_snapshot_slots(
+        &self,
+    ) -> Result<
+        BTreeMap<String, BTreeMap<u64, coven_protocol::objects::ObjectSlot>>,
+        StoreObjectError,
+    > {
+        let context = ProtocolObjectContext::signed_plaintext(
+            self.root.reference().store_root_hash,
+            ProtocolObjectDomain::StoreSnapshotMeta,
+        );
+        let mut listed: BTreeMap<String, BTreeMap<u64, coven_protocol::objects::ObjectSlot>> =
+            BTreeMap::new();
+        for slot in self
+            .storage
+            .list_protocol_slots(&context, STORE_SNAPSHOT_LISTING_PREFIX)
+            .await?
+        {
+            let Some((device_id, generation)) = listed_snapshot_coordinate(&slot) else {
+                continue;
+            };
+            listed
+                .entry(device_id)
+                .or_default()
+                .insert(generation, slot);
+        }
+        Ok(listed)
+    }
+
+    /// Authenticate one listed slot as `generation` of `registration`'s stream.
+    ///
+    /// `None` when the slot is not there: a listing is a picture of a moment,
+    /// and a reader that finds nothing at a key it named has learned only that
+    /// the picture was stale.
+    ///
+    /// This runs the identical checks the stream walk runs on the same bytes —
+    /// `parse_stream_entry_at` binds the metadata to this Store's root, to its
+    /// author's registration and signature, to the generation the key claims,
+    /// and to the successor slot its own stream reserves. What it does not
+    /// check is the walk's one further claim, that the object this metadata
+    /// names as its predecessor is the one standing at the generation below:
+    /// that is a statement about the *enumeration*, not about this snapshot,
+    /// and nothing an installing device concludes rests on it.
+    pub(crate) async fn load_listed_store_snapshot(
+        &self,
+        registration_ref: &StoreDeviceRegistrationRef,
+        registration: &StoreDeviceRegistration,
+        generation: u64,
+        slot: &coven_protocol::objects::ObjectSlot,
+    ) -> Result<Option<coven_database::PublishedStoreSnapshot>, StoreObjectError> {
+        let context = ProtocolObjectContext::signed_plaintext(
+            self.root.reference().store_root_hash,
+            ProtocolObjectDomain::StoreSnapshotMeta,
+        );
+        let Some(semantic_prefix) = context.semantic_prefix_of(slot) else {
+            return Ok(None);
+        };
+        let (bytes, object) = match self
+            .storage
+            .read_protocol_slot(&context, slot, semantic_prefix)
+            .await
+        {
+            Ok(value) => value,
+            Err(StorageError::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(StoreObjectError::from(error)),
+        };
+        self.verify_listed_store_snapshot(
+            registration_ref,
+            registration,
+            generation,
+            semantic_prefix,
+            bytes,
+            object,
+        )
+        .await
+        .map(Some)
+    }
+
+    /// The checks [`load_listed_store_snapshot`](Self::load_listed_store_snapshot)
+    /// runs, over bytes a caller already read.
+    pub(crate) async fn verify_listed_store_snapshot(
+        &self,
+        registration_ref: &StoreDeviceRegistrationRef,
+        registration: &StoreDeviceRegistration,
+        generation: u64,
+        semantic_prefix: &str,
+        bytes: Vec<u8>,
+        object: ExactObjectRef,
+    ) -> Result<coven_database::PublishedStoreSnapshot, StoreObjectError> {
+        let expected_root = self.root.reference().clone();
+        let expected_registration_ref = registration_ref.clone();
+        let expected_registration = registration.clone();
+        let expected_object = object.clone();
+        let (reference, meta) = run_blocking_object_verification(
+            semantic_prefix,
+            &object,
+            Box::new(move || {
+                let reference = StoreSnapshotRef {
+                    generation,
+                    snapshot_hash: SnapshotMeta::semantic_hash_from_bytes(&bytes)?,
+                    object: expected_object,
+                };
+                let meta = SnapshotMeta::parse_stream_entry_at(
+                    &bytes,
+                    &expected_root,
+                    &expected_registration_ref,
+                    &expected_registration,
+                    &reference,
+                )?;
+                Ok((reference, meta))
+            }),
+        )
+        .await?;
+        let successor_slot = meta.successor.next_slot.clone();
+        Ok(coven_database::PublishedStoreSnapshot {
+            reference,
+            successor_slot,
+            meta,
+        })
+    }
+
     /// The newest snapshot any device has published, found by listing the
     /// snapshot prefix instead of walking a device's snapshot stream.
     ///
@@ -244,21 +378,25 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(crate) async fn newest_listed_store_snapshot(
         &self,
     ) -> Result<Option<SnapshotMeta>, StoreObjectError> {
+        let Some((device_id, generation, slot)) = self
+            .listed_store_snapshot_slots()
+            .await?
+            .into_iter()
+            .filter_map(|(device_id, generations)| {
+                generations
+                    .into_iter()
+                    .next_back()
+                    .map(|(generation, slot)| (device_id, generation, slot))
+            })
+            .max_by_key(|(_, generation, _)| *generation)
+        else {
+            return Ok(None);
+        };
+        let _ = device_id;
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreSnapshotMeta,
         );
-        let slots = self
-            .storage
-            .list_protocol_slots(&context, STORE_SNAPSHOT_LISTING_PREFIX)
-            .await?;
-        let Some((generation, slot)) = slots
-            .into_iter()
-            .filter_map(|slot| listed_snapshot_generation(&slot).map(|value| (value, slot)))
-            .max_by_key(|(generation, _)| *generation)
-        else {
-            return Ok(None);
-        };
         let Some(semantic_prefix) = context.semantic_prefix_of(&slot) else {
             return Ok(None);
         };
@@ -275,33 +413,19 @@ impl<'a> StoreCommitVerifier<'a> {
         let registration = self
             .load_registration(&unverified.author_registration)
             .await?;
-        let reference = StoreSnapshotRef {
-            generation,
-            snapshot_hash: SnapshotMeta::semantic_hash_from_bytes(&bytes).map_err(|source| {
-                StoreObjectError::InvalidObject {
-                    semantic_prefix: semantic_prefix.to_string(),
-                    key: slot.logical_key().to_string(),
-                    source: Box::new(source),
-                }
-            })?,
-            object,
-        };
-        let meta = SnapshotMeta::parse_at(
-            &bytes,
-            self.root.reference().store_root_hash,
-            &reference,
+        let semantic_prefix = semantic_prefix.to_string();
+        self.verify_listed_store_snapshot(
+            &unverified.author_registration,
             &registration.value,
+            generation,
+            &semantic_prefix,
+            bytes,
+            object,
         )
-        .map_err(|source| StoreObjectError::InvalidObject {
-            semantic_prefix: semantic_prefix.to_string(),
-            key: slot.logical_key().to_string(),
-            source: Box::new(source),
-        })?;
-        Ok(Some(meta))
+        .await
+        .map(|published| Some(published.meta))
     }
 
-    /// Read the membership rollup one snapshot names, authenticated against the
-    /// snapshot's own author.
     pub(crate) async fn load_membership_rollup(
         &self,
         meta: &SnapshotMeta,
@@ -781,14 +905,15 @@ impl<'a> StoreCommitVerifier<'a> {
     }
 }
 
-/// The generation a listed snapshot slot names, or `None` for a key this
-/// domain does not write.
-fn listed_snapshot_generation(slot: &coven_protocol::objects::ObjectSlot) -> Option<u64> {
-    slot.logical_key()
+/// The author device and generation a listed snapshot slot names, or `None`
+/// for a key this domain does not write.
+fn listed_snapshot_coordinate(slot: &coven_protocol::objects::ObjectSlot) -> Option<(String, u64)> {
+    let (device_id, generation) = slot
+        .logical_key()
         .strip_prefix(STORE_SNAPSHOT_LISTING_PREFIX)?
         .strip_suffix(".json")?
-        .split_once('/')
-        .and_then(|(_, generation)| generation.parse().ok())
+        .split_once('/')?;
+    Some((device_id.to_string(), generation.parse().ok()?))
 }
 
 const STORE_SNAPSHOT_LISTING_PREFIX: &str = "store-v1/snapshots/";

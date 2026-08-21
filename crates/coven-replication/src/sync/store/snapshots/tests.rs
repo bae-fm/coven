@@ -484,3 +484,90 @@ async fn snapshot_predecessor_and_reserved_successor_form_one_exact_chain() {
         .expect("count published Store snapshot generations");
     assert_eq!(published_generations, 2);
 }
+
+/// Choosing the snapshot a device installs does not grow with how many
+/// generations the Store has published.
+///
+/// Following a generation-linked stream costs a read per generation, and a
+/// device join did that per owner device before it could weigh the first
+/// candidate — a walk of history to answer a question about its newest point.
+/// The slots name their own coordinates, so one listing enumerates them, and
+/// each owner's newest generation is the only one a store that has not turned
+/// it away ever needs read.
+#[tokio::test]
+async fn installable_snapshot_selection_does_not_grow_with_published_generations() {
+    let shallow = installable_selection_reads("selection-shallow", 1).await;
+    let deep = installable_selection_reads("selection-deep", 6).await;
+
+    assert_eq!(
+        shallow, deep,
+        "selecting over six published generations cost {deep} snapshot operations \
+         against {shallow} over one, so the selection still follows the stream",
+    );
+    // One listing of the snapshot prefix, and the one candidate it names as
+    // this owner's newest.
+    assert_eq!(
+        deep, 2,
+        "selecting an installable snapshot cost {deep} snapshot operations, not \
+         the listing and the newest candidate it names",
+    );
+}
+
+/// Provider operations one fresh reader spends choosing an installable
+/// snapshot, over a Store that has published `generations` of them.
+async fn installable_selection_reads(store_id: &str, generations: usize) -> usize {
+    let home = InMemoryCloudHome::new();
+    let signer = UserKeypair::generate();
+    let storage = storage(&home, &signer);
+    let (db, db_store_dir) = open(Path::new(":memory:"), store_id);
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
+    for generation in 0..generations {
+        device
+            .publish_snapshot(
+                format!("image for generation {generation}").into_bytes(),
+                CommitFrontier(BTreeMap::new()),
+            )
+            .await
+            .expect("publish a Store snapshot generation");
+    }
+
+    let root = device.store_root().clone();
+    let mut history = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
+        .open_pinned(storage.as_ref(), &root)
+        .await
+        .expect("open the snapshot history authority");
+    let founder = history
+        .load_founder_registration()
+        .await
+        .expect("load the founder registration");
+    let owners = vec![(
+        coven_protocol::store_commit::StoreDeviceRegistrationRef::from_registration(
+            &founder.value,
+            founder.object.clone(),
+        ),
+        founder.value.clone(),
+    )];
+
+    home.clear_exact_reads();
+    home.clear_exact_listings();
+    let selected = Box::pin(history.select_listed_installable_store_snapshot(&owners))
+        .await
+        .expect("select an installable snapshot")
+        .expect("a published snapshot is installable");
+    assert_eq!(
+        selected.snapshot.reference.generation,
+        generations as u64 - 1,
+        "the newest published generation is the one selected"
+    );
+
+    let counted = |key: &str| key.starts_with("store-v1/snapshots/");
+    home.exact_reads()
+        .iter()
+        .filter(|slot| counted(slot.logical_key()))
+        .count()
+        + home
+            .exact_listed_prefixes()
+            .iter()
+            .filter(|prefix| counted(prefix))
+            .count()
+}

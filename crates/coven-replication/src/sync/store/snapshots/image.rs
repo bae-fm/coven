@@ -535,16 +535,8 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             .into_iter()
             .filter(|(_, registration)| membership.is_owner_now(&registration.author_pubkey))
             .collect::<Vec<_>>();
-        let mut authorized = Vec::new();
-        for (registration_ref, registration) in registrations {
-            authorized.extend(
-                history_verifier
-                    .load_store_snapshot_stream(&registration_ref, &registration)
-                    .await?,
-            );
-        }
         let selected =
-            Box::pin(history_verifier.select_maximal_installable_store_snapshot(authorized))
+            Box::pin(history_verifier.select_listed_installable_store_snapshot(&registrations))
                 .await
                 .map_err(SnapshotError::from)?
                 .ok_or_else(|| {
