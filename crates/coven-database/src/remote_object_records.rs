@@ -355,6 +355,8 @@ pub(crate) fn record_reclaimed_store_package_on(
                 let owner = target.snapshot_owner(root_hash).map_err(DbError::from)?;
                 remote.validate_reclaimable_snapshot_image(&target.image, &owner)
             }
+            coven_protocol::reclaim::ReclaimTarget::StoreMembershipRollup(target) => remote
+                .validate_reclaimable_membership_rollup(&target.rollup, &target.snapshot_owner()),
             coven_protocol::reclaim::ReclaimTarget::AudienceBlob(target) => {
                 remote.validate_reclaimable_stored_blob(&target.blob)
             }

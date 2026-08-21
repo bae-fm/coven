@@ -109,6 +109,43 @@ pub(super) fn validate_circle_snapshot_activated_reclaim_target(
     Ok(())
 }
 
+/// The Store snapshot generation that published a reclaimed membership rollup,
+/// checked against the slots both objects must occupy.
+///
+/// A Store snapshot stream is anchored on its author's device registration
+/// alone, so the two logical keys are the whole binding: the generation's
+/// metadata slot, and the rollup's content-addressed slot under this author.
+pub(super) fn validate_store_snapshot_activated_reclaim_target(
+    target: &coven_protocol::reclaim::ReclaimTarget,
+    activation: &coven_protocol::reclaim::StoreSnapshotStreamActivation<'_>,
+) -> Result<(), RegistrationLoadError> {
+    let coven_protocol::reclaim::ReclaimTarget::StoreMembershipRollup(rollup) = target else {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim target is not published by a Store snapshot stream".to_string(),
+        ));
+    };
+    let device_id = activation.author_registration.device_id.to_string();
+    let expected_metadata = format!(
+        "{}.json",
+        super::store_commit::snapshot_slot_prefix(&device_id, activation.snapshot.generation)
+    );
+    let expected_rollup = format!(
+        "{}.json",
+        super::store_commit::membership_rollup_semantic_prefix(
+            &device_id,
+            rollup.rollup.rollup_hash,
+        )
+    );
+    if activation.snapshot.object.slot().logical_key() != expected_metadata
+        || rollup.rollup.object.slot().logical_key() != expected_rollup
+    {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim evidence target differs from its exact Store snapshot generation".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn device_state_has_active_registration(
     state: &ResolvedStoreDeviceState,
     registration: &StoreDeviceRegistrationRef,

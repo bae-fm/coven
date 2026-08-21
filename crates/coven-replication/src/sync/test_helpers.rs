@@ -839,6 +839,38 @@ mod test_device {
             .await
         }
 
+        pub async fn latest_local_store_snapshot_for_test(
+            &self,
+        ) -> Result<Option<coven_database::PublishedStoreSnapshot>, TestError> {
+            Ok(self.db.latest_local_store_snapshot().await?)
+        }
+
+        /// Publish one more generation over the current frontier and acknowledge
+        /// it, the way the cadence would.
+        pub async fn publish_snapshot_generation_for_test(
+            &self,
+        ) -> Result<coven_database::PublishedStoreSnapshot, TestError> {
+            let image_dir = tempfile::tempdir()?;
+            let root = self.store.root_ref_for_test().clone();
+            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+            let image = self
+                .db
+                .capture_snapshot_image_for_test(
+                    root,
+                    image_dir.path().to_path_buf(),
+                    Some(routing_encryption),
+                )
+                .await?;
+            let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+                self.db.materialized_frontier().await?,
+            )?;
+            self.publish_snapshot(image, coverage.clone()).await?;
+            self.publish_acknowledgement(coverage).await?;
+            self.db.latest_local_store_snapshot().await?.ok_or_else(|| {
+                TestError::invariant("the published generation is absent".to_string())
+            })
+        }
+
         pub async fn ensure_device_join_snapshot_for_test(&self) -> Result<(), TestError> {
             if let Some(snapshot) = self.db.latest_local_store_snapshot().await? {
                 let acknowledged = if let Some(published) = self.db.latest_local_store_ack().await?
@@ -3749,6 +3781,29 @@ impl TestStore {
             coven_storage::CloudSyncCipherStateAccess::suffix(self.storage.as_ref()),
         );
         coven_storage::cloud::CloudHome::exists(self.home.as_ref(), &key).await
+    }
+
+    pub async fn contains_membership_rollup(
+        &self,
+        rollup: &coven_protocol::store_commit::MembershipRollupRef,
+    ) -> Result<bool, TestError> {
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            self.root.store_root_hash,
+            coven_protocol::objects::ProtocolObjectDomain::StoreMembershipRollup,
+        );
+        let prefix = coven_protocol::store_commit::semantic_prefix_from_exact_object(
+            &rollup.object,
+            coven_protocol::objects::ProtectedObjectDomain::StoreMembershipRollup.extension(),
+        )?;
+        match self
+            .storage
+            .read_protocol_object(&context, &rollup.object, &prefix)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(coven_protocol::objects::StorageError::NotFound(_)) => Ok(false),
+            Err(error) => Err(TestError::from(error)),
+        }
     }
 
     pub async fn contains_circle_snapshot_image(

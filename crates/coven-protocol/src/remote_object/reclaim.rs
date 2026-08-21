@@ -40,7 +40,11 @@ impl RemoteObjectRecord {
                 SemanticPayload::Spooled(record.identity.semantic_hash)
             }
             Self::SharedLiveSet(record) => match &record.identity.domain {
+                // The images and the membership rollup all went to the provider
+                // from the flow that built them, and none is kept here after —
+                // so the record claims no spool file, only the reference.
                 SharedLiveSetObjectDomain::StoreSnapshotImage { .. }
+                | SharedLiveSetObjectDomain::StoreMembershipRollup { .. }
                 | SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => SemanticPayload::Absent,
                 _ => SemanticPayload::Spooled(record.identity.semantic_hash),
             },
@@ -247,6 +251,41 @@ impl RemoteObjectRecord {
             return Err(RemoteObjectRecordError::InvalidReclaim);
         }
         Ok(ownership)
+    }
+
+    /// A membership rollup is reclaimable when the generation named as its
+    /// owner is its *only* owner. A rollup two generations point at carries
+    /// both, and stays until the other one is reclaimed as well.
+    pub fn validate_reclaimable_membership_rollup(
+        &self,
+        rollup: &crate::store_commit::MembershipRollupRef,
+        owner: &SnapshotObjectOwner,
+    ) -> Result<(), RemoteObjectRecordError> {
+        self.validate()?;
+        let Self::SharedLiveSet(record) = self else {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        };
+        if !matches!(
+            &record.identity.domain,
+            SharedLiveSetObjectDomain::StoreMembershipRollup { reference } if reference == rollup
+        ) || record.identity.semantic_hash != rollup.rollup_hash
+            || record.identity.object != rollup.object
+            || !matches!(record.payloads, RemoteObjectPayloads::SpooledExternal)
+        {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        let OwnedObjectState::UploadedVerified { ownership } = &record.state else {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        };
+        if !ownership
+            .activated
+            .contains(&SharedObjectOwner::Snapshot(owner.clone()))
+            || !ownership.pending.is_empty()
+            || ownership.activated.len() != 1
+        {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        Ok(())
     }
 
     fn activated_circle_bootstrap_image_ownership<'a>(

@@ -215,6 +215,7 @@ impl SharedLiveSetObjectDomain {
         match self {
             Self::StoredBlob
             | Self::StoreSnapshotImage { .. }
+            | Self::StoreMembershipRollup { .. }
             | Self::CircleBootstrapImage { .. } => Err(RemoteObjectRecordError::DomainMismatch),
             Self::StorePackage { reference } => Ok(&reference.object),
             Self::CirclePackage { reference } => Ok(&reference.package.object),
@@ -253,6 +254,18 @@ impl SharedLiveSetObjectRef {
             SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => {
                 Err(RemoteObjectRecordError::StoredReferenceMismatch)
             }
+            // Like the images: the bytes went to the provider and were never
+            // kept here, so the record names its reference and nothing else.
+            SharedLiveSetObjectDomain::StoreMembershipRollup { reference }
+                if bytes.is_empty()
+                    && self.semantic_hash == reference.rollup_hash
+                    && self.object == reference.object =>
+            {
+                Ok(())
+            }
+            SharedLiveSetObjectDomain::StoreMembershipRollup { .. } => {
+                Err(RemoteObjectRecordError::StoredReferenceMismatch)
+            }
             _ => validate_semantic_hash(self.semantic_hash, bytes),
         }
     }
@@ -264,6 +277,13 @@ pub enum SharedLiveSetObjectDomain {
     StoredBlob,
     StoreSnapshotImage {
         reference: crate::store_commit::SnapshotImageRef,
+    },
+    /// The membership rollup one snapshot generation published beside its
+    /// image. Content-addressed, so two generations over the same membership
+    /// frontier name the same object — which is why it is owned rather than
+    /// simply deleted with the generation that named it last.
+    StoreMembershipRollup {
+        reference: crate::store_commit::MembershipRollupRef,
     },
     CircleBootstrapImage {
         reference: crate::store_commit::SnapshotImageRef,

@@ -379,9 +379,12 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             .map_err(StoreReclaimError::from)?;
         // A missing or unstable Store snapshot leaves Store packages uncovered but must
         // not block Circle package reclamation, which carries its own Circle coverage.
+        let mut rollup_claims = Vec::new();
         let (coverage, store_targets) = match Box::pin(self.choose_snapshot(&registrations)).await {
             Ok(claim) => {
                 let generation = claim.snapshot.reference.generation;
+                rollup_claims =
+                    self.prepare_store_membership_rollup_claims(&registrations, &claim)?;
                 let targets = self
                     .history()
                     .store_package_targets(&claim.snapshot.meta.coverage)
@@ -440,6 +443,9 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 AuthorizationOutcome::Signed => store_packages.authorized += 1,
                 AuthorizationOutcome::AlreadyJournalled => store_packages.already_authorized += 1,
             }
+        }
+        for claim in rollup_claims {
+            Box::pin(self.prepare_authorization(claim)).await?;
         }
         Box::pin(self.prepare_circle_authorizations(&registrations)).await?;
         Box::pin(self.prepare_audience_blob_authorizations()).await?;
@@ -571,6 +577,65 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             .await?;
         }
         Ok(())
+    }
+
+    /// Authorize deleting the membership rollup of every Store snapshot
+    /// generation the acknowledged one supersedes.
+    ///
+    /// A rollup is only ever reached through the generation that names it, and
+    /// only the newest generation's is ever read — a joining device takes the
+    /// newest listed snapshot and follows its `membership_rollup`. Nothing lists
+    /// `store-v1/membership-rollups/`, so an older generation's rollup is not
+    /// merely unused but unfindable, and it stayed at the provider forever.
+    ///
+    /// `selected` is the snapshot the package leg already proved every device
+    /// that matters has acknowledged, and `selected.authorized` is the stream it
+    /// was chosen from — so this asks the provider for nothing. A generation is
+    /// superseded when that same author published the selected one later, over a
+    /// strictly greater cut, naming a different rollup.
+    fn prepare_store_membership_rollup_claims(
+        &self,
+        registrations: &[coven_protocol::store_commit::ReferencedStoreDeviceRegistration],
+        selected: &VerifiedReclaimSnapshot,
+    ) -> Result<Vec<ReclaimClaim>, StoreReclaimError> {
+        let author = &selected.snapshot.meta.author_registration;
+        let Some(registration) = registrations
+            .iter()
+            .find(|candidate| candidate.reference() == author)
+        else {
+            return Ok(Vec::new());
+        };
+        let activation = registration
+            .value()
+            .store_snapshot_activation(registration.reference())
+            .map_err(StoreReclaimError::from)?
+            .activation_id();
+        let mut claims = Vec::new();
+        for generation in &selected.authorized {
+            if generation.meta.author_registration != *author
+                || generation.reference.generation >= selected.snapshot.reference.generation
+                || generation.meta.membership_rollup.object
+                    == selected.snapshot.meta.membership_rollup.object
+                || !snapshot_supersedes_seed(
+                    &selected.snapshot.meta.coverage,
+                    &generation.meta.coverage,
+                )
+            {
+                continue;
+            }
+            claims.push(ReclaimClaim::StoreMembershipRollup(
+                StoreMembershipRollupReclaimClaim {
+                    target: StoreMembershipRollupReclaimTarget {
+                        snapshot_author: author.clone(),
+                        activation,
+                        snapshot: generation.reference.clone(),
+                        rollup: generation.meta.membership_rollup.clone(),
+                    },
+                    superseding: selected.snapshot.reference.clone(),
+                },
+            ));
+        }
+        Ok(claims)
     }
 
     async fn prepare_circle_snapshot_image_authorizations(

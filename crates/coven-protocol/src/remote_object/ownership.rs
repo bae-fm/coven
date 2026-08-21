@@ -189,6 +189,37 @@ impl RemoteObjectRecord {
         self.validate()
     }
 
+    /// Add one more snapshot generation to a membership rollup's owners.
+    ///
+    /// A rollup is content-addressed over the membership frontier, so a
+    /// generation published while membership stood still names the object an
+    /// earlier one already owns. Both own it; reclaim deletes it when the last
+    /// owner goes.
+    pub fn merge_snapshot_ownership(
+        &mut self,
+        rollup: &crate::store_commit::MembershipRollupRef,
+        owner: SnapshotObjectOwner,
+    ) -> Result<(), RemoteObjectRecordError> {
+        let Self::SharedLiveSet(record) = self else {
+            return Err(RemoteObjectRecordError::DomainMismatch);
+        };
+        if !matches!(
+            &record.identity.domain,
+            SharedLiveSetObjectDomain::StoreMembershipRollup { reference } if reference == rollup
+        ) || record.identity.semantic_hash != rollup.rollup_hash
+            || record.identity.object != rollup.object
+        {
+            return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+        }
+        let OwnedObjectState::UploadedVerified { ownership } = &mut record.state else {
+            return Err(RemoteObjectRecordError::DomainMismatch);
+        };
+        ownership
+            .activated
+            .insert(SharedObjectOwner::Snapshot(owner));
+        self.validate()
+    }
+
     pub fn merge_package_activation(
         &mut self,
         domain: &SharedLiveSetObjectDomain,
@@ -295,6 +326,7 @@ impl RemoteObjectRecord {
             )),
             SharedLiveSetObjectDomain::StoredBlob => None,
             SharedLiveSetObjectDomain::StoreSnapshotImage { .. } => None,
+            SharedLiveSetObjectDomain::StoreMembershipRollup { .. } => None,
             SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => None,
         };
         if let Some((family, domain)) = package_domain {

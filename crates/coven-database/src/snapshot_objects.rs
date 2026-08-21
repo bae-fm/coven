@@ -180,6 +180,39 @@ pub(crate) fn persist_snapshot_image_on(
     persist_exact_remote_object_on(conn, store_dir, &image, label)
 }
 
+/// Record the generation's ownership of the membership rollup it published.
+///
+/// Merged rather than inserted: a rollup is content-addressed over the
+/// membership frontier, so a generation published while membership has not
+/// changed names the object an earlier generation already owns. Both
+/// generations own it, and it is reclaimable only once neither does.
+pub(crate) fn persist_membership_rollup_on(
+    conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    rollup: &coven_protocol::store_commit::MembershipRollupRef,
+    owner: coven_protocol::remote_object::SnapshotObjectOwner,
+    label: &str,
+) -> Result<(), DbError> {
+    let object_id = coven_protocol::remote_object::remote_object_id(&rollup.object);
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if exists {
+        let mut remote = load_remote_object_on(conn, object_id)?;
+        remote
+            .merge_snapshot_ownership(rollup, owner)
+            .map_err(|error| DbError::context(format!("{label} ownership"), error))?;
+        return update_remote_object_on(conn, object_id, &remote);
+    }
+    let rollup = RemoteObjectRecord::snapshot_activated_membership_rollup(rollup, owner)
+        .map_err(|error| DbError::context(format!("{label} ownership"), error))?;
+    persist_exact_remote_object_on(conn, store_dir, &rollup, label)
+}
+
 pub fn snapshot_generation_as_i64(generation: u64, label: &str) -> Result<i64, DbError> {
     i64::try_from(generation)
         .map_err(|_| DbError::Message(format!("{label} generation exceeds SQLite INTEGER")))

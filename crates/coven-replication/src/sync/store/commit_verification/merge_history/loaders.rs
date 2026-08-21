@@ -401,6 +401,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                 coven_protocol::reclaim::ReclaimActivation::CircleSnapshotMetadata(activation) => {
                     validate_circle_snapshot_activated_reclaim_target(&target, &activation)
                 }
+                coven_protocol::reclaim::ReclaimActivation::StoreSnapshotMetadata(activation) => {
+                    validate_store_snapshot_activated_reclaim_target(&target, &activation)
+                }
                 coven_protocol::reclaim::ReclaimActivation::PackageBlobBinding(activation) => {
                     accepted.validate_package_bound_reclaim_target(&target, &activation)
                 }

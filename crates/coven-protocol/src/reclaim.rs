@@ -9,9 +9,10 @@ use crate::circle_control::StoreMembershipStateRef;
 use crate::membership::MembershipGrantId;
 use crate::objects::ExactObjectRef;
 use crate::store_commit::{
-    CircleAckRef, CirclePackageRef, CircleSnapshotRef, ObjectHash, Signed, SignedBody,
-    SnapshotImageRef, StoreAckRef, StoreBatchCommitRef, StoreDeviceRegistration,
+    CircleAckRef, CirclePackageRef, CircleSnapshotRef, MembershipRollupRef, ObjectHash, Signed,
+    SignedBody, SnapshotImageRef, StoreAckRef, StoreBatchCommitRef, StoreDeviceRegistration,
     StoreDeviceRegistrationRef, StorePackageRef, StoreProtocolError, StoreSnapshotLocator,
+    StoreSnapshotRef, StreamActivationId,
 };
 use coven_keys::keys::{self, UserKeypair};
 
@@ -30,6 +31,7 @@ pub enum ReclaimTarget {
     CirclePackage(CirclePackageReclaimTarget),
     CircleBootstrapImage(CircleBootstrapImageReclaimTarget),
     CircleSnapshotImage(CircleSnapshotImageReclaimTarget),
+    StoreMembershipRollup(StoreMembershipRollupReclaimTarget),
     AudienceBlob(AudienceBlobReclaimTarget),
 }
 
@@ -40,6 +42,7 @@ impl ReclaimTarget {
             Self::CirclePackage(target) => &target.package.package.object,
             Self::CircleBootstrapImage(target) => &target.coverage.bootstrap.image.object,
             Self::CircleSnapshotImage(target) => &target.image.object,
+            Self::StoreMembershipRollup(target) => &target.rollup.object,
             Self::AudienceBlob(target) => target.blob.object(),
         }
     }
@@ -54,6 +57,12 @@ impl ReclaimTarget {
             Self::CircleSnapshotImage(target) => {
                 ReclaimActivation::CircleSnapshotMetadata(CircleSnapshotStreamActivation {
                     circle_id: target.circle_id,
+                    author_registration: &target.snapshot_author,
+                    snapshot: &target.snapshot,
+                })
+            }
+            Self::StoreMembershipRollup(target) => {
+                ReclaimActivation::StoreSnapshotMetadata(StoreSnapshotStreamActivation {
                     author_registration: &target.snapshot_author,
                     snapshot: &target.snapshot,
                 })
@@ -78,6 +87,7 @@ impl ReclaimTarget {
 pub enum ReclaimActivation<'a> {
     Commit(&'a StoreBatchCommitRef),
     CircleSnapshotMetadata(CircleSnapshotStreamActivation<'a>),
+    StoreSnapshotMetadata(StoreSnapshotStreamActivation<'a>),
     PackageBlobBinding(PackageBlobBindingActivation<'a>),
 }
 
@@ -88,6 +98,7 @@ impl ReclaimActivation<'_> {
         match self {
             Self::Commit(commit) => &commit.object,
             Self::CircleSnapshotMetadata(activation) => &activation.snapshot.object,
+            Self::StoreSnapshotMetadata(activation) => &activation.snapshot.object,
             Self::PackageBlobBinding(activation) => activation.package.object(),
         }
     }
@@ -114,6 +125,15 @@ pub struct CircleSnapshotStreamActivation<'a> {
     pub snapshot: &'a CircleSnapshotRef,
 }
 
+/// One generation of a device's Store snapshot stream, named by the exact
+/// metadata object whose signature vouches for what that generation published
+/// beside its image. The Store stream is anchored on the author's device
+/// registration alone, which every Store member can check.
+pub struct StoreSnapshotStreamActivation<'a> {
+    pub author_registration: &'a StoreDeviceRegistrationRef,
+    pub snapshot: &'a StoreSnapshotRef,
+}
+
 /// The eligibility proof an Owner signs to authorize one reclaim. The claim kind
 /// matches its `ReclaimTarget` kind and carries the exact coverage and
 /// acknowledgement references verified before the target is deleted.
@@ -124,6 +144,7 @@ pub enum ReclaimClaim {
     CirclePackage(CirclePackageReclaimClaim),
     CircleBootstrapImage(CircleBootstrapImageReclaimClaim),
     CircleSnapshotImage(CircleSnapshotImageReclaimClaim),
+    StoreMembershipRollup(StoreMembershipRollupReclaimClaim),
     AudienceBlob(AudienceBlobReclaimClaim),
 }
 
@@ -138,6 +159,9 @@ impl ReclaimClaim {
             Self::CircleSnapshotImage(claim) => {
                 ReclaimTarget::CircleSnapshotImage(claim.target.clone())
             }
+            Self::StoreMembershipRollup(claim) => {
+                ReclaimTarget::StoreMembershipRollup(claim.target.clone())
+            }
             Self::AudienceBlob(claim) => ReclaimTarget::AudienceBlob(claim.target.clone()),
         }
     }
@@ -148,6 +172,7 @@ impl ReclaimClaim {
             Self::CirclePackage(claim) => claim.validate(),
             Self::CircleBootstrapImage(claim) => claim.validate(),
             Self::CircleSnapshotImage(claim) => claim.validate(),
+            Self::StoreMembershipRollup(claim) => claim.validate(),
             Self::AudienceBlob(claim) => claim.validate(),
         }
     }
@@ -447,6 +472,61 @@ impl CircleSnapshotImageReclaimClaim {
         if *image == self.target.snapshot.object || *image == self.superseding.object {
             return Err(StoreProtocolError::Malformed(
                 "Circle snapshot reclaim target aliases proof authority".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One superseded generation's membership rollup, named beside the generation
+/// that published it.
+///
+/// The activation is carried rather than derived because a Store snapshot
+/// stream's activation lives inside the author's registration *value*, which the
+/// closure that validates ownership does not hold — so the claim verifier is
+/// where it is checked against the registration, and the closure checks only
+/// that the record it deletes names the generation the claim does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreMembershipRollupReclaimTarget {
+    pub snapshot_author: StoreDeviceRegistrationRef,
+    pub activation: StreamActivationId,
+    pub snapshot: StoreSnapshotRef,
+    pub rollup: MembershipRollupRef,
+}
+
+impl StoreMembershipRollupReclaimTarget {
+    /// The ownership record's owner for this rollup: the generation that
+    /// published it, on the author's Store snapshot stream.
+    pub fn snapshot_owner(&self) -> crate::remote_object::SnapshotObjectOwner {
+        crate::remote_object::SnapshotObjectOwner {
+            activation: self.activation,
+            generation: self.snapshot.generation,
+        }
+    }
+}
+
+/// Evidence that a later generation of the same device's Store snapshot stream
+/// supersedes the reclaimed one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreMembershipRollupReclaimClaim {
+    pub target: StoreMembershipRollupReclaimTarget,
+    pub superseding: StoreSnapshotRef,
+}
+
+impl StoreMembershipRollupReclaimClaim {
+    fn validate(&self) -> Result<(), StoreProtocolError> {
+        if self.superseding.generation <= self.target.snapshot.generation {
+            return Err(StoreProtocolError::Malformed(
+                "Store membership rollup reclaim names a superseding generation that is not later"
+                    .to_string(),
+            ));
+        }
+        let rollup = &self.target.rollup.object;
+        if *rollup == self.target.snapshot.object || *rollup == self.superseding.object {
+            return Err(StoreProtocolError::Malformed(
+                "Store membership rollup reclaim target aliases proof authority".to_string(),
             ));
         }
         Ok(())

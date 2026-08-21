@@ -1861,3 +1861,81 @@ async fn a_removed_members_device_does_not_block_reclaim() {
     })
     .await;
 }
+
+/// A superseded snapshot generation's membership rollup is reclaimed; the
+/// newest generation's stays.
+///
+/// A rollup is reachable only through the generation that names it, and only the
+/// newest generation's is ever read — a joining device takes the newest listed
+/// snapshot and follows its `membership_rollup`. Nothing lists
+/// `store-v1/membership-rollups/`, so a superseded generation's rollup is not
+/// merely unused: it is unfindable, and before this it stayed at the provider
+/// forever, one per distinct membership frontier the store ever published over.
+///
+/// The rollup is owned by the generation that published it rather than deleted
+/// with it, because the object is content-addressed over the membership
+/// frontier: a generation published while membership stood still names the
+/// object an earlier one already owns, and it has to survive until neither does.
+#[tokio::test]
+async fn superseded_membership_rollups_are_reclaimed_and_the_newest_stays() {
+    let fixture = ReclaimJourneyFixture::build("membership-rollup-reclaim").await;
+    let first = fixture
+        .device
+        .latest_local_store_snapshot_for_test()
+        .await
+        .expect("read the first snapshot")
+        .expect("the fixture published one");
+
+    // A second generation over a strictly later cut, acknowledged the way the
+    // first one was.
+    let changeset =
+        crate::sync::test_helpers::open_test_db(crate::sync::test_helpers::test_store_dir())
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('rollup-reclaim-3', 'third', NULL, \
+                 '0000000003000-0000-rollup-reclaim', '2026-01-01')",
+            ])
+            .await;
+    fixture
+        .store
+        .publish_changeset("founder", 4, &changeset, fixture.device.schema_version())
+        .await
+        .expect("publish a third package activation");
+    let second = fixture
+        .device
+        .publish_snapshot_generation_for_test()
+        .await
+        .expect("publish and acknowledge a second generation");
+    assert_ne!(
+        first.meta.membership_rollup.object, second.meta.membership_rollup.object,
+        "the two generations must name different rollups for this to test anything",
+    );
+    assert!(
+        fixture
+            .store
+            .contains_membership_rollup(&first.meta.membership_rollup)
+            .await
+            .expect("read the superseded rollup"),
+        "the superseded generation's rollup is at the provider before reclaim",
+    );
+
+    fixture.reclaim().await.expect("run reclaim");
+
+    assert!(
+        !fixture
+            .store
+            .contains_membership_rollup(&first.meta.membership_rollup)
+            .await
+            .expect("read the superseded rollup after reclaim"),
+        "the superseded generation's rollup is deleted",
+    );
+    assert!(
+        fixture
+            .store
+            .contains_membership_rollup(&second.meta.membership_rollup)
+            .await
+            .expect("read the newest rollup after reclaim"),
+        "the newest generation's rollup stays: it supersedes nothing, and it is \
+         the one a joining device reads",
+    );
+}

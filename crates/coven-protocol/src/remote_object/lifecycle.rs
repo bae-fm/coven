@@ -127,6 +127,7 @@ impl RemoteObjectRecord {
                     matches!(record.payloads, RemoteObjectPayloads::RowBlob { .. })
                 }
                 SharedLiveSetObjectDomain::StoreSnapshotImage { .. }
+                | SharedLiveSetObjectDomain::StoreMembershipRollup { .. }
                 | SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => {
                     matches!(record.payloads, RemoteObjectPayloads::SpooledExternal)
                 }
@@ -185,6 +186,7 @@ impl RemoteObjectRecord {
                 match &record.identity.domain {
                     SharedLiveSetObjectDomain::StoredBlob
                     | SharedLiveSetObjectDomain::StoreSnapshotImage { .. }
+                    | SharedLiveSetObjectDomain::StoreMembershipRollup { .. }
                     | SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => {}
                     SharedLiveSetObjectDomain::StorePackage { reference } => {
                         validate_package_reference(

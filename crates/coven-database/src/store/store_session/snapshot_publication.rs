@@ -229,8 +229,15 @@ impl StoreSession<'_> {
             &tx,
             self.store_dir,
             &outbound.meta.value.image,
-            snapshot_owner,
+            snapshot_owner.clone(),
             "Store snapshot image",
+        )?;
+        crate::snapshot_objects::persist_membership_rollup_on(
+            &tx,
+            self.store_dir,
+            &outbound.meta.value.membership_rollup,
+            snapshot_owner,
+            "Store membership rollup",
         )?;
         let deleted = tx
             .execute(

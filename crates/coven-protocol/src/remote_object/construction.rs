@@ -328,6 +328,38 @@ impl RemoteObjectRecord {
         ClosedRemoteObject::carried(record)
     }
 
+    /// The membership rollup one snapshot generation published, owned by that
+    /// generation.
+    ///
+    /// The same owner shape the image gets, and for a reason the image does not
+    /// have: a rollup is content-addressed over the membership frontier, so two
+    /// generations published over an unchanged membership name the *same*
+    /// object. Ownership is what keeps the older generation's reclaim from
+    /// deleting the rollup the newer one still points at.
+    pub fn snapshot_activated_membership_rollup(
+        rollup: &crate::store_commit::MembershipRollupRef,
+        owner: SnapshotObjectOwner,
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
+        let record = Self::SharedLiveSet(SharedObjectRecord {
+            identity: SharedLiveSetObjectRef {
+                domain: SharedLiveSetObjectDomain::StoreMembershipRollup {
+                    reference: rollup.clone(),
+                },
+                semantic_hash: rollup.rollup_hash,
+                object: rollup.object.clone(),
+            },
+            payloads: RemoteObjectPayloads::SpooledExternal,
+            state: OwnedObjectState::UploadedVerified {
+                ownership: SharedObjectOwnership {
+                    pending: BTreeSet::new(),
+                    activated: BTreeSet::from([SharedObjectOwner::Snapshot(owner)]),
+                    nonactivated: Vec::new(),
+                },
+            },
+        });
+        ClosedRemoteObject::carried(record)
+    }
+
     pub fn activated_external_package(
         domain: SharedLiveSetObjectDomain,
         package: &crate::audience_package::AudiencePackage,

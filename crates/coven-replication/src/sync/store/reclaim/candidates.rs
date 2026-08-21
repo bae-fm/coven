@@ -56,6 +56,9 @@ pub(super) fn snapshot_supersedes_seed(cut: &CommitFrontier, seed: &CommitFronti
 pub(super) struct VerifiedReclaimSnapshot {
     pub(super) snapshot: coven_database::PublishedStoreSnapshot,
     pub(super) acknowledgements: Vec<StoreAckRef>,
+    /// Every generation the selection considered, kept so the legs that reason
+    /// about superseded generations do not read the same streams again.
+    pub(super) authorized: Vec<coven_database::PublishedStoreSnapshot>,
 }
 
 impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
@@ -376,6 +379,18 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                     .map_err(StoreReclaimError::from)?,
                 )
             }
+            ReclaimTarget::StoreMembershipRollup(target) => (
+                ProtocolObjectContext::signed_plaintext(
+                    root.store_root_hash,
+                    ProtocolObjectDomain::StoreMembershipRollup,
+                ),
+                coven_protocol::store_commit::semantic_prefix_from_exact_object(
+                    &target.rollup.object,
+                    coven_protocol::objects::ProtectedObjectDomain::StoreMembershipRollup
+                        .extension(),
+                )
+                .map_err(StoreReclaimError::from)?,
+            ),
             ReclaimTarget::AudienceBlob(_) => {
                 return Err(StoreReclaimError::Authorization(
                     "audience blob reclaim target has no protocol object prefix".to_string(),
@@ -413,7 +428,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             }
         }
         let selected = match history
-            .select_maximal_acknowledged_store_snapshot(authorized, &members)
+            .select_maximal_acknowledged_store_snapshot(authorized.clone(), &members)
             .await
         {
             Ok(Some(selected)) => selected,
@@ -457,6 +472,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         Ok(VerifiedReclaimSnapshot {
             snapshot,
             acknowledgements,
+            authorized,
         })
     }
 }

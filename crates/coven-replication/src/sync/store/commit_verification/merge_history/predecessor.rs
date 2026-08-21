@@ -245,6 +245,7 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                     access.bootstrap.as_ref() == Some(&bootstrap.coverage.bootstrap.image)
                 }),
             coven_protocol::reclaim::ReclaimTarget::CircleSnapshotImage(_)
+            | coven_protocol::reclaim::ReclaimTarget::StoreMembershipRollup(_)
             | coven_protocol::reclaim::ReclaimTarget::AudienceBlob(_) => {
                 return Err(RegistrationLoadError::Invalid(
                     "reclaim target claims a Store commit activation it is not published by"

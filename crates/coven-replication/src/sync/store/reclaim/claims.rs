@@ -28,6 +28,10 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             ReclaimTarget::CircleSnapshotImage(target) => Ok(database
                 .circle_image_is_retained_for_replay(target.circle_id, target.image.clone())
                 .await?),
+            // A rollup states membership, which no replay input needs: replay
+            // rebuilds rows from commits, and the membership a device stands on
+            // comes from its own chain. Nothing retains one.
+            ReclaimTarget::StoreMembershipRollup(_) => Ok(false),
             ReclaimTarget::AudienceBlob(target) => Ok(database
                 .audience_blob_is_retained_for_replay(target.blob.clone())
                 .await?),
@@ -134,6 +138,10 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             )),
             ReclaimClaim::CircleSnapshotImage(claim) => Ok(ReclaimTarget::CircleSnapshotImage(
                 self.verify_circle_snapshot_image_reclaim_claim(claim)
+                    .await?,
+            )),
+            ReclaimClaim::StoreMembershipRollup(claim) => Ok(ReclaimTarget::StoreMembershipRollup(
+                self.verify_store_membership_rollup_reclaim_claim(claim)
                     .await?,
             )),
             ReclaimClaim::AudienceBlob(claim) => {
@@ -433,6 +441,96 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         {
             return Err(StoreReclaimError::Authorization(
                 "Circle package lies within its accepted epoch cutoff and is not reclaimable as beyond-cutoff"
+                    .to_string(),
+            ));
+        }
+        Ok(claim.target.clone())
+    }
+
+    /// Re-verify that a later generation of the reclaimed rollup's own Store
+    /// snapshot stream supersedes it.
+    ///
+    /// The stream is re-read from the author's own signed metadata, so both the
+    /// reclaimed generation and the named superseding one are taken from what
+    /// they say about themselves rather than from the claim. The superseding
+    /// generation must carry a cut that strictly dominates the reclaimed one and
+    /// must be acknowledged by every device that could still install it — the
+    /// same discipline the package leg deletes behind — and it must not name the
+    /// rollup being reclaimed, which a generation published over an unchanged
+    /// membership frontier would.
+    pub(super) async fn verify_store_membership_rollup_reclaim_claim(
+        &mut self,
+        claim: &StoreMembershipRollupReclaimClaim,
+    ) -> Result<StoreMembershipRollupReclaimTarget, StoreReclaimError> {
+        let database = self.database.clone();
+        let members = self.membership.clone();
+        let author = database
+            .activated_store_device_registration(claim.target.snapshot_author.clone())
+            .await?;
+        if author
+            .value()
+            .store_snapshot_activation(author.reference())
+            .map_err(StoreReclaimError::from)?
+            .activation_id()
+            != claim.target.activation
+        {
+            return Err(StoreReclaimError::Authorization(
+                "Store membership rollup reclaim names another snapshot stream activation"
+                    .to_string(),
+            ));
+        }
+        let mut history = self.history();
+        let stream = history
+            .load_store_snapshot_stream(author.reference(), author.value())
+            .await
+            .map_err(StoreReclaimError::from)?;
+        let generation = stream
+            .iter()
+            .find(|snapshot| snapshot.reference == claim.target.snapshot)
+            .ok_or_else(|| {
+                StoreReclaimError::Authorization(
+                    "Store membership rollup reclaim target is absent from its author's stream"
+                        .to_string(),
+                )
+            })?;
+        if generation.meta.membership_rollup != claim.target.rollup {
+            return Err(StoreReclaimError::Authorization(
+                "Store membership rollup reclaim target differs from its own signed generation"
+                    .to_string(),
+            ));
+        }
+        let superseding = stream
+            .iter()
+            .find(|snapshot| snapshot.reference == claim.superseding)
+            .ok_or_else(|| {
+                StoreReclaimError::Authorization(
+                    "Store membership rollup reclaim superseding generation is absent from the \
+                     same stream"
+                        .to_string(),
+                )
+            })?;
+        if !snapshot_supersedes_seed(&superseding.meta.coverage, &generation.meta.coverage) {
+            return Err(StoreReclaimError::Authorization(
+                "Store membership rollup reclaim superseding generation does not strictly \
+                 dominate the reclaimed cut"
+                    .to_string(),
+            ));
+        }
+        if superseding.meta.membership_rollup.object == claim.target.rollup.object {
+            return Err(StoreReclaimError::Authorization(
+                "Store membership rollup reclaim superseding generation names the same rollup"
+                    .to_string(),
+            ));
+        }
+        if history
+            .select_maximal_acknowledged_store_snapshot(vec![superseding.clone()], &members)
+            .await
+            .map_err(StoreReclaimError::from)?
+            .is_none()
+        {
+            return Err(StoreReclaimError::Authorization(
+                "Store membership rollup reclaim superseding generation is not \
+                 acknowledgement-stable"
                     .to_string(),
             ));
         }
