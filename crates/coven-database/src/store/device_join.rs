@@ -10,7 +10,6 @@ use coven_protocol::store_commit::{DeviceJoinAttemptId, ObjectHash};
 
 #[derive(Clone, Debug)]
 pub struct DeviceJoinJournalStore {
-    path: std::path::PathBuf,
     connection: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
 }
 
@@ -46,7 +45,6 @@ impl DeviceJoinJournalStore {
             )
             .map_err(crate::DbError::from)?;
         Ok(Self {
-            path,
             connection: std::sync::Arc::new(std::sync::Mutex::new(connection)),
         })
     }
@@ -141,50 +139,30 @@ impl DeviceJoinJournalStore {
         Ok(changed == 1)
     }
 
-    pub async fn complete_into(
+    /// Drop one attempt's joiner row, but only while it still holds exactly the
+    /// payload the caller last read.
+    ///
+    /// This is how a joining device finishes: the row is its working notes on
+    /// an exchange that is over, and what says the join happened is the
+    /// library's own config file, written before this runs.
+    pub fn compare_and_forget(
         &self,
-        database: &StoreDatabase,
-        current: &DeviceJoinJournalRecord,
-        activated: &DeviceJoinJournalRecord,
-    ) -> Result<(), DeviceJoinJournalError> {
-        if current.sort_key() != activated.sort_key() {
-            return Err(DeviceJoinJournalError::JournalConflict);
-        }
-        let pending_attempt = current.attempt_key();
-        let expected_pending = serde_json::to_string(current)?;
-        let store_key = activated.store_key();
-        let store_payload = serde_json::to_string(activated)?;
-        self.complete_payload_into(
-            database,
-            pending_attempt,
-            expected_pending,
-            store_key,
-            store_payload,
-        )
-        .await
-        .map_err(DeviceJoinJournalError::Database)
-    }
-
-    async fn complete_payload_into(
-        &self,
-        database: &StoreDatabase,
-        pending_attempt: String,
-        expected_pending: String,
-        store_key: String,
-        store_payload: String,
-    ) -> Result<(), crate::DbError> {
-        let pending_path = self.path.to_string_lossy().into_owned();
-        database
-            .call_database(move |session| {
-                session.complete_device_join_from_pending(
-                    &pending_path,
-                    &pending_attempt,
-                    &expected_pending,
-                    &store_key,
-                    &store_payload,
-                )
-            })
-            .await
+        attempt_id: &str,
+        role: &str,
+        expected_payload: &str,
+    ) -> Result<bool, crate::DbError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| pending_join_connection_poisoned())?;
+        let removed = connection
+            .execute(
+                "DELETE FROM device_join_journals
+                 WHERE attempt_id = ?1 AND role = ?2 AND payload = ?3",
+                (attempt_id, role, expected_payload),
+            )
+            .map_err(crate::DbError::from)?;
+        Ok(removed == 1)
     }
 
     #[cfg(test)]
@@ -201,77 +179,6 @@ impl DeviceJoinJournalStore {
 
 fn pending_join_connection_poisoned() -> crate::DbError {
     crate::DbError::Message("pending device-join journal connection lock was poisoned".to_string())
-}
-
-pub(crate) fn complete_device_join_from_pending_on(
-    conn: &rusqlite::Connection,
-    durability: crate::connection_io::ConnectionDurability,
-    pending_path: &str,
-    pending_attempt: &str,
-    expected_pending: &str,
-    store_key: &str,
-    store_payload: &str,
-) -> Result<(), crate::DbError> {
-    conn.execute("ATTACH DATABASE ?1 AS pending_join_source", [pending_path])
-        .map_err(crate::DbError::from)?;
-    let operation = (|| {
-        crate::connection_io::configure_connection_schema_durability(
-            conn,
-            Some("pending_join_source"),
-            durability,
-        )?;
-        let transaction = conn.unchecked_transaction().map_err(crate::DbError::from)?;
-        let actual: String = transaction
-            .query_row(
-                "SELECT payload FROM pending_join_source.device_join_journals
-                     WHERE attempt_id = ?1 AND role = 'joiner'",
-                [pending_attempt],
-                |row| row.get(0),
-            )
-            .map_err(crate::DbError::from)?;
-        if actual != expected_pending {
-            return Err(crate::DbError::Message(
-                "pending join journal changed before activation".to_string(),
-            ));
-        }
-        let installed = transaction
-            .execute(
-                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                     WHERE value = excluded.value",
-                (store_key, store_payload),
-            )
-            .map_err(crate::DbError::from)?;
-        if installed != 1 {
-            return Err(crate::DbError::Message(
-                "activated join conflicts with the durable Store journal".to_string(),
-            ));
-        }
-        let removed = transaction
-            .execute(
-                "DELETE FROM pending_join_source.device_join_journals
-                     WHERE attempt_id = ?1 AND role = 'joiner' AND payload = ?2",
-                (pending_attempt, expected_pending),
-            )
-            .map_err(crate::DbError::from)?;
-        if removed != 1 {
-            return Err(crate::DbError::Message(
-                "pending join journal changed during activation".to_string(),
-            ));
-        }
-        transaction.commit().map_err(crate::DbError::from)
-    })();
-    let detached = conn
-        .execute_batch("DETACH DATABASE pending_join_source")
-        .map_err(crate::DbError::from);
-    match (operation, detached) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(operation), Ok(())) => Err(operation),
-        (Ok(()), Err(detach)) => Err(detach),
-        (Err(operation), Err(detach)) => Err(crate::DbError::Message(format!(
-            "{operation}; detaching pending join journal also failed: {detach}"
-        ))),
-    }
 }
 
 pub(crate) fn begin_device_join_on(
@@ -531,49 +438,5 @@ mod tests {
             .expect("read synchronous setting");
 
         assert_eq!(synchronous, 0);
-    }
-
-    #[tokio::test]
-    async fn conflicting_store_journal_keeps_the_pending_join() {
-        let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending =
-            DeviceJoinJournalStore::open_for_test(pending_dir.path().join("pending.sqlite"))
-                .expect("open pending join journal");
-        pending
-            .insert_or_load("attempt", "joiner", "pending")
-            .expect("insert pending join");
-        let database_store_dir = crate::synthetic_store::test_store_dir();
-        let database = crate::synthetic_store::open_test_db(database_store_dir.clone());
-        let store = StoreDatabase::new(&database);
-        let store_key = "device_join/attempt/joiner";
-        store
-            .set_protocol_state(store_key, "conflicting")
-            .await
-            .expect("insert conflicting Store journal");
-
-        let result = pending
-            .complete_payload_into(
-                &store,
-                "attempt".to_string(),
-                "pending".to_string(),
-                store_key.to_string(),
-                "activated".to_string(),
-            )
-            .await;
-
-        assert!(result.is_err(), "a conflicting Store journal must fail");
-        assert_eq!(
-            pending
-                .load("attempt", "joiner")
-                .expect("load pending join"),
-            Some("pending".to_string()),
-        );
-        assert_eq!(
-            store
-                .get_protocol_state(store_key)
-                .await
-                .expect("load Store journal"),
-            Some("conflicting".to_string()),
-        );
     }
 }

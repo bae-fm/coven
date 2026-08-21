@@ -18,10 +18,8 @@ pub struct PendingDeviceJoinObservation<'storage> {
 
 #[doc(hidden)]
 pub struct PendingSamePrincipalDeviceJoinCompletion {
-    database: StoreDatabase,
     journal: PendingJoinJournal,
     current: DeviceJoinJournalRecord,
-    activated: DeviceJoinJournalRecord,
     joined: JoinedStore,
 }
 
@@ -31,9 +29,7 @@ impl PendingSamePrincipalDeviceJoinCompletion {
     }
 
     pub async fn complete(self) -> Result<JoinedStore, DeviceJoinError> {
-        self.journal
-            .complete_on(&self.database, &self.current, &self.activated)
-            .await?;
+        self.journal.retire(&self.current)?;
         Ok(self.joined)
     }
 }
@@ -185,15 +181,8 @@ impl PendingJoinJournal {
             .observe_joiner_activation_if_pending(activation)
     }
 
-    pub(super) async fn complete_on(
-        &self,
-        database: &StoreDatabase,
-        current: &DeviceJoinJournalRecord,
-        activated: &DeviceJoinJournalRecord,
-    ) -> Result<(), DeviceJoinError> {
-        self.database
-            .complete_into(database, current, activated)
-            .await
+    pub(super) fn retire(&self, current: &DeviceJoinJournalRecord) -> Result<(), DeviceJoinError> {
+        self.database.retire(current)
     }
 
     fn record_readiness(
@@ -520,22 +509,12 @@ impl<'storage> JoiningStore<'storage> {
         &mut self,
         activation: DeviceJoinActivation,
     ) -> Result<JoinedStore, DeviceJoinError> {
-        let attempt_id = activation.attempt_id;
-        if let Some(record) = self
-            .history
-            .device_join()
-            .completed_join(attempt_id)
-            .await?
-        {
-            let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Activated(existing)) =
-                &*record.progress
-            else {
-                return Err(DeviceJoinError::JournalConflict);
-            };
-            let joined = self.materialize(activation).await?;
-            return (existing == &joined)
-                .then_some(joined)
-                .ok_or(DeviceJoinError::JournalConflict);
+        // No row means this attempt already finished on this device. What says
+        // so is the library's config file, which the caller wrote before it got
+        // here and checks before it calls again; the row was only ever this
+        // device's working notes on an exchange that is over.
+        if self.journal.load()?.is_none() {
+            return self.materialize(activation).await;
         }
         let current_readiness = self
             .journal
@@ -559,13 +538,9 @@ impl<'storage> JoiningStore<'storage> {
         if readiness != &current_readiness || current_activation != &joined.activation {
             return Err(DeviceJoinError::JournalConflict);
         }
-        let activated_record = self
-            .journal
-            .record(JoinerJoinProgress::Activated(joined.clone()));
         self.history
             .device_join()
-            .complete_join(&self.journal, &current, &activated_record)
-            .await?;
+            .retire_join(&self.journal, &current)?;
         Ok(joined)
     }
 }
@@ -751,13 +726,10 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
         if current_readiness != &readiness || current_activation != &joined.activation {
             return Err(DeviceJoinError::JournalConflict);
         }
-        let activated = journal.record(JoinerJoinProgress::Activated(joined.clone()));
         run.report();
         Ok(PendingSamePrincipalDeviceJoinCompletion {
-            database,
             journal,
             current,
-            activated,
             joined,
         })
     }

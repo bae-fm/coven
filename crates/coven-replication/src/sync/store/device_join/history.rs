@@ -219,25 +219,12 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         self.database.latest_local_store_device_registration().await
     }
 
-    pub(super) async fn completed_join(
-        &self,
-        attempt_id: DeviceJoinAttemptId,
-    ) -> Result<Option<DeviceJoinJournalRecord>, DeviceJoinError> {
-        self.database
-            .load_device_join(attempt_id, DeviceJoinRole::Joiner)
-            .await
-            .map_err(DeviceJoinError::from)
-    }
-
-    pub(super) async fn complete_join(
+    pub(super) fn retire_join(
         &self,
         pending: &super::joiner::PendingJoinJournal,
         current: &DeviceJoinJournalRecord,
-        activated: &DeviceJoinJournalRecord,
     ) -> Result<(), DeviceJoinError> {
-        pending
-            .complete_on(&self.database, current, activated)
-            .await
+        pending.retire(current)
     }
 
     #[allow(clippy::too_many_arguments)]

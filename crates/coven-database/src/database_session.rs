@@ -5,7 +5,6 @@ use super::*;
 /// retained schema services remain private to this module.
 pub(crate) struct DatabaseSession<'session> {
     conn: &'session Connection,
-    connection_durability: crate::connection_io::ConnectionDurability,
     #[cfg(any(test, feature = "test-utils"))]
     store_dir: &'session coven_foundation::store_dir::StoreDir,
 }
@@ -13,35 +12,14 @@ pub(crate) struct DatabaseSession<'session> {
 impl<'session> DatabaseSession<'session> {
     pub(crate) fn new(
         conn: &'session Connection,
-        connection_durability: crate::connection_io::ConnectionDurability,
         #[cfg(any(test, feature = "test-utils"))]
         store_dir: &'session coven_foundation::store_dir::StoreDir,
     ) -> Self {
         Self {
             conn,
-            connection_durability,
             #[cfg(any(test, feature = "test-utils"))]
             store_dir,
         }
-    }
-
-    pub(crate) fn complete_device_join_from_pending(
-        &mut self,
-        pending_path: &str,
-        pending_attempt: &str,
-        expected_pending: &str,
-        store_key: &str,
-        store_payload: &str,
-    ) -> Result<(), DbError> {
-        crate::store::complete_device_join_from_pending_on(
-            self.conn,
-            self.connection_durability,
-            pending_path,
-            pending_attempt,
-            expected_pending,
-            store_key,
-            store_payload,
-        )
     }
 
     pub(crate) fn begin_device_join(

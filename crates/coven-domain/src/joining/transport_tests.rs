@@ -354,6 +354,15 @@ impl TransportFixture {
             .expect("the owner's write landed at a Store commit")
     }
 
+    /// Every row the joining device's pending journal still holds.
+    fn pending_journal_records(
+        &self,
+    ) -> Vec<coven_protocol::store_commit::device_join_journal::DeviceJoinJournalRecord> {
+        self.client()
+            .pending_journal_records_for_test()
+            .expect("read the joining device's pending journal")
+    }
+
     /// A fresh joining client, as a relaunched app would construct it: nothing
     /// but the codes and the on-disk journal carry across.
     fn client(&self) -> crate::joining::client::DeviceJoinClient {
@@ -663,6 +672,16 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
         .store_dir(&config.store_id)
         .config_path()
         .exists());
+    // A finished join leaves no journal row on either device: the library's
+    // config file is what says it finished, and the rows were working notes on
+    // an exchange that is over.
+    assert!(
+        fixture
+            .pending_journal_records()
+            .iter()
+            .all(|record| record.attempt_id != bundle.offer.attempt_id),
+        "the joining device kept a journal row for a join it finished",
+    );
     assert_eq!(activation.attempt_id, bundle.offer.attempt_id,);
     assert!(fixture
         .client()
@@ -845,6 +864,16 @@ async fn run_transport_carries_a_cross_principal_join() {
         .store_dir(&config.store_id)
         .config_path()
         .exists());
+    // A finished join leaves no journal row on either device: the library's
+    // config file is what says it finished, and the rows were working notes on
+    // an exchange that is over.
+    assert!(
+        fixture
+            .pending_journal_records()
+            .iter()
+            .all(|record| record.attempt_id != bundle.offer.attempt_id),
+        "the joining device kept a journal row for a join it finished",
+    );
     assert_eq!(activation.attempt_id, bundle.offer.attempt_id,);
     for kind in DeviceJoinTransportKind::ALL {
         assert!(
@@ -925,6 +954,16 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
         .store_dir(&config.store_id)
         .config_path()
         .exists());
+    // A finished join leaves no journal row on either device: the library's
+    // config file is what says it finished, and the rows were working notes on
+    // an exchange that is over.
+    assert!(
+        fixture
+            .pending_journal_records()
+            .iter()
+            .all(|record| record.attempt_id != bundle.offer.attempt_id),
+        "the joining device kept a journal row for a join it finished",
+    );
     for kind in DeviceJoinTransportKind::ALL {
         assert!(
             fixture.slot_bytes(&bundle, kind).await.is_none(),

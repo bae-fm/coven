@@ -258,16 +258,26 @@ impl DeviceJoinJournalDatabase {
         Ok(())
     }
 
-    pub(super) async fn complete_into(
-        &self,
-        database: &StoreDatabase,
-        current: &DeviceJoinJournalRecord,
-        activated: &DeviceJoinJournalRecord,
-    ) -> Result<(), DeviceJoinError> {
-        self.store
-            .complete_into(database, current, activated)
-            .await
-            .map_err(DeviceJoinError::from)
+    /// Drop this attempt's joiner row now the join has finished.
+    ///
+    /// The row held the join's last state so a repeated completion could tell
+    /// "already done" from "conflicting". The library's config file says that
+    /// now — it is written before this runs, and it is what the caller checks —
+    /// so the row has nothing left to answer and goes.
+    pub(super) fn retire(&self, current: &DeviceJoinJournalRecord) -> Result<(), DeviceJoinError> {
+        let payload = serde_json::to_string(current)?;
+        if !self
+            .store
+            .compare_and_forget(
+                &attempt_key(current.attempt_id),
+                current.progress.role_name(),
+                &payload,
+            )
+            .map_err(database_error)?
+        {
+            return Err(DeviceJoinError::JournalConflict);
+        }
+        Ok(())
     }
 }
 

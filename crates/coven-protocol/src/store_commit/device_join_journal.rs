@@ -8,8 +8,8 @@ use crate::provider::StoreMemberProviderAccessGrant;
 use crate::store_commit::device_join_exchange::{
     DeviceJoinAbandonment, DeviceJoinActivation, DeviceJoinOffer, DeviceJoinReadiness,
     DeviceProviderAccessRequest, DeviceProviderAdmissionApproval,
-    DeviceProviderAdmissionCompletion, DeviceRegistrationRequest, JoinedStore,
-    ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap, SamePrincipalDeviceJoin,
+    DeviceProviderAdmissionCompletion, DeviceRegistrationRequest, ProviderReadyDeviceBootstrap,
+    ProvisionalDeviceBootstrap, SamePrincipalDeviceJoin,
 };
 
 use super::*;
@@ -51,9 +51,6 @@ pub enum DeviceJoinStatus {
     },
     SamePrincipalCompleted {
         join: SamePrincipalDeviceJoin,
-    },
-    Activated {
-        store: JoinedStore,
     },
     Abandoned {
         abandonment: DeviceJoinAbandonment,
@@ -185,7 +182,6 @@ pub enum JoinerJoinProgress {
         readiness: DeviceJoinReadiness,
         activation: DeviceJoinActivation,
     },
-    Activated(JoinedStore),
     Abandoned(DeviceJoinAbandonment),
 }
 
@@ -371,11 +367,6 @@ pub(crate) fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoin
         }) => DeviceJoinStatus::AwaitingCompletion {
             activation: activation.clone(),
         },
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Activated(store)) => {
-            DeviceJoinStatus::Activated {
-                store: store.clone(),
-            }
-        }
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Abandoned(abandonment))
         | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Abandoned(abandonment)) => {
             DeviceJoinStatus::Abandoned {
@@ -444,9 +435,7 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
             activation,
             ..
         }) => Some(DeviceJoinAction::CompleteJoin(activation.clone())),
-        DeviceJoinRoleProgress::Joiner(
-            JoinerJoinProgress::Activated(_) | JoinerJoinProgress::Abandoned(_),
-        ) => None,
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Abandoned(_)) => None,
     }
 }
 

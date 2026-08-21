@@ -598,12 +598,40 @@ impl DeviceJoinClient {
         Ok(observation.observe_abandonment(abandonment).await?)
     }
 
+    /// The library this join produced, when it already exists.
+    ///
+    /// This is the joining device's finished marker. It used to be a journal
+    /// row that outlived the join it described; the config file is written by
+    /// the same completion, says the same thing, and is the file the library is
+    /// opened from — so the row was a second copy of it that nothing else read.
+    pub(crate) fn completed_library(&self) -> Result<Option<Config>, BootstrapError> {
+        let store_dir = self.layout.store_dir(&self.admission.store_id);
+        if !store_dir.config_path().exists() {
+            return Ok(None);
+        }
+        let config = Config::load_from_config_yaml(&store_dir)?;
+        if config.store_id != self.admission.store_id {
+            return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into());
+        }
+        Ok(Some(config))
+    }
+
     pub(crate) fn device_join_status(
         &self,
         attempt_id: coven_protocol::DeviceJoinAttemptId,
     ) -> Result<Option<coven_replication::sync::DeviceJoinStatus>, BootstrapError> {
         let pending = self.open_pending_journal()?;
         Ok(pending.status(attempt_id)?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_journal_records_for_test(
+        &self,
+    ) -> Result<
+        Vec<coven_protocol::store_commit::device_join_journal::DeviceJoinJournalRecord>,
+        BootstrapError,
+    > {
+        Ok(self.open_pending_journal()?.records()?)
     }
 
     #[cfg(test)]

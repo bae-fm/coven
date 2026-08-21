@@ -217,9 +217,6 @@ fn joiner_adjacent(previous: &JoinerJoinProgress, next: &JoinerJoinProgress) -> 
         ) | (
             JoinerJoinProgress::Ready(_),
             JoinerJoinProgress::ActivationObserved { .. }
-        ) | (
-            JoinerJoinProgress::ActivationObserved { .. },
-            JoinerJoinProgress::Activated(_)
         )
     )
 }

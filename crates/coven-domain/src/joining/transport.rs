@@ -493,6 +493,14 @@ impl DeviceJoinClient {
         let attempt_id = bundle.offer.attempt_id;
         let mut published = Vec::new();
 
+        // A finished join leaves no journal row, so the library it produced is
+        // what says it finished. Without this the loop below would read "no
+        // record of this attempt" as "not started" and begin it again.
+        if let Some(config) = self.completed_library()? {
+            transport.delete_attempt_slots().await?;
+            return Ok(DeviceJoinTransportOutcome::Joined(config));
+        }
+
         // Each pass takes the joiner journal's durable state and performs the
         // one step that follows it — never an earlier step, which the journal
         // refuses once it is past. A step that produced an artifact but died
@@ -658,9 +666,6 @@ impl DeviceJoinClient {
                 }
                 Some(DeviceJoinStatus::AwaitingCompletion { activation }) => {
                     return self.finish(transport, activation, on_progress).await;
-                }
-                Some(DeviceJoinStatus::Activated { store }) => {
-                    return self.finish(transport, store.activation, on_progress).await;
                 }
                 Some(_) => {
                     return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into())

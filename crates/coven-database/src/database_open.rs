@@ -333,7 +333,6 @@ impl DatabaseCore {
         Ok(DatabaseCore::new(
             store_dir,
             conn,
-            connection_durability,
             hlc,
             synced_tables,
             schema_version,
@@ -400,7 +399,6 @@ impl DatabaseCore {
         Ok(DatabaseCore::new(
             store_dir,
             conn,
-            crate::connection_io::ConnectionDurability::Full,
             hlc,
             synced_tables,
             schema_version,
