@@ -717,17 +717,30 @@ impl<'a> DeviceJoinTransport<'a> {
     /// Observe one artifact without imposing a phase deadline. A concurrent
     /// operation owns the deadline; this observation exists to interrupt that
     /// operation when a terminal artifact appears.
+    ///
+    /// This is the longest-running wait in a join and the one least likely to
+    /// find anything: it watches for the owner cancelling, for the whole join,
+    /// alongside the snapshot download and the install. At the asked-for
+    /// cadence that is a provider read every hundred milliseconds for minutes
+    /// to answer "not yet" — which is exactly what [`JoinPollBackoff`] was
+    /// introduced to stop for the phase waits, and this one was left behind
+    /// because it takes a bare interval rather than a timing. It takes the
+    /// timing now and backs off like the others: the first look is immediate,
+    /// so a cancellation still interrupts promptly, and the cadence settles at
+    /// the same ceiling instead of running flat out under a several-second
+    /// download.
     pub async fn observe_artifact<T: DeviceJoinArtifact>(
         &self,
-        poll: Duration,
+        timing: DeviceJoinTransportTiming,
     ) -> Result<T, DeviceJoinTransportError> {
         let kind = T::KIND;
+        let mut poll = timing.polls();
         loop {
             if let Some(action) = self.read(kind).await? {
                 return T::from_action(action)
                     .ok_or(DeviceJoinTransportError::KindMismatch { kind });
             }
-            tokio::time::sleep(poll).await;
+            tokio::time::sleep(poll.next()).await;
         }
     }
 

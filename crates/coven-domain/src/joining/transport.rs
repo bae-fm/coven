@@ -479,7 +479,7 @@ impl DeviceJoinClient {
         let transport = DeviceJoinTransport::open(&storage, bundle, DeviceJoinRoles::joiner())?;
         let joining =
             self.drive_join_via_transport(&transport, bundle, timing, &on_progress, cancel);
-        let cancellation = transport.observe_artifact::<DeviceJoinCancellation>(timing.poll);
+        let cancellation = transport.observe_artifact::<DeviceJoinCancellation>(timing);
         tokio::pin!(joining);
         tokio::pin!(cancellation);
         tokio::select! {

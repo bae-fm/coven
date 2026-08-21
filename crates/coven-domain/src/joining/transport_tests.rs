@@ -2383,3 +2383,134 @@ async fn join_membership_operations(store_id: &str, extra_members: usize) -> usi
             .filter(|prefix| counted(prefix))
             .count()
 }
+
+/// What a join spends on the transport when it never waits.
+///
+/// A device join's transport operations divide into two kinds, and only one of
+/// them is the protocol. The artifacts are fixed: each one the exchange moves
+/// is read once, and a joining device that resumes republishes the artifact it
+/// had already published, because the joiner journal advances when the artifact
+/// is *prepared* and a crash between preparing and publishing has to be
+/// recoverable — so the republish is the recovery path, and the read that
+/// follows its slot collision is what confirms the slot holds the same
+/// transfer. The rest is polling, and polling is time, not protocol.
+///
+/// This is the shape with no waiting in it at all: the joining device publishes
+/// its request and dies, the owner admits it without needing the joiner back,
+/// and the joining device then runs once with every artifact it asks for
+/// already at its slot. Whatever it spends here it spends on every join.
+///
+/// Only the artifacts are counted here, and exactly: a new read in the exchange
+/// is a change to the protocol and should have to be written down. What the
+/// watch spends is the join's duration divided by its cadence, which no count
+/// taken over a leg this short can tell apart from a watch that never backs
+/// off — `the_cancellation_watch_backs_off_instead_of_polling_flat_out` settles
+/// that on a clock it controls.
+#[test]
+fn a_join_that_never_waits_spends_a_fixed_number_of_transport_operations() {
+    on_a_deep_stack(run_a_join_that_never_waits_spends_a_fixed_number_of_transport_operations);
+}
+
+async fn run_a_join_that_never_waits_spends_a_fixed_number_of_transport_operations() {
+    let fixture = TransportFixture::build("device-join-no-wait-budget").await;
+    fixture.publish_owner_snapshot().await;
+    let bundle = fixture.begin().await;
+    let cancel = never_cancelled();
+    let join_once = |timing| {
+        let client = fixture.client();
+        let bundle = &bundle;
+        let cancel = &cancel;
+        async move {
+            client
+                .join_via_transport(bundle, timing, no_join_progress(), cancel)
+                .await
+        }
+    };
+
+    assert_joiner_waited_for(
+        Box::pin(join_once(one_shot())).await,
+        DeviceJoinTransportKind::SamePrincipalJoin,
+    );
+    activated(fixture.drive_owner_with(&bundle, one_shot()).await);
+
+    // From here the owner is done, so nothing the joining device asks for is
+    // still on its way and every operation it makes is its own.
+    fixture.home.clear_exact_reads();
+    joined(Box::pin(join_once(timing())).await);
+
+    let (watched, artifacts): (Vec<_>, Vec<_>) = fixture
+        .home
+        .exact_reads()
+        .into_iter()
+        .filter_map(|slot| {
+            slot.logical_key()
+                .strip_prefix("store-v1/device-join-transport/")
+                .map(|tail| tail.to_string())
+        })
+        .partition(|tail| tail.ends_with("/cancellation.json"));
+
+    // Six artifacts the exchange moves, the request this resume republishes and
+    // the read that confirms its slot, the step waits' first look at the
+    // abandonment slot, and the teardown's probe of every slot an attempt can
+    // hold before it deletes the ones it finds.
+    assert_eq!(
+        artifacts.len(),
+        21,
+        "the joining device made {} artifact operations on a join with no waiting in it: {artifacts:?}",
+        artifacts.len(),
+    );
+    assert!(
+        !watched.is_empty(),
+        "the cancellation watch never looked, so the split above proves nothing",
+    );
+}
+
+/// The watch that runs alongside a whole join backs off instead of asking at
+/// the cadence a prompt-response wait wants.
+///
+/// It is the longest-running wait in a join and the one least likely to find
+/// anything: it watches for the owner cancelling, through the snapshot download
+/// and the install. Asking every hundred milliseconds for all of that is a
+/// provider read ten times a second to be told "not yet" — and a provider that
+/// rate-limits them makes the join slower, not faster.
+///
+/// Counted on a clock this test controls, because the number is the span
+/// divided by the cadence and no wall-clock run of a fixture can hold either
+/// still. Over ten seconds the interactive cadence would look a hundred times
+/// flat out; backing off to the ceiling it looks about nine.
+#[test]
+fn the_cancellation_watch_backs_off_instead_of_polling_flat_out() {
+    on_a_deep_stack(run_the_cancellation_watch_backs_off_instead_of_polling_flat_out);
+}
+
+async fn run_the_cancellation_watch_backs_off_instead_of_polling_flat_out() {
+    let fixture = TransportFixture::build("device-join-watch-cadence").await;
+    let bundle = fixture.begin().await;
+    let transport = fixture.transport(&bundle);
+
+    tokio::time::pause();
+    fixture.home.clear_exact_reads();
+    let watched = tokio::time::timeout(
+        Duration::from_secs(10),
+        transport.observe_artifact::<coven_replication::sync::DeviceJoinCancellation>(
+            DeviceJoinTransportTiming::interactive(),
+        ),
+    )
+    .await;
+    assert!(
+        watched.is_err(),
+        "nobody cancelled, so the watch has to be the thing that timed out"
+    );
+
+    let looks = fixture
+        .home
+        .exact_reads()
+        .into_iter()
+        .filter(|slot| slot.logical_key().ends_with("/cancellation.json"))
+        .count();
+    assert!(
+        (2..=20).contains(&looks),
+        "the watch looked {looks} times over ten seconds; at the interactive \
+         cadence that is either flat-out polling or a watch that stopped looking",
+    );
+}
