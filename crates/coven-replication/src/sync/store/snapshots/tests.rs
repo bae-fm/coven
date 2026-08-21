@@ -578,3 +578,240 @@ async fn installable_selection_reads(store_id: &str, generations: usize) -> usiz
             .filter(|prefix| counted(prefix))
             .count()
 }
+
+/// Two owner devices publish snapshots, and the reader takes the one whose
+/// coverage reaches furthest — not the one holding the newest generation.
+///
+/// A single-owner store cannot tell those two apart: with one stream, "widest
+/// coverage" and "highest generation" name the same snapshot every time. The
+/// round logic in `StoreSnapshotDescent` that descends several authors' streams
+/// together, and the coverage domination that decides between them, only do
+/// anything once there are several streams, and neither had a test.
+#[tokio::test]
+async fn selection_takes_the_widest_coverage_across_two_owner_devices() {
+    let shallow = two_owner_selection("two-owner-selection-shallow", 1).await;
+    let deep = two_owner_selection("two-owner-selection-deep", 4).await;
+
+    assert_eq!(
+        shallow.reads, deep.reads,
+        "selecting across two owners cost {} snapshot operations over four published \
+         rounds against {} over one, so a round still descends the generations under \
+         the newest",
+        deep.reads, shallow.reads,
+    );
+    // One listing of the snapshot prefix, the newest generation of each owner's
+    // stream, and one older generation of the winner's own stream that
+    // verifying the winner reads back. None of the four scales with how many
+    // generations either owner has published.
+    assert_eq!(
+        deep.reads, 4,
+        "selecting across two owners cost {} snapshot operations, not the listing, \
+         one candidate per owner, and the one generation verifying the winner reads",
+        deep.reads,
+    );
+
+    for selection in [&shallow, &deep] {
+        assert_eq!(
+            selection.author,
+            SelectedAuthor::Wider,
+            "the picker took the narrower owner's snapshot",
+        );
+        // The narrower owner publishes three snapshots to the wider owner's one,
+        // so it also holds the highest generation the store has. Selecting below
+        // that is what says coverage decided this and generation did not.
+        assert!(
+            selection.selected_generation < selection.narrower_newest_generation,
+            "the picker took generation {} while the narrower owner held {}, so the \
+             two are not being told apart",
+            selection.selected_generation,
+            selection.narrower_newest_generation,
+        );
+    }
+}
+
+/// What one run of [`two_owner_selection`] observed.
+struct TwoOwnerSelection {
+    /// Provider operations the selection spent under the snapshot prefix.
+    reads: usize,
+    author: SelectedAuthor,
+    selected_generation: u64,
+    /// The newest generation the narrower owner published, which is also the
+    /// newest generation in the store.
+    narrower_newest_generation: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SelectedAuthor {
+    Wider,
+    Narrower,
+}
+
+/// Build a store with two owner devices, have each publish over `rounds` with
+/// one reaching further than the other, and select over both.
+async fn two_owner_selection(store_id: &str, rounds: usize) -> TwoOwnerSelection {
+    let home = InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let member = UserKeypair::generate();
+    let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+
+    let (owner_db, owner_dir) = open(Path::new(":memory:"), store_id);
+    let (store, connection) = crate::sync::test_helpers::TestStore::create_with_connection(
+        &owner_db,
+        owner_dir.clone(),
+        store_id,
+        owner.clone(),
+        Arc::new(home.clone()),
+    )
+    .await
+    .expect("create the two-owner test Store");
+
+    let member_pubkey = coven_keys::keys::public_key_hex(&member);
+    store
+        .admit_member(
+            &owner_db,
+            owner_dir.clone(),
+            &owner,
+            &member_pubkey,
+            None,
+            coven_protocol::membership::MemberRole::Member,
+            &encryption,
+            "Two Owner Store",
+        )
+        .await
+        .expect("admit the second device's identity");
+    let (member_db, member_dir) = open(Path::new(":memory:"), &format!("{store_id}-second"));
+    store
+        .activate_joined_device(
+            &owner_db,
+            owner_dir.clone(),
+            &member_db,
+            member_dir.clone(),
+            &member,
+            "2026-07-21T00:00:00Z",
+        )
+        .await
+        .expect("activate the second device");
+    store
+        .promote_active_member_fixture(
+            &owner_db,
+            owner_dir.clone(),
+            &member_db,
+            member_dir.clone(),
+            &owner,
+            &member,
+            &encryption,
+        )
+        .await
+        .expect("promote the second device to Owner");
+
+    // Both owners publish, round for round. The first owner writes a commit
+    // before each of its snapshots and the second never pulls again, so the
+    // first owner's coverage runs ahead of the second's and strictly dominates
+    // it — which is what makes the two candidates comparable at all rather than
+    // settled by the snapshot-hash tie-break.
+    let first = store
+        .bind_device_in(&owner_db, owner_dir.clone(), &owner)
+        .await
+        .expect("bind the first owner device");
+    let second = store
+        .bind_device_in(&member_db, member_dir.clone(), &member)
+        .await
+        .expect("bind the second owner device");
+    let mut narrower_newest_generation = 0;
+    for round in 0..rounds {
+        let changeset = owner_db
+            .capture_test_changeset(&[&format!(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('n{round}', 'Round {round}', NULL, 1, \
+                 '000000000{}000-0000-dev1', '2026-01-01')",
+                round + 1,
+            )])
+            .await;
+        let previous = first
+            .latest_local_store_position()
+            .await
+            .expect("read the first owner's Store position")
+            .map_or(0, |position| position.coord.sequence());
+        first
+            .publish_changeset_after_for_test(changeset, previous)
+            .await
+            .expect("publish a commit the first owner's snapshot covers");
+        first
+            .publish_snapshot(
+                format!("first owner image {round}").into_bytes(),
+                CommitFrontier::from_refs(
+                    first
+                        .materialized_frontier()
+                        .await
+                        .expect("read the first owner's frontier"),
+                )
+                .expect("the materialized frontier names valid author streams"),
+            )
+            .await
+            .expect("publish the first owner's snapshot");
+        // Three to the first owner's one, so the narrower owner is also the one
+        // holding the store's highest generation.
+        for extra in 0..3 {
+            let meta = second
+                .publish_snapshot(
+                    format!("second owner image {round}.{extra}").into_bytes(),
+                    CommitFrontier::from_refs(
+                        second
+                            .materialized_frontier()
+                            .await
+                            .expect("read the second owner's frontier"),
+                    )
+                    .expect("the materialized frontier names valid author streams"),
+                )
+                .await
+                .expect("publish the second owner's snapshot");
+            narrower_newest_generation = meta.generation;
+        }
+    }
+
+    let root = first.store_root().clone();
+    let mut history = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
+        .open_pinned(connection.as_ref(), &root)
+        .await
+        .expect("open the snapshot history authority");
+    let owners = store_database(&owner_db)
+        .activated_store_device_registration_records()
+        .await
+        .expect("load the store's activated device registrations");
+    assert_eq!(owners.len(), 2, "the fixture built two owner devices");
+
+    home.clear_exact_reads();
+    home.clear_exact_listings();
+    let selected = Box::pin(
+        history.select_listed_installable_store_snapshot(
+            owners
+                .iter()
+                .map(|registration| (registration.reference(), registration.value())),
+            &mut crate::sync::store::commit_verification::merge_history::weigh_every_snapshot,
+        ),
+    )
+    .await
+    .expect("select an installable snapshot")
+    .expect("a published snapshot is installable");
+
+    let counted = |key: &str| key.starts_with("store-v1/snapshots/");
+    TwoOwnerSelection {
+        reads: home
+            .exact_reads()
+            .iter()
+            .filter(|slot| counted(slot.logical_key()))
+            .count()
+            + home
+                .exact_listed_prefixes()
+                .iter()
+                .filter(|prefix| counted(prefix))
+                .count(),
+        author: if selected.snapshot.meta.author_registration.device_id == first.typed_device_id() {
+            SelectedAuthor::Wider
+        } else {
+            SelectedAuthor::Narrower
+        },
+        selected_generation: selected.snapshot.reference.generation,
+        narrower_newest_generation,
+    }
+}
