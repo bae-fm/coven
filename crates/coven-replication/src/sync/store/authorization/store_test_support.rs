@@ -822,6 +822,14 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(crate::sync::store::snapshots::SnapshotError::from)?;
+        // Production publishes inside a cycle whose pull has already seeded the
+        // verifier from this device's retained rows. A test entry point that
+        // skipped it would measure a verifier that has read nothing, and count
+        // reads production never makes.
+        writer
+            .seed_retained_history()
+            .await
+            .map_err(crate::sync::store::snapshots::SnapshotError::from)?;
         writer
             .snapshots()
             .push_store_snapshot(

@@ -1671,3 +1671,82 @@ async fn a_cycle_with_something_to_say_acknowledges_it() {
         "and the Store settles again once the news is acknowledged",
     );
 }
+
+impl AcknowledgedHistory {
+    /// Provider operations one snapshot publication asks for.
+    async fn snapshot_publication_requests(&self) -> u64 {
+        let image_dir = tempfile::tempdir().expect("snapshot image dir");
+        let image = coven_database::StoreDatabase::new(&self.db)
+            .capture_snapshot_image_for_test(
+                self.device.store_root().clone(),
+                image_dir.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("capture a snapshot image");
+        let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+            coven_database::StoreDatabase::new(&self.db)
+                .materialized_frontier()
+                .await
+                .expect("materialized frontier"),
+        )
+        .expect("frontier");
+        let before = self._store.provider_requests_issued();
+        self.device
+            .publish_snapshot(image, coverage)
+            .await
+            .expect("publish the snapshot");
+        self._store.provider_requests_issued() - before
+    }
+
+    /// Let both devices see the snapshot just published, and this one advance
+    /// its replay baseline onto the acknowledgement it makes of it — which is
+    /// what retires the retained rows the next composition would otherwise
+    /// have read its acknowledgements out of.
+    async fn settle_onto_the_published_snapshot(&self) {
+        self.device.run_cycle(None).await.expect("settle the cycle");
+        self.peer.run_cycle(None).await.expect("the peer settles");
+        self.device
+            .run_cycle(None)
+            .await
+            .expect("stand on the snapshot just acknowledged");
+    }
+}
+
+/// Publishing a snapshot asks the provider for the objects it writes, and
+/// nothing that depends on how much history stands behind it or how many
+/// snapshots came before.
+///
+/// The composition it runs is the same one snapshot verification runs, and it
+/// fails the same way: a summary states every device's acknowledgement chain
+/// from sequence one, the walk that builds it stops at the first
+/// acknowledgement the verifier already holds, and a device that has advanced
+/// its baseline holds none of them — the rows a verifier seeds from are the
+/// retained materializations, which the advance retires. Measured against a
+/// build without the baseline's summary admitted, publishing climbed on both
+/// axes at once: 21 requests at four rounds of history rising to 43 by the
+/// fourth generation over it. Live, publishing generation 2 of a five-release
+/// library cost 186 requests and 23 seconds.
+///
+/// So this is a budget, held at an exact number rather than a bound: the
+/// publication writes what it writes, and asks nothing per commit, per
+/// acknowledgement, or per generation.
+#[tokio::test]
+async fn publishing_a_snapshot_asks_for_what_it_writes_and_nothing_per_commit() {
+    /// Allocate and write the image, the membership rollup and the metadata,
+    /// resolve the predecessor slot, and read the membership the rollup states.
+    /// Every one of them is a fact about this publication, not about the past.
+    const PUBLICATION_REQUESTS: u64 = 17;
+
+    for rounds in [1u64, 4, 8] {
+        let fixture = AcknowledgedHistory::publish(rounds).await;
+        for generation in 0..4 {
+            assert_eq!(
+                fixture.snapshot_publication_requests().await,
+                PUBLICATION_REQUESTS,
+                "generation {generation} over {rounds} rounds of history",
+            );
+            fixture.settle_onto_the_published_snapshot().await;
+        }
+    }
+}
