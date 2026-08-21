@@ -7013,3 +7013,146 @@ async fn a_journal_record_this_binary_cannot_read_does_not_stop_the_next_join() 
         crate::sync::test_helpers::pubkey_hex(&member),
     );
 }
+
+/// What a joined device's first cycle spends on snapshots does not grow with
+/// how many the Store has published.
+///
+/// A snapshot stream is generation-linked, so following one costs a read per
+/// generation ever published. The device that pays that in full is the one
+/// that has just joined: nothing it holds resumes a walk, so every question it
+/// asks about a snapshot climbed from generation zero to reach it — including
+/// "load the snapshot I already stand on", which names its own coordinate and
+/// never needed the climb.
+#[tokio::test]
+async fn a_joined_device_reads_the_same_snapshots_however_many_generations_stand() {
+    let shallow = Box::pin(first_cycle_snapshot_operations(1)).await;
+    let deep = Box::pin(first_cycle_snapshot_operations(6)).await;
+
+    assert_eq!(
+        shallow, deep,
+        "a first cycle over six published rounds spent {deep} snapshot \
+         operations against {shallow} over one, so it still climbs the stream",
+    );
+    // Listing the snapshot prefix and reading the newest generation it names,
+    // which is how the device finds the membership rollup; then that same
+    // object again, read at its own coordinate, when the device stands on the
+    // snapshot it installed. Written as a number rather than a bound because a
+    // budget nobody wrote down is one nobody notices doubling.
+    assert_eq!(
+        deep, 3,
+        "a joined device's first cycle spends {deep} snapshot operations, not \
+         the listing and the two reads of the generation it names",
+    );
+}
+
+/// Publish `generations` Store snapshots, each covering one more of the owner's
+/// own commits than the last, and acknowledged by the cycle that follows it.
+async fn publish_snapshot_generations(
+    storage: &std::sync::Arc<TestStore>,
+    owner_db: &Database,
+    owner_db_store_dir: &StoreDir,
+    generations: usize,
+) {
+    let image_dir = tempfile::tempdir().expect("snapshot image directory");
+    for generation in 0..generations {
+        owner_db
+            .execute_test_host_write(&format!(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('gen-{generation}', 'Generation {generation}', NULL, 1, \
+                 '{:013}-0000-G', '2026-01-01')",
+                (generation + 2) * 1000
+            ))
+            .await;
+        let device = storage
+            .open_into(owner_db, owner_db_store_dir.clone())
+            .await
+            .expect("open the owner Store");
+        device
+            .run_cycle(None)
+            .await
+            .expect("publish the owner's row");
+        let store_database = StoreDatabase::new(owner_db);
+        let image = store_database
+            .capture_snapshot_image_for_test(
+                storage.root().clone(),
+                image_dir.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("capture the snapshot image");
+        let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+            store_database
+                .materialized_frontier()
+                .await
+                .expect("read the owner's materialized frontier"),
+        )
+        .expect("shape the owner's materialized frontier");
+        device
+            .publish_snapshot(image, coverage)
+            .await
+            .expect("publish a Store snapshot generation");
+    }
+}
+
+/// Provider operations under the snapshot prefix that a freshly joined device's
+/// first cycle issues, over a Store that has published `generations` of them.
+async fn first_cycle_snapshot_operations(generations: usize) -> usize {
+    let owner = UserKeypair::generate();
+    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let storage =
+        cycle_test_store(&owner_db, owner_db_store_dir.clone(), &owner, home.clone()).await;
+    publish_snapshot_generations(&storage, &owner_db, &owner_db_store_dir, generations).await;
+
+    let joining = UserKeypair::generate();
+    storage
+        .admit_member(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &owner,
+            &crate::sync::test_helpers::pubkey_hex(&joining),
+            None,
+            coven_protocol::membership::MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Test Store",
+        )
+        .await
+        .expect("admit the joining member");
+    let joined = storage
+        .activate_joined_device_from_snapshot(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            crate::sync::test_helpers::test_store_dir(),
+            &joining,
+            T0,
+            crate::sync::test_helpers::test_synced_tables(),
+            crate::sync::test_helpers::test_migrations(),
+            SCHEMA_VERSION,
+        )
+        .await
+        .expect("join a device from the published snapshot");
+
+    home.clear_exact_reads();
+    home.clear_exact_listings();
+    joined
+        .run_cycle(None)
+        .await
+        .expect("run the joined device's first cycle");
+    snapshot_operations(&home)
+}
+
+/// Reads and listings under the Store snapshot prefix, which is what choosing a
+/// snapshot spends and nothing else does.
+fn snapshot_operations(home: &InMemoryCloudHome) -> usize {
+    let counted = |key: &str| key.starts_with("store-v1/snapshots/");
+    home.exact_reads()
+        .iter()
+        .filter(|slot| counted(slot.logical_key()))
+        .count()
+        + home
+            .exact_listed_prefixes()
+            .iter()
+            .filter(|prefix| counted(prefix))
+            .count()
+}

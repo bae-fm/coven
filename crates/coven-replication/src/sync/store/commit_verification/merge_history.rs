@@ -66,7 +66,8 @@ pub(crate) use promotion::{
     VerifiedMergeConflictResolutionActivation, VerifiedOwnerPromotionRequestActivation,
 };
 pub(crate) use snapshots::{
-    SelectedAcknowledgedStoreSnapshot, SelectedInstallableStoreSnapshot, SelectedStoreSnapshot,
+    weigh_every_snapshot, SelectedAcknowledgedStoreSnapshot, SelectedInstallableStoreSnapshot,
+    SelectedStoreSnapshot, StoreSnapshotDescentStep,
 };
 pub use successor::MergeHistorySuccessorEvidence;
 pub use successor::PreparedMergeHistorySuccessor;
@@ -529,14 +530,13 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(())
     }
 
-    /// Whether this device's installed replay baseline already stands at or
-    /// past `coverage`.
+    /// The coverage this device's installed replay baseline stands at.
     ///
-    /// A snapshot covering no more than the baseline has nothing this device
-    /// can verify it against — the history behind it was retired — and nothing
-    /// to offer it, because the baseline restates at least as much.
-    pub(crate) fn replay_baseline_stands_past(&self, coverage: &CommitFrontier) -> bool {
-        !coverage.covers(self.history.baseline.coverage())
+    /// A snapshot covering no more than this has nothing this device can verify
+    /// it against — the history behind it was retired — and nothing to offer
+    /// it, because the baseline restates at least as much.
+    pub(crate) fn replay_baseline_coverage(&self) -> &CommitFrontier {
+        self.history.baseline.coverage()
     }
 
     /// Whether this device's installed replay baseline already restates
@@ -567,7 +567,19 @@ impl<'a> MergeHistoryVerifier<'a> {
             .newest_acknowledged_snapshot(registration)
     }
 
-    /// The published snapshot `locator` names, from its author's stream.
+    /// The published snapshot `locator` names, read at the coordinate it names.
+    ///
+    /// The locator comes out of an acknowledgement this device published, so it
+    /// carries the snapshot's exact object and semantic hash already — there is
+    /// nothing about it left to establish by following the stream that leads to
+    /// it, and following one costs a read per generation published under it.
+    /// The object is authenticated exactly as a stream walk authenticates it,
+    /// against this Store's root, its author's registration and signature, and
+    /// the generation its own key claims.
+    ///
+    /// `None` when the provider no longer holds it: an acknowledged snapshot is
+    /// a claim about what this device stands on, not a promise that the cloud
+    /// still has it.
     pub(crate) async fn load_acknowledged_snapshot(
         &mut self,
         locator: &store_commit::StoreSnapshotLocator,
@@ -576,16 +588,25 @@ impl<'a> MergeHistoryVerifier<'a> {
         Option<coven_database::PublishedStoreSnapshot>,
         crate::sync::store::snapshots::SnapshotError,
     > {
-        Ok(self
-            .load_store_snapshot_stream(&locator.author_registration, author)
-            .await?
-            .into_iter()
-            .find(|snapshot| snapshot.reference == locator.snapshot))
+        let (reference, meta) = match self
+            .commit_verifier
+            .load_store_snapshot(&locator.author_registration, author, &locator.snapshot)
+            .await
+        {
+            Ok(loaded) => loaded,
+            Err(StoreObjectError::Storage(StorageError::NotFound(_))) => return Ok(None),
+            Err(error) => return Err(crate::sync::store::snapshots::SnapshotError::from(error)),
+        };
+        Ok(Some(coven_database::PublishedStoreSnapshot {
+            successor_slot: meta.successor.next_slot.clone(),
+            reference,
+            meta,
+        }))
     }
 
     /// Adopt this device's own published snapshots as the walked prefix of its
-    /// snapshot stream, so choosing what to acknowledge does not re-read every
-    /// generation it has ever published.
+    /// snapshot stream, so reclaim's choice does not re-read every generation
+    /// it has ever published.
     pub(crate) fn admit_published_snapshots(
         &mut self,
         snapshots: Vec<coven_database::PublishedStoreSnapshot>,

@@ -535,15 +535,21 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             .into_iter()
             .filter(|(_, registration)| membership.is_owner_now(&registration.author_pubkey))
             .collect::<Vec<_>>();
-        let selected =
-            Box::pin(history_verifier.select_listed_installable_store_snapshot(&registrations))
-                .await
-                .map_err(SnapshotError::from)?
-                .ok_or_else(|| {
-                    SnapshotError::Bucket(coven_protocol::objects::StorageError::NotFound(
-                        "Store snapshot stream".to_string(),
-                    ))
-                })?;
+        let selected = Box::pin(
+            history_verifier.select_listed_installable_store_snapshot(
+                registrations
+                    .iter()
+                    .map(|(registration_ref, registration)| (registration_ref, registration)),
+                &mut crate::sync::store::commit_verification::merge_history::weigh_every_snapshot,
+            ),
+        )
+        .await
+        .map_err(SnapshotError::from)?
+        .ok_or_else(|| {
+            SnapshotError::Bucket(coven_protocol::objects::StorageError::NotFound(
+                "Store snapshot stream".to_string(),
+            ))
+        })?;
         let snapshot = selected.snapshot;
         if snapshot.meta.schema_version > binary_schema_version {
             return Err(SnapshotError::SchemaTooNew {

@@ -138,6 +138,97 @@ fn take_maximal_eligible<Verified>(
     })?)
 }
 
+/// What a descent does with one candidate it loaded.
+///
+/// A snapshot stream's coverage grows with its generation, so a candidate too
+/// far along for the question being asked has a predecessor that may not be,
+/// while a candidate that has fallen behind the question has no predecessor
+/// that could catch up. Those are the two directions, and a caller that cares
+/// about neither weighs everything.
+pub(crate) enum StoreSnapshotDescentStep {
+    /// Weigh it against this round's other streams.
+    Weigh,
+    /// Ahead of what is being asked; ask the generation below it instead.
+    Descend,
+    /// Neither it nor anything below it in this stream can answer.
+    Abandon,
+}
+
+/// Weigh whatever the listing names, which is what a caller with no question
+/// about the candidate itself wants.
+pub(crate) fn weigh_every_snapshot(
+    _: &coven_database::PublishedStoreSnapshot,
+) -> StoreSnapshotDescentStep {
+    StoreSnapshotDescentStep::Weigh
+}
+
+/// One author's listed snapshot stream, descended newest generation first.
+struct DescendedSnapshotStream {
+    registration_ref: StoreDeviceRegistrationRef,
+    registration: StoreDeviceRegistration,
+    generations: std::vec::IntoIter<(u64, coven_protocol::objects::ObjectSlot)>,
+}
+
+/// Every author's listed snapshot stream, descended together a round at a time.
+///
+/// A round is one candidate per stream — the newest generation that stream has
+/// not offered yet and that the caller wants weighed. A round the selection
+/// turns away entirely is followed by the round below it, which is what keeps
+/// the one legitimate per-generation fallback: an author excluded after
+/// publishing disqualifies its newest snapshots while its older ones, whose
+/// coverage predates the exclusion, remain installable.
+struct StoreSnapshotDescent {
+    streams: Vec<DescendedSnapshotStream>,
+}
+
+impl StoreSnapshotDescent {
+    /// The next round of candidates, or an empty round when every stream has
+    /// run out of generations worth asking about.
+    async fn next_round(
+        &mut self,
+        verifier: &StoreCommitVerifier<'_>,
+        weigh: &mut (dyn FnMut(&coven_database::PublishedStoreSnapshot) -> StoreSnapshotDescentStep
+                  + Send),
+    ) -> Result<Vec<coven_database::PublishedStoreSnapshot>, StorePullError> {
+        let mut candidates = Vec::new();
+        for stream in &mut self.streams {
+            let mut abandoned = false;
+            for (generation, slot) in stream.generations.by_ref() {
+                let Some(snapshot) = verifier
+                    .load_listed_store_snapshot(
+                        &stream.registration_ref,
+                        &stream.registration,
+                        generation,
+                        &slot,
+                    )
+                    .await
+                    .map_err(StorePullError::Object)?
+                else {
+                    // The listing named a slot the provider no longer holds. It
+                    // was a picture of a moment and this is what a stale one
+                    // looks like; the generations under it still stand.
+                    continue;
+                };
+                match weigh(&snapshot) {
+                    StoreSnapshotDescentStep::Weigh => {
+                        candidates.push(snapshot);
+                        break;
+                    }
+                    StoreSnapshotDescentStep::Descend => {}
+                    StoreSnapshotDescentStep::Abandon => {
+                        abandoned = true;
+                        break;
+                    }
+                }
+            }
+            if abandoned {
+                stream.generations = Vec::new().into_iter();
+            }
+        }
+        Ok(candidates)
+    }
+}
+
 impl<'a> MergeHistoryVerifier<'a> {
     /// The newest snapshot this device can install as its starting state.
     ///
@@ -207,100 +298,88 @@ impl<'a> MergeHistoryVerifier<'a> {
         take_maximal_eligible(eligible, maximal_rejection, selector)
     }
 
-    /// The newest installable snapshot each owner has published, found by
-    /// listing rather than by following every stream to its end.
+    /// The maximal installable snapshot, chosen out of listed streams rather
+    /// than followed to.
     ///
-    /// A device join used to enumerate candidates the only way a
-    /// generation-linked stream can be followed: a read per generation the
-    /// Store has ever published, per owner device, before the first candidate
-    /// could even be weighed. That is a walk of history to answer a question
-    /// about its newest point, and it is what the join budget forbids.
+    /// `weigh` says which candidate a stream is being asked about; the callers
+    /// that ask about all of them pass [`weigh_every_snapshot`].
+    pub(crate) async fn select_listed_installable_store_snapshot<'r>(
+        &mut self,
+        registrations: impl IntoIterator<
+            Item = (&'r StoreDeviceRegistrationRef, &'r StoreDeviceRegistration),
+        >,
+        weigh: &mut (dyn FnMut(&coven_database::PublishedStoreSnapshot) -> StoreSnapshotDescentStep
+                  + Send),
+    ) -> Result<Option<SelectedInstallableStoreSnapshot>, StorePullError> {
+        let mut descent = self.listed_store_snapshot_descent(registrations).await?;
+        let mut rejection = None;
+        loop {
+            let candidates = descent.next_round(&self.commit_verifier, weigh).await?;
+            if candidates.is_empty() {
+                return rejection.map_or(Ok(None), Err);
+            }
+            match Box::pin(self.select_maximal_installable_store_snapshot(candidates)).await {
+                Ok(selected) => return Ok(selected),
+                // Every candidate in this round was turned away for a reason
+                // particular to it, so the round below it is worth asking. The
+                // first round's rejection is the one reported: it is the
+                // maximal candidate's, which is what a caller asking why it got
+                // nothing wants to read.
+                Err(error) if disqualifies_one_candidate(&error) => {
+                    rejection.get_or_insert(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Every listed snapshot stream of `registrations`, ready to be descended a
+    /// round at a time.
     ///
-    /// Nothing an installing device concludes rests on having followed the
-    /// ladder. A snapshot's authority is decided entirely against the Store's
-    /// own verified history — its coverage, the device state and membership at
-    /// that coverage, its author being an owner active there, and its history
+    /// A device used to enumerate candidates the only way a generation-linked
+    /// stream can be followed: a read per generation the Store has ever
+    /// published, per author device, before the first candidate could even be
+    /// weighed. That is a walk of history to answer a question about its newest
+    /// point, and it is what the cycle and join budgets forbid.
+    ///
+    /// Nothing a reader concludes rests on having followed the ladder. A
+    /// snapshot's authority is decided entirely against the Store's own
+    /// verified history — its coverage, the device state and membership at that
+    /// coverage, its author being an owner active there, and its history
     /// summary recomposing — and none of that consults the generation below it.
     /// What the ladder establishes is the *enumeration*: that these are all the
     /// generations, in order. So the listing takes over the enumeration, and
     /// each candidate it names is authenticated exactly as a walk would have
     /// authenticated it.
-    ///
-    /// Choosing between the candidates is
-    /// [`select_maximal_installable_store_snapshot`](Self::select_maximal_installable_store_snapshot)
-    /// unchanged. This only decides which candidates it is given: one per
-    /// owner, its newest, rather than every generation that owner ever
-    /// published. It steps a generation down and asks again only when the store
-    /// turns all of them away — an author excluded after publishing disqualifies
-    /// its newest snapshots while its older ones, whose coverage predates the
-    /// exclusion, remain installable, and that fallback is worth keeping. So
-    /// the reads are one per owner, plus one per round of refusals, and never
-    /// one per generation that stands.
-    pub(crate) async fn select_listed_installable_store_snapshot(
-        &mut self,
-        owners: &[(
-            StoreDeviceRegistrationRef,
-            coven_protocol::store_commit::StoreDeviceRegistration,
-        )],
-    ) -> Result<Option<SelectedInstallableStoreSnapshot>, StorePullError> {
+    async fn listed_store_snapshot_descent<'r>(
+        &self,
+        registrations: impl IntoIterator<
+            Item = (&'r StoreDeviceRegistrationRef, &'r StoreDeviceRegistration),
+        >,
+    ) -> Result<StoreSnapshotDescent, StorePullError> {
         let listed = self
             .commit_verifier
             .listed_store_snapshot_slots()
             .await
             .map_err(StorePullError::Object)?;
-        // Each owner's descent through its own stream, newest generation first.
-        let mut descents = owners
-            .iter()
-            .filter_map(|(registration_ref, registration)| {
-                let generations = listed.get(&registration.device_id.to_string())?;
-                Some((
-                    registration_ref,
-                    registration,
-                    generations.iter().rev().collect::<Vec<_>>().into_iter(),
-                ))
-            })
-            .collect::<Vec<_>>();
-        loop {
-            let mut candidates = Vec::new();
-            for (registration_ref, registration, generations) in &mut descents {
-                for (generation, slot) in generations.by_ref() {
-                    if let Some(snapshot) = self
-                        .commit_verifier
-                        .load_listed_store_snapshot(
-                            registration_ref,
-                            registration,
-                            *generation,
-                            slot,
-                        )
-                        .await
-                        .map_err(StorePullError::Object)?
-                    {
-                        candidates.push(snapshot);
-                        break;
-                    }
-                    // The listing named a slot the provider no longer holds. It
-                    // was a picture of a moment and this is what a stale one
-                    // looks like; the generations under it still stand.
-                }
-            }
-            if candidates.is_empty() {
-                return Ok(None);
-            }
-            match Box::pin(self.select_maximal_installable_store_snapshot(candidates)).await {
-                Ok(selected) => return Ok(selected),
-                // Every candidate in this round was turned away for a reason
-                // particular to it, so the round below it is worth asking.
-                Err(error) if disqualifies_one_candidate(&error) => {
-                    if descents
-                        .iter()
-                        .all(|(_, _, generations)| generations.as_slice().is_empty())
-                    {
-                        return Err(error);
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
+        Ok(StoreSnapshotDescent {
+            streams: registrations
+                .into_iter()
+                .filter_map(|(registration_ref, registration)| {
+                    let generations = listed.get(&registration.device_id.to_string())?;
+                    Some(DescendedSnapshotStream {
+                        registration_ref: registration_ref.clone(),
+                        registration: registration.clone(),
+                        generations: generations
+                            .iter()
+                            .rev()
+                            .map(|(generation, slot)| (*generation, slot.clone()))
+                            .collect::<Vec<_>>()
+                            .into_iter(),
+                    })
+                })
+                .collect(),
+        })
     }
 
     /// Verify one snapshot this device has already acknowledged.

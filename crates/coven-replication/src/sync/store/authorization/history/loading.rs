@@ -292,6 +292,21 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     /// whose device state the store has moved past fails these filters while
     /// remaining exactly what this device acknowledged, which is why the
     /// baseline advance is licensed elsewhere.
+    ///
+    /// A snapshot stream's coverage grows with its generation, which is what
+    /// makes the three filters below answers about a *descent* rather than
+    /// about each generation separately:
+    ///
+    /// - A snapshot this device's own frontier does not cover is ahead of what
+    ///   the device can say, and the generation below it is the one to ask
+    ///   about. This is the only one worth descending for, and how far it
+    ///   descends is how far behind the publisher this device is.
+    /// - A snapshot the replay baseline already stands past would need the
+    ///   history the baseline retired, and every generation below it stands
+    ///   further back still.
+    /// - A snapshot naming a device state this device is not at cannot be what
+    ///   this device acknowledges, and the states below it are older ones the
+    ///   store has moved even further past.
     pub(crate) async fn select_acknowledgement_snapshot(
         &mut self,
         frontier: &CommitFrontier,
@@ -302,39 +317,36 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         >,
         crate::sync::store::acknowledgements::StoreAckError,
     >{
+        use crate::sync::store::commit_verification::merge_history::StoreSnapshotDescentStep;
+
         let registrations = self
             .database
             .activated_store_device_registration_records()
             .await?;
-        let mut published = Vec::new();
-        for registration in registrations {
-            published.extend(
-                self.history_verifier
-                    .load_store_snapshot_stream(registration.reference(), registration.value())
-                    .await?,
-            );
-        }
-        let candidates = published
-            .into_iter()
-            .filter(|snapshot| {
-                // A snapshot this device's replay baseline already stands past
-                // is dropped rather than verified: it would need the history
-                // the baseline retired, and acknowledging it would claim less
-                // than the device holds.
-                frontier.covers(&snapshot.meta.coverage)
-                    && !self
-                        .history_verifier
-                        .replay_baseline_stands_past(&snapshot.meta.coverage)
-                    && snapshot.meta.state.devices.state_hash() == device_state.state_hash()
-                    && snapshot.meta.state.devices.recovery() == device_state.recovery()
-            })
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return Ok(None);
-        }
+        // Held by value so the descent below can ask about them while the
+        // verifier is borrowed to load candidates.
+        let baseline_coverage = self.history_verifier.replay_baseline_coverage().clone();
+        let mut weigh = |snapshot: &coven_database::PublishedStoreSnapshot| {
+            let coverage = &snapshot.meta.coverage;
+            if !frontier.covers(coverage) {
+                return StoreSnapshotDescentStep::Descend;
+            }
+            if !coverage.covers(&baseline_coverage)
+                || snapshot.meta.state.devices.state_hash() != device_state.state_hash()
+                || snapshot.meta.state.devices.recovery() != device_state.recovery()
+            {
+                return StoreSnapshotDescentStep::Abandon;
+            }
+            StoreSnapshotDescentStep::Weigh
+        };
         Ok(self
             .history_verifier
-            .select_maximal_installable_store_snapshot(candidates)
+            .select_listed_installable_store_snapshot(
+                registrations
+                    .iter()
+                    .map(|registration| (registration.reference(), registration.value())),
+                &mut weigh,
+            )
             .await
             .map_err(crate::sync::store::snapshots::SnapshotError::from)?)
     }

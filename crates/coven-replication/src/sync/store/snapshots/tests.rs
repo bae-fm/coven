@@ -540,7 +540,7 @@ async fn installable_selection_reads(store_id: &str, generations: usize) -> usiz
         .load_founder_registration()
         .await
         .expect("load the founder registration");
-    let owners = vec![(
+    let owners = [(
         coven_protocol::store_commit::StoreDeviceRegistrationRef::from_registration(
             &founder.value,
             founder.object.clone(),
@@ -550,10 +550,17 @@ async fn installable_selection_reads(store_id: &str, generations: usize) -> usiz
 
     home.clear_exact_reads();
     home.clear_exact_listings();
-    let selected = Box::pin(history.select_listed_installable_store_snapshot(&owners))
-        .await
-        .expect("select an installable snapshot")
-        .expect("a published snapshot is installable");
+    let selected = Box::pin(
+        history.select_listed_installable_store_snapshot(
+            owners
+                .iter()
+                .map(|(registration_ref, registration)| (registration_ref, registration)),
+            &mut crate::sync::store::commit_verification::merge_history::weigh_every_snapshot,
+        ),
+    )
+    .await
+    .expect("select an installable snapshot")
+    .expect("a published snapshot is installable");
     assert_eq!(
         selected.snapshot.reference.generation,
         generations as u64 - 1,
