@@ -86,10 +86,10 @@ pub use local_blob_cleanup::LocalBlobCleanup;
 pub use materialization_models::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
     DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, DeviceJoinBootstrapRowData,
-    MembershipAuthorityBytes, OwnedVerifiedMergeMaterialization, PreparedMergeMaterialization,
-    PreparedMergeMaterializationPackage, ResolvedDeviceJoinBootstrap, RetainedAudiencePackage,
-    RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
-    VerifiedAcknowledgedStoreSnapshot, VerifiedMergeMaterialization,
+    InstalledReplayBaseline, MembershipAuthorityBytes, OwnedVerifiedMergeMaterialization,
+    PreparedMergeMaterialization, PreparedMergeMaterializationPackage, ResolvedDeviceJoinBootstrap,
+    RetainedAudiencePackage, RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey,
+    RetainedPackageApplication, VerifiedAcknowledgedStoreSnapshot, VerifiedMergeMaterialization,
     VerifiedMergeMembershipObjects, VerifiedStoreSnapshotAuthority,
 };
 #[cfg(test)]
@@ -127,6 +127,7 @@ pub use snapshot_image::{
 };
 use store_device_state::apply_store_device_exclusion_freezes_on;
 pub use store_session::circle_acknowledgements::CircleAckPublicationInput;
+pub use store_session::AdvancedReplayBaseline;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_support::AuthorExclusionLocatorTamper;
 pub use write_lifecycle::BlockedWriteDiscard;

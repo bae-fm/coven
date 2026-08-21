@@ -362,17 +362,10 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
     pub(crate) async fn prepare_retained_history(
         &mut self,
     ) -> Result<Vec<coven_database::OwnedVerifiedMergeMaterialization>, StorePullError> {
-        let retained = self
-            .database
-            .retained_merge_replay_inputs(self.history.verified_root().reference().clone())
-            .await?;
-        self.history.admit_retained_history(&retained)?;
-        self.history
-            .verify_refs(
-                retained
-                    .iter()
-                    .map(|materialization| materialization.commit_ref().clone())
-                    .collect::<Vec<_>>(),
+        let retained =
+            crate::sync::store::authorization::history::retained::seed_verifier_from_retained_history(
+                &self.database,
+                self.history,
             )
             .await?;
         self.resume_merge_retraction_cleanups().await?;

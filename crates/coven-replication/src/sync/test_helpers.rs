@@ -191,6 +191,55 @@ impl CrossPrincipalTestDevice {
         .map_err(TestError::from)
     }
 
+    /// Download and install the newest Store snapshot this joining device may
+    /// install, into `store_dir`, through its own provider access.
+    ///
+    /// The step production runs before it asks for the history published after
+    /// that snapshot. Skipping it leaves the joining device asking for the
+    /// closure back to genesis, which means a package per commit — and a store
+    /// that reclaims has deleted the ones its snapshot restates.
+    #[cfg(test)]
+    pub async fn install_store_snapshot<'a>(
+        &'a self,
+        store_dir: &'a coven_foundation::store_dir::StoreDir,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        membership: &coven_protocol::membership::MembershipChain,
+        identity: &UserKeypair,
+        device_id: String,
+        binary_schema_version: u32,
+        synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
+        migrations: &[coven_database::Migration],
+    ) -> Result<crate::sync::store::RestoringStore<'a>, TestError> {
+        let history_verifier = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
+            .open_pinned(self.storage.as_ref(), root)
+            .await
+            .map_err(crate::sync::store::SnapshotError::from)?;
+        let cancel = tokio::sync::watch::channel(false).1;
+        store_dir.ensure_created()?;
+        Ok(crate::sync::store::PreparedSnapshotBootstrap::prepare(
+            &self.storage,
+            history_verifier,
+            &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+            binary_schema_version,
+            &store_dir.db_path(),
+            identity,
+            std::sync::Arc::new(|_| {}),
+            &cancel,
+        )
+        .await?
+        .install(
+            store_dir,
+            synced_tables,
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            device_id,
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            migrations,
+            None,
+        )
+        .await?)
+    }
+
     pub async fn open_pending_device_join(
         &self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
@@ -313,6 +362,8 @@ enum TestErrorCause {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     TestPull(#[from] TestPullError),
+    #[error(transparent)]
+    DatabaseOpen(#[from] coven_database::OpenError),
 }
 
 macro_rules! test_error_from {
@@ -361,6 +412,7 @@ test_error_from!(coven_foundation::atomic_file::FileError, File);
 test_error_from!(serde_json::Error, Json);
 test_error_from!(std::io::Error, Io);
 test_error_from!(TestPullError, TestPull);
+test_error_from!(coven_database::OpenError, DatabaseOpen);
 
 /// Why a test pull did not produce a result. Keeps the three steps a test pull
 /// runs — opening the store, authorizing the writer, running the cycle — apart,
@@ -502,6 +554,49 @@ mod test_device {
     }
 
     impl TestDevice {
+        /// Replay this device's retained history and count `table`'s rows.
+        ///
+        /// The device performs the replay with the database it owns rather than
+        /// handing that database out, so a caller checking a replay never gets
+        /// a handle it could write through.
+        /// Answer a read-only query against this device's Store, for a test
+        /// that never holds the database — a device installed by a join or a
+        /// restore is opened by that install, not by its caller.
+        pub async fn query_test_text(&self, sql: &str) -> String {
+            self.db
+                .test_query_optional_text(sql.to_string())
+                .await
+                .expect("test text query failed")
+                .expect("test text query matched no row")
+        }
+
+        pub async fn test_row_exists(&self, sql: &str) -> bool {
+            self.db
+                .test_query_optional_text(format!("SELECT 'found' FROM ({sql}) LIMIT 1"))
+                .await
+                .expect("test row-existence query failed")
+                .is_some()
+        }
+
+        pub async fn latest_local_store_device_registration(
+            &self,
+        ) -> Result<Option<coven_database::DurableDeviceRegistration>, coven_database::DbError>
+        {
+            self.db.latest_local_store_device_registration().await
+        }
+
+        pub async fn replay_row_count_for_test(
+            &self,
+            table: &str,
+        ) -> Result<i64, coven_database::DbError> {
+            self.db
+                .replay_row_count_for_test(
+                    self.store.root_ref_for_test().clone(),
+                    table.to_string(),
+                )
+                .await
+        }
+
         pub fn device_id(&self) -> String {
             self.device_id.clone()
         }
@@ -634,6 +729,106 @@ mod test_device {
             )
             .await
             .map_err(TestError::from)
+        }
+
+        /// Join a device the way production does: install the owner's newest
+        /// snapshot, then carry only the history published after it.
+        ///
+        /// [`activate_joined`](Self::activate_joined) pulls the whole history
+        /// into an empty database instead, which leaves the joining device on a
+        /// genesis replay baseline holding — and pinning for replay — every
+        /// commit back to the beginning of the store. A store that reclaims has
+        /// deleted the packages its snapshot restates, so a device joined that
+        /// way cannot pull past the first reclaim it meets.
+        #[cfg(test)]
+        #[allow(clippy::too_many_arguments)]
+        pub async fn activate_joined_from_snapshot(
+            observer: Self,
+            joining_store_dir: StoreDir,
+            joining_identity: &UserKeypair,
+            published_at: &str,
+            storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
+            synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
+            migrations: Vec<coven_database::Migration>,
+            binary_schema_version: u32,
+        ) -> Result<Self, TestError> {
+            observer.ensure_device_join_snapshot_for_test().await?;
+            let pending_dir = tempfile::tempdir()?;
+            let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+                pending_dir.path().join("pending-device-join.sqlite"),
+            )?;
+            let offer = observer
+                .begin_device_join(&pubkey_hex(joining_identity))
+                .await?;
+            let mut pending_join = observer
+                .open_pending_device_join_for_test(&pending, joining_identity, offer.clone())
+                .await?;
+            let access_request = pending_join.prepare_provider_access_request().await?;
+            let approval = observer
+                .authorize_device_provider_access(access_request, None)
+                .await?;
+            let registration_request = pending_join.prepare_registration_request(approval).await?;
+            let join = observer
+                .activate_same_principal_join_for_test(registration_request)
+                .await?;
+            drop(pending_join);
+            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+            let history_verifier = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
+                .open_pinned(storage.as_ref(), &offer.store_root)
+                .await
+                .map_err(crate::sync::store::SnapshotError::from)?;
+            let cancel = tokio::sync::watch::channel(false).1;
+            joining_store_dir.ensure_created()?;
+            let open_synced_tables = synced_tables.clone();
+            let joined_device_id = offer.attempt_id.to_string();
+            let membership = observer.membership().await?;
+            let storage_object: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
+                storage.clone();
+            let restoring = crate::sync::store::PreparedSnapshotBootstrap::prepare(
+                &storage_object,
+                history_verifier,
+                &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+                binary_schema_version,
+                &joining_store_dir.db_path(),
+                joining_identity,
+                std::sync::Arc::new(|_| {}),
+                &cancel,
+            )
+            .await?
+            .install(
+                &joining_store_dir,
+                synced_tables,
+                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
+                offer.attempt_id.to_string(),
+                std::sync::Arc::new(coven_foundation::clock::SystemClock),
+                &migrations,
+                Some(&routing_encryption),
+            )
+            .await?;
+            let mut joining = restoring.begin_device_join(&pending, offer).await?;
+            joining
+                .bootstrap(
+                    join.bootstrap.clone(),
+                    published_at,
+                    Some(&routing_encryption),
+                )
+                .await?;
+            joining.complete(join.activation).await?;
+            // The install owns the database it created, so the join has to be
+            // finished and dropped before a device opens it — the same order
+            // production has, where the join and the running device are
+            // separate processes over one file.
+            drop(joining);
+            open_joined_test_device(
+                joining_store_dir,
+                joining_identity,
+                storage,
+                joined_device_id,
+                open_synced_tables,
+                &migrations,
+            )
+            .await
         }
 
         pub async fn ensure_device_join_snapshot_for_test(&self) -> Result<(), TestError> {
@@ -1116,12 +1311,12 @@ mod test_device {
             self.store.load_registration_for_test(reference).await
         }
 
-        pub async fn verify_snapshots_for_acknowledgement_for_test(
+        pub async fn verify_installable_snapshots_for_test(
             &self,
             snapshots: &[coven_database::PublishedStoreSnapshot],
         ) -> Result<(), crate::sync::store::StoreError> {
             self.store
-                .verify_snapshots_for_acknowledgement_for_test(snapshots)
+                .verify_installable_snapshots_for_test(snapshots)
                 .await
         }
 
@@ -2554,11 +2749,14 @@ mod test_device {
                 .await
         }
 
+        /// Acknowledge `frontier`, and report what advancing this device's
+        /// replay baseline over the snapshot it named retired.
         pub async fn publish_acknowledgement(
             &self,
             frontier: coven_protocol::store_commit::CommitFrontier,
-        ) -> Result<(), TestError> {
-            self.store
+        ) -> Result<Option<coven_database::AdvancedReplayBaseline>, TestError> {
+            let staged = self
+                .store
                 .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:01Z".to_string())
                 .await?;
             let published = self.store.drain_acknowledgements_for_test().await?;
@@ -2567,7 +2765,7 @@ mod test_device {
                 "snapshot acknowledgement fixture published {published} acknowledgements instead of one"
             )));
             }
-            Ok(())
+            Ok(staged.baseline_advance)
         }
 
         pub async fn stage_acknowledgement(
@@ -2578,6 +2776,20 @@ mod test_device {
             self.store
                 .stage_acknowledgement_for_test(frontier, sync_time)
                 .await
+                .map(|staged| staged.acknowledgement)
+                .map_err(TestError::from)
+        }
+
+        /// Stage an acknowledgement and report only what the baseline advance
+        /// it licensed retired.
+        pub async fn advance_baseline_by_acknowledging(
+            &self,
+            frontier: coven_protocol::store_commit::CommitFrontier,
+        ) -> Result<Option<coven_database::AdvancedReplayBaseline>, TestError> {
+            self.store
+                .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:02Z".to_string())
+                .await
+                .map(|staged| staged.baseline_advance)
                 .map_err(TestError::from)
         }
 
@@ -2610,6 +2822,7 @@ mod test_device {
             self.store
                 .stage_acknowledgement_for_test(frontier, sync_time)
                 .await
+                .map(|staged| staged.acknowledgement)
         }
 
         #[cfg(test)]
@@ -2782,6 +2995,75 @@ mod test_device {
 }
 
 pub use test_device::{TestDevice, TestDeviceSigningAuthority};
+
+/// The Store a completed join installed, for a test that only asks it
+/// questions.
+///
+/// A joining device never opens a database of its own — the snapshot install is
+/// what creates it — so a fixture cannot hand one back without handing out a
+/// raw database. It hands back this instead: the questions the join is asserted
+/// on, and nothing to write through.
+#[cfg(test)]
+pub struct JoinedTestStore {
+    database: coven_database::StoreDatabase,
+}
+
+#[cfg(test)]
+impl JoinedTestStore {
+    pub async fn latest_local_store_device_registration(
+        &self,
+    ) -> Result<Option<coven_database::DurableDeviceRegistration>, coven_database::DbError> {
+        self.database.latest_local_store_device_registration().await
+    }
+
+    pub async fn query_test_text(&self, sql: &str) -> String {
+        self.database
+            .test_query_optional_text(sql.to_string())
+            .await
+            .expect("test text query failed")
+            .expect("test text query matched no row")
+    }
+}
+
+/// Open the Store a join installed, once the join has closed its own handle.
+#[cfg(test)]
+fn open_joined_test_store(
+    store_dir: &StoreDir,
+    device_id: String,
+    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
+    migrations: &[coven_database::Migration],
+) -> Result<Database, TestError> {
+    Ok(Database::open(
+        &store_dir.db_path(),
+        synced_tables,
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
+        device_id,
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        migrations,
+    )?)
+}
+
+/// Open the device a join installed, over the database the install created.
+///
+/// A joining device never opens a database of its own: the snapshot install is
+/// what creates the file, so the join has to finish and close before anything
+/// else opens it. This is that second open, and it is the only handle a test
+/// gets — the fixtures hand back a device, not a database.
+#[cfg(test)]
+async fn open_joined_test_device(
+    store_dir: StoreDir,
+    identity: &UserKeypair,
+    storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
+    device_id: String,
+    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
+    migrations: &[coven_database::Migration],
+) -> Result<TestDevice, TestError> {
+    let database = open_joined_test_store(&store_dir, device_id, synced_tables, migrations)?;
+    TestDevice::load(&database, store_dir, storage, identity.clone())
+        .await
+        .map_err(TestError::from)
+}
 
 struct TestStoreProducers {
     unassigned: Option<TestDevice>,
@@ -3938,6 +4220,41 @@ impl TestStore {
         .await
     }
 
+    /// Join a device through the production shape: snapshot install first,
+    /// then only the history published after it. Hands back the database the
+    /// install created, because the joining device's database is the image.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn activate_joined_device_from_snapshot(
+        &self,
+        observer_db: &Database,
+        observer_store_dir: StoreDir,
+        joining_store_dir: StoreDir,
+        joining_identity: &UserKeypair,
+        published_at: &str,
+        synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
+        migrations: Vec<coven_database::Migration>,
+        binary_schema_version: u32,
+    ) -> Result<TestDevice, TestError> {
+        let observer = self
+            .bind_device_in(observer_db, observer_store_dir, &self.signer)
+            .await?;
+        TestDevice::activate_joined_from_snapshot(
+            observer,
+            joining_store_dir,
+            joining_identity,
+            published_at,
+            std::sync::Arc::new(
+                self.storage
+                    .connection_for_test_identity(joining_identity.clone()),
+            ),
+            synced_tables,
+            migrations,
+            binary_schema_version,
+        )
+        .await
+    }
+
     pub async fn bind_store_device(
         &self,
         database: &coven_database::StoreDatabase,
@@ -4286,16 +4603,32 @@ impl TestStore {
         })
     }
 
+    /// Run a cross-principal device join end to end and hand back the database
+    /// the joining device ends up with.
+    ///
+    /// The joining device installs the owner's newest snapshot first and then
+    /// carries only the history published after it, which is the shape
+    /// production has: a joiner that carried the closure back to genesis would
+    /// need every package ever written, including the ones reclamation deletes
+    /// once every device has acknowledged the snapshot restating them.
     #[cfg(test)]
     pub fn install_cross_principal_device<'a>(
         &'a self,
-        local_database: coven_database::StoreDatabase,
+        joining_store_dir: StoreDir,
+        synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
+        migrations: Vec<coven_database::Migration>,
+        binary_schema_version: u32,
         identity: &'a UserKeypair,
         peer_account_id: &'a str,
         published_at: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), TestError>> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<JoinedTestStore, TestError>> + 'a>>
+    {
         Box::pin(async move {
+            let open_synced_tables = synced_tables.clone();
             let observer = self.founder.clone();
+            // The joining device installs a snapshot, so the Store has to have
+            // published one — the same precondition production has.
+            observer.ensure_device_join_snapshot_for_test().await?;
             let peer = self
                 .cross_principal_device_for_test(identity, peer_account_id)
                 .await?;
@@ -4305,7 +4638,7 @@ impl TestStore {
             )?;
             let offer = observer.begin_device_join(&pubkey_hex(identity)).await?;
             let mut pending_join = peer
-                .open_pending_device_join(&pending, identity, offer)
+                .open_pending_device_join(&pending, identity, offer.clone())
                 .await?;
             let access_request = pending_join.prepare_provider_access_request().await?;
             let approval = peer
@@ -4328,10 +4661,21 @@ impl TestStore {
             let provider_ready = observer
                 .publish_device_provider_challenge(provisional)
                 .await?;
-            let (_store_dir_temp, store_dir) = temp_store_dir();
-            let mut joining = pending_join
-                .begin_joining_store(local_database, &store_dir)
+            drop(pending_join);
+            let joined_device_id = offer.attempt_id.to_string();
+            let restoring = peer
+                .install_store_snapshot(
+                    &joining_store_dir,
+                    &offer.store_root,
+                    &observer.membership().await?,
+                    identity,
+                    offer.attempt_id.to_string(),
+                    binary_schema_version,
+                    synced_tables,
+                    &migrations,
+                )
                 .await?;
+            let mut joining = restoring.begin_device_join(&pending, offer).await?;
             let readiness = joining
                 .bootstrap(provider_ready, published_at, None)
                 .await?;
@@ -4360,7 +4704,16 @@ impl TestStore {
             }
             let activation = observer.finalize_device_join(completion).await?;
             joining.complete(activation).await?;
-            Ok(())
+            drop(joining);
+            let database = open_joined_test_store(
+                &joining_store_dir,
+                joined_device_id,
+                open_synced_tables,
+                &migrations,
+            )?;
+            Ok(JoinedTestStore {
+                database: coven_database::StoreDatabase::new(&database),
+            })
         })
     }
 

@@ -353,15 +353,15 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         // A missing or unstable Store snapshot leaves Store packages uncovered but must
         // not block Circle package reclamation, which carries its own Circle coverage.
         let (coverage, store_targets) = match Box::pin(self.choose_snapshot(&registrations)).await {
-            Ok(snapshot) => {
-                let generation = snapshot.snapshot.reference.generation;
+            Ok(claim) => {
+                let generation = claim.snapshot.reference.generation;
                 let targets = self
                     .history()
-                    .store_package_targets(&snapshot.snapshot.meta.coverage)
+                    .store_package_targets(&claim.snapshot.meta.coverage)
                     .await
                     .map_err(StoreReclaimError::from)?
                     .into_iter()
-                    .map(|(commit, package)| (commit, package, snapshot.clone()))
+                    .map(|(commit, package)| (commit, package, claim.clone()))
                     .collect::<Vec<_>>();
                 (
                     StorePackageReclaimCoverage::Snapshot { generation },

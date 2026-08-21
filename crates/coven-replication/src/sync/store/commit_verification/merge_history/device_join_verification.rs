@@ -314,11 +314,21 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok((attempt, owner))
     }
 
+    /// Verify the attempt this device is joining under and build the history
+    /// it has to carry.
+    ///
+    /// `installed` is the coverage of the Store snapshot the joining device has
+    /// already installed into its database — empty only when it truly starts
+    /// from nothing. Passing the real coverage is what keeps the plan buildable
+    /// at all on a store that reclaims: every commit the plan carries is read
+    /// from its package, and a package behind an acknowledged snapshot is
+    /// exactly what reclaim deletes.
     pub(crate) async fn verify_attempt_and_prepare_device_join_bootstrap(
         &mut self,
         attempt: &store_commit::DeviceJoinAttemptRef,
         attempt_owner: &StoreDeviceRegistration,
         attempt_activation: &StoreBatchCommitRef,
+        installed: &CommitFrontier,
     ) -> Result<
         (
             VerifiedObject<store_commit::DeviceJoinAttempt>,
@@ -331,15 +341,12 @@ impl<'a> MergeHistoryVerifier<'a> {
             .load_device_join_attempt_evidence(attempt, attempt_owner)
             .await?;
         let verified_attempt = self.verify_device_join_attempt_evidence(evidence).await?;
-        // This device builds the plan for itself and materializes it into a
-        // database that holds no Store snapshot, so nothing is already there to
-        // carry from — the closure runs back to genesis.
         let plan = self
             .prepare_device_join_bootstrap(
                 &verified_attempt.value.bootstrap_cut,
                 attempt_activation,
                 &verified_attempt.value.membership,
-                &CommitFrontier(BTreeMap::new()),
+                installed,
             )
             .await?;
         Ok((verified_attempt, plan))

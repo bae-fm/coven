@@ -45,6 +45,53 @@ impl StoreSession<'_> {
         Ok(operation)
     }
 
+    /// Adopt an acknowledged snapshot as this device's replay baseline.
+    ///
+    /// Only reclaim calls this, because only reclaim holds the proof that
+    /// licenses it: a snapshot every device that could still need the history
+    /// behind it has acknowledged. Advancing releases the replay pins on that
+    /// history, which is what lets the same run authorize its packages.
+    fn advance_snapshot_replay_baseline(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        snapshot_authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<Option<crate::AdvancedReplayBaseline>, DbError> {
+        let cut = snapshot_authority.metadata.coverage.clone();
+        // Ask before rebuilding. The image is reconstructed by replaying the
+        // whole retained history, so a cycle whose baseline already stands at
+        // the coverage — every cycle after the one that advanced it — must not
+        // pay for it.
+        if !crate::store::store_session::replay_baseline_advances_on(
+            crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
+            &cut,
+        )? {
+            return Ok(None);
+        }
+        let snapshot_hash = snapshot_authority.snapshot.snapshot_hash;
+        let image =
+            self.capture_replay_baseline_at_cut(root, &cut, snapshot_hash, routing_encryption)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let schema_version = self.schema_version;
+        let routing_hash = self.sync_routing_hash;
+        let store_dir = self.store_dir;
+        let advanced = crate::store::store_session::StoreTransaction::new(&tx, store_dir)
+            .advance_snapshot_replay_baseline(
+                self.verified_store_authority,
+                root,
+                schema_version,
+                routing_hash,
+                snapshot_authority,
+                image,
+            )?;
+        tx.commit().map_err(DbError::from)?;
+        if advanced.is_some() {
+            self.verified_store_authority
+                .forget_superseded_replay_baseline();
+        }
+        Ok(advanced)
+    }
+
     fn store_package_is_retained_for_replay(
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
@@ -555,6 +602,28 @@ impl StoreDatabase {
         };
         self.call_store(move |session| session.begin_store_reclaim_operation(operation, remotes))
             .await
+    }
+
+    /// Adopt an acknowledged snapshot as this device's replay baseline, and
+    /// retire the retained history it supersedes.
+    ///
+    /// `Ok(None)` means the snapshot does not advance this device's cut, which
+    /// is the ordinary result once a device has caught up to the newest
+    /// acknowledged snapshot.
+    pub async fn advance_snapshot_replay_baseline(
+        &self,
+        root: coven_protocol::store_commit::StoreRootRef,
+        snapshot_authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
+    ) -> Result<Option<crate::AdvancedReplayBaseline>, DbError> {
+        self.call_store(move |session| {
+            session.advance_snapshot_replay_baseline(
+                &root,
+                snapshot_authority,
+                routing_encryption.as_ref(),
+            )
+        })
+        .await
     }
 
     pub async fn store_package_is_retained_for_replay(

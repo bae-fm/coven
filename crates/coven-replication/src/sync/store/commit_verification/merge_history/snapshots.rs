@@ -96,6 +96,7 @@ fn disqualifies_one_candidate(error: &StorePullError) -> bool {
         StorePullError::SnapshotNotStable { .. }
             | StorePullError::SnapshotAuthorInactive
             | StorePullError::SnapshotAuthorNotOwner
+            | StorePullError::SnapshotBehindReplayBaseline
     )
 }
 
@@ -213,8 +214,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .commit_verifier
             .load_active_registrations(&authority.device_state)
             .await?;
-        let commit_refs =
-            verified_merge_commit_closure(&self.history.commits, frontier.values().cloned())?;
+        let commit_refs = verified_merge_commit_closure(&self.history, frontier.values().cloned())?;
         Ok(VerifiedMergeSnapshotState {
             common: VerifiedSnapshotState {
                 device_state: authority.device_state,
@@ -229,6 +229,19 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         snapshot: &coven_database::PublishedStoreSnapshot,
     ) -> Result<(StoreHistoryCut, VerifiedMergeSnapshotState), StorePullError> {
+        // Verification recomposes the snapshot's history summary, and the
+        // composition resumes at this device's baseline. That only reaches the
+        // snapshot's coverage when the coverage stands at or above the
+        // baseline; a snapshot behind it would need the commits the baseline
+        // retired. It is also nothing this device wants: it already stands
+        // further along than the snapshot claims.
+        if !snapshot
+            .meta
+            .coverage
+            .covers(self.history.baseline.coverage())
+        {
+            return Err(StorePullError::SnapshotBehindReplayBaseline);
+        }
         let frontier = &snapshot.meta.coverage.0;
         let state = self
             .verify_snapshot_history_state(frontier, &snapshot.meta.state.membership)
@@ -269,10 +282,11 @@ impl<'a> MergeHistoryVerifier<'a> {
             &state.common.device_state,
             &snapshot.meta.author_registration,
             author.value(),
+            self.history.baseline.history_summary().cloned(),
             state
                 .commit_refs
                 .iter()
-                .map(|reference| &self.history.commits[reference]),
+                .filter_map(|reference| self.history.commits.get(reference)),
         )?;
         // Complete each chain the same way the publisher did, so the
         // recomposition is comparable to the summary the snapshot carries.
@@ -323,7 +337,20 @@ impl<'a> MergeHistoryVerifier<'a> {
             let discovery = self
                 .discover_merge_stream(registration_ref, registration.value(), None)
                 .await?;
-            let Some((_, _, latest, _)) = discovery.commits.last() else {
+            let covered_tip = self
+                .commit_verifier
+                .covered_announcement_commit(registration_ref)
+                .cloned();
+            let Some(latest) = discovery
+                .commits
+                .last()
+                .map(|(_, _, latest, _)| latest.clone())
+                // A walk that resumed at this device's own snapshot coverage
+                // reports only what stands above it. When nothing does, the
+                // stream's accepted tip is the coverage itself — the position
+                // the walk started from, on the owner's signature.
+                .or(covered_tip)
+            else {
                 if accepted.contains_key(&stream_id) {
                     return Err(StorePullError::InvalidState(
                         "accepted Merge snapshot history is absent from its author stream"
@@ -332,6 +359,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 }
                 continue;
             };
+            let latest = &latest;
             if let Some(snapshot_tip) = accepted.get(&stream_id) {
                 if latest.coord.sequence() < snapshot_tip.coord.sequence()
                     || (latest.coord.sequence() == snapshot_tip.coord.sequence()
@@ -359,7 +387,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self,
         frontier: &BTreeMap<protocol_membership::AuthorStreamId, StoreBatchCommitRef>,
     ) -> Result<Vec<VerifiedActivatedStoreAck>, StorePullError> {
-        verified_merge_commit_closure(&self.history.commits, frontier.values().cloned())?;
+        verified_merge_commit_closure(&self.history, frontier.values().cloned())?;
         // A retained row carries the one acknowledgement its commit activated, so
         // a device's chain is assembled here, from every commit in the verified
         // closure that acknowledged for it. This is the boundary where the whole
@@ -379,16 +407,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             });
         }
         Ok(acknowledgements)
-    }
-
-    pub(crate) async fn verify_snapshots_for_acknowledgement(
-        &mut self,
-        snapshots: &[coven_database::PublishedStoreSnapshot],
-    ) -> Result<(), StorePullError> {
-        for snapshot in snapshots {
-            self.verify_snapshot_authority(snapshot).await?;
-        }
-        Ok(())
     }
 
     /// Verify one snapshot as installable: the owner's signature over metadata

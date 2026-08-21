@@ -4,11 +4,14 @@ use crate::store::store_session::StoreRecords;
 impl StoreDatabase {
     /// The `retained_merge_materializations` commit-refs a Store snapshot image
     /// keeps: author-exclusion activation commits (device-exclusion recovery),
-    /// Circle bootstrap-coverage activation commits, and every retained
-    /// materialization that still carries a Circle package no bootstrap cut
-    /// covers. `StoreTransaction::retain_snapshot_replay_inputs` keeps exactly this set, and
-    /// `validate_snapshot_retained_inputs_on` expects exactly it, so the two
-    /// share this one derivation.
+    /// Circle bootstrap-coverage activation commits, the activation commit
+    /// behind every Circle control the database still indexes, and every
+    /// retained materialization that still carries a Circle package no
+    /// bootstrap cut covers. `StoreTransaction::retain_snapshot_replay_inputs`
+    /// keeps exactly this set, `validate_snapshot_retained_inputs_on` expects
+    /// exactly it, and advancing a replay baseline retires everything at or
+    /// under the new cut that is not in it — so all three share this one
+    /// derivation.
     pub(crate) fn snapshot_required_retained_refs(
         records: StoreRecords<'_>,
         authority: &mut dyn VerifiedStoreLookup,
@@ -19,6 +22,14 @@ impl StoreDatabase {
             .exclusion_activation_commits
             .into_iter()
             .collect::<BTreeSet<_>>();
+        // `circle_control_activations` is rebuilt by replay from the commits it
+        // applies, so every control it names is a claim that the commit which
+        // activated it is still replayable. Building the Circle replay epoch
+        // index resolves all of them, and refuses a control whose activation
+        // was dropped. Keeping those commits is what makes that claim true; a
+        // control whose activation is already gone is a superseded epoch and
+        // stays gone.
+        required.extend(records.circle_control_activation_refs()?);
         let mut bootstrap_cuts = BTreeMap::new();
         for (circle_id, activation_commit, exact_cut) in rows.circle_bootstraps {
             let circle_id: coven_protocol::circle::CircleId = circle_id

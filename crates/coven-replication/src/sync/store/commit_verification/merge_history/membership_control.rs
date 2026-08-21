@@ -227,17 +227,26 @@ impl VerifiedMergeMembershipPrefix {
     }
 }
 
+/// The membership authority a commit's predecessors establish, down to the
+/// installed baseline.
+///
+/// A covered predecessor contributes its position and nothing else: the
+/// baseline's own membership floor is what stands behind it, and the control
+/// activations under it were validated when the image that restates them was
+/// verified.
 pub(crate) fn verified_merge_membership_prefix(
-    commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
+    history: &VerifiedMergeHistory,
     tips: impl IntoIterator<Item = StoreBatchCommitRef>,
 ) -> Result<VerifiedMergeMembershipPrefix, StorePullError> {
-    let closure = verified_merge_commit_closure(commits, tips)?;
+    let closure = verified_merge_commit_closure(history, tips)?;
     let mut prefix = VerifiedMergeMembershipPrefix {
         commits: closure.clone(),
         ..VerifiedMergeMembershipPrefix::default()
     };
     for reference in closure {
-        let verified = &commits[&reference];
+        let Some(verified) = history.commits.get(&reference) else {
+            continue;
+        };
         prefix
             .predecessor_memberships
             .push(verified.predecessor_membership.clone());
@@ -454,7 +463,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 )
             })?;
         let verified_membership_activations = verified_merge_membership_prefix(
-            &self.history.commits,
+            &self.history,
             commit_predecessor_references(request_commit.verified.value()),
         )?;
         let request_membership = self
@@ -669,16 +678,12 @@ impl<'a> MergeHistoryVerifier<'a> {
                 ResolvedStoreDeviceState::merge(
                     next.values()
                         .map(|reference| {
-                            self.history
-                                .commits
-                                .get(reference)
-                                .map(|commit| commit.state_after.clone())
-                                .ok_or_else(|| {
-                                    StorePullError::InvalidState(
-                                        "current Merge frontier is absent from its verified graph"
-                                            .to_string(),
-                                    )
-                                })
+                            self.history.state_after(reference).cloned().ok_or_else(|| {
+                                StorePullError::InvalidState(
+                                    "current Merge frontier is absent from its verified graph"
+                                        .to_string(),
+                                )
+                            })
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                 )
@@ -692,7 +697,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 && registrations.len() == registration_count;
             if stable {
                 let accepted_closure =
-                    verified_merge_commit_closure(&self.history.commits, next.values().cloned())?;
+                    verified_merge_commit_closure(&self.history, next.values().cloned())?;
                 return Ok(accepted_closure.contains(expected));
             }
             let state_fingerprint = ObjectHash::digest(

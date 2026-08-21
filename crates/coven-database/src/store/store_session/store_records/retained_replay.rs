@@ -26,13 +26,13 @@ pub(crate) struct SnapshotRetentionRows {
     pub(crate) materialization_refs: Vec<String>,
 }
 
-struct PreparedRetainedReplayBaseline {
+pub(super) struct PreparedRetainedReplayBaseline {
     baseline: crate::RetainedReplayBaseline,
     image_bytes: Vec<u8>,
 }
 
 impl PreparedRetainedReplayBaseline {
-    fn new(
+    pub(super) fn new(
         exact_cut: coven_protocol::store_commit::CommitFrontier,
         schema_version: u32,
         routing_hash: ObjectHash,
@@ -50,6 +50,20 @@ impl PreparedRetainedReplayBaseline {
             },
             image_bytes,
         }
+    }
+
+    /// Validate the image from the bytes in hand, before they are stored.
+    ///
+    /// The installed-baseline check reads its image back out of the payload
+    /// store, which a baseline that has not been written yet cannot do.
+    pub(super) fn validate_image(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+    ) -> Result<(), DbError> {
+        let mut image = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
+        crate::connection_io::deserialize_database_image_into(&mut image, &self.image_bytes)
+            .map_err(|error| DbError::context("open advanced replay database image", error))?;
+        self.baseline.validate_open_image(&image, store_dir)
     }
 }
 
@@ -87,6 +101,27 @@ impl StoreRecords<'_> {
             circle_bootstraps: bootstraps,
             materialization_refs: materializations,
         })
+    }
+
+    /// The stored commit-ref of every retained materialization a Circle control
+    /// activation names.
+    ///
+    /// A control whose activation row has no retained materialization is not an
+    /// error here: that is the superseded-epoch state a Circle bootstrap leaves
+    /// behind, and this reports what is still retained rather than what once
+    /// was.
+    pub(crate) fn circle_control_activation_refs(self) -> Result<Vec<String>, DbError> {
+        Ok(crate::query_mapped_rows(
+            self.conn,
+            "SELECT DISTINCT retained.commit_ref
+             FROM circle_control_activations activation
+             JOIN retained_merge_materializations retained
+               ON retained.device_id = activation.stream_id
+              AND retained.seq = activation.seq
+             ORDER BY retained.commit_ref",
+            [],
+            |row| row.get::<_, String>(0),
+        )?)
     }
 
     pub(crate) fn snapshot_exclusion_activation_rows(
@@ -161,21 +196,34 @@ impl StoreRecords<'_> {
         )
     }
 
-    pub(crate) fn snapshot_coverage_reference(
+    /// The position a stream's installed snapshot coverage stands at, if the
+    /// stream has one.
+    ///
+    /// One row per stream — `snapshot_coverage` is keyed by `device_id` — so
+    /// this is the whole of what a snapshot says about the stream. Callers ask
+    /// by stream rather than by exact coordinate because the coverage answers
+    /// for its entire prefix, not only for its tip.
+    pub(crate) fn snapshot_coverage_position(
         self,
         stream_id: &str,
-        sequence: i64,
-    ) -> Result<Option<String>, DbError> {
+    ) -> Result<Option<(u64, String)>, DbError> {
         use rusqlite::OptionalExtension;
 
         self.conn
             .query_row(
-                "SELECT commit_ref FROM snapshot_coverage WHERE device_id = ?1 AND seq = ?2",
-                rusqlite::params![stream_id, sequence],
-                |row| row.get(0),
+                "SELECT seq, commit_ref FROM snapshot_coverage WHERE device_id = ?1",
+                rusqlite::params![stream_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
-            .map_err(DbError::from)
+            .map_err(DbError::from)?
+            .map(|(sequence, reference)| {
+                Ok((
+                    crate::Database::sequence_from_sqlite(stream_id, sequence)?,
+                    reference,
+                ))
+            })
+            .transpose()
     }
 
     pub(crate) fn store_device_snapshot(
@@ -384,7 +432,7 @@ impl StoreRecords<'_> {
         outcome
     }
 
-    fn install_prepared_replay_baseline(
+    pub(super) fn install_prepared_replay_baseline(
         self,
         prepared: PreparedRetainedReplayBaseline,
         timings: &mut coven_foundation::stage_timing::StageTimings,
@@ -544,11 +592,13 @@ impl StoreTransaction<'_, '_> {
 
     pub(crate) fn merge_replay_write_overlays(
         self,
+        baseline_cut: &coven_protocol::store_commit::CommitFrontier,
         active_accepted_writes: &BTreeSet<coven_protocol::write::WriteId>,
         retracted_writes: &BTreeSet<coven_protocol::write::WriteId>,
     ) -> Result<Vec<crate::MergeReplayWriteOverlay>, DbError> {
         StoreDatabase::load_merge_replay_write_overlays_on(
             crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            baseline_cut,
             active_accepted_writes,
             retracted_writes,
         )

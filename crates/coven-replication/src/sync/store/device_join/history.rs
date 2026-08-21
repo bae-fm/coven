@@ -135,11 +135,17 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         ),
         StorePullError,
     > {
+        // The joining device installs its Store snapshot image before it asks
+        // for this plan, so the history it already holds is that image's
+        // coverage. Reading it here is what stops the closure at the snapshot
+        // rather than at genesis.
+        let installed = self.database.snapshot_coverage_frontier().await?;
         self.history
             .verify_attempt_and_prepare_device_join_bootstrap(
                 attempt,
                 attempt_owner,
                 attempt_activation,
+                &installed,
             )
             .await
     }

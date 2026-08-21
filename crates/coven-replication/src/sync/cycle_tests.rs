@@ -357,13 +357,25 @@ impl CycleTestDatabaseOps for Database {
 }
 
 trait CycleTestStoreOps {
+    /// Whether the Store package one exact commit published is still readable.
+    ///
+    /// Takes the commit reference rather than a coordinate because a coordinate
+    /// stops naming a commit once a snapshot covers it: the device retires the
+    /// per-position row when its replay baseline advances, and a lookup by
+    /// coordinate would then report "no package" about a package that is
+    /// sitting there.
     async fn store_package_exists(
         &self,
         db: &Database,
         db_store_dir: StoreDir,
-        stream_id: &str,
-        sequence: u64,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> bool;
+    /// Whether this device published a Store package at `sequence` on its own
+    /// stream, as far as its own materialized rows record.
+    ///
+    /// Answers `false` for a position the device holds no row for, which is
+    /// what the callers below are asserting: a write that failed or was blocked
+    /// never reached the position at all.
     async fn local_store_package_exists(
         &self,
         db: &Database,
@@ -380,26 +392,35 @@ trait CycleTestStoreOps {
     async fn assert_latest_ack_timestamp_is_rfc3339(&self, db: &Database, db_store_dir: StoreDir);
 }
 
+/// Whether this device's materialized history reaches `sequence` on `stream_id`.
+///
+/// Deliberately not `exact_materialized_ref`. A cycle that advances its replay
+/// baseline retires the per-position rows the snapshot it adopted restates, so
+/// a commit at or under the new coverage stops having a row of its own — the
+/// position survives in the frontier, which reads the coverage beside the rows
+/// and takes the later of the two. Asking for the row would answer "not
+/// materialized" about history the device demonstrably holds.
+async fn materialized_history_reaches(db: &Database, stream_id: &str, sequence: u64) -> bool {
+    coven_database::StoreDatabase::new(db)
+        .materialized_frontier()
+        .await
+        .expect("read materialized Store frontier")
+        .get(stream_id)
+        .is_some_and(|reference| reference.coord.sequence() >= sequence)
+}
+
 impl CycleTestStoreOps for TestStore {
     async fn store_package_exists(
         &self,
         db: &Database,
         db_store_dir: StoreDir,
-        stream_id: &str,
-        sequence: u64,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> bool {
         let device = self
             .bind_founder_device(db, db_store_dir.clone())
             .await
             .expect("bind Store package test device");
-        let Some((reference, _commit)) = device
-            .load_exact_materialized_commit(stream_id, sequence)
-            .await
-            .expect("load exact materialized Store commit")
-        else {
-            return false;
-        };
-        match device.load_store_package_for_test(&reference).await {
+        match device.load_store_package_for_test(reference).await {
             Ok(package) => package.is_some(),
             Err(crate::sync::store::StoreError::Object(
                 coven_protocol::objects::StoreObjectError::Storage(
@@ -417,7 +438,14 @@ impl CycleTestStoreOps for TestStore {
         sequence: u64,
     ) -> bool {
         let stream_id = db.local_store_stream_id().await;
-        self.store_package_exists(db, db_store_dir, &stream_id, sequence)
+        let Some(reference) = coven_database::StoreDatabase::new(db)
+            .exact_materialized_ref(&stream_id, sequence)
+            .await
+            .expect("read exact materialized Store position")
+        else {
+            return false;
+        };
+        self.store_package_exists(db, db_store_dir, &reference)
             .await
     }
 
@@ -3403,18 +3431,20 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
     );
     assert!(db.latest_store_snapshot_meta().await.is_some());
 
-    let stream_id = db.local_store_stream_id().await;
     let package_device = storage
         .bind_device_in(&db, db_store_dir.clone(), &keypair)
         .await
         .expect("bind package inspection Store");
+    // Where the writes landed, from the write rows rather than the per-position
+    // index: the cycle advanced this device's replay baseline over the snapshot
+    // it acknowledged, which retires the positions that snapshot restates.
+    let published = coven_database::StoreDatabase::new(&db)
+        .published_write_commits()
+        .await
+        .expect("read where each host write landed");
+    assert_eq!(published.len(), 2, "both host writes published");
     let mut published_blob_ids = Vec::new();
-    for seq in [1, 2] {
-        let (commit_ref, _commit) = package_device
-            .load_exact_materialized_commit(&stream_id, seq)
-            .await
-            .expect("load exact materialized commit")
-            .expect("write has a commit");
+    for commit_ref in published {
         let package = package_device
             .load_store_package_for_test(&commit_ref)
             .await
@@ -3554,11 +3584,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     };
     let stream_id = db.local_store_stream_id().await;
     assert!(
-        coven_database::StoreDatabase::new(&db)
-            .exact_materialized_ref(&stream_id, published.coord.sequence())
-            .await
-            .expect("read adopted exact Store position")
-            .is_some(),
+        materialized_history_reaches(&db, &stream_id, published.coord.sequence()).await,
         "the published Store write is materialized",
     );
     let activated = db
@@ -3836,11 +3862,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
     .await
     .expect("two-blob retry cycle succeeds");
     let stream_id = db.local_store_stream_id().await;
-    assert!(coven_database::StoreDatabase::new(&db)
-        .exact_materialized_ref(&stream_id, 2)
-        .await
-        .expect("read retried exact materialized Store commit")
-        .is_some());
+    assert!(materialized_history_reaches(&db, &stream_id, 2).await);
     let activated_first = db
         .stored_blob_for_row("note_photos", "firstblob")
         .await
@@ -3910,11 +3932,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         .await
         .expect("first host blob cycle succeeds");
     let stream_id = db.local_store_stream_id().await;
-    assert!(coven_database::StoreDatabase::new(&db)
-        .exact_materialized_ref(&stream_id, 1)
-        .await
-        .expect("read first exact materialized Store commit")
-        .is_some());
+    assert!(materialized_history_reaches(&db, &stream_id, 1).await);
     let published_blob = db
         .row_blob_ref("note_photos", "remoteonly")
         .await
@@ -3951,11 +3969,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     run_cycle_in_task(Arc::clone(&reject_blob_create), device)
         .await
         .expect("already-uploaded host blob cycle succeeds");
-    assert!(coven_database::StoreDatabase::new(&db)
-        .exact_materialized_ref(&stream_id, 2)
-        .await
-        .expect("read re-emitted exact materialized Store commit")
-        .is_some());
+    assert!(materialized_history_reaches(&db, &stream_id, 2).await);
     assert!(reject_blob_create.rejected_blobs().is_empty());
     let republished_blob = db
         .row_blob_ref("note_photos", "remoteonly")
@@ -4074,25 +4088,24 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         status => panic!("retried Store write is not published: {status:?}"),
     };
     let stream_id = db.local_store_stream_id().await;
-    let published = coven_database::StoreDatabase::new(&db)
-        .exact_materialized_ref(&stream_id, commit.coord.sequence())
-        .await
-        .expect("read retried exact Store position")
-        .expect("retried exact Store position is materialized");
-    assert_eq!(published, commit);
+    assert!(
+        materialized_history_reaches(&db, &stream_id, commit.coord.sequence()).await,
+        "the retried Store write is materialized",
+    );
     let device = storage
         .bind_device_in(&db, db_store_dir.clone(), &keypair)
         .await
         .expect("bind retried Store writer");
-    let (published_ref, published_commit) = device
-        .load_exact_materialized_commit(&stream_id, commit.coord.sequence())
+    // Read the commit by its published reference rather than out of the
+    // per-position row: the cycle above adopted a snapshot covering it, which
+    // retires that row.
+    let published_commit = device
+        .load_commit_for_test(&commit)
         .await
-        .expect("load retried exact Store commit")
-        .expect("retried exact Store commit exists");
-    assert_eq!(published_ref, published);
-    assert_eq!(published_commit.write_id, write_id);
+        .expect("load retried exact Store commit");
+    assert_eq!(published_commit.value().write_id, write_id);
     assert!(
-        published_commit.store_package().is_some(),
+        published_commit.value().store_package().is_some(),
         "the blob Store write carries an exact Store package reference",
     );
     let activated_blob = db
@@ -4170,11 +4183,7 @@ async fn push_cycle_writes_rfc3339_ack_timestamp() {
         status => panic!("push-timestamp write is not published: {status:?}"),
     };
     let stream_id = db.local_store_stream_id().await;
-    assert!(coven_database::StoreDatabase::new(&db)
-        .exact_materialized_ref(&stream_id, published.coord.sequence())
-        .await
-        .expect("read push-timestamp materialization")
-        .is_some());
+    assert!(materialized_history_reaches(&db, &stream_id, published.coord.sequence()).await);
     storage
         .assert_latest_ack_timestamp_is_rfc3339(&db, db_store_dir.clone())
         .await;
@@ -4719,11 +4728,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
         status => panic!("retried preparation write is not published: {status:?}"),
     };
     let stream_id = db.local_store_stream_id().await;
-    assert!(coven_database::StoreDatabase::new(&db)
-        .exact_materialized_ref(&stream_id, published.coord.sequence())
-        .await
-        .expect("read retried preparation materialization")
-        .is_some());
+    assert!(materialized_history_reaches(&db, &stream_id, published.coord.sequence()).await);
     assert_eq!(
         db.pending_write_count().await,
         0,
@@ -4751,15 +4756,22 @@ impl<'a> InterceptedCycle<'a> {
 
 // ---- changeset reclamation through a real cycle ----
 
-/// A package remains available after it becomes snapshot-covered and acknowledged
-/// while an accepted Merge materialization still needs it for replay. Peer A has
-/// pushed A/1; M pulls it, acknowledges it, snapshots it, and retains its package.
+/// A package stops being needed once the device that acknowledged it advances
+/// its replay baseline over the snapshot covering it. Peer A has pushed A/1; M
+/// pulls it, acknowledges it, snapshots it, adopts that snapshot as its
+/// baseline, and deletes the package.
+///
+/// This is the whole point of the acknowledged-snapshot proof. The retained
+/// materialization for A/1 is what pinned the package, and it existed to serve
+/// a replay that now starts from an image restating A/1's rows. A device that
+/// never moved its baseline held that pin for the life of the store and
+/// declined this same target on every cycle.
 ///
 /// The mock is built with M's keypair so the head it signs for M and the ack M
 /// publishes share an author, the same identity a real device's storage and ack
 /// share — which is what lets reclamation honor M's ack against M's head.
 #[tokio::test]
-async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
+async fn cycle_reclaims_a_fully_acked_changeset_once_the_baseline_advances() {
     let keypair = UserKeypair::generate();
     let db_m_store_dir = crate::sync::test_helpers::test_store_dir();
     let db_m = crate::sync::test_helpers::open_test_db(db_m_store_dir.clone());
@@ -4785,7 +4797,6 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
         .await
         .expect("publish exact Store changeset");
     let published_stream = published.coord.stream_id;
-    let stream_id = published_stream.to_string();
 
     // M's cycle pulls A->1, acks A->1, snapshots covering A->1, then reclaims.
     let device = storage
@@ -4842,16 +4853,24 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
             if frontier.get(&published_stream) == Some(&published)
     ));
     assert!(
-        storage
-            .store_package_exists(&db_m, db_m_store_dir.clone(), &stream_id, 1)
+        !storage
+            .store_package_exists(&db_m, db_m_store_dir.clone(), &published)
             .await,
-        "the accepted Merge materialization retains its Store package for replay",
+        "the advanced replay baseline releases the Store package it pinned",
     );
 }
 
-/// Reclamation refuses the snapshot proof while one exact active device is
-/// behind it. The behind device acknowledges the first data commit, the owner
-/// publishes another, and both packages remain available for its later pull.
+/// Reclamation works from the newest snapshot every active device has
+/// acknowledged, so a device that is behind protects exactly the history it has
+/// not reached and nothing more.
+///
+/// The behind device acknowledges through the first data commit; the owner then
+/// publishes a second and runs a cycle. What the owner may delete is the
+/// package under the acknowledged coverage — the behind device said in a signed
+/// acknowledgement that it holds it. What it may not delete is the second
+/// package, which the behind device has never seen and pulls below. Asserting
+/// that the first survives too would be asserting that reclamation never
+/// deletes anything.
 #[tokio::test]
 async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
     Box::pin(async {
@@ -4873,7 +4892,7 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
              VALUES ('a1', 'Title Alpha', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
             ])
             .await;
-        storage
+        let first_commit = storage
             .publish_changeset("owner", 1, &first_changeset, SCHEMA_VERSION)
             .await
             .expect("publish first exact Store changeset");
@@ -4892,16 +4911,21 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             )
             .await
             .expect("admit exact behind Member identity");
+        // Joined the way production joins: the device installs the owner's
+        // snapshot and carries only the history published after it. A device
+        // joined by replaying from genesis would pin every package the store
+        // ever wrote, including the one this cycle deletes.
         let behind_db_store_dir = crate::sync::test_helpers::test_store_dir();
-        let behind_db = crate::sync::test_helpers::open_test_db(behind_db_store_dir.clone());
         let behind_store = storage
-            .activate_joined_device(
+            .activate_joined_device_from_snapshot(
                 &owner_db,
                 owner_db_store_dir.clone(),
-                &behind_db,
                 behind_db_store_dir.clone(),
                 &behind,
                 T0,
+                crate::sync::test_helpers::test_synced_tables(),
+                crate::sync::test_helpers::test_migrations(),
+                SCHEMA_VERSION,
             )
             .await
             .expect("activate exact joined test device");
@@ -4911,7 +4935,7 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             .expect("pull initial behind Member Store state");
 
         let behind_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
-            coven_database::StoreDatabase::new(&behind_db)
+            behind_store
                 .materialized_frontier()
                 .await
                 .expect("read behind device frontier"),
@@ -4941,30 +4965,13 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             .sequence()
             .checked_add(1)
             .expect("owner Store sequence remains representable");
-        storage
+        let second_commit = storage
             .publish_changeset("owner", second_sequence, &second_changeset, SCHEMA_VERSION)
             .await
             .expect("publish second exact Store changeset after registration activation");
 
         drop(source);
         tokio::spawn(async move {
-            let registration = coven_database::StoreDatabase::new(&owner_db)
-                .local_blob_write_authority()
-                .await
-                .expect("read owner announcement authority");
-            let owner_stream = registration
-                .value()
-                .store_announcement_activation(registration.reference())
-                .expect("derive owner Store announcement activation")
-                .author_stream_id()
-                .to_string();
-            let second_sequence = storage
-                .latest_store_position()
-                .await
-                .expect("read published owner Store position")
-                .expect("second owner Store commit is materialized")
-                .coord
-                .sequence();
             let cycle_device = storage
                 .open_into(&owner_db, owner_db_store_dir.clone())
                 .await
@@ -4975,19 +4982,14 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
                 .expect("run package-retention cycle");
 
             assert!(
-                storage
-                    .store_package_exists(&owner_db, owner_db_store_dir.clone(), &owner_stream, 1,)
+                !storage
+                    .store_package_exists(&owner_db, owner_db_store_dir.clone(), &first_commit)
                     .await,
-                "reclamation keeps the earlier package while an active device is behind",
+                "reclamation deletes the package every active device acknowledged",
             );
             assert!(
                 storage
-                    .store_package_exists(
-                        &owner_db,
-                        owner_db_store_dir.clone(),
-                        &owner_stream,
-                        second_sequence,
-                    )
+                    .store_package_exists(&owner_db, owner_db_store_dir.clone(), &second_commit)
                     .await,
                 "reclamation keeps the package the behind device still needs",
             );
@@ -4997,7 +4999,7 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
                 .await
                 .expect("pull retained changeset into behind Member Store");
             assert!(
-                behind_db
+                behind_store
                     .test_row_exists("SELECT 1 FROM notes WHERE id = 'a2'")
                     .await,
                 "the behind device pulls the retained changeset",
@@ -6334,10 +6336,12 @@ async fn cross_principal_device_join_completes_on_the_runtime_stack() {
     .await;
 
     let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
-    storage
+    let member_device = storage
         .install_cross_principal_device(
-            coven_database::StoreDatabase::new(&member_db),
+            member_db_store_dir.clone(),
+            crate::sync::test_helpers::test_synced_tables(),
+            crate::sync::test_helpers::test_migrations(),
+            SCHEMA_VERSION,
             &member,
             "member-account",
             T0,
@@ -6346,7 +6350,7 @@ async fn cross_principal_device_join_completes_on_the_runtime_stack() {
         .expect("complete cross-principal device join");
 
     assert!(
-        coven_database::StoreDatabase::new(&member_db)
+        member_device
             .latest_local_store_device_registration()
             .await
             .expect("load joined local registration")
@@ -6396,10 +6400,12 @@ async fn cross_principal_device_join_materializes_rows_written_after_the_snapsho
         .expect("publish the post-snapshot row");
 
     let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
-    storage
+    let member_device = storage
         .install_cross_principal_device(
-            coven_database::StoreDatabase::new(&member_db),
+            member_db_store_dir.clone(),
+            crate::sync::test_helpers::test_synced_tables(),
+            crate::sync::test_helpers::test_migrations(),
+            SCHEMA_VERSION,
             &member,
             "member-account",
             T0,
@@ -6408,7 +6414,7 @@ async fn cross_principal_device_join_materializes_rows_written_after_the_snapsho
         .expect("complete cross-principal device join");
 
     assert_eq!(
-        member_db
+        member_device
             .query_test_text("SELECT title FROM notes WHERE id = 'post-snapshot'")
             .await,
         "Written after the snapshot",
@@ -6626,11 +6632,12 @@ async fn a_device_join_reads_no_blob_content() {
     home.clear_exact_reads();
 
     let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let member_db =
-        crate::sync::test_helpers::open_test_db_with_blob(member_db_store_dir.clone(), blob_decl);
-    storage
+    let _member_db = storage
         .install_cross_principal_device(
-            coven_database::StoreDatabase::new(&member_db),
+            member_db_store_dir.clone(),
+            crate::sync::test_helpers::test_synced_tables_with_blob(blob_decl),
+            crate::sync::test_helpers::test_migrations(),
+            SCHEMA_VERSION,
             &member,
             "member-account",
             T0,

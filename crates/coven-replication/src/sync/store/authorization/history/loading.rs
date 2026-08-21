@@ -178,23 +178,22 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    pub(crate) async fn verify_snapshots_for_acknowledgement(
-        &mut self,
-        snapshots: &[coven_database::PublishedStoreSnapshot],
-    ) -> Result<(), pull::StorePullError> {
-        self.history_verifier
-            .verify_snapshots_for_acknowledgement(snapshots)
-            .await
-    }
-
+    /// The snapshot this device acknowledges, verified as installable.
+    ///
+    /// It is the same authority the device installs a baseline from, because
+    /// acknowledging a snapshot and standing on it are the same act: the
+    /// acknowledgement says this device holds everything the snapshot covers,
+    /// and the baseline advance is that claim made true locally.
     pub(crate) async fn select_acknowledgement_snapshot(
         &mut self,
         frontier: &CommitFrontier,
         device_state: &StoreDeviceStateRef,
     ) -> Result<
-        Option<coven_protocol::store_commit::StoreSnapshotLocator>,
+        Option<
+            crate::sync::store::commit_verification::merge_history::SelectedInstallableStoreSnapshot,
+        >,
         crate::sync::store::acknowledgements::StoreAckError,
-    > {
+    >{
         let registrations = self
             .database
             .activated_store_device_registration_records()
@@ -206,7 +205,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 .load_store_snapshot_stream(registration.reference(), registration.value())
                 .await?
             {
+                // A snapshot this device's replay baseline already stands
+                // past is dropped here rather than verified: it would need the
+                // history the baseline retired, and acknowledging it would
+                // claim less than the device holds.
                 if !frontier.covers(&snapshot.meta.coverage)
+                    || self
+                        .history_verifier
+                        .replay_baseline_stands_past(&snapshot.meta.coverage)
                     || snapshot.meta.state.devices.state_hash() != device_state.state_hash()
                     || snapshot.meta.state.devices.recovery() != device_state.recovery()
                 {
@@ -218,17 +224,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         if candidates.is_empty() {
             return Ok(None);
         }
-        self.verify_snapshots_for_acknowledgement(&candidates)
+        Ok(self
+            .history_verifier
+            .select_maximal_installable_store_snapshot(candidates)
             .await
-            .map_err(crate::sync::store::snapshots::SnapshotError::from)?;
-        Ok(
-            crate::sync::store::snapshots::select_maximal_store_snapshot(candidates).map(
-                |snapshot| coven_protocol::store_commit::StoreSnapshotLocator {
-                    author_registration: snapshot.meta.author_registration.clone(),
-                    snapshot: snapshot.reference,
-                },
-            ),
-        )
+            .map_err(crate::sync::store::snapshots::SnapshotError::from)?)
     }
 
     pub(crate) async fn load_current_membership(

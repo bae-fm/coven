@@ -45,14 +45,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     /// it already; a pull seeds from them at the top of every cycle, and the
     /// write path needs the same seed before it walks.
     pub(crate) async fn seed_retained_history(&mut self) -> Result<(), pull::StorePullError> {
-        let root = self.history_verifier.verified_root().reference().clone();
-        let retained = self.database.retained_merge_replay_inputs(root).await?;
-        self.history_verifier.admit_retained_history(&retained)?;
-        let refs = retained
-            .iter()
-            .map(|materialization| materialization.commit_ref().clone())
-            .collect::<Vec<_>>();
-        self.history_verifier.verify_refs(refs).await?;
+        super::retained::seed_verifier_from_retained_history(
+            &self.database,
+            &mut self.history_verifier,
+        )
+        .await?;
         Ok(())
     }
 

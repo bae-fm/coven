@@ -58,11 +58,13 @@ pub(crate) use membership_control::{
     VerifiedMergeMembershipControl, VerifiedMergeMembershipHeadActivation,
     VerifiedMergePrefixHeadStatus,
 };
-pub(crate) use predecessor::{predecessor_verifies_owner, VerifiedMergePredecessorHistory};
+pub(crate) use predecessor::{
+    predecessor_verifies_owner, PredecessorSearch, VerifiedMergePredecessorHistory,
+};
 pub(crate) use promotion::{
     VerifiedMergeConflictResolutionActivation, VerifiedOwnerPromotionRequestActivation,
 };
-pub(crate) use snapshots::SelectedAcknowledgedStoreSnapshot;
+pub(crate) use snapshots::{SelectedAcknowledgedStoreSnapshot, SelectedInstallableStoreSnapshot};
 pub use successor::MergeHistorySuccessorEvidence;
 pub use successor::PreparedMergeHistorySuccessor;
 pub(crate) use successor::{
@@ -290,6 +292,8 @@ impl<'a> MergeHistoryVerifier<'a> {
             founder: founder_ref,
             history: VerifiedMergeHistory {
                 genesis,
+                baseline: coven_database::InstalledReplayBaseline::default(),
+                retained: BTreeMap::new(),
                 commits: BTreeMap::new(),
             },
             verified_memberships: Vec::new(),
@@ -422,6 +426,99 @@ impl<'a> MergeHistoryVerifier<'a> {
     /// the same signature check a provider read would have run, and the
     /// `remember_*` entry points reject a value that disagrees with its
     /// reference or with an entry already admitted.
+    /// Adopt the announcement position the installed Store snapshot restates
+    /// for each stream, as the point a chain walk resumes from.
+    ///
+    /// Admitted before [`admit_retained_history`](Self::admit_retained_history)
+    /// because it decides where the accepted path starts. Without it a device
+    /// whose retained rows stop above the snapshot cut has no accepted prefix
+    /// at all, and every walk falls back to the stream anchor and re-reads
+    /// every head and commit under the cut, on every pull, for as long as the
+    /// store exists.
+    ///
+    /// The authority is the one the baseline itself rests on: the owner signed
+    /// this announcement into the snapshot's history summary alongside the
+    /// state it restates, and the database refuses a frontier naming a commit
+    /// its own coverage does not.
+    pub(crate) fn admit_snapshot_announcements(
+        &mut self,
+        frontier: &BTreeMap<
+            coven_protocol::causal_grants::AuthorStreamId,
+            store_commit::RetainedAcceptedStoreAnnouncement,
+        >,
+    ) -> Result<(), StorePullError> {
+        for announcement in frontier.values() {
+            let head = &announcement.value;
+            let head_ref = StoreDeviceHeadRef {
+                head_hash: head.head_hash(),
+                object: announcement.reference.object.clone(),
+            };
+            if announcement.reference != head_ref {
+                return Err(StorePullError::InvalidState(
+                    "snapshot announcement differs from its own head reference".to_string(),
+                ));
+            }
+            self.commit_verifier
+                .remember_verified_head(
+                    &head_ref,
+                    VerifiedObject {
+                        value: head.clone(),
+                        bytes: head.to_bytes(),
+                        semantic_hash: head_ref.head_hash,
+                        object: head_ref.object.clone(),
+                    },
+                )
+                .map_err(StorePullError::Protocol)?;
+            self.commit_verifier
+                .remember_covered_announcement(
+                    &head.author_registration,
+                    crate::sync::store::commit_verification::commit::CoveredStoreAnnouncement {
+                        sequence: head.commit.coord.sequence(),
+                        commit: head.commit.clone(),
+                        head: head_ref,
+                        next_slot: head.successor.next_slot.clone(),
+                    },
+                )
+                .map_err(StorePullError::Protocol)?;
+        }
+        Ok(())
+    }
+
+    /// Adopt the replay baseline this device stands on as the floor of every
+    /// history walk this verifier runs.
+    ///
+    /// Admitted before the retained rows, for the same reason
+    /// [`admit_snapshot_announcements`](Self::admit_snapshot_announcements) is:
+    /// it decides where a walk stops, and a walk that starts before knowing
+    /// that runs to genesis over commits the baseline retired.
+    ///
+    /// Refuses to replace a baseline already admitted with a different one. One
+    /// verifier serves one operation, and a coverage that moves under it would
+    /// silently change what the walks it already ran were allowed to skip.
+    pub(crate) fn admit_installed_baseline(
+        &mut self,
+        baseline: coven_database::InstalledReplayBaseline,
+    ) -> Result<(), StorePullError> {
+        let installed = self.history.baseline.coverage();
+        if !installed.commits().is_empty() && installed != baseline.coverage() {
+            return Err(StorePullError::InvalidState(
+                "installed replay baseline coverage moved under its history verifier".to_string(),
+            ));
+        }
+        self.history.baseline = baseline;
+        Ok(())
+    }
+
+    /// Whether this device's installed replay baseline already stands at or
+    /// past `coverage`.
+    ///
+    /// A snapshot covering no more than the baseline has nothing this device
+    /// can verify it against — the history behind it was retired — and nothing
+    /// to offer it, because the baseline restates at least as much.
+    pub(crate) fn replay_baseline_stands_past(&self, coverage: &CommitFrontier) -> bool {
+        !coverage.covers(self.history.baseline.coverage())
+    }
+
     pub(crate) fn admit_retained_history(
         &mut self,
         retained: &[coven_database::OwnedVerifiedMergeMaterialization],
@@ -430,6 +527,9 @@ impl<'a> MergeHistoryVerifier<'a> {
         for materialization in retained {
             let commit = materialization.commit();
             let commit_ref = materialization.commit_ref();
+            self.history
+                .retained
+                .insert(commit_ref.clone(), materialization.registrations().to_vec());
             self.commit_verifier
                 .remember(materialization.verified_commit().clone())
                 .map_err(StorePullError::Protocol)?;
@@ -459,14 +559,24 @@ impl<'a> MergeHistoryVerifier<'a> {
                     },
                 )
                 .map_err(StorePullError::Protocol)?;
-            // The accepted path is a dense sequence from one, and a snapshot
-            // truncates retained rows below its cut. Admit each stream's
-            // contiguous prefix and leave the rest to the discovery walk, which
-            // resumes at the first sequence the path does not cover.
+            // The accepted path is a dense sequence above the snapshot
+            // coverage, which is where `admit_snapshot_announcements` has
+            // already put its floor. Admit each stream's contiguous prefix from
+            // there and leave the rest to the discovery walk, which resumes at
+            // the first sequence the path does not cover.
             let sequence = commit_ref.coord.sequence();
-            let expected = announced
-                .get(&commit.author_registration)
-                .map_or(1, |previous| previous.saturating_add(1));
+            // The contiguous run starts one above the snapshot's coverage, not
+            // at sequence one: rows at or under the coverage are the closure
+            // the image keeps for its own reasons, not a prefix of the accepted
+            // path, and treating one of them as the start would leave the run
+            // stuck at a position the path does not hold.
+            let expected = match announced.get(&commit.author_registration) {
+                Some(previous) => previous.saturating_add(1),
+                None => self
+                    .commit_verifier
+                    .covered_announcement_floor(&commit.author_registration)
+                    .saturating_add(1),
+            };
             if sequence != expected {
                 continue;
             }
@@ -560,12 +670,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self,
         commit: &StoreBatchCommit,
     ) -> Result<ResolvedStoreDeviceState, StorePullError> {
-        let states = self
-            .history
-            .commits
-            .iter()
-            .map(|(reference, verified)| (reference.clone(), verified.state_after.clone()))
-            .collect::<BTreeMap<_, _>>();
+        let states = self.history.resolved_states();
         verified_merge_predecessor_state(&self.history.genesis, &states, commit)
     }
 
@@ -573,7 +678,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self,
         predecessors: impl IntoIterator<Item = StoreBatchCommitRef>,
     ) -> Result<VerifiedMergeMembershipPrefix, StorePullError> {
-        verified_merge_membership_prefix(&self.history.commits, predecessors)
+        verified_merge_membership_prefix(&self.history, predecessors)
     }
 
     pub(crate) fn verified_pull_candidate(
@@ -769,29 +874,31 @@ impl<'a> MergeHistoryVerifier<'a> {
                 frontier
                     .values()
                     .map(|reference| {
-                        self.history
-                            .commits
-                            .get(reference)
-                            .map(|commit| commit.state_after.clone())
-                            .ok_or_else(|| {
-                                StorePullError::InvalidState(
-                                    "Merge history frontier is absent from its verified graph"
-                                        .to_string(),
-                                )
-                            })
+                        self.history.state_after(reference).cloned().ok_or_else(|| {
+                            StorePullError::InvalidState(
+                                "Merge history frontier is absent from its verified graph"
+                                    .to_string(),
+                            )
+                        })
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             )
             .map_err(StorePullError::Protocol)?
         };
         let membership =
-            verified_merge_membership_prefix(&self.history.commits, frontier.values().cloned())?;
+            verified_merge_membership_prefix(&self.history, frontier.values().cloned())?;
         Ok((device_state, membership))
     }
 }
 
+/// Every commit `tips` causally depends on, down to the installed baseline.
+///
+/// A covered reference is a member of the closure but not a step in the walk:
+/// the baseline restates what stands there, and the commits behind it are
+/// retired. Walking past one would demand history this device deliberately
+/// dropped.
 fn verified_merge_commit_closure(
-    commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
+    history: &VerifiedMergeHistory,
     tips: impl IntoIterator<Item = StoreBatchCommitRef>,
 ) -> Result<BTreeSet<StoreBatchCommitRef>, StorePullError> {
     let mut pending = tips.into_iter().collect::<Vec<_>>();
@@ -800,7 +907,10 @@ fn verified_merge_commit_closure(
         if !closure.insert(reference.clone()) {
             continue;
         }
-        let verified = commits.get(&reference).ok_or_else(|| {
+        if history.superseded(&reference) {
+            continue;
+        }
+        let verified = history.commits.get(&reference).ok_or_else(|| {
             StorePullError::InvalidState(
                 "verified Merge predecessor closure is absent from its history".to_string(),
             )
@@ -812,12 +922,12 @@ fn verified_merge_commit_closure(
 
 fn merge_device_state_from_verified_history(
     reference: &StoreDeviceStateRef,
-    genesis: &ResolvedStoreDeviceState,
-    commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
+    history: &VerifiedMergeHistory,
     allowed_tips: impl IntoIterator<Item = StoreBatchCommitRef>,
 ) -> Result<ResolvedStoreDeviceState, StorePullError> {
+    let genesis = &history.genesis;
     let frontier = reference.frontier();
-    let allowed = verified_merge_commit_closure(commits, allowed_tips)?;
+    let allowed = verified_merge_commit_closure(history, allowed_tips)?;
     if frontier
         .commits()
         .values()
@@ -835,15 +945,12 @@ fn merge_device_state_from_verified_history(
                 .commits()
                 .values()
                 .map(|reference| {
-                    commits
-                        .get(reference)
-                        .map(|verified| verified.state_after.clone())
-                        .ok_or_else(|| {
-                            StorePullError::InvalidState(
-                                "Merge device-state frontier is absent from its verified history"
-                                    .to_string(),
-                            )
-                        })
+                    history.state_after(reference).cloned().ok_or_else(|| {
+                        StorePullError::InvalidState(
+                            "Merge device-state frontier is absent from its verified history"
+                                .to_string(),
+                        )
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         )
@@ -861,7 +968,77 @@ fn merge_device_state_from_verified_history(
 
 pub(crate) struct VerifiedMergeHistory {
     pub(crate) genesis: ResolvedStoreDeviceState,
+    /// Where a walk down this history stops, and what it reads there.
+    ///
+    /// Below an installed baseline there is nothing to walk to: the commits are
+    /// retired and their rows are restated by one signed image. The two ends of
+    /// a history are the same shape — `genesis` is the state before the first
+    /// commit, `baseline` is the state at the positions the image covers.
+    pub(crate) baseline: coven_database::InstalledReplayBaseline,
+    /// The commits this device still holds a retained materialization for, and
+    /// the registrations that row proved active at each of them.
+    ///
+    /// A baseline image keeps a closure of rows at or under its own coverage —
+    /// historical Circle epoch access, author-exclusion recovery — because
+    /// those paths read the rows rather than a replay. Being covered therefore
+    /// does not mean the commit is gone; holding no row for it does.
+    pub(crate) retained: BTreeMap<StoreBatchCommitRef, Vec<ActivatedStoreDeviceRegistration>>,
     pub(crate) commits: BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
+}
+
+impl VerifiedMergeHistory {
+    /// Whether the installed baseline stands in for `reference` outright: it
+    /// restates the position and this device kept no row behind it. Nothing
+    /// walks past such a reference, because there is nothing left to walk to.
+    pub(crate) fn superseded(&self, reference: &StoreBatchCommitRef) -> bool {
+        self.baseline.covers(reference) && !self.retained.contains_key(reference)
+    }
+
+    /// The registrations a retained row already proved active at its commit.
+    ///
+    /// Re-deriving them reads whatever the commit's body names from the
+    /// provider — a reclaim authorization, its evidence, its receipt — on every
+    /// pull, for a commit this device verified once and wrote a row for. The
+    /// row was written by the transaction that verified and applied the commit,
+    /// and opening it re-parses and re-checks the commit against its activated
+    /// registration, so it is the answer rather than a cache of one.
+    pub(crate) fn retained_registrations(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Option<&[ActivatedStoreDeviceRegistration]> {
+        self.retained
+            .get(reference)
+            .map(|registrations| registrations.as_slice())
+    }
+
+    /// The device state standing after `reference`, from the verified graph
+    /// when it holds the commit and from the baseline when the commit is one it
+    /// superseded.
+    pub(crate) fn state_after(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Option<&ResolvedStoreDeviceState> {
+        self.commits
+            .get(reference)
+            .map(|commit| &commit.state_after)
+            .or_else(|| self.baseline.covered_state(reference))
+    }
+
+    /// Every position this history can answer a device state for: the commits
+    /// it verified, plus the covered positions the baseline restates.
+    pub(crate) fn resolved_states(
+        &self,
+    ) -> BTreeMap<StoreBatchCommitRef, ResolvedStoreDeviceState> {
+        self.baseline
+            .covered_states()
+            .map(|(reference, state)| (reference.clone(), state.clone()))
+            .chain(
+                self.commits
+                    .iter()
+                    .map(|(reference, verified)| (reference.clone(), verified.state_after.clone())),
+            )
+            .collect()
+    }
 }
 
 struct VerifiedMembershipChain {

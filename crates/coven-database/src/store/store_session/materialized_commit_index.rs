@@ -110,6 +110,81 @@ impl StoreSession<'_> {
             .snapshot_coverage_frontier()
     }
 
+    fn installed_replay_baseline(&mut self) -> Result<crate::InstalledReplayBaseline, DbError> {
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
+        let coverage = self.snapshot_coverage_frontier()?;
+        let covered_states =
+            crate::store::store_device_state::load_covered_store_device_snapshots_on(
+                self.conn, &coverage,
+            )?;
+        // A genesis baseline covers nothing, so there is nothing under it to
+        // summarize and every walk runs to the bottom as it always did.
+        let summary =
+            match crate::store::retained_replay::load_replay_baseline_metadata_on(records)? {
+                Some(baseline)
+                    if matches!(
+                        baseline.authority,
+                        crate::RetainedReplayAuthority::InstalledSnapshot(_)
+                    ) =>
+                {
+                    Some(
+                        crate::StoreDatabase::open_installed_baseline_history_summary(
+                            records, &baseline,
+                        )?,
+                    )
+                }
+                _ => None,
+            };
+        Ok(crate::InstalledReplayBaseline::new(
+            coverage,
+            covered_states,
+            summary,
+        ))
+    }
+
+    /// The accepted announcement each stream's installed snapshot restates at
+    /// its covered tip.
+    ///
+    /// The announcement chain is slot-linked, so a walker that starts below a
+    /// position cannot skip to it — it has to read every head in between. This
+    /// is where a walk resumes instead: the head the snapshot's owner signed
+    /// into its history summary, at the coverage this device stands on. A
+    /// device on a genesis baseline has none, and its walks start at the stream
+    /// anchor as they always did.
+    fn snapshot_announcement_frontier(
+        &mut self,
+    ) -> Result<
+        BTreeMap<
+            coven_protocol::causal_grants::AuthorStreamId,
+            coven_protocol::store_commit::RetainedAcceptedStoreAnnouncement,
+        >,
+        DbError,
+    > {
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
+        let baseline = self
+            .verified_store_authority
+            .retained_replay_baseline_on(records)?;
+        let crate::RetainedReplayAuthority::InstalledSnapshot(authority) = &baseline.authority
+        else {
+            return Ok(BTreeMap::new());
+        };
+        let summary = &authority.metadata.history_summary;
+        let coverage = &authority.metadata.coverage.0;
+        let frontier = summary.announcement_frontier.clone();
+        for (stream_id, announcement) in &frontier {
+            // The summary carries both, so they can disagree; the coverage is
+            // what every other position question answers from, and an
+            // announcement naming a different commit would resume a walk on the
+            // wrong chain.
+            if coverage.get(stream_id) != Some(&announcement.value.commit) {
+                return Err(DbError::Message(
+                    "snapshot announcement frontier differs from its own coverage".to_string(),
+                ));
+            }
+        }
+        Ok(frontier)
+    }
+
     fn store_device_state_for_history_cut(
         &mut self,
         cut: StoreHistoryCut,
@@ -307,6 +382,28 @@ impl StoreDatabase {
 
     pub async fn snapshot_coverage_frontier(&self) -> Result<CommitFrontier, DbError> {
         self.call_store(|session| session.snapshot_coverage_frontier())
+            .await
+    }
+
+    /// The baseline a history walk stops at, with the device states it keeps
+    /// for the covered positions commits above it still name.
+    pub async fn installed_replay_baseline(
+        &self,
+    ) -> Result<crate::InstalledReplayBaseline, DbError> {
+        self.call_store(|session| session.installed_replay_baseline())
+            .await
+    }
+
+    pub async fn snapshot_announcement_frontier(
+        &self,
+    ) -> Result<
+        BTreeMap<
+            coven_protocol::causal_grants::AuthorStreamId,
+            coven_protocol::store_commit::RetainedAcceptedStoreAnnouncement,
+        >,
+        DbError,
+    > {
+        self.call_store(|session| session.snapshot_announcement_frontier())
             .await
     }
 

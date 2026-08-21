@@ -270,6 +270,101 @@ pub struct OwnedVerifiedMergeMaterialization {
     input_hash: ObjectHash,
 }
 
+/// The replay baseline a device stands on, as the history verifier needs it.
+///
+/// A device that installed or advanced a baseline holds one signed image in
+/// place of the commits under `coverage`, and the rows those commits produced
+/// are gone. So a walk that reaches a covered position has nothing left to walk
+/// to — and nothing to prove, because the baseline already restates the result.
+/// It stops there instead, and reads the position's device state out of
+/// `covered_states`, which is what `retain_snapshot_device_states` keeps alive
+/// for exactly the positions commits above the coverage still name.
+///
+/// A device on a genesis baseline has an empty coverage, so every walk runs to
+/// genesis as it always did.
+#[derive(Debug, Clone)]
+pub struct InstalledReplayBaseline {
+    coverage: coven_protocol::store_commit::CommitFrontier,
+    covered_states: std::collections::BTreeMap<
+        StoreBatchCommitRef,
+        coven_protocol::store_commit::ResolvedStoreDeviceState,
+    >,
+    summary: Option<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
+}
+
+impl Default for InstalledReplayBaseline {
+    /// The genesis baseline: nothing is covered, so every walk runs to the
+    /// bottom of the history exactly as it does on a device that never
+    /// installed a snapshot.
+    fn default() -> Self {
+        Self {
+            coverage: coven_protocol::store_commit::CommitFrontier(
+                std::collections::BTreeMap::new(),
+            ),
+            covered_states: std::collections::BTreeMap::new(),
+            summary: None,
+        }
+    }
+}
+
+impl InstalledReplayBaseline {
+    pub fn new(
+        coverage: coven_protocol::store_commit::CommitFrontier,
+        covered_states: std::collections::BTreeMap<
+            StoreBatchCommitRef,
+            coven_protocol::store_commit::ResolvedStoreDeviceState,
+        >,
+        summary: Option<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
+    ) -> Self {
+        Self {
+            coverage,
+            covered_states,
+            summary,
+        }
+    }
+
+    /// The signed history summary standing for everything under the coverage.
+    ///
+    /// A composition that walked to genesis produced this from the commits
+    /// themselves; one that stops at the baseline starts from it instead. Both
+    /// arrive at the same summary, which is what makes a summary a summary.
+    pub fn history_summary(
+        &self,
+    ) -> Option<&coven_protocol::store_commit::OpenedRetainedMergeHistorySummary> {
+        self.summary.as_ref()
+    }
+
+    pub fn coverage(&self) -> &coven_protocol::store_commit::CommitFrontier {
+        &self.coverage
+    }
+
+    /// Whether the baseline restates `reference`, so no walk need pass it.
+    pub fn covers(&self, reference: &StoreBatchCommitRef) -> bool {
+        self.coverage.covers_commit(reference)
+    }
+
+    /// The device state that stood at a covered position, or `None` when this
+    /// device never recorded one there — which is a commit naming a position
+    /// outside its own history, not a baseline that lost something.
+    pub fn covered_state(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Option<&coven_protocol::store_commit::ResolvedStoreDeviceState> {
+        self.covered_states.get(reference)
+    }
+
+    pub fn covered_states(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &StoreBatchCommitRef,
+            &coven_protocol::store_commit::ResolvedStoreDeviceState,
+        ),
+    > {
+        self.covered_states.iter()
+    }
+}
+
 pub enum RetainedMergeHistoryCheckpoint {
     Snapshot(coven_protocol::store_commit::OpenedRetainedMergeHistorySummary),
     Commit(Box<OwnedVerifiedMergeMaterialization>),
@@ -653,6 +748,17 @@ impl VerifiedAcknowledgedStoreSnapshot {
     ) -> Result<Self, crate::DbError> {
         acknowledged.validate()?;
         Ok(Self { acknowledged })
+    }
+
+    /// The authority a device adopts when it advances its own replay baseline
+    /// over this snapshot.
+    ///
+    /// Reclaim-grade verification is what licenses the advance: every device
+    /// that could still need the history behind this cut has said in a signed
+    /// acknowledgement that it holds this snapshot, so nothing is left needing
+    /// the retained rows the advance retires.
+    pub fn authority(&self) -> &coven_protocol::store_commit::RetainedReplaySnapshotAuthority {
+        &self.acknowledged.authority
     }
 
     pub fn acknowledgement_refs(

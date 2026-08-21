@@ -73,21 +73,16 @@ impl ReclaimJourneyFixture {
                 .expect("publish package activation");
             activations.push(activation);
         }
-        let tip = activations.last().expect("published two packages").clone();
-        let StoreCommitCoord { stream_id, .. } = tip.coord;
-        let coverage = CommitFrontier(BTreeMap::from([(stream_id, tip)]));
-
+        // A real captured image, not a placeholder: reclaim adopts the snapshot
+        // it proves acknowledged as this device's replay baseline, and an image
+        // that is not a database cannot serve a rewind. Publishing it the way
+        // production does is also what releases the replay pins on the two
+        // packages below — the fixture used to reach past that with a test-only
+        // ownership release, which is the thing this suite is now checking.
         device
-            .publish_snapshot(b"reclaim journey snapshot".to_vec(), coverage.clone())
+            .ensure_device_join_snapshot_for_test()
             .await
-            .expect("publish covering snapshot");
-        device
-            .publish_acknowledgement(coverage)
-            .await
-            .expect("acknowledge covering snapshot");
-        db.release_retained_replay_ownership_for_test()
-            .await
-            .expect("release retained replay ownership");
+            .expect("publish and acknowledge a covering snapshot");
 
         let mut packages = Vec::new();
         for activation in activations {
@@ -122,6 +117,20 @@ impl ReclaimJourneyFixture {
             .map_err(StoreReclaimError::from)?
             .reclaim_packages()
             .await
+    }
+
+    async fn materialized_frontier(&self) -> coven_protocol::store_commit::CommitFrontier {
+        coven_protocol::store_commit::CommitFrontier::from_refs(
+            self.device
+                .materialized_frontier()
+                .await
+                .expect("read materialized frontier"),
+        )
+        .expect("shape materialized frontier")
+    }
+
+    async fn replay_note_count(&self) -> Result<i64, coven_database::DbError> {
+        self.device.replay_row_count_for_test("notes").await
     }
 
     async fn package_is_present(&self, target: &StorePackageReclaimTarget) -> bool {
@@ -796,6 +805,177 @@ async fn a_reclaim_that_deletes_nothing_reports_the_step_that_declined() {
             + result.store_packages.already_authorized
             + result.store_packages.authorized,
         "every considered target is accounted for by exactly one outcome",
+    );
+}
+
+/// A standing device advances its own replay baseline over the snapshot it
+/// acknowledges, and that is what releases the packages behind it.
+///
+/// This is the shape that cost a live store 87MB and every package it ever
+/// wrote. A device that joins gets a baseline at the snapshot it installs, but
+/// one that has been in the store since the beginning never moved its own: its
+/// baseline stayed at genesis, so its retained-replay closure spanned all of
+/// history and pinned every package forever. Reclaim selected the right
+/// snapshot, found the targets behind it, and declined every one of them as
+/// retained for replay — for as long as the store existed.
+///
+/// The fixture acknowledges its snapshot while it builds, so the advance has
+/// already happened by the time reclaim runs; what reclaim shows is the
+/// consequence — nothing left pinned, every target authorized.
+#[tokio::test]
+async fn a_standing_device_advances_its_baseline_and_releases_what_it_pinned() {
+    let fixture = ReclaimJourneyFixture::build("reclaim-baseline-advance").await;
+
+    let result = fixture.reclaim().await.expect("reclaim covered packages");
+
+    assert_eq!(
+        result.store_packages.retained_for_replay, 0,
+        "the acknowledgement's advance left no target pinned for replay",
+    );
+    assert_eq!(
+        result.store_packages.authorized, result.store_packages.targets_considered,
+        "and every considered target is authorized instead of declined",
+    );
+    assert!(
+        result.store_packages.targets_considered > 0,
+        "the run had targets to consider in the first place",
+    );
+}
+
+/// Acknowledging a snapshot is what moves the baseline, and it moves once.
+///
+/// Rebuilding the baseline image replays the whole retained history, so a
+/// device whose baseline already stands at the snapshot it is acknowledging
+/// must decline before paying for it.
+#[tokio::test]
+async fn a_baseline_already_at_the_coverage_does_not_advance_again() {
+    let fixture = ReclaimJourneyFixture::build("reclaim-baseline-settled").await;
+    let frontier = fixture.materialized_frontier().await;
+
+    let again = fixture
+        .device
+        .advance_baseline_by_acknowledging(frontier)
+        .await
+        .expect("acknowledge the snapshot a second time");
+
+    assert!(
+        again.is_none(),
+        "the baseline already stands at the acknowledged snapshot, so nothing is rebuilt",
+    );
+}
+
+/// Replay still reconstructs the store after the baseline moves.
+///
+/// The advance retires the retained rows the new cut covers, which is only safe
+/// because the baseline image restates what they replayed. If it did not, this
+/// count would come back short by the retired commits' rows.
+#[tokio::test]
+async fn replay_reconstructs_the_store_after_the_baseline_advances() {
+    let fixture = ReclaimJourneyFixture::build("reclaim-baseline-replay").await;
+
+    let after = fixture
+        .replay_note_count()
+        .await
+        .expect("replay after advancing");
+    assert_eq!(
+        after, 2,
+        "replay from the advanced baseline reproduces both published notes",
+    );
+}
+
+/// Publishing a snapshot does not move the publisher's baseline; acknowledging
+/// it does.
+///
+/// The baseline is what replay rewinds to, and advancing it retires the rows
+/// that served that rewind. What licenses that is this device's own
+/// acknowledgement: the signed statement that it holds everything the snapshot
+/// covers. Until it says so, it keeps replaying from where it was — and reclaim,
+/// which needs every device to have said it, has no coverage to work from
+/// either.
+#[tokio::test]
+async fn an_unacknowledged_snapshot_does_not_advance_the_baseline() {
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let signer = UserKeypair::generate();
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let (store, _storage) = crate::sync::test_helpers::TestStore::create_with_connection(
+        &db,
+        db_store_dir.clone(),
+        "reclaim-baseline-unacknowledged",
+        signer.clone(),
+        home.clone(),
+    )
+    .await
+    .expect("create Store");
+    let device = store
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
+        .await
+        .expect("bind reclaim Store");
+
+    let changeset =
+        crate::sync::test_helpers::open_test_db(crate::sync::test_helpers::test_store_dir())
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('unacknowledged-1', 'first', NULL, \
+             '0000000001000-0000-unacknowledged', '2026-01-01')",
+            ])
+            .await;
+    store
+        .publish_changeset("founder", 1, &changeset, db.schema_version())
+        .await
+        .expect("publish package activation");
+
+    // Published the way production publishes it, and deliberately never
+    // acknowledged: the image is real, so nothing about its shape is what
+    // stops the advance.
+    let image_dir = tempfile::tempdir().expect("snapshot image dir");
+    let image = coven_database::StoreDatabase::new(&db)
+        .capture_snapshot_image_for_test(store.root().clone(), image_dir.path().to_path_buf(), None)
+        .await
+        .expect("capture a real snapshot image");
+    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+        coven_database::StoreDatabase::new(&db)
+            .materialized_frontier()
+            .await
+            .expect("materialized frontier"),
+    )
+    .expect("frontier");
+    device
+        .publish_snapshot(image, coverage)
+        .await
+        .expect("publish the unacknowledged snapshot");
+
+    let result = device
+        .reclaim_packages()
+        .await
+        .expect("reclaim runs even with nothing it may delete behind");
+    assert_ne!(
+        result.store_packages.coverage,
+        super::StorePackageReclaimCoverage::Snapshot { generation: 0 },
+        "the leg reports that it had no acknowledged coverage to work from",
+    );
+
+    let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
+        coven_database::StoreDatabase::new(&db)
+            .materialized_frontier()
+            .await
+            .expect("materialized frontier"),
+    )
+    .expect("frontier");
+    let advanced = device
+        .advance_baseline_by_acknowledging(frontier)
+        .await
+        .expect("acknowledge the published snapshot")
+        .expect("acknowledging it is what licenses the advance");
+    assert!(
+        advanced.retired_commits > 0,
+        "advancing retires the retained materializations the new cut covers, retired {}",
+        advanced.retired_commits,
+    );
+    assert!(
+        advanced.released_pins > 0,
+        "and releases the replay pins those materializations held, released {}",
+        advanced.released_pins,
     );
 }
 

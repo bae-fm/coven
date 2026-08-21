@@ -401,6 +401,15 @@ fn insert_snapshot_commit(
     )
 }
 
+/// Recompose a snapshot's history summary from the commits it covers, resuming
+/// at whatever `baseline` restates.
+///
+/// `baseline` is the summary this device's own replay baseline rests on, when
+/// its coverage lies inside the snapshot's. Below it the commits are retired,
+/// so the composition starts from the summary that stands for them instead of
+/// from history the device dropped — the same resume the publisher composes
+/// from. A device on a genesis baseline passes `None` and the walk runs to the
+/// bottom.
 pub(crate) fn compose_verified_merge_snapshot_history_summary<'a>(
     root: &StoreRootRef,
     coverage: &CommitFrontier,
@@ -408,9 +417,11 @@ pub(crate) fn compose_verified_merge_snapshot_history_summary<'a>(
     state: &ResolvedStoreDeviceState,
     author_ref: &StoreDeviceRegistrationRef,
     author: &StoreDeviceRegistration,
+    baseline: Option<OpenedRetainedMergeHistorySummary>,
     commits: impl IntoIterator<Item = &'a VerifiedMergeHistoryCommit>,
 ) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
-    let mut merged = merge_retained_merge_history(root, membership, Vec::new())?;
+    let mut merged =
+        merge_retained_merge_history(root, membership, baseline.into_iter().collect())?;
     for verified in commits {
         insert_snapshot_commit(
             &mut merged,

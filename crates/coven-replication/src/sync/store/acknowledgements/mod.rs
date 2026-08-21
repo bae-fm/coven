@@ -52,6 +52,14 @@ impl From<crate::sync::store::StoreWriterAuthorizationError> for StoreAckError {
     }
 }
 
+/// What one acknowledgement pass did: the acknowledgement it staged, if the
+/// standing one no longer held, and what advancing the baseline over the
+/// snapshot it names retired.
+pub(crate) struct StagedStoreAcknowledgement {
+    pub(crate) acknowledgement: Option<StoreAck>,
+    pub(crate) baseline_advance: Option<coven_database::AdvancedReplayBaseline>,
+}
+
 pub(crate) struct AuthorizedAcknowledgements<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
     database: StoreDatabase,
@@ -74,10 +82,15 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         }
     }
 
+    /// Publish anything queued, then acknowledge where this device now stands.
+    ///
+    /// Returns what advancing this device's replay baseline over the
+    /// acknowledged snapshot retired, when it advanced.
     pub(crate) async fn stage_and_publish(
         &mut self,
         sync_time: &str,
-    ) -> Result<(), SyncCycleFailure> {
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<Option<coven_database::AdvancedReplayBaseline>, SyncCycleFailure> {
         Box::pin(self.drain_acknowledgements())
             .await
             .map_err(|error| {
@@ -100,13 +113,30 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("stage Circle acknowledgements", error))?;
-        Box::pin(self.stage_acknowledgement(frontier.clone(), sync_time.to_owned()))
-            .await
-            .map_err(|error| SyncCycleFailure::operation("stage Store acknowledgement", error))?;
+        let StagedStoreAcknowledgement {
+            acknowledgement,
+            baseline_advance,
+        } = Box::pin(self.stage_acknowledgement(
+            frontier.clone(),
+            sync_time.to_owned(),
+            routing_encryption,
+        ))
+        .await
+        .map_err(|error| SyncCycleFailure::operation("stage Store acknowledgement", error))?;
+        if let Some(acknowledgement) = &acknowledgement {
+            debug!(
+                sequence = acknowledgement.sequence,
+                snapshot = acknowledgement
+                    .snapshot
+                    .as_ref()
+                    .map(|locator| locator.snapshot.generation),
+                "Staged a Store acknowledgement"
+            );
+        }
         Box::pin(self.drain_acknowledgements())
             .await
             .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
-        Ok(())
+        Ok(baseline_advance)
     }
 
     /// Stage this device's acknowledgement of `frontier`, unless the one it
@@ -126,12 +156,13 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
     /// Anything else in the frontier having moved is new material to acknowledge.
     ///
     /// Returns the acknowledgement it staged, or `None` when the standing one
-    /// still holds.
+    /// still holds, alongside what advancing the baseline retired.
     pub(crate) async fn stage_acknowledgement(
         &mut self,
         frontier: CommitFrontier,
         sync_time: String,
-    ) -> Result<Option<StoreAck>, StoreAckError> {
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<StagedStoreAcknowledgement, StoreAckError> {
         let commits = frontier.commits();
         let device_id = self.writer.local_device_id().to_string();
         let root = self.writer.store_root().clone();
@@ -141,10 +172,36 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             .database
             .store_device_state_for_history_cut(&history_cut)
             .await?;
-        let snapshot = self
+        let selected = self
             .writer
             .select_acknowledgement_snapshot(&frontier, &device_state)
             .await?;
+        // Stand on the snapshot before saying so. Advancing rebuilds this
+        // device's baseline image from its own replay and retires the history
+        // the snapshot restates, which is what stops the device pinning
+        // packages for replay. Doing it first is what makes the ordering safe:
+        // once every device has published an acknowledgement of this snapshot —
+        // which is the proof that licenses deleting the packages behind it —
+        // every one of them has already stopped needing them.
+        let mut baseline_advance = None;
+        let snapshot = match selected {
+            Some(selected) => {
+                let locator = coven_protocol::store_commit::StoreSnapshotLocator {
+                    author_registration: selected.snapshot.meta.author_registration.clone(),
+                    snapshot: selected.snapshot.reference.clone(),
+                };
+                baseline_advance = self
+                    .database
+                    .advance_snapshot_replay_baseline(
+                        root.clone(),
+                        selected.verified.into_authority(),
+                        routing_encryption.cloned(),
+                    )
+                    .await?;
+                Some(locator)
+            }
+            None => None,
+        };
         let exclusions = coven_protocol::store_commit::StoreAckExclusionState {
             proposal_freezes: self.database.store_device_exclusion_freezes().await?,
         };
@@ -153,6 +210,10 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                 "a prior acknowledgement remains queued".to_string(),
             ));
         }
+        let staged = |acknowledgement| StagedStoreAcknowledgement {
+            acknowledgement,
+            baseline_advance,
+        };
         let previous = self.database.latest_local_store_ack().await?;
         let assertion = self.local_writer.device_acknowledgement_assertion(
             history_cut,
@@ -171,7 +232,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                 .is_some_and(|standing| standing.still_holds(&assertion))
         {
             debug!("skip Store acknowledgement: the standing one still holds");
-            return Ok(None);
+            return Ok(staged(None));
         }
         let (sequence, predecessor, current_slot) = match previous {
             Some(previous) => (
@@ -236,7 +297,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         self.database
             .stage_store_ack(acknowledgement.clone(), prepared)
             .await?;
-        Ok(Some(acknowledgement))
+        Ok(staged(Some(acknowledgement)))
     }
 
     pub(crate) async fn drain_acknowledgements(&mut self) -> Result<u64, StoreAckError> {

@@ -249,6 +249,23 @@ impl StoreDatabase {
             .await
     }
 
+    /// The first column of `sql`'s first row, as text, or `None` when the query
+    /// matched nothing. The only way a test reads a database a join or restore
+    /// installed, which it never holds a handle to.
+    pub async fn test_query_optional_text(&self, sql: String) -> Result<Option<String>, DbError> {
+        self.call_store(move |session| session.test_query_optional_text(&sql))
+            .await
+    }
+
+    pub async fn replay_row_count_for_test(
+        &self,
+        root: coven_protocol::store_commit::StoreRootRef,
+        table: String,
+    ) -> Result<i64, DbError> {
+        self.call_store(move |session| session.replay_row_count_for_test(&root, &table))
+            .await
+    }
+
     pub async fn compare_circle_bootstrap_replay_with_missing_coverage_for_test(
         &self,
         root: coven_protocol::store_commit::StoreRootRef,

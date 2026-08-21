@@ -952,7 +952,7 @@ async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
     assert!(
         fixture
             .device
-            .verify_snapshots_for_acknowledgement_for_test(std::slice::from_ref(&forged))
+            .verify_installable_snapshots_for_test(std::slice::from_ref(&forged))
             .await
             .is_err(),
         "snapshot authority accepted a signed summary that omitted exact cut history",
@@ -996,10 +996,17 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
 /// Every other reuse assertion in this file is scoped `within_a_cycle` — they
 /// prove one cycle never reads the same object twice, which was already true
 /// while every cycle still re-read the whole retained history once. This is the
-/// across-cycle claim: a pull over retained history the device already verified
-/// reaches the provider for none of it, on the first cycle and on every cycle
-/// after, and the count does not grow with how much history is retained.
-async fn retained_object_reads_per_pull(history_length: u64, cycles: u32) -> Vec<(usize, usize)> {
+/// across-cycle claim: a pull over history the device already verified reaches
+/// the provider for none of it, on every pull, and the count does not grow with
+/// how much history there is.
+///
+/// One full cycle runs first and is not measured. It publishes a snapshot,
+/// acknowledges it, advances this device's replay baseline over it and reclaims
+/// behind it — which is the state the claim is about, a device holding retained
+/// rows above a coverage rather than its whole past. Measuring cycles instead of
+/// pulls would measure the reclaim leg's own verification, which reads per
+/// target and has nothing to do with history reuse.
+async fn retained_object_reads_per_pull(history_length: u64, pulls: u32) -> Vec<(usize, usize)> {
     let fixture = PublishedHistory::publish(history_length).await;
     let retained = fixture.retained_history().await;
     let retained_slots = retained
@@ -1011,13 +1018,18 @@ async fn retained_object_reads_per_pull(history_length: u64, cycles: u32) -> Vec
             ]
         })
         .collect::<Vec<_>>();
+    fixture
+        .device
+        .run_cycle(None)
+        .await
+        .expect("publish, acknowledge and advance over a covering snapshot");
 
-    let mut per_cycle = Vec::new();
-    for _ in 0..cycles {
+    let mut per_pull = Vec::new();
+    for _ in 0..pulls {
         fixture.home.clear_exact_reads();
         fixture
             .device
-            .run_cycle(None)
+            .pull_store()
             .await
             .expect("pull retained history");
         let reads = fixture.home.exact_reads();
@@ -1025,9 +1037,9 @@ async fn retained_object_reads_per_pull(history_length: u64, cycles: u32) -> Vec
             .iter()
             .filter(|slot| retained_slots.contains(slot))
             .count();
-        per_cycle.push((retained_reads, reads.len()));
+        per_pull.push((retained_reads, reads.len()));
     }
-    per_cycle
+    per_pull
 }
 
 #[tokio::test]
@@ -1036,8 +1048,8 @@ async fn repeated_pulls_over_unchanged_retained_history_read_none_of_it() {
 
     assert!(
         deep.iter().all(|(retained, _)| *retained == 0),
-        "pulls re-read retained Store commit/head objects the device had already verified: \
-         (retained_reads, total_reads) per cycle = {deep:?}",
+        "pulls re-read Store commit/head objects the device had already verified: \
+         (retained_reads, total_reads) per pull = {deep:?}",
     );
 }
 
@@ -1049,7 +1061,7 @@ async fn retained_history_depth_does_not_change_what_a_pull_reads() {
     assert_eq!(
         shallow.iter().map(|(_, total)| *total).collect::<Vec<_>>(),
         deep.iter().map(|(_, total)| *total).collect::<Vec<_>>(),
-        "a pull's provider reads grew with retained history depth: one retained commit read \
+        "a pull's provider reads grew with history depth: one commit read \
          {shallow:?}, twenty-four read {deep:?}",
     );
 }

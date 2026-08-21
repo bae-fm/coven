@@ -371,13 +371,13 @@ impl Store {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn verify_snapshots_for_acknowledgement_for_test(
+    pub(crate) async fn verify_installable_snapshots_for_test(
         &self,
         snapshots: &[coven_database::PublishedStoreSnapshot],
     ) -> Result<(), StoreError> {
         let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
-            .verify_snapshots_for_acknowledgement(snapshots)
+            .verify_installable_snapshots_for_test(snapshots)
             .await?;
         Ok(())
     }
@@ -705,16 +705,22 @@ impl Store {
         frontier: coven_protocol::store_commit::CommitFrontier,
         sync_time: String,
     ) -> Result<
-        Option<coven_protocol::store_commit::StoreAck>,
+        crate::sync::store::acknowledgements::StagedStoreAcknowledgement,
         crate::sync::store::acknowledgements::StoreAckError,
     > {
         let mut writer = self
             .authorize_writer()
             .await
             .map_err(crate::sync::store::acknowledgements::StoreAckError::from)?;
+        // Every scoped test store routes its rows under this key — the same one
+        // `ensure_device_join_snapshot_for_test` captures images with. Staging
+        // an acknowledgement now advances the replay baseline, which rebuilds
+        // the image by replay, so the key has to be here too. Unscoped stores
+        // never look at it.
+        let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         writer
             .acknowledgements()
-            .stage_acknowledgement(frontier, sync_time)
+            .stage_acknowledgement(frontier, sync_time, Some(&routing_encryption))
             .await
     }
 

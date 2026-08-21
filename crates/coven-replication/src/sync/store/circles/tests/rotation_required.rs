@@ -115,6 +115,19 @@ impl RotationMemberDevice {
 }
 
 impl RotationFixture {
+    /// Reclaim the way the sync cycle does, with the Store's row-routing
+    /// encryption in hand.
+    ///
+    /// This Store routes its rows, so reclaim needs the key: advancing the
+    /// replay baseline rebuilds the image from a scoped replay, which cannot be
+    /// projected without it. Passing `None` here would fail for a reason that
+    /// has nothing to do with what any of these tests are about.
+    async fn reclaim_packages(
+        &self,
+    ) -> Result<crate::sync::store::StoreReclaimResult, crate::sync::store::StoreReclaimError> {
+        self.owner_device.reclaim_packages().await
+    }
+
     async fn build(label: &str) -> Self {
         let db_store_dir = crate::sync::test_helpers::test_store_dir();
         let db = open_circle_routing_test_db(db_store_dir.clone());
@@ -1461,13 +1474,18 @@ async fn restore_reports_a_circle_with_no_coverage_image() {
         signer,
         circle_id,
         membership,
+        home,
         ..
     } = base;
 
-    // The owner restores a Circle it holds access to but which no bootstrap or
-    // snapshot ever covered — the no-coverage report path. Selection must not error
-    // on the missing image, and must not fabricate a coverage row; the Store image
-    // still restores the Circle's control indexes.
+    // The owner restores a Circle it holds access to. The owner's own database
+    // carries no bootstrap coverage row for it — it never installed one,
+    // because it created the Circle — but the control activation it retains
+    // names an epoch-access image that is really in the cloud, and the
+    // restoring device holds no rows for the Circle at all. Staging that image
+    // as the restored device's coverage is what gives it the Circle's rows;
+    // refusing to would restore a device with access to a Circle and nothing in
+    // it.
     let target = RestoreTarget::new();
     let restored = restore_store_snapshot(
         &store,
@@ -1478,15 +1496,20 @@ async fn restore_reports_a_circle_with_no_coverage_image() {
         "no-image-device",
     )
     .await
-    .expect("a Circle with active access but no image restores without error");
+    .expect("a Circle with active access restores without error");
 
     let coverage = restored
         .circle_bootstrap_coverage_for_test(circle_id)
         .await
-        .expect("read restored Circle coverage");
+        .expect("read restored Circle coverage")
+        .expect("selection stages the coverage whose image the Circle's access names");
+    assert_eq!(coverage.circle_id, circle_id);
+    // Bucket keys carry the provider locator after the logical key, so match on
+    // the logical prefix rather than the whole key.
+    let image_key = coverage.bootstrap.image.object.slot().logical_key();
     assert!(
-        coverage.is_none(),
-        "selection stages no coverage row for a Circle it holds no image for"
+        home.keys().iter().any(|key| key.starts_with(image_key)),
+        "the staged coverage names an image the cloud holds: {image_key}",
     );
 
     let control_count: i64 = restored
@@ -2608,7 +2631,6 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
 
     // Nothing has moved yet: every ciphertext is still bound by a live row.
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("run reclamation while every blob is still bound");
@@ -2664,7 +2686,6 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
     // release that ownership, as a superseding coverage cut does in production.
     fixture.release_retained_replay_ownership().await;
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("reclaim the stranded source ciphertext");
@@ -2760,7 +2781,7 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
     fixture
         .home
         .fail_nth_exact_delete_of(&[source.object().slot()], 1);
-    let interrupted = fixture.owner_device.reclaim_packages().await;
+    let interrupted = fixture.reclaim_packages().await;
     assert!(
         interrupted.is_err(),
         "the delete failure fails the reclaim to its initiator: {interrupted:?}"
@@ -2776,7 +2797,6 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
 
     // The journal still holds the authorized reclaim, so a restart finishes it.
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("restart resumes the interrupted audience blob reclaim");
@@ -2792,7 +2812,6 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
     // A further run is idempotent: the target is recorded as reclaimed, so nothing
     // re-authorizes or re-deletes it.
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("a further run finds nothing left to reclaim");
@@ -2830,7 +2849,6 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
     // Nothing supersedes the stream's latest generation, so reclamation refuses it
     // and its image stays readable.
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("run reclamation with no superseding Circle snapshot generation");
@@ -2878,7 +2896,6 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
         "the unacknowledged generation's cut strictly dominates the earlier one"
     );
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("run reclamation against an unacknowledged superseding generation");
@@ -2897,7 +2914,6 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
         .publish_covered_circle_package(member_view, "00000000-0000-4000-8000-0000000000d2")
         .await;
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("reclaim the superseded Circle snapshot image");
@@ -2974,7 +2990,6 @@ async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
     fixture.release_retained_replay_ownership().await;
 
     let result = fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("reclaim the covered Circle package");
@@ -3049,7 +3064,6 @@ async fn circle_package_reclaim_refuses_a_replay_retained_package() {
     // (the member advanced past it), but the replay-retained package itself is never
     // reclaimed while its ownership survives.
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("run reclamation with the package still retained");
@@ -3108,7 +3122,6 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
     // seed-anchored cross-device acknowledgement.
     fixture.release_retained_replay_ownership().await;
     let result = fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("reclaim after cross-device verifying the seeded acknowledgement");
@@ -3241,7 +3254,6 @@ async fn circle_bootstrap_reclaim_unblocks_when_recipient_advances_past_its_seed
     // No later Circle snapshot supersedes the recipient's seed yet, so reclamation
     // leaves the image in place.
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("run reclamation before a later snapshot exists");
@@ -3257,7 +3269,6 @@ async fn circle_bootstrap_reclaim_unblocks_when_recipient_advances_past_its_seed
         .publish_covered_circle_package(member_view, "00000000-0000-4000-8000-0000000000b1")
         .await;
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("reclaim the superseded seed image");
@@ -3309,7 +3320,6 @@ async fn circle_bootstrap_reclaim_unblocks_when_recipient_loses_authority() {
     // The removed member lost authority under the activated successor control: its
     // seed image is reclaimed, re-verified from its own signed acknowledgement.
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("reclaim the removed member's seed image");
@@ -3367,7 +3377,6 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
         "Store revocation alone does not yet exclude the identity from the Circle roster"
     );
     fixture
-        .owner_device
         .reclaim_packages()
         .await
         .expect("run reclamation while the roster still names the identity");

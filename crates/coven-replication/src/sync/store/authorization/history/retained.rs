@@ -187,6 +187,38 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 }
 
+/// Seed a history verifier from the history this device already holds.
+///
+/// Three things in one order that matters. The baseline first, because it is
+/// the floor every later walk stops at. Then the announcement each stream's
+/// snapshot restates, because that is where a chain walk resumes. Then the
+/// retained rows themselves, whose accepted run starts one above the floor.
+///
+/// Getting the order wrong is not a slow path, it is a walk to genesis: a
+/// verifier that does not know where its baseline is asks the provider for
+/// every commit under it, once per commit standing above it, on every cycle.
+pub(crate) async fn seed_verifier_from_retained_history(
+    database: &StoreDatabase,
+    history: &mut MergeHistoryVerifier<'_>,
+) -> Result<Vec<coven_database::OwnedVerifiedMergeMaterialization>, pull::StorePullError> {
+    let root = history.verified_root().reference().clone();
+    let baseline = database.installed_replay_baseline().await?;
+    history.admit_installed_baseline(baseline)?;
+    let announcements = database.snapshot_announcement_frontier().await?;
+    history.admit_snapshot_announcements(&announcements)?;
+    let retained = database.retained_merge_replay_inputs(root).await?;
+    history.admit_retained_history(&retained)?;
+    history
+        .verify_refs(
+            retained
+                .iter()
+                .map(|materialization| materialization.commit_ref().clone())
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    Ok(retained)
+}
+
 /// The device state a commit's predecessor cut resolves to, read from the
 /// retained checkpoints its frontier names.
 pub(crate) async fn retained_history_checkpoints(

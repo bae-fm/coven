@@ -3,6 +3,7 @@ use coven_protocol::store_commit::{
     ObjectHash, StoreBatchCommitRef, StoreDeviceExclusionRef, StoreDeviceHeadRef,
 };
 use coven_protocol::write::WriteId;
+use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug)]
@@ -538,6 +539,50 @@ impl StoreSession<'_> {
             )
         })?;
         Ok((device_id, sequence))
+    }
+
+    /// Replay the whole retained history and count `table`'s rows.
+    ///
+    /// A device that advanced its baseline replays from the new image plus the
+    /// commits it does not cover; this is how a test checks that what comes out
+    /// is still the store the live database holds.
+    /// Answer a read-only test query against the Store's own connection.
+    ///
+    /// A test that drives a real join or restore never opens the database
+    /// itself — the install is what creates it — so its assertions have to go
+    /// through the Store. Handing out the connection instead would put a raw
+    /// database in a caller's hands.
+    fn test_query_optional_text(&mut self, sql: &str) -> Result<Option<String>, DbError> {
+        self.conn
+            .query_row(sql, [], |row| row.get::<_, Option<String>>(0))
+            .optional()
+            .map(Option::flatten)
+            .map_err(DbError::from)
+    }
+
+    fn replay_row_count_for_test(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        table: &str,
+    ) -> Result<i64, DbError> {
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let replay =
+            crate::store::store_session::StoreTransaction::new(&transaction, self.store_dir)
+                .replay_projection_with_authority(
+                    self.verified_store_authority,
+                    root,
+                    self.blob_decls,
+                    self.gates,
+                    self.synced_tables,
+                    None,
+                    &BTreeSet::new(),
+                    None,
+                    false,
+                    coven_protocol::membership::LocalStoreMembership::Current,
+                )?;
+        let count = replay.row_count(table)?;
+        transaction.rollback().map_err(DbError::from)?;
+        Ok(count)
     }
 
     fn compare_circle_bootstrap_replay_with_missing_coverage_for_test(

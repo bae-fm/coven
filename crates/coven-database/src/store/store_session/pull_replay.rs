@@ -50,12 +50,52 @@ pub(crate) fn install_circle_bootstrap_connection_on(
     projection_tables.dedup();
     conn.pragma_update(None, "defer_foreign_keys", "ON")
         .map_err(DbError::from)?;
+    // The image is this Circle's whole state at its coverage, so every row it
+    // names it also supersedes. The target can already hold one: a restore
+    // carries the routing tables wholesale, and a replay base built from a
+    // baseline image holds the rows that stood before the bootstrap — including
+    // a row that was in the Store audience and has since moved into the Circle.
+    // Clearing what the image restates makes the install the same operation
+    // whatever it lands on, rather than one that only works onto an empty base.
+    let superseded = crate::query_mapped_rows(
+        source,
+        "SELECT table_name, row_id FROM _coven_row_routes",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    for (table, row_id) in &superseded {
+        if !projection_tables.contains(table) {
+            return Err(DbError::Message(format!(
+                "Circle {circle_id} bootstrap routes a row in unprojected table {table:?}"
+            )));
+        }
+        conn.execute(
+            &format!("DELETE FROM {} WHERE id = ?1", crate::quote_ident(table)),
+            [row_id],
+        )
+        .map_err(DbError::from)?;
+        // The audience row is keyed by the routing id, which only the route
+        // names, so it goes before the route that finds it.
+        conn.execute(
+            "DELETE FROM _coven_audience WHERE routing_id IN (
+                 SELECT routing_id FROM _coven_row_routes
+                 WHERE table_name = ?1 AND row_id = ?2
+             )",
+            rusqlite::params![table, row_id],
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "DELETE FROM _coven_row_routes WHERE table_name = ?1 AND row_id = ?2",
+            rusqlite::params![table, row_id],
+        )
+        .map_err(DbError::from)?;
+    }
     for table in &projection_tables {
-        // The audience-routing tables are preserved wholesale by a Store image, so
-        // a restore already carries their deterministic rows; skip a re-insert of a
-        // row that is already present instead of failing on its unique key. A pull
-        // installs onto an empty replay base, where nothing conflicts. Data tables
-        // carry no circle rows on a Store image, so they insert exactly once.
+        // The routing tables are deterministic in the row they describe, so a
+        // target that already holds an entry holds the same one — a restore
+        // carries them wholesale. Skipping a re-insert there is not papering
+        // over a conflict; the data tables above have had everything this image
+        // restates cleared, so they insert exactly once.
         let ignore_existing = table == "_coven_audience" || table == "_coven_row_routes";
         crate::copy_table_with_conflicts(source, conn, table, ignore_existing).map_err(
             |error| {

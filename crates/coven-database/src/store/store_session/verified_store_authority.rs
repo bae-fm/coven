@@ -468,6 +468,14 @@ impl VerifiedStoreAuthority {
         ))
     }
 
+    /// Drop replay state derived from a baseline this session just advanced.
+    ///
+    /// Both halves of the cache — the baseline and the verified
+    /// materializations read against it — describe history the advance retired.
+    pub(crate) fn forget_superseded_replay_baseline(&mut self) {
+        self.retained_replay.forget_superseded_baseline();
+    }
+
     pub(super) fn retained_replay_baseline_on(
         &mut self,
         records: crate::store::store_session::StoreRecords<'_>,

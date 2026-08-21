@@ -426,6 +426,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     ),
     (
         "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestDevice",
+        "activate_joined_from_snapshot",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
         "TestStore",
         "create",
     ),
@@ -483,6 +488,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "crates/coven-replication/src/sync/test_helpers.rs",
         "TestStore",
         "activate_joined_device",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "activate_joined_device_from_snapshot",
     ),
     (
         "crates/coven-replication/src/sync/test_helpers.rs",

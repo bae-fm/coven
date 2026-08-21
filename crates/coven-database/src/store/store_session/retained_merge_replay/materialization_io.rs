@@ -423,9 +423,19 @@ impl StoreDatabase {
         )
     }
 
-    /// The checkpoint a reference resolves to when no retained row holds it —
-    /// which means a snapshot covers it, so the baseline's summary is its
-    /// authority.
+    /// The checkpoint a reference resolves to.
+    ///
+    /// A position at or under the installed snapshot coverage resolves to the
+    /// coverage itself. The snapshot's owner signed one state for its whole
+    /// covered prefix and the image restates that prefix in one object, so the
+    /// per-position states below the coverage are not merely unavailable — they
+    /// have stopped existing, and the coverage answers in their place. Above the
+    /// coverage a retained row holds the position and answers for itself.
+    ///
+    /// This is why a predecessor cut may name a position no retained row holds:
+    /// a commit's cut can reach back to any earlier coordinate on another
+    /// stream, and a device that has advanced its replay baseline retired
+    /// everything the new cut covers.
     ///
     /// `baseline` is supplied rather than loaded because loading one deserializes
     /// the whole baseline database image into a fresh in-memory connection and
@@ -444,52 +454,36 @@ impl StoreDatabase {
         } = &reference.coord;
         let stream = stream_id.to_string();
         let sequence_sql = Database::sequence_to_sqlite(&stream, *sequence)?;
-        let snapshot_reference = records.snapshot_coverage_reference(&stream, sequence_sql)?;
-        if let Some(snapshot_reference) = snapshot_reference {
-            let snapshot_reference: StoreBatchCommitRef = serde_json::from_str(&snapshot_reference)
-                .map_err(|error| DbError::context("snapshot Merge checkpoint commit ref", error))?;
-            if &snapshot_reference != reference {
+        let coverage = records
+            .snapshot_coverage_position(&stream)?
+            .filter(|(covered, _)| covered >= sequence);
+        if let Some((covered, encoded_coverage)) = coverage {
+            let snapshot_reference: StoreBatchCommitRef = serde_json::from_str(&encoded_coverage)
+                .map_err(|error| {
+                DbError::context("snapshot Merge checkpoint commit ref", error)
+            })?;
+            // At the tip the coverage names this exact commit, and disagreeing
+            // there is a corrupted position rather than a superseded one. Below
+            // the tip there is nothing to compare against: the coverage state is
+            // the answer for every position it covers.
+            if covered == *sequence && &snapshot_reference != reference {
                 return Err(DbError::Message(
                     "snapshot Merge checkpoint coordinate contains another commit".to_string(),
                 ));
             }
-            let RetainedReplayAuthority::InstalledSnapshot(authority) = &baseline.authority else {
-                return Err(DbError::Message(
-                    "snapshot Merge checkpoint has genesis replay authority".to_string(),
-                ));
-            };
-            let summary = authority.metadata.history_summary.clone();
-            summary
-                .validate_snapshot_baseline()
-                .map_err(|error| DbError::context("snapshot Merge checkpoint", error))?;
-            if summary
+            let opened = Self::open_installed_baseline_history_summary(records, baseline)?;
+            if opened
+                .summary
                 .frontier()
                 .map_err(|error| DbError::context("snapshot Merge checkpoint frontier", error))?
-                .get(stream_id)
-                != Some(reference)
+                .get(&snapshot_reference.coord.stream_id)
+                != Some(&snapshot_reference)
             {
                 return Err(DbError::Message(
                     "snapshot Merge checkpoint is absent from its signed frontier".to_string(),
                 ));
             }
-            let state = records.store_device_snapshot(reference)?;
-            let expected_state = coven_protocol::store_commit::StoreDeviceStateRef::from_resolved(
-                CommitFrontier(summary.frontier().map_err(DbError::from)?),
-                &state,
-            )
-            .map_err(DbError::from)?;
-            if summary.post_state != expected_state {
-                return Err(DbError::Message(
-                    "snapshot Merge checkpoint state differs from its signed reference".to_string(),
-                ));
-            }
-            return Ok(crate::RetainedMergeHistoryCheckpoint::Snapshot(
-                coven_protocol::store_commit::OpenedRetainedMergeHistorySummary {
-                    announcement_frontier: summary.announcement_frontier.clone(),
-                    post_state: state,
-                    summary,
-                },
-            ));
+            return Ok(crate::RetainedMergeHistoryCheckpoint::Snapshot(opened));
         }
         let (stored_ref, input_hash) =
             records.retained_materialization_identity(&stream, sequence_sql)?;
@@ -514,6 +508,47 @@ impl StoreDatabase {
             registrations,
             reference,
             &retained,
+        )
+    }
+
+    /// The signed history summary the installed baseline rests on, opened
+    /// against the device state this database holds at its coverage.
+    ///
+    /// This is the authority that stands in for everything under the coverage:
+    /// a walk that stops at the baseline resumes its composition from here
+    /// rather than from the retired commits behind it.
+    pub(crate) fn open_installed_baseline_history_summary(
+        records: StoreRecords<'_>,
+        baseline: &RetainedReplayBaseline,
+    ) -> Result<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
+        let RetainedReplayAuthority::InstalledSnapshot(authority) = &baseline.authority else {
+            return Err(DbError::Message(
+                "snapshot Merge checkpoint has genesis replay authority".to_string(),
+            ));
+        };
+        let summary = authority.metadata.history_summary.clone();
+        summary
+            .validate_snapshot_baseline()
+            .map_err(|error| DbError::context("snapshot Merge checkpoint", error))?;
+        let frontier = summary.frontier().map_err(DbError::from)?;
+        // Every stream the coverage names, not just the one a caller asked
+        // about: `post_state` is the merge across the whole frontier, so
+        // comparing one stream's state against it only ever agreed because the
+        // stores that reached here had one stream.
+        let (expected_state, state) = records.store_device_state_for_history_cut(
+            &coven_protocol::store_commit::StoreHistoryCut(frontier),
+        )?;
+        if summary.post_state != expected_state {
+            return Err(DbError::Message(
+                "snapshot Merge checkpoint state differs from its signed reference".to_string(),
+            ));
+        }
+        Ok(
+            coven_protocol::store_commit::OpenedRetainedMergeHistorySummary {
+                announcement_frontier: summary.announcement_frontier.clone(),
+                post_state: state,
+                summary,
+            },
         )
     }
 
@@ -550,8 +585,18 @@ impl StoreDatabase {
         )))
     }
 
+    /// The local write partitions replay overlays on top of the baseline image.
+    ///
+    /// `baseline_cut` is what the image already states. A published write whose
+    /// commit the cut covers has had its shared partition folded into the image
+    /// and its commit retired, so it is settled in exactly the way a write
+    /// replayed from a retained row above the cut is — only its local partition
+    /// is still owed. Without that, a device that advanced its baseline would
+    /// find every write it had ever published stranded: not replayed from a
+    /// retained row, not retracted, and so reported as a write with no input.
     pub(crate) fn load_merge_replay_write_overlays_on(
         records: StoreRecords<'_>,
+        baseline_cut: &CommitFrontier,
         active_accepted_writes: &BTreeSet<WriteId>,
         retracted_writes: &BTreeSet<WriteId>,
     ) -> Result<Vec<MergeReplayWriteOverlay>, DbError> {
@@ -603,7 +648,8 @@ impl StoreDatabase {
                         partitions
                     }
                 }
-                WriteStatus::Published(_) => {
+                WriteStatus::Published(position) => {
+                    let active = active || baseline_cut.covers_commit(position.commit());
                     if retracted {
                         PreparedStoreWritePartitions {
                             store: None,

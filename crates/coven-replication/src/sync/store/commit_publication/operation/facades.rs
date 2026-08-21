@@ -165,9 +165,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         frontier: &coven_protocol::store_commit::CommitFrontier,
         device_state: &coven_protocol::store_commit::StoreDeviceStateRef,
     ) -> Result<
-        Option<coven_protocol::store_commit::StoreSnapshotLocator>,
+        Option<
+            crate::sync::store::commit_verification::merge_history::SelectedInstallableStoreSnapshot,
+        >,
         crate::sync::store::acknowledgements::StoreAckError,
-    > {
+    >{
         self.history
             .select_acknowledgement_snapshot(frontier, device_state)
             .await

@@ -61,6 +61,16 @@ impl VerifiedStoreLookup for ReplayVerifiedStoreLookup<'_, '_> {
 }
 
 impl RetainedReplayCache {
+    /// Forget everything derived from a baseline that has just been superseded.
+    ///
+    /// Advancing the baseline retires retained materializations, so both halves
+    /// of this cache describe a store that no longer exists. It is a cache, so
+    /// the repair is to read again, not to patch the entries.
+    pub(super) fn forget_superseded_baseline(&mut self) {
+        self.baseline = None;
+        self.verified.clear();
+    }
+
     pub(super) fn commit_installed_baseline(&mut self, baseline: RetainedReplayBaseline) {
         match &self.baseline {
             Some(existing) => assert_eq!(
@@ -433,13 +443,38 @@ impl RetainedReplayCache {
         let schema = replay.table_schema(synced_tables, gates)?;
         let circle_bootstraps = transaction_records.claimed_circle_bootstrap_coverage_refs()?;
         let mut circle_bootstrap_cuts = BTreeMap::new();
+        // Circles whose bootstrap stands above the horizon this projection
+        // stops at. See `deferred_bootstrap_circles` below for why their rows
+        // are left out entirely rather than replayed.
+        let mut deferred_bootstrap_circles = BTreeSet::new();
         for coverage in &circle_bootstraps {
-            replay.install_circle_bootstrap(
-                &transaction_records.verified_payload(coverage.bootstrap.image.image_hash)?,
-                coverage,
-                synced_tables,
-                routing_key,
-            )?;
+            // A claimed bootstrap is a fact about now, not about the horizon a
+            // projection stops at. A projection that does not reach the commit
+            // activating it must leave it out — and must leave that Circle's
+            // rows out with it, because the bootstrap image is their authority
+            // and every replay from this projection installs it. Carrying rows
+            // this projection replayed for the Circle would put them under the
+            // bootstrap image that restates them, and the install would insert
+            // each one a second time.
+            if history_cut.is_some_and(|cut| !cut.covers_commit(&coverage.activation_commit)) {
+                deferred_bootstrap_circles.insert(coverage.circle_id);
+                continue;
+            }
+            // A bootstrap the baseline already covers is in the image this
+            // replay starts from: the capture that produced the image installed
+            // it. Its cut is still recorded below, because the packages under
+            // it stay skipped either way.
+            if !baseline
+                .exact_cut
+                .covers_commit(&coverage.activation_commit)
+            {
+                replay.install_circle_bootstrap(
+                    &transaction_records.verified_payload(coverage.bootstrap.image.image_hash)?,
+                    coverage,
+                    synced_tables,
+                    routing_key,
+                )?;
+            }
             if circle_bootstrap_cuts
                 .insert(coverage.circle_id, coverage.bootstrap.coverage.clone())
                 .is_some()
@@ -453,10 +488,19 @@ impl RetainedReplayCache {
         let retained =
             self.replay_inputs_in_transaction(transaction_records, root, registrations)?;
         let circle_epochs = self.circle_replay_epoch_index_in_transaction(transaction_records)?;
+        // A retained row is not automatically a replay input. The baseline
+        // image already states the history its cut covers, so re-applying a
+        // commit from under the cut would apply it twice — which is why a
+        // dependency under the cut counts as settled below without being
+        // applied. Rows under the cut are kept for the authority they carry,
+        // read directly by the Circle and exclusion paths, not for replay.
         let active_references = retained
             .iter()
             .filter(|materialization| {
                 !retracted.contains(materialization.commit_ref())
+                    && !baseline
+                        .exact_cut
+                        .covers_commit(materialization.commit_ref())
                     && history_cut
                         .is_none_or(|cutoff| cutoff.covers_commit(materialization.commit_ref()))
             })
@@ -506,8 +550,11 @@ impl RetainedReplayCache {
             .map(|materialization| materialization.commit().write_id.clone())
             .collect::<BTreeSet<_>>();
         let write_overlays = if include_local_write_overlays {
-            transaction_records
-                .merge_replay_write_overlays(&active_accepted_writes, &retracted_writes)?
+            transaction_records.merge_replay_write_overlays(
+                &baseline.exact_cut,
+                &active_accepted_writes,
+                &retracted_writes,
+            )?
         } else {
             Vec::new()
         };
@@ -567,6 +614,9 @@ impl RetainedReplayCache {
                         ..
                     } = package.audience()
                     {
+                        if deferred_bootstrap_circles.contains(circle_id) {
+                            continue;
+                        }
                         if circle_bootstrap_cuts
                             .get(circle_id)
                             .is_some_and(|cut| cut.covers_commit(materialization.commit_ref()))

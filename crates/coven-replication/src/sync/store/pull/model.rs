@@ -367,6 +367,14 @@ pub enum StorePullError {
     SnapshotAuthorInactive,
     #[error("Store snapshot author is not an Owner in its exact membership state")]
     SnapshotAuthorNotOwner,
+    /// The snapshot's coverage does not reach this device's installed replay
+    /// baseline, so the device stands past it. Verifying a snapshot means
+    /// recomposing its history summary, and the history behind this one was
+    /// retired when the baseline moved over it — there is nothing left to
+    /// recompose from and nothing to gain: whatever this snapshot restates, the
+    /// baseline already restates at least as much.
+    #[error("Store snapshot is behind this device's installed replay baseline")]
+    SnapshotBehindReplayBaseline,
     #[error("membership: {0}")]
     Membership(#[source] StorePullMembershipError),
     #[error("{0}")]

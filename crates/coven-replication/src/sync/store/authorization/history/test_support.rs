@@ -189,6 +189,19 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .verified_membership_prefix(predecessors)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn verify_installable_snapshots_for_test(
+        &mut self,
+        snapshots: &[coven_database::PublishedStoreSnapshot],
+    ) -> Result<(), pull::StorePullError> {
+        for snapshot in snapshots {
+            self.history_verifier
+                .verify_installable_snapshot(snapshot)
+                .await?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) async fn load_founder_registration_for_test(
         &mut self,

@@ -12,6 +12,9 @@ use super::StoreTransaction;
 use crate::StoreDatabase;
 use crate::{AudiencePartition, CirclePartitionControl, Database, DbError};
 
+mod baseline_advance;
+pub(crate) use baseline_advance::replay_baseline_advances_on;
+pub use baseline_advance::AdvancedReplayBaseline;
 mod circle_bootstrap;
 mod retained_replay;
 mod snapshot_install;

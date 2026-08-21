@@ -44,6 +44,32 @@ impl StoreSession<'_> {
         .collect()
     }
 
+    /// Where each published write landed, in publication order.
+    ///
+    /// The device's own record of its writes, which survives a replay-baseline
+    /// advance — the per-position `materialized_commits` rows do not, because
+    /// the advance retires the retained rows they name.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn published_write_commits(
+        &self,
+    ) -> Result<Vec<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
+        let rows = crate::query_mapped_rows(
+            self.conn,
+            "SELECT status FROM store_writes ORDER BY ordinal",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut commits = Vec::new();
+        for raw in rows {
+            let status: WriteStatus = serde_json::from_str(&raw)
+                .map_err(|error| DbError::context("published write status", error))?;
+            if let WriteStatus::Published(position) = status {
+                commits.push(position.commit().clone());
+            }
+        }
+        Ok(commits)
+    }
+
     fn set_write_status(&self, write_id: &WriteId, status: &WriteStatus) -> Result<(), DbError> {
         Database::set_write_status_on(self.conn, write_id, status)
     }
@@ -250,6 +276,14 @@ impl StoreDatabase {
     #[doc(hidden)]
     pub async fn pending_writes(&self) -> Result<Vec<PendingWrite>, DbError> {
         self.call_store(|session| session.pending_writes()).await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn published_write_commits(
+        &self,
+    ) -> Result<Vec<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
+        self.call_store(|session| session.published_write_commits())
+            .await
     }
 
     #[doc(hidden)]

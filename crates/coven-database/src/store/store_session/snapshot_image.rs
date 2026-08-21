@@ -726,6 +726,59 @@ impl StoreSession<'_> {
         Ok((snapshot, coverage))
     }
 
+    /// Reconstruct the Store as of `cut` and serialize it as a replay baseline.
+    ///
+    /// The live database is left exactly as it was: the projection is built
+    /// inside a transaction that is rolled back, the same way a Circle close
+    /// captures its cutoff image. What comes back is a database whose frontier
+    /// is `cut` — checked, not assumed — which is the one property a baseline
+    /// image must have, because replay applies the retained commits the cut
+    /// does not cover on top of it.
+    pub(super) fn capture_replay_baseline_at_cut(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        cut: &coven_protocol::store_commit::CommitFrontier,
+        snapshot_hash: crate::ObjectHash,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<Vec<u8>, DbError> {
+        let routing_key = if self.gates.has_scoped_graph() {
+            let encryption = routing_encryption.ok_or_else(|| {
+                DbError::Message(
+                    "scoped replay baseline capture requires Store routing encryption".to_string(),
+                )
+            })?;
+            Some(
+                coven_protocol::circle::derive_row_routing_key(encryption, root.store_root_hash)
+                    .map_err(DbError::from)?,
+            )
+        } else {
+            None
+        };
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let replay =
+            crate::store::store_session::StoreTransaction::new(&transaction, self.store_dir)
+                .replay_projection_with_authority(
+                    self.verified_store_authority,
+                    root,
+                    self.blob_decls,
+                    self.gates,
+                    self.synced_tables,
+                    routing_key.as_ref(),
+                    &std::collections::BTreeSet::new(),
+                    Some(cut),
+                    false,
+                    coven_protocol::membership::LocalStoreMembership::Current,
+                )?;
+        transaction.rollback().map_err(DbError::from)?;
+        let replay_frontier = replay.materialized_frontier()?;
+        if replay_frontier != *cut {
+            return Err(DbError::Message(
+                "retained replay baseline cut is not an exact Store frontier".to_string(),
+            ));
+        }
+        replay.capture_replay_baseline(root, cut, snapshot_hash)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn capture_circle_snapshot_at_cutoff(
         &mut self,

@@ -49,66 +49,94 @@ pub(super) fn predecessor_verifies_provider_administrator_grant(
         .is_some_and(|state| state.authorizes(grant_id, executor))
 }
 
+/// What a search of a commit's predecessor history found.
+///
+/// The third answer is the one an installed baseline forces. A device that
+/// advanced its baseline retired the commits under it, so a position the
+/// baseline covers is in this device's predecessor history — the coverage
+/// exists because the device verified and materialized every commit behind it —
+/// but the body that would answer anything further about it is gone.
+pub(crate) enum PredecessorSearch<'a> {
+    Found(&'a VerifiedMergeHistoryCommit),
+    /// The reference is one the installed baseline restates.
+    Covered,
+    Absent,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct VerifiedMergePredecessorHistory<'a> {
-    commits: &'a BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
+    history: &'a VerifiedMergeHistory,
     frontier: &'a [StoreBatchCommitRef],
 }
 
 impl<'a> VerifiedMergePredecessorHistory<'a> {
     pub(crate) fn new(
-        commits: &'a BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
+        history: &'a VerifiedMergeHistory,
         frontier: &'a [StoreBatchCommitRef],
     ) -> Self {
-        Self { commits, frontier }
+        Self { history, frontier }
     }
 
+    /// Search the predecessor closure for a commit whose body satisfies
+    /// `matches`, down to the installed baseline.
+    ///
+    /// `expected` is the reference the caller is really after, so that a search
+    /// that reaches the baseline can say whether the thing it wanted is under
+    /// it rather than reporting a bare absence. Pass `None` when the search is
+    /// over bodies rather than for one known position.
     pub(super) fn find(
         &self,
+        expected: Option<&StoreBatchCommitRef>,
         mut matches: impl FnMut(&StoreBatchCommitRef, &StoreBatchCommit) -> bool,
-    ) -> Result<Option<&'a VerifiedMergeHistoryCommit>, StorePullError> {
+    ) -> Result<PredecessorSearch<'a>, StorePullError> {
+        if expected.is_some_and(|reference| self.history.superseded(reference)) {
+            return Ok(PredecessorSearch::Covered);
+        }
         let mut pending = self.frontier.to_vec();
         let mut visited = BTreeSet::new();
         while let Some(reference) = pending.pop() {
             if !visited.insert(reference.clone()) {
                 continue;
             }
-            let verified = self.commits.get(&reference).ok_or_else(|| {
+            if self.history.superseded(&reference) {
+                continue;
+            }
+            let verified = self.history.commits.get(&reference).ok_or_else(|| {
                 StorePullError::InvalidState(
                     "verified Merge predecessor graph is missing an exact commit".to_string(),
                 )
             })?;
             if matches(&reference, verified.verified.value()) {
-                return Ok(Some(verified));
+                return Ok(PredecessorSearch::Found(verified));
             }
             pending.extend(commit_predecessor_references(verified.verified.value()));
         }
-        Ok(None)
+        Ok(PredecessorSearch::Absent)
     }
 
     pub(super) fn contains_join_attempt(
         &self,
         expected: &DeviceJoinAttemptRef,
     ) -> Result<bool, StorePullError> {
-        self.find(|_, commit| {
+        self.find(None, |_, commit| {
             commit.device_join_attempt_decisions().iter().any(|decision| {
                 matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(reference) if reference == expected)
             })
         })
-        .map(|found| found.is_some())
+        .map(|found| matches!(found, PredecessorSearch::Found(_)))
     }
 
     fn contains_join_outcome(
         &self,
         expected: &DeviceJoinOutcomeRef,
     ) -> Result<bool, StorePullError> {
-        self.find(|_, commit| {
+        self.find(None, |_, commit| {
             commit
                 .device_join_outcomes()
                 .binary_search(expected)
                 .is_ok()
         })
-        .map(|found| found.is_some())
+        .map(|found| matches!(found, PredecessorSearch::Found(_)))
     }
 
     /// Bind a row blob to the package that published it. The blob is never named in a
@@ -130,15 +158,25 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
             ));
         };
         let expected = activation.activation.clone();
-        let activating = self
-            .find(|candidate, _| candidate == &expected)
+        let activating = match self
+            .find(Some(&expected), |candidate, _| candidate == &expected)
             .map_err(registration_attempt_error)?
-            .ok_or_else(|| {
-                RegistrationLoadError::Invalid(
+        {
+            PredecessorSearch::Found(activating) => activating,
+            // The activation is under this device's replay baseline: it is in
+            // the predecessor history, and its body — which is what would name
+            // the package again — was retired with the rest of the history the
+            // baseline restates. The device checked that binding when it
+            // materialized the activation, which is why the position is covered
+            // at all.
+            PredecessorSearch::Covered => return Ok(()),
+            PredecessorSearch::Absent => {
+                return Err(RegistrationLoadError::Invalid(
                     "reclaim evidence blob activation is absent from predecessor history"
                         .to_string(),
-                )
-            })?;
+                ))
+            }
+        };
         let names_package = match activation.package {
             coven_protocol::reclaim::AudienceBlobBindingPackage::Store(package) => {
                 activating.verified.value().store_package() == Some(package)
@@ -171,15 +209,23 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         activating_commit: &StoreBatchCommitRef,
     ) -> Result<(), RegistrationLoadError> {
         let expected = activating_commit.clone();
-        let activation = self
-            .find(|candidate, _| candidate == &expected)
+        let activation = match self
+            .find(Some(&expected), |candidate, _| candidate == &expected)
             .map_err(registration_attempt_error)?
-            .ok_or_else(|| {
-                RegistrationLoadError::Invalid(
+        {
+            PredecessorSearch::Found(activation) => activation,
+            // Under the replay baseline. See the note on
+            // `validate_package_bound_reclaim_target`: the position is in this
+            // device's history on the coverage's authority, and the body that
+            // would name the target again is retired.
+            PredecessorSearch::Covered => return Ok(()),
+            PredecessorSearch::Absent => {
+                return Err(RegistrationLoadError::Invalid(
                     "reclaim evidence package activation is absent from predecessor history"
                         .to_string(),
-                )
-            })?;
+                ))
+            }
+        };
         let names_target = match target {
             coven_protocol::reclaim::ReclaimTarget::StorePackage(store) => {
                 activation.verified.value().store_package() == Some(&store.package)
@@ -285,16 +331,23 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                     &provider_admin.administrator,
                     provider_admin,
                 ),
-                Some(access) => self
-                    .find(|candidate, _| candidate == &access.activation)?
-                    .is_some_and(|verified| {
+                Some(access) => match self.find(Some(&access.activation), |candidate, _| {
+                    candidate == &access.activation
+                })? {
+                    PredecessorSearch::Found(verified) => {
                         predecessor_verifies_provider_administrator(
                             &verified.predecessor_membership,
                             &access.grant.administrator_grant,
                             &verified.verified.value().author_registration,
                             provider_admin,
                         )
-                    }),
+                    }
+                    // The activation is under the replay baseline, which the
+                    // device only holds because it verified that grant when it
+                    // materialized the commit carrying it.
+                    PredecessorSearch::Covered => true,
+                    PredecessorSearch::Absent => false,
+                },
             };
             if !verifies_administrator {
                 return Err(StorePullError::InvalidState(

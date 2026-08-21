@@ -212,6 +212,29 @@ pub(crate) struct StoreCommitVerifier<'a> {
     >,
     accepted_announcements:
         BTreeMap<StoreDeviceRegistrationRef, Vec<VerifiedAcceptedStoreAnnouncement>>,
+    /// Where each author's announcement chain has been restated by the Store
+    /// snapshot this device stands on, so a walk resumes there instead of at
+    /// the anchor slot.
+    ///
+    /// The chain is a slot-linked list: sequence one names the slot of two, and
+    /// so on, so a walker cannot skip into the middle of it — it either holds a
+    /// position already or reads every head from the anchor. A device whose
+    /// replay baseline advanced holds no row under the snapshot's cut, and
+    /// without a resume point the only place left to start is the anchor: the
+    /// whole chain re-read on every pull, forever, growing with the store's
+    /// history. The snapshot's history summary carries the accepted
+    /// announcement at each covered tip, signed by the owner alongside the
+    /// state it restates, and that is the resume point.
+    covered_announcements: BTreeMap<StoreDeviceRegistrationRef, CoveredStoreAnnouncement>,
+    /// Announcement heads found at positions the installed snapshot covers.
+    ///
+    /// The accepted path holds only what stands above the coverage, so a query
+    /// about an older position — a join activation, an exclusion-history walk —
+    /// has to read the chain from the anchor to reach it. It is the same walk
+    /// every time it is asked, so one per verifier is enough; without this the
+    /// per-commit questions those walks ask turn one chain read into one per
+    /// commit.
+    covered_walk: BTreeMap<(StoreDeviceRegistrationRef, u64), VerifiedAcceptedStoreAnnouncement>,
 }
 
 pub(crate) struct VerifiedMergeMembershipClosure {
@@ -235,6 +258,16 @@ struct VerifiedAcceptedStoreAnnouncement {
     commit: StoreBatchCommitRef,
     head: StoreDeviceHeadRef,
     next_slot: coven_protocol::objects::ObjectSlot,
+}
+
+/// One author's announcement position as of the installed snapshot: the
+/// accepted head at the covered tip, and the slot its successor occupies.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CoveredStoreAnnouncement {
+    pub(crate) sequence: u64,
+    pub(crate) commit: StoreBatchCommitRef,
+    pub(crate) head: StoreDeviceHeadRef,
+    pub(crate) next_slot: coven_protocol::objects::ObjectSlot,
 }
 
 pub(crate) struct VerifiedAcceptedStoreAnnouncementPrefix {
@@ -374,6 +407,8 @@ impl<'a> StoreCommitVerifier<'a> {
             prefetched_slot_streams: std::sync::Mutex::new(BTreeMap::new()),
             snapshot_streams: std::sync::Mutex::new(BTreeMap::new()),
             accepted_announcements: BTreeMap::new(),
+            covered_announcements: BTreeMap::new(),
+            covered_walk: BTreeMap::new(),
         }
     }
 }

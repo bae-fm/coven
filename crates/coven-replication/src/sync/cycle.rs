@@ -277,16 +277,18 @@ impl AuthorizedSyncCycle<'_, '_> {
                         SyncCycleFailure::operation("finalize Circle epoch closes", error)
                     })?;
             }
-            timings
+            let routing_encryption = self.routing_encryption;
+            let baseline_advance = timings
                 .stage(
                     "publish acknowledgements",
                     Box::pin(
                         self.authorization
                             .acknowledgements()
-                            .stage_and_publish(&completed.sync_time),
+                            .stage_and_publish(&completed.sync_time, routing_encryption),
                     ),
                 )
                 .await?;
+            Self::report_baseline_advance(baseline_advance);
             timings
                 .stage("reclaim packages", Box::pin(self.reclaim_packages()))
                 .await?;
@@ -550,6 +552,23 @@ impl AuthorizedSyncCycle<'_, '_> {
             resume_drain_promptly,
             rotation_pending,
         })
+    }
+
+    /// Say what advancing this device's replay baseline retired.
+    ///
+    /// Read this beside the reclaim line below it: a device whose baseline
+    /// never advances keeps its whole past retained, and every package it ever
+    /// wrote stays pinned for replay, which is what a reclaim run reporting
+    /// every target as retained looks like from the log.
+    fn report_baseline_advance(advanced: Option<coven_database::AdvancedReplayBaseline>) {
+        let Some(advanced) = advanced else {
+            return;
+        };
+        info!(
+            commits = advanced.retired_commits,
+            pins = advanced.released_pins,
+            "Advanced the replay baseline over an acknowledged snapshot"
+        );
     }
 
     /// Reclaim, and say what it did every cycle rather than only when it

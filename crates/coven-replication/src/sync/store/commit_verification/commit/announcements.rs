@@ -35,6 +35,98 @@ impl<'a> StoreCommitVerifier<'a> {
         Ok(verified)
     }
 
+    /// Adopt the announcement position an installed Store snapshot restates for
+    /// one author, as the point its chain walk resumes from.
+    ///
+    /// Adopt the announcement position an installed Store snapshot restates for
+    /// one author, as the point its chain walk resumes from.
+    ///
+    /// It decides how the accepted path is indexed — a covered author's path
+    /// holds sequences above the covered tip and nothing at or under it — so it
+    /// is admitted before anything is remembered for that author. A walk that
+    /// already ran holds those covered positions itself, and since the snapshot
+    /// restates the same chain the two have to agree at the tip, after which
+    /// what the walk found under it is dropped: the snapshot is now what states
+    /// it.
+    pub(crate) fn remember_covered_announcement(
+        &mut self,
+        registration: &StoreDeviceRegistrationRef,
+        covered: CoveredStoreAnnouncement,
+    ) -> Result<(), StoreProtocolError> {
+        if covered.sequence == 0 || covered.commit.coord.sequence() != covered.sequence {
+            return Err(StoreProtocolError::Malformed(
+                "covered Store announcement differs from its own coordinate".to_string(),
+            ));
+        }
+        match self.covered_announcements.entry(registration.clone()) {
+            std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &covered => {
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(_) => Err(StoreProtocolError::Malformed(
+                "one Store announcement stream reports two covered positions".to_string(),
+            )),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                if let Some(path) = self.accepted_announcements.get_mut(registration) {
+                    let covered_length = usize::try_from(covered.sequence).map_err(|_| {
+                        StoreProtocolError::Malformed(
+                            "covered Store announcement sequence exceeds the platform address \
+                             space"
+                                .to_string(),
+                        )
+                    })?;
+                    match path.get(covered_length.wrapping_sub(1)) {
+                        Some(walked)
+                            if walked.commit != covered.commit
+                                || walked.head != covered.head
+                                || walked.next_slot != covered.next_slot =>
+                        {
+                            return Err(StoreProtocolError::Malformed(
+                                "Store snapshot coverage disagrees with the walked announcement \
+                                 chain"
+                                    .to_string(),
+                            ));
+                        }
+                        Some(_) => {
+                            path.drain(..covered_length);
+                        }
+                        // The walk stopped under the coverage, so every entry it
+                        // found is restated by the snapshot.
+                        None => path.clear(),
+                    }
+                }
+                entry.insert(covered);
+                Ok(())
+            }
+        }
+    }
+
+    /// The sequence an author's accepted path starts above: everything at or
+    /// under it is restated by the installed snapshot and held nowhere else.
+    fn covered_through(&self, registration: &StoreDeviceRegistrationRef) -> u64 {
+        self.covered_announcements
+            .get(registration)
+            .map_or(0, |covered| covered.sequence)
+    }
+
+    pub(crate) fn covered_announcement_floor(
+        &self,
+        registration: &StoreDeviceRegistrationRef,
+    ) -> u64 {
+        self.covered_through(registration)
+    }
+
+    /// The commit an author's stream stands at according to the installed
+    /// snapshot, for a walk that resumed at the coverage and found nothing
+    /// above it.
+    pub(crate) fn covered_announcement_commit(
+        &self,
+        registration: &StoreDeviceRegistrationRef,
+    ) -> Option<&StoreBatchCommitRef> {
+        self.covered_announcements
+            .get(registration)
+            .map(|covered| &covered.commit)
+    }
+
     pub(crate) fn remember_accepted_announcement(
         &mut self,
         registration: &StoreDeviceRegistrationRef,
@@ -48,12 +140,14 @@ impl<'a> StoreCommitVerifier<'a> {
             head,
             next_slot,
         };
+        let covered_through = self.covered_through(registration);
         let index = sequence
-            .checked_sub(1)
+            .checked_sub(covered_through)
+            .and_then(|offset| offset.checked_sub(1))
             .and_then(|index| usize::try_from(index).ok())
             .ok_or_else(|| {
                 StoreProtocolError::Malformed(
-                    "Store announcement sequence exceeds the platform address space".to_string(),
+                    "Store announcement sequence is at or under its snapshot coverage".to_string(),
                 )
             })?;
         let path = self
@@ -81,12 +175,21 @@ impl<'a> StoreCommitVerifier<'a> {
         first_slot: &coven_protocol::objects::ObjectSlot,
         maximum_sequence: Option<u64>,
     ) -> Result<VerifiedAcceptedStoreAnnouncementPrefix, StorePullError> {
+        let covered = self.covered_announcements.get(registration);
+        let covered_through = covered.map_or(0, |covered| covered.sequence);
+        // Where a walk starts when nothing above the coverage is accepted yet:
+        // the snapshot's own tip, or the stream anchor for an author no
+        // snapshot covers.
+        let (start_slot, start_predecessor) = match covered {
+            Some(covered) => (covered.next_slot.clone(), Some(covered.head.object.clone())),
+            None => (first_slot.clone(), None),
+        };
         let Some(path) = self.accepted_announcements.get(registration) else {
             return Ok(VerifiedAcceptedStoreAnnouncementPrefix {
                 commits: Vec::new(),
-                next_slot: first_slot.clone(),
-                predecessor: None,
-                next_sequence: 1,
+                next_slot: start_slot,
+                predecessor: start_predecessor,
+                next_sequence: covered_through.saturating_add(1),
             });
         };
         let heads = self
@@ -94,12 +197,14 @@ impl<'a> StoreCommitVerifier<'a> {
             .lock()
             .expect("verified Store device head cache mutex is not poisoned");
         let mut commits = Vec::new();
-        let mut next_slot = first_slot.clone();
-        let mut predecessor = None;
+        let mut next_slot = start_slot;
+        let mut predecessor = start_predecessor;
+        let mut accepted_count = 0u64;
         for (index, accepted) in path.iter().enumerate() {
             let sequence = u64::try_from(index)
                 .ok()
                 .and_then(|index| index.checked_add(1))
+                .and_then(|offset| offset.checked_add(covered_through))
                 .ok_or_else(|| {
                     StorePullError::InvalidState(
                         "verified Store announcement path exceeds the protocol sequence range"
@@ -129,10 +234,11 @@ impl<'a> StoreCommitVerifier<'a> {
             ));
             next_slot = accepted.next_slot.clone();
             predecessor = Some(accepted.head.object.clone());
+            accepted_count = accepted_count.saturating_add(1);
         }
-        let next_sequence = u64::try_from(commits.len())
-            .ok()
-            .and_then(|length| length.checked_add(1))
+        let next_sequence = covered_through
+            .checked_add(accepted_count)
+            .and_then(|sequence| sequence.checked_add(1))
             .ok_or_else(|| {
                 StorePullError::InvalidState(
                     "verified Store announcement path exceeds the protocol sequence range"
@@ -197,12 +303,49 @@ impl<'a> StoreCommitVerifier<'a> {
         self.commits
             .entry(target.clone())
             .or_insert_with(|| previous.clone());
-        let target_index = usize::try_from(target.coord.sequence() - 1).map_err(|_| {
-            StoreError::InvalidOutbound(
-                "local predecessor announcement sequence exceeds the platform address space"
-                    .to_string(),
+        let covered = self.covered_announcements.get(registration_ref).cloned();
+        let covered_through = covered.as_ref().map_or(0, |covered| covered.sequence);
+        // The covered tip is the one old position the snapshot answers for: the
+        // owner signed that head, so its slot link is a resume point rather
+        // than something to be walked to.
+        if let Some(covered) = &covered {
+            if target.coord.sequence() == covered.sequence {
+                if covered.commit != *target {
+                    return Err(StoreError::MergeAnnouncementOccupied {
+                        expected: Box::new(target.clone()),
+                        actual: Box::new(covered.commit.clone()),
+                    });
+                }
+                return Ok((covered.next_slot.clone(), Some(covered.head.clone())));
+            }
+        }
+        // A target under the coverage is asking for a head the snapshot does
+        // not carry — it holds one accepted announcement per stream, at the
+        // covered tip. The chain is slot-linked, so the only way to that head
+        // is from the anchor, and the walk below starts there. This is the join
+        // and exclusion paths asking about one old activation, not the
+        // per-pull chain walk, which resumes at the coverage in
+        // `accepted_announcement_prefix`.
+        let under_coverage = target.coord.sequence() < covered_through;
+        let target_index = if under_coverage {
+            None
+        } else {
+            Some(
+                target
+                    .coord
+                    .sequence()
+                    .checked_sub(covered_through)
+                    .and_then(|offset| offset.checked_sub(1))
+                    .and_then(|index| usize::try_from(index).ok())
+                    .ok_or_else(|| {
+                        StoreError::InvalidOutbound(
+                            "local predecessor announcement sequence exceeds the platform \
+                             address space"
+                                .to_string(),
+                        )
+                    })?,
             )
-        })?;
+        };
         let activation = registration
             .store_announcement_activation(registration_ref)
             .map_err(StoreError::from)?
@@ -211,11 +354,15 @@ impl<'a> StoreCommitVerifier<'a> {
             self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
-        if let Some(accepted) = self
-            .accepted_announcements
-            .get(registration_ref)
-            .and_then(|path| path.get(target_index))
-        {
+        if let Some(accepted) = match target_index {
+            Some(index) => self
+                .accepted_announcements
+                .get(registration_ref)
+                .and_then(|path| path.get(index)),
+            None => self
+                .covered_walk
+                .get(&(registration_ref.clone(), target.coord.sequence())),
+        } {
             if accepted.commit != *target {
                 return Err(StoreError::MergeAnnouncementOccupied {
                     expected: Box::new(target.clone()),
@@ -224,14 +371,19 @@ impl<'a> StoreCommitVerifier<'a> {
             }
             return Ok((accepted.next_slot.clone(), Some(accepted.head.clone())));
         }
-        let (start, mut slot, mut predecessor) = match self
-            .accepted_announcements
-            .get(registration_ref)
-            .and_then(|path| path.last().map(|accepted| (path.len(), accepted)))
-        {
+        let walked = if under_coverage {
+            None
+        } else {
+            self.accepted_announcements
+                .get(registration_ref)
+                .and_then(|path| path.last().map(|accepted| (path.len(), accepted)))
+        };
+        let mut reached = None;
+        let (start, mut slot, mut predecessor) = match walked {
             Some((length, accepted)) => (
                 u64::try_from(length)
                     .ok()
+                    .and_then(|offset| offset.checked_add(covered_through))
                     .and_then(|sequence| sequence.checked_add(1))
                     .ok_or_else(|| {
                         StoreError::InvalidOutbound(
@@ -241,7 +393,14 @@ impl<'a> StoreCommitVerifier<'a> {
                 accepted.next_slot.clone(),
                 Some(accepted.head.clone()),
             ),
-            None => (1, first_slot.clone(), None),
+            None => match covered.filter(|_| !under_coverage) {
+                Some(covered) => (
+                    covered.sequence.saturating_add(1),
+                    covered.next_slot.clone(),
+                    Some(covered.head.clone()),
+                ),
+                None => (1, first_slot.clone(), None),
+            },
         };
         if start > target.coord.sequence() {
             return Err(StoreError::InvalidOutbound(
@@ -333,19 +492,41 @@ impl<'a> StoreCommitVerifier<'a> {
             .map_err(StoreError::from)?;
             slot = head.successor.next_slot.clone();
             predecessor = Some(reference.clone());
-            self.remember_accepted_announcement(
-                registration_ref,
-                sequence,
-                head.commit.clone(),
-                reference,
-                slot.clone(),
-            )
-            .map_err(StoreError::from)?;
+            if is_target {
+                reached = Some((slot.clone(), reference.clone()));
+            }
+            // The accepted path holds only what stands above the coverage; a
+            // walk that ran under it keeps what it verified beside the path so
+            // the next question about the same position costs nothing.
+            if sequence > covered_through {
+                self.remember_accepted_announcement(
+                    registration_ref,
+                    sequence,
+                    head.commit.clone(),
+                    reference,
+                    slot.clone(),
+                )
+                .map_err(StoreError::from)?;
+            } else {
+                self.covered_walk.insert(
+                    (registration_ref.clone(), sequence),
+                    VerifiedAcceptedStoreAnnouncement {
+                        commit: head.commit.clone(),
+                        head: reference,
+                        next_slot: slot.clone(),
+                    },
+                );
+            }
         }
-        let accepted = self
-            .accepted_announcements
-            .get(registration_ref)
-            .and_then(|path| path.get(target_index))
+        if let Some(reached) = reached {
+            return Ok((reached.0, Some(reached.1)));
+        }
+        let accepted = target_index
+            .and_then(|index| {
+                self.accepted_announcements
+                    .get(registration_ref)
+                    .and_then(|path| path.get(index))
+            })
             .ok_or_else(|| {
                 StoreError::InvalidOutbound(
                     "local Store predecessor traversal ended early".to_string(),

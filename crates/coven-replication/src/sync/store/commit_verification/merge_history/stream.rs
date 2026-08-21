@@ -59,6 +59,12 @@ impl<'a> MergeHistoryVerifier<'a> {
             .iter()
             .map(|(head, _, _, _)| head.object.slot().clone())
             .collect::<BTreeSet<_>>();
+        // The head the walk resumes behind is occupied too. When the prefix
+        // came from an installed snapshot its slot is in none of the commits
+        // above, so the repeated-slot check would not see it.
+        if let Some(predecessor) = &accepted.predecessor {
+            visited.insert(predecessor.slot().clone());
+        }
         let mut slot = accepted.next_slot;
         let mut predecessor = accepted.predecessor;
         let mut sequence = accepted.next_sequence;
@@ -431,7 +437,15 @@ impl<'a> MergeHistoryVerifier<'a> {
         let mut pending = tips.into_iter().collect::<Vec<_>>();
         let mut loaded = BTreeMap::<StoreBatchCommitRef, VerifiedStoreBatchCommit>::new();
         while let Some(reference) = pending.pop() {
-            if self.history.commits.contains_key(&reference) || loaded.contains_key(&reference) {
+            // The baseline is where this walk ends. A covered commit is retired
+            // — its rows, its package and its announcement head are gone, and
+            // the signed image restates what it did — so loading it would ask
+            // the provider for history this device deliberately dropped, once
+            // per commit standing above it.
+            if self.history.commits.contains_key(&reference)
+                || loaded.contains_key(&reference)
+                || self.history.superseded(&reference)
+            {
                 continue;
             }
             let verified = self.load_ref(&reference).await?;
@@ -439,12 +453,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             loaded.insert(reference, verified);
         }
 
-        let mut states = self
-            .history
-            .commits
-            .iter()
-            .map(|(reference, verified)| (reference.clone(), verified.state_after.clone()))
-            .collect::<BTreeMap<_, _>>();
+        let mut states = self.history.resolved_states();
         while !loaded.is_empty() {
             let next = loaded.iter().find_map(|(reference, verified)| {
                 commit_predecessor_references(verified.value())
@@ -477,7 +486,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             let predecessor_state =
                 verified_merge_predecessor_state(&self.history.genesis, &states, &commit)?;
             let verified_membership_prefix = verified_merge_membership_prefix(
-                &self.history.commits,
+                &self.history,
                 commit_predecessor_references(&commit),
             )?;
             let pending_resolution =
@@ -514,13 +523,18 @@ impl<'a> MergeHistoryVerifier<'a> {
                 ));
             }
             let accepted_frontier = commit_predecessor_references(&commit);
-            let registrations = Box::pin(self.load_merge_commit_registrations(
-                &commit,
-                &author,
-                &membership,
-                &accepted_frontier,
-            ))
-            .await?;
+            let registrations = match self.history.retained_registrations(&reference) {
+                Some(registrations) => registrations.to_vec(),
+                None => {
+                    Box::pin(self.load_merge_commit_registrations(
+                        &commit,
+                        &author,
+                        &membership,
+                        &accepted_frontier,
+                    ))
+                    .await?
+                }
+            };
             let (authorized_predecessor, recovery_author) = predecessor_state
                 .clone()
                 .preactivate_recovery_author(&commit, &registrations)

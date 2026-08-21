@@ -113,8 +113,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .map_err(StorePullError::Protocol)?;
         let state = merge_device_state_from_verified_history(
             &acceptance.device_state,
-            &self.history.genesis,
-            &self.history.commits,
+            &self.history,
             allowed_tips,
         )?;
         if !device_state_has_active_registration(&state, &acceptance.owner_registration) {
@@ -298,7 +297,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             ));
         }
         let verified_membership_activations = verified_merge_membership_prefix(
-            &self.history.commits,
+            &self.history,
             commit_predecessor_references(verified_commit),
         )?;
         let membership = self

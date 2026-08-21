@@ -45,6 +45,39 @@ pub(crate) fn load_store_device_snapshot_on(
     Ok(state)
 }
 
+/// Every device state this database holds at a position `coverage` covers.
+///
+/// These are the positions an installed replay baseline supersedes: the
+/// baseline restates the rows they produced, so nothing re-derives them, but a
+/// commit standing above the coverage still names one of them as its
+/// predecessor and has to be checked against the state that stood there.
+/// `retain_snapshot_device_states` is what keeps exactly this set alive across
+/// a baseline install or advance.
+pub(crate) fn load_covered_store_device_snapshots_on(
+    conn: &Connection,
+    coverage: &CommitFrontier,
+) -> Result<BTreeMap<StoreBatchCommitRef, ResolvedStoreDeviceState>, DbError> {
+    let rows = crate::query_mapped_rows(
+        conn,
+        "SELECT commit_ref, state FROM store_device_state_snapshots ORDER BY commit_ref",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    let mut covered = BTreeMap::new();
+    for (encoded_ref, encoded_state) in rows {
+        let reference: StoreBatchCommitRef = serde_json::from_str(&encoded_ref)
+            .map_err(|error| DbError::context("covered device-state commit ref", error))?;
+        if !coverage.covers_commit(&reference) {
+            continue;
+        }
+        let state: ResolvedStoreDeviceState = serde_json::from_str(&encoded_state)
+            .map_err(|error| DbError::context("covered device state", error))?;
+        state.validate_canonical().map_err(DbError::from)?;
+        covered.insert(reference, state);
+    }
+    Ok(covered)
+}
+
 pub(crate) fn store_device_state_for_history_cut_on(
     conn: &Connection,
     cut: &coven_protocol::store_commit::StoreHistoryCut,

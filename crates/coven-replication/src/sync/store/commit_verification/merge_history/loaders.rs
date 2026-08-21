@@ -337,8 +337,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         membership: &MembershipChain,
         accepted_frontier: &[StoreBatchCommitRef],
     ) -> Result<Vec<ActivatedStoreDeviceRegistration>, StorePullError> {
-        let accepted =
-            VerifiedMergePredecessorHistory::new(&self.history.commits, accepted_frontier);
+        let accepted = VerifiedMergePredecessorHistory::new(&self.history, accepted_frontier);
         let loaded = self.load_commit_join_evidence(commit, author).await;
         let loaded = loaded.map_err(StorePullError::from)?;
         let join_evidence = accepted.verify_commit_join_evidence(commit, loaded, membership)?;
@@ -433,13 +432,14 @@ impl<'a> MergeHistoryVerifier<'a> {
                         .to_string(),
                 ));
             }
-            if accepted
-                .find(|_, candidate| {
-                    candidate.reclaim_authorization() == Some(&receipt.authorization)
-                })
-                .map_err(registration_attempt_error)?
-                .is_none()
-            {
+            if matches!(
+                accepted
+                    .find(None, |_, candidate| {
+                        candidate.reclaim_authorization() == Some(&receipt.authorization)
+                    })
+                    .map_err(registration_attempt_error)?,
+                PredecessorSearch::Absent
+            ) {
                 return Err(RegistrationLoadError::Invalid(
                     "reclaim receipt authorization is absent from predecessor history".to_string(),
                 ));

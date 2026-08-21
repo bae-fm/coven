@@ -47,6 +47,8 @@ pub(crate) mod snapshot_publication;
 pub(crate) mod store_acknowledgements;
 pub(crate) mod store_authority;
 pub(crate) mod store_records;
+pub(crate) use store_records::replay_baseline_advances_on;
+pub use store_records::AdvancedReplayBaseline;
 pub(crate) use store_records::StoreRecords;
 mod store_transaction;
 pub(crate) mod stream_activation_records;
