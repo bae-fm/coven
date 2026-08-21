@@ -3163,3 +3163,150 @@ async fn round_trip_make_remote_make_local_make_remote() {
         .await
         .expect("the replacement exact blob is in the cloud");
 }
+
+/// Every file staged under `outbound-blobs`, by name.
+fn staged_upload_copies(store_dir: &StoreDir) -> Vec<String> {
+    let dir = store_dir.storage_dir().join("outbound-blobs");
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            let mut names = entries
+                .map(|entry| {
+                    entry
+                        .expect("read a staged upload copy")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("read {}: {error}", dir.display()),
+    }
+}
+
+/// A staged upload copy is the sealed bytes an upload reads from, and it exists
+/// exactly while something can still read them.
+///
+/// It is written before the upload and read again by every resume until the
+/// upload is durably recorded — after that nothing reads it, and it is the whole
+/// blob, in ciphertext, sitting beside a library that already has the plaintext.
+/// Left behind it makes the store grow by the size of everything ever published:
+/// a real library was found holding 2.7 GB of them, every one already at the
+/// provider.
+#[tokio::test]
+async fn a_drained_upload_keeps_no_staged_copy() {
+    let (db, storage, _cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
+    let bytes = b"PHOTO-BYTES-staged-copy".to_vec();
+    owners
+        .seed_local_release(
+            &tmp.path().join("user"),
+            "n-spool",
+            "photospool",
+            "cv/photospool.jpg",
+            &bytes,
+        )
+        .await;
+    owners
+        .make_remote("notes", "n-spool", true)
+        .await
+        .expect("make the release remote");
+
+    storage
+        .run_founder_cycle(None)
+        .await
+        .expect("drain the queued upload");
+
+    assert_eq!(
+        pending_uploads(&db).await,
+        0,
+        "the upload has to have drained for this to say anything about the copy",
+    );
+    assert_eq!(
+        shared_flag(&db, "n-spool").await,
+        1,
+        "the release has to be published for this to say anything about the copy",
+    );
+    assert_eq!(
+        staged_upload_copies(&lib),
+        Vec::<String>::new(),
+        "an upload that is durably recorded left its staged copy behind",
+    );
+}
+
+/// The copy survives a failed upload, because the resume reads it.
+///
+/// Deleting on the way out of the upload attempt rather than on the durable
+/// record of it would take the bytes the retry needs, and the retry would have
+/// to seal them again from a source file that may be gone.
+#[tokio::test]
+async fn a_failed_upload_keeps_its_staged_copy_for_the_resume() {
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db_with_blob(db_store_dir.clone(), photo_decl());
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let (storage, _cloud_storage) = create_store(
+        &db,
+        db_store_dir.clone(),
+        UserKeypair::generate(),
+        home.clone(),
+    )
+    .await;
+    let tmp = tempfile::tempdir().expect("create external blob fixture directory");
+    let lib = db_store_dir.clone();
+    let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
+    let bytes = b"PHOTO-BYTES-resume-copy".to_vec();
+    owners
+        .seed_local_release(
+            &tmp.path().join("user"),
+            "n-resume",
+            "photoresume",
+            "cv/photoresume.jpg",
+            &bytes,
+        )
+        .await;
+    owners
+        .make_remote("notes", "n-resume", true)
+        .await
+        .expect("make the release remote");
+
+    home.arm_write_failures();
+    storage
+        .run_founder_cycle(None)
+        .await
+        .expect_err("the armed write failure fails the upload");
+    home.clear_write_failures();
+
+    assert_eq!(
+        pending_uploads(&db).await,
+        1,
+        "the upload has to still be queued for this to say anything about the copy",
+    );
+    assert_eq!(
+        staged_upload_copies(&lib).len(),
+        1,
+        "the copy an unconfirmed upload will be resumed from was removed",
+    );
+
+    // The failed attempt earned a retry window. Resuming is the point of this
+    // test, not waiting out the clock.
+    StoreDatabase::new(&db)
+        .reset_outbox_backoff()
+        .await
+        .expect("clear the failed attempt's retry window");
+    storage
+        .run_founder_cycle(None)
+        .await
+        .expect("resume the queued upload");
+
+    assert_eq!(
+        pending_uploads(&db).await,
+        0,
+        "the resume drained the upload"
+    );
+    assert_eq!(
+        staged_upload_copies(&lib),
+        Vec::<String>::new(),
+        "the resumed upload left its staged copy behind",
+    );
+}

@@ -199,6 +199,12 @@ impl InMemoryCloudHome {
         self.fail_writes.store(true, Ordering::SeqCst);
     }
 
+    /// Let writes through again, so a test can drive the resume that follows a
+    /// failed one rather than only the failure.
+    pub fn clear_write_failures(&self) {
+        self.fail_writes.store(false, Ordering::SeqCst);
+    }
+
     /// Make the next `n` `read_range` calls fail with a retryable transport
     /// error before any serves bytes, to exercise a caller's read-retry path.
     /// Each failed call consumes one; once `n` are spent, ranges serve

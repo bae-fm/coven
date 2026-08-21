@@ -238,6 +238,30 @@ impl AuthorizedWriterOperation<'_> {
         self.database.mark_blob_upload_created(entry).await
     }
 
+    /// Drop the staged copy an upload was read from, now that the record says
+    /// the provider has the bytes.
+    ///
+    /// The copy is the whole blob, sealed, sitting beside a library that already
+    /// holds the plaintext, and it exists for exactly one reader: the create
+    /// that uploads from it, and every resume of that create until one is
+    /// durably recorded. Past that nothing reads it — the resume path skips the
+    /// create outright, and a cancellation deletes the copy rather than reading
+    /// it — so this is where its reason to exist ends.
+    ///
+    /// A removal that fails is reported and fails the attempt rather than being
+    /// swallowed: the entry stays queued, so the next pass finds a record that
+    /// already says created, skips straight back to here, and tries the removal
+    /// again. Swallowing it is what left a real library holding gigabytes of
+    /// copies of things the provider already had.
+    async fn retire_blob_upload_spool(
+        &self,
+        stored: &StoredBlobRef,
+    ) -> Result<(), coven_foundation::atomic_file::FileError> {
+        self.store_dir
+            .remove_outbound_blob_spool(stored.locator().locator_hash())
+            .await
+    }
+
     async fn pin_uploaded_blob(
         &self,
         stored: &StoredBlobRef,
@@ -484,6 +508,16 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             if let Some(observer) = self.observer {
                 observer.on_blob_uploaded(&row).await;
             }
+        }
+
+        // The record says the provider has these bytes, whether this pass put
+        // them there or an earlier one did, so the staged copy has no reader
+        // left.
+        if let Err(error) = self.writer.retire_blob_upload_spool(&stored).await {
+            let object_key = stored.object().slot().logical_key().to_string();
+            return self
+                .local_failure(&row, object_key, UploadFailureCause::File(error))
+                .await;
         }
 
         if retain_pinned {
