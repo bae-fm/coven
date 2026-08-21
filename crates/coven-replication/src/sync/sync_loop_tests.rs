@@ -10,7 +10,6 @@ fn success() -> SyncLoopSuccess {
         alerts: crate::sync::SyncLoopAlerts {
             rotation_pending: None,
             held_positions: Vec::new(),
-            asset_downloads_failed: false,
             local_blob_cleanup_pending: false,
         },
     }

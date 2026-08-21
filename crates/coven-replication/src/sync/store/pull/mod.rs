@@ -140,7 +140,6 @@ pub(crate) use model::{
 pub use model::{StorePullError, StorePullResult};
 pub(crate) use snapshot_evidence::*;
 pub use support::PullError;
-pub(crate) use support::{BlobDownloadFailure, BlobDownloadFailures};
 
 #[cfg(test)]
 mod tests;

@@ -337,7 +337,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             })?;
         let mut row_changes = Vec::new();
         let mut changesets_applied = 0_u64;
-        let mut asset_downloads_failed = false;
         let mut blocked = BTreeMap::new();
         let mut latest_membership = membership.clone();
 
@@ -430,9 +429,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                                 progressed = true;
                             }
                             ApplyOutcome::Held(reason) => {
-                                if matches!(reason, HeldStorePositionReason::BlobDownloadFailed) {
-                                    asset_downloads_failed = true;
-                                }
                                 let held_position = HeldStorePosition::commit(
                                     candidate.candidate.commit_ref(),
                                     reason,
@@ -472,7 +468,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 held_positions: held,
                 visible_heads,
                 row_changes,
-                asset_downloads_failed,
                 local_blob_cleanup_pending,
                 #[cfg(any(test, feature = "test-utils"))]
                 frontier,
@@ -595,12 +590,9 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             };
             match timings
                 .stage(
-                    "fetch blobs",
-                    self.history.prepare_package(
-                        package,
-                        self.package_schema.clone(),
-                        super::history::PackageBlobPolicy::FetchAndVerify,
-                    ),
+                    "prepare package",
+                    self.history
+                        .prepare_package(package, self.package_schema.clone()),
                 )
                 .await?
             {
@@ -615,12 +607,9 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             };
             match timings
                 .stage(
-                    "fetch blobs",
-                    self.history.prepare_package(
-                        package,
-                        self.package_schema.clone(),
-                        super::history::PackageBlobPolicy::FetchAndVerify,
-                    ),
+                    "prepare package",
+                    self.history
+                        .prepare_package(package, self.package_schema.clone()),
                 )
                 .await?
             {

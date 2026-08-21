@@ -28,7 +28,6 @@ pub struct SyncLoopAlerts {
     /// Changesets held after a validation/apply failure, with per-changeset
     /// detail (device, seq, reason) — so a host can name which are stalled.
     pub held_positions: Vec<HeldStorePosition>,
-    pub asset_downloads_failed: bool,
     pub local_blob_cleanup_pending: bool,
 }
 
@@ -47,8 +46,6 @@ impl SyncLoopAlerts {
                 self.held_positions[0].coordinate.seq(),
                 self.held_positions[0].reason,
             ))
-        } else if self.asset_downloads_failed {
-            Some("Some files failed to download; their changes remain pending.".to_string())
         } else if self.local_blob_cleanup_pending {
             Some("Some obsolete local file copies are still pending cleanup.".to_string())
         } else {
@@ -112,7 +109,6 @@ pub(crate) fn after_success(result: SyncCycleResult) -> SyncLoopDecision {
             alerts: SyncLoopAlerts {
                 rotation_pending: result.rotation_pending,
                 held_positions: result.held_positions,
-                asset_downloads_failed: result.asset_downloads_failed,
                 local_blob_cleanup_pending: result.local_blob_cleanup_pending,
             },
         }),
@@ -189,7 +185,6 @@ mod tests {
             held_positions: Vec::new(),
             device_activity: device_activity(2),
             sync_time: "2026-07-03T00:00:00Z".to_string(),
-            asset_downloads_failed: false,
             local_blob_cleanup_pending: false,
             row_changes: vec![],
             resume_drain_promptly: false,
@@ -218,7 +213,6 @@ mod tests {
         let mut result = cycle_result();
         result.device_activity = device_activity(2);
         result.held_positions = held(3);
-        result.asset_downloads_failed = true;
 
         let decision = after_success(result);
 
@@ -228,8 +222,6 @@ mod tests {
                 assert_eq!(success.device_activity.len(), 2);
                 assert_eq!(success.device_activity[0].author, "author-0");
                 assert_eq!(success.device_count, 3);
-                // Every warning category reaches the report's alerts.
-                assert!(success.alerts.asset_downloads_failed);
                 // Held changesets travel with device/seq/reason, not a bare count.
                 assert_eq!(success.alerts.held_positions.len(), 3);
                 assert_eq!(
@@ -274,7 +266,6 @@ mod tests {
         let alerts = SyncLoopAlerts {
             rotation_pending: None,
             held_positions: held(4),
-            asset_downloads_failed: true,
             local_blob_cleanup_pending: true,
         };
 
@@ -294,7 +285,6 @@ mod tests {
                 live_generation: 1,
             }),
             held_positions: held(4),
-            asset_downloads_failed: true,
             local_blob_cleanup_pending: true,
         };
 
@@ -310,7 +300,6 @@ mod tests {
         let alerts = SyncLoopAlerts {
             rotation_pending: None,
             held_positions: Vec::new(),
-            asset_downloads_failed: false,
             local_blob_cleanup_pending: false,
         };
 
@@ -331,7 +320,6 @@ mod tests {
             success.alerts.primary_message().as_deref(),
             Some("Some obsolete local file copies are still pending cleanup."),
         );
-        assert!(!success.alerts.asset_downloads_failed);
         assert!(success.alerts.local_blob_cleanup_pending);
     }
 }

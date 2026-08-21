@@ -184,6 +184,24 @@ impl TestOwnerGraph {
         )
     }
 
+    /// Run the eager cache fill the sync loop runs behind its cycles, which is
+    /// what makes an eager blob local now that a pull downloads nothing.
+    pub async fn fill_eager_cache(
+        &self,
+        storage: Arc<dyn CloudSyncObjectStorage>,
+    ) -> Result<(), std::sync::Arc<crate::sync::EagerCacheFillError>> {
+        let (_cancel, cancel_rx) = tokio::sync::watch::channel(false);
+        let (status, _status_rx) =
+            tokio::sync::watch::channel(crate::sync::EagerCacheFillStatus::Scanning);
+        crate::sync::store::blob::eager_cache::run(
+            &self.database,
+            &self.remote_blob_access(storage),
+            cancel_rx,
+            &status,
+        )
+        .await
+    }
+
     pub async fn read_blob(
         &self,
         storage: Option<Arc<dyn CloudSyncObjectStorage>>,

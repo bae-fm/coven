@@ -201,15 +201,39 @@ impl SyncLoopThread {
         }
 
         let eager_components = Arc::clone(&self.inner);
-        let eager_cancel = self.eager_cache_cancel_rx.clone();
+        let mut eager_cancel = self.eager_cache_cancel_rx.clone();
+        // Raised when the cycle loop ends, so a fill parked between passes stops
+        // with it rather than holding the loop's thread open.
+        let cycles_ended = Arc::new(tokio::sync::Notify::new());
+        let eager_cycles_ended = Arc::clone(&cycles_ended);
         let eager_status = self.eager_cache_status_tx.clone();
+        // The first pass covers whatever the database already holds; each pass
+        // after it waits for a cycle to materialize rows and scans again,
+        // because a pull records what its rows bind and downloads none of it.
+        // A cancelled fill stays cancelled — the host asked for it to stop, not
+        // to pause.
         let eager_fill = async move {
-            if let Err(error) = eager_components
-                .components
-                .fill_eager_cache(eager_cancel, &eager_status)
-                .await
-            {
-                error!(%error, "post-open eager cache fill failed");
+            loop {
+                if let Err(error) = eager_components
+                    .components
+                    .fill_eager_cache(eager_cancel.clone(), &eager_status)
+                    .await
+                {
+                    error!(%error, "post-open eager cache fill failed");
+                    return;
+                }
+                if *eager_cancel.borrow() {
+                    return;
+                }
+                tokio::select! {
+                    () = eager_components.components.eager_fill_wanted().notified() => {}
+                    () = eager_cycles_ended.notified() => return,
+                    changed = eager_cancel.changed() => {
+                        if changed.is_err() || *eager_cancel.borrow() {
+                            return;
+                        }
+                    }
+                }
             }
         };
         tokio::pin!(eager_fill);
@@ -217,7 +241,12 @@ impl SyncLoopThread {
         tokio::pin!(cycles);
         tokio::select! {
             () = &mut eager_fill => cycles.await,
-            () = &mut cycles => eager_fill.await,
+            () = &mut cycles => {
+                // An in-flight fill still observes the cancellation the stop
+                // raised and reports where it stopped; a parked one ends here.
+                cycles_ended.notify_one();
+                eager_fill.await;
+            }
         }
     }
 

@@ -607,19 +607,6 @@ impl<'storage> RemoteBlobSource<'storage> {
             .await
     }
 
-    pub(super) async fn verify_plaintext(
-        &self,
-        cache: &StoreBlobCache,
-        authority: &RowBlobAuthority,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-        retain: bool,
-        progress: coven_storage::cloud::DownloadProgress,
-    ) -> Result<(), BlobDownloadFailureCause> {
-        self.inner
-            .verify_plaintext(cache, authority, stored, retain, progress)
-            .await
-    }
-
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) async fn key_fingerprint_for_test(
         &self,
@@ -693,23 +680,6 @@ impl RemoteBlobSourceInner<'_> {
         self.resolved_access(authority, stored)
             .await?
             .stage_verified_plaintext(stored, stage, progress)
-            .await
-    }
-
-    pub(super) async fn verify_plaintext(
-        &self,
-        cache: &StoreBlobCache,
-        authority: &RowBlobAuthority,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-        retain: bool,
-        progress: coven_storage::cloud::DownloadProgress,
-    ) -> Result<(), BlobDownloadFailureCause> {
-        let remote = self
-            .resolved_access(authority, stored)
-            .await
-            .map_err(BlobDownloadFailureCause::Cache)?;
-        cache
-            .verify_remote_plaintext(&remote, stored, retain, progress)
             .await
     }
 
@@ -1040,74 +1010,6 @@ impl StoreBlobCache {
             }
             Err(error) => Err(BlobCacheError::Commit(error)),
         }
-    }
-
-    async fn verify_remote_plaintext(
-        &self,
-        remote: &ExactRemoteBlobAccess<'_>,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-        retain: bool,
-        progress: coven_storage::cloud::DownloadProgress,
-    ) -> Result<(), BlobDownloadFailureCause> {
-        let locator = stored.locator();
-        coven_foundation::store_dir::validate_path_token(locator.namespace())
-            .map_err(BlobDownloadFailureCause::Invalid)?;
-        coven_foundation::store_dir::validate_path_token(locator.blob_id())
-            .map_err(BlobDownloadFailureCause::Invalid)?;
-        let destination = self
-            .store_dir
-            .cache_blob_path(locator.namespace(), locator.locator_hash())
-            .map_err(BlobDownloadFailureCause::Invalid)?;
-        let stage = self
-            .store_dir
-            .stage_atomic_file(&destination)
-            .await
-            .map_err(BlobDownloadFailureCause::File)?;
-        let staged = remote
-            .stage_verified_plaintext(stored, stage, progress)
-            .await
-            .map_err(|error| match error {
-                BlobCacheError::Storage(error) => BlobDownloadFailureCause::Storage(error),
-                other => BlobDownloadFailureCause::Cache(other),
-            })?;
-        if !retain {
-            return Ok(());
-        }
-        if self
-            .store_dir
-            .remote_blob_is_exact(
-                locator.namespace(),
-                locator.locator_hash(),
-                locator.plaintext_size(),
-                locator.plaintext_hash(),
-            )
-            .await
-            .map_err(|error| BlobDownloadFailureCause::Cache(error.into()))?
-        {
-            return Ok(());
-        }
-        match staged.commit_new().await {
-            Ok(()) => {}
-            Err(coven_foundation::local_file::CommitNewFileError::DestinationExists(_)) => {
-                if !self
-                    .store_dir
-                    .remote_blob_is_exact(
-                        locator.namespace(),
-                        locator.locator_hash(),
-                        locator.plaintext_size(),
-                        locator.plaintext_hash(),
-                    )
-                    .await
-                    .map_err(|error| BlobDownloadFailureCause::Cache(error.into()))?
-                {
-                    return Err(BlobDownloadFailureCause::OccupiedPathMismatch);
-                }
-            }
-            Err(error) => return Err(BlobDownloadFailureCause::Commit(error)),
-        }
-        self.enforce_budget(locator.namespace(), Some(&destination))
-            .await
-            .map_err(BlobDownloadFailureCause::Cache)
     }
 
     async fn stage_exact_copy(

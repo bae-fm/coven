@@ -66,7 +66,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             self.database.clone(),
             self.storage.as_ref(),
             &mut self.history_verifier,
-            &self.blob_source,
             &self.blob_cache,
         )
     }

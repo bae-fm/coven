@@ -821,10 +821,9 @@ async fn cache_eager_lands_in_cache_on_pull() {
     let db2 =
         crate::sync::test_helpers::open_test_db_with_blob(db2_store_dir.clone(), photo_decl());
     let ld = db2_store_dir.clone();
-    let (_updated, result) = storage.pull_into(&db2, &ld).await;
+    let (_updated, result) = storage.pull_and_fill_into(&db2, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
-    assert!(!result.asset_downloads_failed);
     let reference = db2
         .row_blob_ref("note_photos", "ph01abcd")
         .await
@@ -1152,7 +1151,6 @@ async fn cache_lazy_fetches_on_first_read() {
 
     // The row applied, but the CacheLazy blob is in neither folder — pull skipped it.
     assert_eq!(result.changesets_applied, 1);
-    assert!(!result.asset_downloads_failed);
     let reference = db2
         .row_blob_ref("note_photos", "aud01234")
         .await
@@ -3224,7 +3222,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let store_database2 = StoreDatabase::new(&db2);
     let ld = db2_store_dir.clone();
     let cache = StoreBlobCache::new(store_database2.clone(), ld.clone());
-    let (_updated, result) = storage.pull_into(&db2, &ld).await;
+    let (_updated, result) = storage.pull_and_fill_into(&db2, &ld).await;
     assert_eq!(result.changesets_applied, 1);
     let eager = db2
         .row_blob_ref("note_photos", "mir0aaaa")

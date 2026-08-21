@@ -35,7 +35,6 @@ pub enum HeldStorePositionReason {
     CirclePackageRead(std::sync::Arc<crate::sync::store::CirclePackageReadError>),
     ChangesetUnreadable(std::sync::Arc<coven_database::ChangesetError>),
     InvalidRowIdentity(std::sync::Arc<coven_protocol::synced_schema::RowIdentityError>),
-    BlobDownloadFailed,
     ForeignKeyDependency,
     ConstraintConflict(Vec<String>),
     HashMismatch {
@@ -72,7 +71,6 @@ impl PartialEq for HeldStorePositionReason {
             | (Reason::Unauthorized, Reason::Unauthorized)
             | (Reason::StorePackageMismatch, Reason::StorePackageMismatch)
             | (Reason::CirclePackageMismatch, Reason::CirclePackageMismatch)
-            | (Reason::BlobDownloadFailed, Reason::BlobDownloadFailed)
             | (Reason::ForeignKeyDependency, Reason::ForeignKeyDependency)
             | (Reason::InvalidSignature, Reason::InvalidSignature) => true,
             (Reason::MissingPredecessor(left), Reason::MissingPredecessor(right)) => left == right,
@@ -310,7 +308,6 @@ pub struct StorePullResult {
     pub held_positions: Vec<HeldStorePosition>,
     pub visible_heads: Vec<VerifiedStoreDeviceHead>,
     pub row_changes: Vec<RowChange>,
-    pub asset_downloads_failed: bool,
     pub local_blob_cleanup_pending: bool,
     #[cfg(any(test, feature = "test-utils"))]
     pub frontier: BTreeMap<String, StoreBatchCommitRef>,
@@ -377,8 +374,6 @@ pub enum StorePullError {
     SnapshotBehindReplayBaseline,
     #[error("membership: {0}")]
     Membership(#[source] StorePullMembershipError),
-    #[error("{0}")]
-    BlobDownloads(#[source] crate::sync::store::pull::BlobDownloadFailures),
     #[error("storage: {0}")]
     Storage(#[from] StorageError),
     #[error("Circle package: {0}")]

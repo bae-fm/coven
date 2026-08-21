@@ -3051,6 +3051,29 @@ mod test_device {
             self.pull_store_with_encryption(&routing_encryption).await
         }
 
+        /// Pull, then run the eager cache fill the sync loop runs behind its
+        /// cycles. A pull records what its rows bind and downloads none of it,
+        /// so this is what makes an eager blob's bytes local.
+        pub async fn pull_store_and_fill_eager(
+            &self,
+        ) -> Result<
+            (
+                std::collections::BTreeMap<String, u64>,
+                crate::sync::store::StorePullResult,
+            ),
+            TestPullError,
+        > {
+            let pulled = self.pull_store().await?;
+            crate::sync::test_owner_graph::TestOwnerGraph::new(
+                self.db.clone(),
+                self.store_dir.clone(),
+            )
+            .fill_eager_cache(self.storage.clone())
+            .await
+            .expect("fill the eager cache behind the pull");
+            Ok(pulled)
+        }
+
         pub async fn pull_store_with_encryption(
             &self,
             routing_encryption: &coven_keys::encryption::EncryptionService,
@@ -3429,6 +3452,29 @@ impl TestStore {
         self.pull_into_result(db, store_dir)
             .await
             .expect("pull exact test Store")
+    }
+
+    /// Pull, then run the eager cache fill the sync loop runs behind its cycles.
+    ///
+    /// A pull records what its rows bind and downloads none of it, so a test
+    /// that wants an eager blob's bytes on disk has to do what the loop does.
+    pub async fn pull_and_fill_into(
+        &self,
+        db: &Database,
+        store_dir: &StoreDir,
+    ) -> (
+        std::collections::BTreeMap<String, u64>,
+        crate::sync::store::StorePullResult,
+    ) {
+        let pulled = self.pull_into(db, store_dir).await;
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            coven_database::StoreDatabase::new(db),
+            store_dir.clone(),
+        )
+        .fill_eager_cache(self.storage.clone())
+        .await
+        .expect("fill the eager cache behind the pull");
+        pulled
     }
 
     pub async fn promote_active_member_fixture(

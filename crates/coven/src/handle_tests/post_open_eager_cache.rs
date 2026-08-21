@@ -319,3 +319,117 @@ async fn run_stopping_sync_cancels_the_post_open_eager_fill() {
         "stopping sync must retain the cancelled eager-fill progress, got {cancelled:?}",
     );
 }
+
+/// One more eager image on the owner, published after a joining device is
+/// already open and synchronised.
+async fn publish_one_more_eager_image(handle: &crate::CovenHandle, index: usize) {
+    const IMAGE_BYTES: usize = 64 * 1024;
+
+    let id = format!("image{index:04}");
+    let bytes = vec![u8::try_from(index).expect("image index fits u8"); IMAGE_BYTES];
+    let hash = coven_protocol::blob::content_hash(&bytes);
+    let blob_id = id.clone();
+    let blob_bytes = bytes.clone();
+    handle
+        .write_with_blobs(
+            move |batch| {
+                batch.put_blob("photos", blob_id, blob_bytes);
+                Ok(())
+            },
+            move |sql| {
+                let stamp = sql.stamp().to_string();
+                sql.execute(
+                    "INSERT INTO note_photos
+                     (id, note_id, kind, size, hash, _updated_at, created_at)
+                     VALUES (?1, 'image-root', 'cover', ?2, ?3, ?4, '2026-01-01')",
+                    rusqlite::params![id, bytes.len() as i64, hash, stamp],
+                )?;
+                Ok(())
+            },
+        )
+        .await
+        .expect("write one more eager image");
+    // The root is already Remote, so the new child row is published with it.
+    wait_for_initial_sync(handle).await;
+}
+
+/// Artwork that arrives *after* a device is open still becomes local bytes.
+///
+/// A pull records what its rows bind and downloads none of it, so the arriving
+/// row alone would leave the album with no cover. The eager cache fill re-scans
+/// whenever a cycle materializes rows, which is what carries the cover across —
+/// behind the cycle, which never waits for it.
+#[test]
+fn eager_artwork_arriving_after_open_still_fills() {
+    on_a_deep_stack(run_eager_artwork_arriving_after_open_still_fills);
+}
+
+async fn run_eager_artwork_arriving_after_open_still_fills() {
+    let store_id = "facade-late-eager-artwork";
+    let fixture = FacadeFixture::build_with_eager_images(store_id, 1).await;
+    let config = join_eager_fixture(&fixture).await;
+
+    let joined_store_dir = fixture.layout.store_dir(store_id);
+    let joined_handle = crate::Coven::builder(joined_store_dir.clone(), config)
+        .synced_tables(fixture.tables.clone())
+        .migrations(test_migrations())
+        .open()
+        .expect("open joined library");
+    let mut fill = joined_handle.subscribe_eager_cache_fill_status();
+    joined_handle
+        .connect_sync_with_test_home(
+            fixture.home.clone(),
+            coven_storage::CloudCipher::Encrypted(fixture.encryption.clone()),
+        )
+        .await
+        .expect("connect joined library");
+
+    await_eager_fill(&mut fill).await;
+
+    // The cover the joined device has never seen.
+    publish_one_more_eager_image(&fixture.handle, 1).await;
+    joined_handle.sync_now();
+
+    let late_cover = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Ok(reference) = joined_handle.row_blob_ref("note_photos", "image0001").await {
+                if let Some(stored) = reference.stored() {
+                    let path = joined_store_dir
+                        .cache_blob_path(
+                            stored.locator().namespace(),
+                            stored.locator().locator_hash(),
+                        )
+                        .expect("late image cache path");
+                    if path.is_file() {
+                        return path;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("artwork that arrived after open is materialized locally");
+    assert!(late_cover.is_file());
+}
+
+/// Wait for a cache fill pass to report complete.
+async fn await_eager_fill(fill: &mut tokio::sync::watch::Receiver<crate::EagerCacheFillStatus>) {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let current = fill.borrow_and_update().clone();
+            match current {
+                crate::EagerCacheFillStatus::Complete { .. } => return,
+                crate::EagerCacheFillStatus::Failed { error, .. } => {
+                    panic!("eager cache fill failed: {error}")
+                }
+                _ => fill
+                    .changed()
+                    .await
+                    .expect("cache fill status remains open"),
+            }
+        }
+    })
+    .await
+    .expect("eager cache fill did not complete");
+}

@@ -183,6 +183,15 @@ impl PullTestDatabaseOps for coven_database::Database {
             .iter()
             .map(|(stream, reference)| (stream.clone(), reference.coord.sequence()))
             .collect();
+        // The pull downloads nothing, so catching a device up means running the
+        // eager cache fill the sync loop runs behind its cycles.
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            coven_database::StoreDatabase::new(self),
+            store_dir.clone(),
+        )
+        .fill_eager_cache(storage.clone())
+        .await
+        .expect("fill the eager cache behind the pull");
         (positions, result)
     }
 
@@ -3053,8 +3062,14 @@ async fn sync_reuses_opened_schema_models() {
     assert_eq!(coven_database::from_tables_call_count(), 1);
 }
 
+/// A blob the provider no longer holds does not stop the rows that bind it.
+///
+/// The pull downloads nothing, so a missing object cannot fail it: the rows land,
+/// the position advances past them, and the blob's absence surfaces where it
+/// belongs — at the read that wants the bytes, checked against the plaintext hash
+/// its binding names.
 #[tokio::test]
-async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
+async fn a_missing_blob_does_not_hold_back_the_rows_that_bind_it() {
     let db1_store_dir = crate::sync::test_helpers::test_store_dir();
     let db1 =
         crate::sync::test_helpers::open_test_db_with_blob(db1_store_dir.clone(), photo_decl());
@@ -3112,38 +3127,34 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
     let (updated, result) = storage.pull_into(&db2, &db2_store_dir).await;
 
     assert!(
-        result.asset_downloads_failed,
-        "seq 1's blob download must fail"
-    );
-    // The position must NOT jump to 2 past the blob-failed seq 1 — otherwise seq 1's
-    // blob would never be re-fetched. It stays before seq 1 so the next cycle
-    // resumes there.
-    assert_ne!(
-        updated.get(&stream_id),
-        Some(&2),
-        "position must not advance past the blob-failed seq",
+        result.held_positions.is_empty(),
+        "a missing blob object holds no position: {:?}",
+        result.held_positions,
     );
     assert_eq!(
         updated.get(&stream_id),
-        None,
-        "position stays before the blob-failed seq 1",
+        Some(&2),
+        "the position advances past the commit whose blob object is gone",
     );
-    // The blob-bearing row must NOT have been applied: with download-before-apply
-    // (#111), seq 1's failed blob means seq 1 is skipped whole -- "row present,
-    // blob missing" never exists. (Before #111 the row was applied and only the
-    // position held back, so n1 was visible with no photo file on disk.)
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await,
-        "seq 1's row must not be applied when its blob download fails",
+        "the blob-bearing row lands even though its blob object is gone",
     );
-    // seq 2 is never reached -- the pull stops this device at the failed seq 1.
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n2'")
+        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n2'")
             .await,
-        "seq 2 is not processed past the blob-failed seq 1",
+        "the commit behind it is applied too",
     );
-    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.changesets_applied, 2);
+
+    // Nothing was downloaded, so nothing was cached: the bytes are fetched by
+    // the read that wants them, against the plaintext hash its binding names.
+    let blob_row = db2.exact_row_blob_ref("note_photos", "ph1").await;
+    assert!(
+        !exact_cache_path(&db2_store_dir, &blob_row).exists(),
+        "the pull cached no blob plaintext",
+    );
 }
 
 /// A changeset whose envelope `changeset_size` disagrees with the actual trailing
@@ -3646,8 +3657,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         .expect("read blob commit position")
         .expect("blob write has a Store commit");
 
-    // Destination pulls. A `CacheEager` photo lands in the store dir's evictable
-    // locator-keyed cache on pull.
+    // Destination pulls. The row and its blob binding land; the bytes do not.
     let db2_store_dir = crate::sync::test_helpers::test_store_dir();
     let db2 =
         crate::sync::test_helpers::open_test_db_with_blob(db2_store_dir.clone(), photo_decl());
@@ -3655,10 +3665,13 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     let (_updated, result) = storage.pull_into(&db2, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
-    assert!(!result.asset_downloads_failed);
     let blob_row = db2.exact_row_blob_ref("note_photos", "p1ab").await;
-    let downloaded = std::fs::read(exact_cache_path(&ld, &blob_row)).expect("downloaded photo");
-    assert_eq!(downloaded, b"PHOTOBYTES");
+    // The pull records the binding and fetches nothing. What makes an eager
+    // photo local is the cache fill behind the cycle, not the cycle.
+    assert!(
+        !exact_cache_path(&ld, &blob_row).exists(),
+        "the pull downloaded a blob it only had to record",
+    );
     let stored = blob_row
         .stored()
         .expect("pulled blob row carries exact storage")
@@ -3691,10 +3704,10 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     ));
 }
 
-/// A `CacheLazy` blob is authenticated before its row crosses to the puller, but
-/// its verified plaintext is discarded instead of being retained in the cache.
+/// A `CacheLazy` blob is never touched by a pull: its row crosses, its binding
+/// is recorded, and its bytes stay in the cloud until a read asks for them.
 #[tokio::test]
-async fn user_provided_lazy_blob_is_verified_without_being_retained() {
+async fn a_lazy_blob_is_never_fetched_by_a_pull() {
     let db1_store_dir = crate::sync::test_helpers::test_store_dir();
     let db1 = crate::sync::test_helpers::open_test_db_with_blob(
         db1_store_dir.clone(),
@@ -3753,34 +3766,22 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
             cloud_storage.clone(),
             FaultingStorage::blob(),
         ));
-    let error = storage
+    // A provider that cannot serve the blob does not stop the commit: the pull
+    // never asks it for one. The row lands and the bytes stay in the cloud.
+    let result = storage
         .pull_with_storage_for_test(&db2, failing, &ld, None)
         .await
-        .expect_err("lazy blob verification failure rejects the Store commit");
-    assert!(
-        error.contains("blob"),
-        "unexpected lazy verification error: {error:?}"
-    );
-    assert!(error.is_offline());
-    assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
-            .await
-    );
-
-    // The same commit applies once the exact blob can be opened and verified.
-    let (updated, result) = storage.pull_into(&db2, &ld).await;
+        .expect("a lazy blob's provider is never asked during a pull");
 
     assert_eq!(result.changesets_applied, 1);
-    assert!(!result.asset_downloads_failed);
-    assert_eq!(updated.values().copied().collect::<Vec<_>>(), vec![1]);
     assert_eq!(
         db2.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
             .await,
         "WithAudio",
         "the row carrying the CacheLazy blob still reaches the peer",
     );
-    // Verification used an unpublished temporary file, so the plaintext remains
-    // absent from both cache locations until an application read requests it.
+    // Nothing was fetched, so the plaintext is absent from both cache locations
+    // until an application read asks for it.
     let reference = db2.exact_row_blob_ref("note_photos", "audio1").await;
     assert!(
         !exact_pinned_path(&ld, &reference).exists()
@@ -4573,7 +4574,6 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
         .await;
 
     assert_eq!(result.changesets_applied, 1);
-    assert!(!result.asset_downloads_failed);
     // A `CacheEager` cover lands in B's evictable cache on pull.
     let downloaded = std::fs::read(exact_cache_path(
         &ld,
@@ -4721,10 +4721,6 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
             .pull_exact_store_into(&db1, &storage, &keypair, &ld2)
             .await;
 
-        assert!(
-            !result.asset_downloads_failed,
-            "device B downloads blobs matching their row hashes",
-        );
         assert_eq!(result.changesets_applied, 1);
         let cached = std::fs::read(exact_cache_path(
             &ld2,
@@ -4831,10 +4827,6 @@ async fn plain_scheme_two_replacements_write_two_objects() {
         let (_updated, result) = db_c
             .pull_exact_store_into(&db_a, &storage, &keypair, &ld_c)
             .await;
-        assert!(
-            !result.asset_downloads_failed,
-            "every row the third device applies names an object that holds its bytes",
-        );
         assert_eq!(
             result.changesets_applied, 3,
             "the original and both replacements all apply",
@@ -4929,10 +4921,6 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
         .pull_exact_store_into(&db1, &storage, &keypair, &ld2)
         .await;
 
-    assert!(
-        !result.asset_downloads_failed,
-        "each changeset finds the exact blob object it names",
-    );
     assert_eq!(result.changesets_applied, 2, "both changesets apply",);
     let cached = std::fs::read(exact_cache_path(
         &ld2,
@@ -5012,7 +5000,6 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     let (_positions, result) = db2
         .pull_exact_store_into(&db1, &storage, &keypair, &ld2)
         .await;
-    assert!(!result.asset_downloads_failed);
     assert_eq!(result.changesets_applied, 1);
     let cached = std::fs::read(exact_cache_path(
         &ld2,
@@ -5200,10 +5187,6 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
             .pull_exact_store_into(&db1, &storage, &keypair, &ld2)
             .await;
 
-        assert!(
-            !result.asset_downloads_failed,
-            "device B must download a cover matching the row's hash",
-        );
         assert_eq!(result.changesets_applied, 1);
         let cached = std::fs::read(exact_cache_path(
             &ld2,
@@ -5372,7 +5355,6 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         .await;
 
     assert_eq!(result.changesets_applied, 1);
-    assert!(!result.asset_downloads_failed);
     assert_eq!(updated.values().copied().collect::<Vec<_>>(), vec![1]);
     assert_eq!(
         db2.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
@@ -5528,7 +5510,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     let db2 =
         crate::sync::test_helpers::open_test_db_with_blob(db2_store_dir.clone(), photo_decl());
     let ld = db2_store_dir.clone();
-    storage.pull_into(&db2, &ld).await;
+    storage.pull_and_fill_into(&db2, &ld).await;
     let deleted_reference = db2.exact_row_blob_ref("note_photos", "pdel1234").await;
     let deleted_cache_path = exact_cache_path(&ld, &deleted_reference);
     let deleted_pinned_path = exact_pinned_path(&ld, &deleted_reference);
@@ -5559,7 +5541,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
         .publish_pending(&db1, &source_store_dir)
         .await
         .expect("publish exact gate retraction"));
-    let (_positions, result) = storage.pull_into(&db2, &ld).await;
+    let (_positions, result) = storage.pull_and_fill_into(&db2, &ld).await;
     assert_eq!(result.changesets_applied, 1, "the DELETE changeset applied");
     assert!(
         !deleted_pinned_path.exists() && !deleted_cache_path.exists(),
@@ -5646,7 +5628,6 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     let restarted = open_blob_test_db_at(&database_path, store_dir.clone(), cleanup_decl());
     let (_updated, second) = storage.pull_into(&restarted, &store_dir).await;
     assert_eq!(second.changesets_applied, 0);
-    assert!(!second.asset_downloads_failed);
     assert!(!second.local_blob_cleanup_pending);
     let pending_after_restart = coven_database::StoreDatabase::new(&restarted)
         .cleanup_intent_count_for_test("photos", "cleanup01")
@@ -5915,7 +5896,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
     let db2_store_dir = crate::sync::test_helpers::test_store_dir();
     let db2 = crate::sync::test_helpers::open_test_db_with_blob(db2_store_dir.clone(), decl);
     let ld = db2_store_dir.clone();
-    let (_positions, result) = storage.pull_into(&db2, &ld).await;
+    let (_positions, result) = storage.pull_and_fill_into(&db2, &ld).await;
     assert_eq!(result.changesets_applied, 1);
     let shared_reference = db2.exact_row_blob_ref("note_photos", "photo-b").await;
     let shared_cache_path = exact_cache_path(&ld, &shared_reference);
@@ -5938,7 +5919,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         .await
         .expect("publish exact blob-bearing Store changeset");
 
-    let (_updated, result) = storage.pull_into(&db2, &ld).await;
+    let (_updated, result) = storage.pull_and_fill_into(&db2, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(
@@ -7880,10 +7861,9 @@ mod blob_path_traversal {
         let db2 =
             crate::sync::test_helpers::open_test_db_with_blob(db2_store_dir.clone(), photo_decl());
         let ld = db2_store_dir;
-        let (updated, result) = storage.pull_into(&db2, &ld).await;
+        let (updated, result) = storage.pull_and_fill_into(&db2, &ld).await;
 
         assert_eq!(result.changesets_applied, 1, "a well-formed row applies");
-        assert!(!result.asset_downloads_failed);
         assert_eq!(updated.values().copied().collect::<Vec<_>>(), vec![1]);
         let written = std::fs::read(exact_cache_path(
             &ld,

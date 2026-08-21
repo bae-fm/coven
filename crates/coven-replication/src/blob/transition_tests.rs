@@ -1375,8 +1375,11 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         "the cover is no longer in the local store (it is Remote now)",
     );
 
-    // B pulls: the cover (CacheEager) lands in B's cache; the photo (CacheLazy) does not.
-    peer.pull_store().await.expect("pull peer Store");
+    // B pulls and its eager cache fills: the cover (CacheEager) lands in B's
+    // cache; the photo (CacheLazy) does not.
+    peer.pull_store_and_fill_eager()
+        .await
+        .expect("pull peer Store");
     assert!(
         exact_cache_path(&lib_b, &cover_ref(&db_b, "coveraaa").await).exists(),
         "B fetches the CacheEager cover eagerly into its cache",
@@ -1970,7 +1973,9 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         "the host-provided blob is uploaded before the row changeset is pushed"
     );
 
-    peer.pull_store().await.expect("pull peer Store");
+    peer.pull_store_and_fill_eager()
+        .await
+        .expect("pull peer Store");
     assert!(
         db_b.test_row_exists("SELECT 1 FROM notes WHERE id = 'n-remote-root'")
             .await,

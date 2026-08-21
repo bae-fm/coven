@@ -43,7 +43,6 @@ pub struct SyncCycleResult {
     pub sync_time: String,
     /// Blobs needed before apply failed to download; their changesets and positions
     /// remain pending.
-    pub asset_downloads_failed: bool,
     /// Post-commit local blob cleanup still has durable filesystem work pending.
     /// Its corresponding rows and positions are already durable.
     pub local_blob_cleanup_pending: bool,
@@ -327,7 +326,6 @@ impl AuthorizedSyncCycle<'_, '_> {
                 self.device_id,
             ),
             sync_time: completed.sync_time,
-            asset_downloads_failed: completed.store_pull.asset_downloads_failed,
             local_blob_cleanup_pending: completed.local_blob_cleanup_pending,
             row_changes: completed.store_pull.row_changes,
             resume_drain_promptly: completed.resume_drain_promptly,
@@ -869,6 +867,7 @@ impl PreparedSyncComponents {
             master_keys: self.master_keys,
             blob_transitions,
             blob_access,
+            eager_fill_wanted: std::sync::Arc::default(),
             settled: std::sync::Arc::default(),
         })
     }
@@ -910,6 +909,11 @@ pub struct SyncComponents {
     master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
     blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
     blob_access: std::sync::Arc<super::store::blob::RemoteStoreBlobAccess>,
+    /// Raised when a cycle materializes rows, so the eager cache fill re-scans
+    /// for the artwork those rows bind. The pull downloads nothing, so this is
+    /// what carries an eager blob from an arriving row to local bytes — off the
+    /// cycle, which never waits for it.
+    eager_fill_wanted: std::sync::Arc<tokio::sync::Notify>,
     /// What this loop's provider-side evaluations last ran against, so a cycle
     /// over an unchanged store re-derives none of them. Lives here because it
     /// is the only thing that outlives a cycle.
@@ -929,6 +933,13 @@ impl SyncComponents {
             status,
         )
         .await
+    }
+
+    /// Raised when a cycle materializes rows. A pull records what its rows bind
+    /// and downloads none of it, so this is what tells the eager cache fill to
+    /// scan again — the path an arriving album's artwork takes to local bytes.
+    pub(crate) fn eager_fill_wanted(&self) -> &tokio::sync::Notify {
+        &self.eager_fill_wanted
     }
 
     pub(crate) async fn probe_storage(&self) -> Result<(), coven_protocol::objects::StorageError> {
@@ -1467,6 +1478,11 @@ impl SyncComponents {
         }
         .run()
         .await
+        .inspect(|result| {
+            if result.changesets_applied > 0 {
+                self.eager_fill_wanted.notify_one();
+            }
+        })
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -1518,6 +1534,7 @@ impl SyncComponents {
             master_keys,
             blob_transitions,
             blob_access,
+            eager_fill_wanted: std::sync::Arc::default(),
             settled,
         }
     }
