@@ -722,7 +722,7 @@ impl<'a> DeviceJoinTransport<'a> {
     /// find anything: it watches for the owner cancelling, for the whole join,
     /// alongside the snapshot download and the install. At the asked-for
     /// cadence that is a provider read every hundred milliseconds for minutes
-    /// to answer "not yet" — which is exactly what [`JoinPollBackoff`] was
+    /// to answer "not yet" — which is exactly what the poll backoff was
     /// introduced to stop for the phase waits, and this one was left behind
     /// because it takes a bare interval rather than a timing. It takes the
     /// timing now and backs off like the others: the first look is immediate,
