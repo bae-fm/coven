@@ -94,6 +94,12 @@ impl StoreDatabase {
         self.database.store_transfer_limits()
     }
 
+    /// Replace the transfer limits for every later upload-drain pass and pin
+    /// call. A pass already running keeps the limit it admitted under.
+    pub fn set_transfer_limits(&self, limits: coven_protocol::blob::TransferLimits) {
+        self.database.set_store_transfer_limits(limits)
+    }
+
     pub fn blob_tombstone_grace(&self) -> chrono::Duration {
         self.database.store_blob_tombstone_grace()
     }

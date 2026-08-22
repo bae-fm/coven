@@ -196,6 +196,14 @@ pub(crate) struct StoreBlobs {
 }
 
 impl StoreBlobs {
+    pub(crate) fn transfer_limits(&self) -> coven_protocol::blob::TransferLimits {
+        self.database.transfer_limits()
+    }
+
+    pub(crate) fn set_transfer_limits(&self, limits: coven_protocol::blob::TransferLimits) {
+        self.database.set_transfer_limits(limits)
+    }
+
     pub(crate) fn new(
         database: StoreDatabase,
         blobs: StoreBlobAccess,

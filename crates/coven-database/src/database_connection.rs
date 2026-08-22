@@ -15,7 +15,10 @@ struct DatabaseContext {
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
-    transfer_limits: coven_protocol::blob::TransferLimits,
+    /// Read by every upload-drain pass and pin call, so a host can change
+    /// them while the store is open and the next pass runs under the new
+    /// limits.
+    transfer_limits: std::sync::Mutex<coven_protocol::blob::TransferLimits>,
     store_runtime: crate::store::StoreDatabaseRuntime,
     ids: coven_foundation::id_provider::IdRef,
     write_statuses: std::sync::Mutex<HashMap<WriteId, tokio::sync::watch::Sender<WriteStatus>>>,
@@ -63,7 +66,7 @@ impl DatabaseCore {
                 gates,
                 blob_decls,
                 blob_tombstone_grace,
-                transfer_limits,
+                transfer_limits: std::sync::Mutex::new(transfer_limits),
                 store_runtime: crate::store::StoreDatabaseRuntime::new(),
                 ids: Arc::new(coven_foundation::id_provider::UuidProvider),
                 write_statuses: std::sync::Mutex::new(HashMap::new()),
@@ -275,7 +278,19 @@ impl DatabaseConnection {
     }
 
     pub(crate) fn store_transfer_limits(&self) -> coven_protocol::blob::TransferLimits {
-        self.context.transfer_limits
+        *self
+            .context
+            .transfer_limits
+            .lock()
+            .expect("transfer limits mutex poisoned")
+    }
+
+    pub(crate) fn set_store_transfer_limits(&self, limits: coven_protocol::blob::TransferLimits) {
+        *self
+            .context
+            .transfer_limits
+            .lock()
+            .expect("transfer limits mutex poisoned") = limits;
     }
 
     pub(crate) fn store_blob_tombstone_grace(&self) -> chrono::Duration {

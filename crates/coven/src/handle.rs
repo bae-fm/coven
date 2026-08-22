@@ -670,6 +670,22 @@ impl CovenHandle {
     /// protection class. [`KeyError::InvalidSecretName`] if `name` collides
     /// with one of coven's own reserved slot names, is empty, or contains
     /// `:`.
+    /// The concurrent blob-transfer limits in force: how many uploads an
+    /// upload-drain pass runs at once and how many downloads a pin fetches at
+    /// once.
+    pub fn transfer_limits(&self) -> coven_protocol::blob::TransferLimits {
+        self.blobs.transfer_limits()
+    }
+
+    /// Replace the transfer limits while the store is open. Every later
+    /// upload-drain pass and pin call runs under the new limits; a pass
+    /// already running keeps the limit it admitted under. The builder's
+    /// `max_concurrent_uploads` / `max_concurrent_downloads` set the initial
+    /// values.
+    pub fn set_transfer_limits(&self, limits: coven_protocol::blob::TransferLimits) {
+        self.blobs.set_transfer_limits(limits)
+    }
+
     pub fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
         self.security.set_host_secret(name, value)
     }

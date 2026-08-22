@@ -3125,3 +3125,27 @@ async fn concurrent_same_blob_cache_writes_never_tear() {
         "the cache file is exactly one producer's whole payload, never a torn mix",
     );
 }
+
+/// The transfer limits the builder set can be replaced on the open handle,
+/// and the replacement is what the next upload-drain pass and pin call read.
+#[test]
+fn transfer_limits_change_on_the_open_handle() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let handle = builder(StoreDir::new_ephemeral(tmp.path()))
+        .synced_tables(vec![files_table()])
+        .migrations(vec![files_migration()])
+        .max_concurrent_uploads(std::num::NonZeroUsize::new(2).unwrap())
+        .max_concurrent_downloads(std::num::NonZeroUsize::new(3).unwrap())
+        .open()
+        .expect("open handle");
+    assert_eq!(handle.transfer_limits().uploads.get(), 2);
+    assert_eq!(handle.transfer_limits().downloads.get(), 3);
+
+    handle.set_transfer_limits(coven_protocol::blob::TransferLimits {
+        uploads: std::num::NonZeroUsize::new(6).unwrap(),
+        downloads: std::num::NonZeroUsize::new(1).unwrap(),
+    });
+
+    assert_eq!(handle.transfer_limits().uploads.get(), 6);
+    assert_eq!(handle.transfer_limits().downloads.get(), 1);
+}

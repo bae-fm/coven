@@ -75,6 +75,10 @@ impl Database {
         self.connection.store_transfer_limits()
     }
 
+    pub(crate) fn set_store_transfer_limits(&self, limits: coven_protocol::blob::TransferLimits) {
+        self.connection.set_store_transfer_limits(limits)
+    }
+
     pub(crate) fn store_blob_tombstone_grace(&self) -> chrono::Duration {
         self.connection.store_blob_tombstone_grace()
     }
