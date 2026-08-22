@@ -222,6 +222,39 @@ pub enum OwnerRecoveryPosition {
     },
 }
 
+impl OwnerRecoveryPosition {
+    /// The position two predecessor states of one Owner grant agree on. The
+    /// grant's recovery nodes form one chain in exact slots, one node per
+    /// sequence, so two positions on it are ordered: a node is past the
+    /// activation it follows, and a higher sequence is past a lower one. Two
+    /// states that name different nodes at one sequence, or different
+    /// activations before the first node, are not on one chain.
+    pub fn merge(&self, other: &Self) -> Result<Self, super::StoreProtocolError> {
+        match (self, other) {
+            (Self::BeforeFirst { activation }, Self::BeforeFirst { activation: other })
+                if activation == other =>
+            {
+                Ok(self.clone())
+            }
+            (Self::BeforeFirst { .. }, Self::BeforeFirst { .. }) => {
+                Err(super::StoreProtocolError::OwnerRecoveryMismatch)
+            }
+            (Self::BeforeFirst { .. }, Self::At { .. }) => Ok(other.clone()),
+            (Self::At { .. }, Self::BeforeFirst { .. }) => Ok(self.clone()),
+            (Self::At { node }, Self::At { node: other_node }) => {
+                match node.sequence.cmp(&other_node.sequence) {
+                    std::cmp::Ordering::Less => Ok(other.clone()),
+                    std::cmp::Ordering::Greater => Ok(self.clone()),
+                    std::cmp::Ordering::Equal if node == other_node => Ok(self.clone()),
+                    std::cmp::Ordering::Equal => {
+                        Err(super::StoreProtocolError::OwnerRecoveryMismatch)
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnerRecoveryCursor {

@@ -277,10 +277,12 @@ impl ResolvedStoreDeviceState {
                     std::collections::btree_map::Entry::Vacant(entry) => {
                         entry.insert(cursor.position);
                     }
-                    std::collections::btree_map::Entry::Occupied(entry) => {
-                        if entry.get() != &cursor.position {
-                            return Err(StoreProtocolError::OwnerRecoveryMismatch);
-                        }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        // Stream heads on either side of a recovery commit
+                        // name different positions on the grant's one chain;
+                        // the merged state stands at the furthest.
+                        let merged = entry.get().merge(&cursor.position)?;
+                        entry.insert(merged);
                     }
                 }
             }

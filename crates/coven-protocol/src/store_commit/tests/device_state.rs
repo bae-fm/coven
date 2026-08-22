@@ -656,3 +656,55 @@ fn device_state_has_exact_pending_proposal(
                 matches!(state, StoreDeviceProposalState::Pending { proposal } if proposal == expected)
             })
 }
+
+/// Two predecessor states stand at different positions on one Owner grant's
+/// recovery chain when a frontier spans a recovery commit: the stream head
+/// from before it still names the activation, the one after names the node.
+/// The merged state stands at the furthest; only positions that cannot both
+/// be on the one chain are a mismatch.
+#[test]
+fn recovery_positions_merge_to_the_furthest_on_one_chain() {
+    let fixture = fixture();
+    let owner_pubkey = fixture.registration.author_pubkey.clone();
+    let owner_grant = fixture.root.descriptor.founder_grant.clone();
+    let node = |sequence: u64, bytes: &[u8]| OwnerRecoveryNodeRef {
+        owner_pubkey: owner_pubkey.clone(),
+        owner_grant: owner_grant.clone(),
+        sequence,
+        node_hash: ObjectHash::digest(bytes),
+        object: exact(
+            format!("store-v1/recovery/owner/grant/{sequence}.json"),
+            bytes,
+        ),
+    };
+    let before = OwnerRecoveryPosition::BeforeFirst {
+        activation: OwnerRecoveryActivationId::derive(
+            &fixture.root_ref,
+            &owner_pubkey,
+            &owner_grant,
+            &fixture.root.descriptor.founder_recovery,
+        )
+        .expect("derive the recovery activation"),
+    };
+    let first = OwnerRecoveryPosition::At {
+        node: node(1, b"first recovery node"),
+    };
+    let second = OwnerRecoveryPosition::At {
+        node: node(2, b"second recovery node"),
+    };
+
+    assert_eq!(before.merge(&first).unwrap(), first);
+    assert_eq!(first.merge(&before).unwrap(), first);
+    assert_eq!(first.merge(&second).unwrap(), second);
+    assert_eq!(second.merge(&first).unwrap(), second);
+    assert_eq!(first.merge(&first).unwrap(), first);
+    assert_eq!(before.merge(&before).unwrap(), before);
+
+    let fork = OwnerRecoveryPosition::At {
+        node: node(1, b"another first recovery node"),
+    };
+    assert!(matches!(
+        first.merge(&fork),
+        Err(StoreProtocolError::OwnerRecoveryMismatch)
+    ));
+}
