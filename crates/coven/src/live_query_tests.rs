@@ -126,7 +126,9 @@ fn open_wal_handle() -> (tempfile::TempDir, crate::CovenHandle) {
     (temp, handle)
 }
 
-async fn assert_does_not_wake<T: Send + 'static>(query: &mut crate::LiveQuery<T>) {
+async fn assert_does_not_wake<T: Clone + PartialEq + Send + 'static>(
+    query: &mut crate::LiveQuery<T>,
+) {
     assert!(
         tokio::time::timeout(Duration::from_millis(100), query.next())
             .await
@@ -921,20 +923,28 @@ async fn reconfigurable_query_reports_lag_as_a_database_change() {
         ReconfigurableLiveQueryCause::Initial
     );
 
+    // Enough unread-column commits to lag the change receiver, with the
+    // body edited inside the burst so the lag-forced rerun has something new
+    // to deliver; a rerun that repeats the delivered value is withheld.
     for rank in 1..=257 {
         handle
             .write(move |sql| {
                 sql.execute("UPDATE notes SET rank = ?1 WHERE id = ?2", (rank, NOTE_ONE))?;
+                if rank == 200 {
+                    sql.execute("UPDATE notes SET body = 'Lagged' WHERE id = ?1", [NOTE_ONE])?;
+                }
                 Ok(())
             })
             .await
             .expect("commit rank");
     }
 
+    let lagged = note.next().await;
     assert_eq!(
-        note.next().await.cause(),
+        lagged.cause(),
         ReconfigurableLiveQueryCause::DatabaseChanged
     );
+    assert_eq!(lagged.into_result().expect("body after lag"), "Lagged");
 }
 
 #[tokio::test]
@@ -1002,4 +1012,116 @@ async fn request_changed_during_a_query_discards_the_superseded_result() {
     assert_eq!(delivered.request(), &[NOTE_TWO.to_string()]);
     assert_eq!(delivered.into_result().expect("latest result"), "Two");
     assert_eq!(invocations.load(Ordering::Acquire), 2);
+}
+
+#[tokio::test]
+async fn a_rerun_that_repeats_the_delivered_value_is_not_delivered() {
+    let (_temp, handle) = open_handle();
+    insert_note(&handle, NOTE_ONE, "One").await;
+    insert_note(&handle, NOTE_TWO, "Two").await;
+    let mut first_page = handle.subscribe(|sql| {
+        sql.query("SELECT body FROM notes ORDER BY id LIMIT 1", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(CovenError::from)
+    });
+    assert_eq!(first_page.next().await.expect("initial page"), vec!["One"]);
+
+    handle
+        .write(|sql| {
+            sql.execute(
+                "UPDATE notes SET body = 'Two again' WHERE id = ?1",
+                [NOTE_TWO],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("commit a row outside the page");
+    assert_does_not_wake(&mut first_page).await;
+
+    handle
+        .write(|sql| {
+            sql.execute(
+                "UPDATE notes SET body = 'One again' WHERE id = ?1",
+                [NOTE_ONE],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("commit the row inside the page");
+    assert_eq!(
+        first_page.next().await.expect("page after change"),
+        vec!["One again"]
+    );
+}
+
+#[tokio::test]
+async fn a_request_change_delivers_even_when_the_value_repeats() {
+    let (_temp, handle) = open_handle();
+    insert_note(&handle, NOTE_ONE, "Same").await;
+    insert_note(&handle, NOTE_TWO, "Same").await;
+    let mut body = handle.subscribe_reconfigurable(NOTE_ONE.to_string(), |id, sql| {
+        sql.query_row("SELECT body FROM notes WHERE id = ?1", [id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(CovenError::from)
+    });
+    let initial = body.next().await;
+    assert_eq!(initial.cause(), ReconfigurableLiveQueryCause::Initial);
+    assert_eq!(initial.into_result().expect("initial body"), "Same");
+
+    body.requests()
+        .set(NOTE_TWO.to_string())
+        .expect("set request");
+    let switched = body.next().await;
+    assert_eq!(
+        switched.cause(),
+        ReconfigurableLiveQueryCause::RequestChanged
+    );
+    assert_eq!(switched.request(), NOTE_TWO);
+    assert_eq!(switched.into_result().expect("body after request"), "Same");
+}
+
+#[tokio::test]
+async fn the_first_value_after_an_error_is_delivered_even_when_it_repeats() {
+    let (_temp, handle) = open_handle();
+    insert_note(&handle, NOTE_ONE, "One").await;
+    let fail = Arc::new(AtomicBool::new(false));
+    let mut body = handle.subscribe({
+        let fail = fail.clone();
+        move |sql| {
+            if fail.load(Ordering::SeqCst) {
+                return Err(CovenError::from(DbError::Message("forced".to_string())));
+            }
+            sql.query_row("SELECT body FROM notes WHERE id = ?1", [NOTE_ONE], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(CovenError::from)
+        }
+    });
+    assert_eq!(body.next().await.expect("initial body"), "One");
+
+    fail.store(true, Ordering::SeqCst);
+    handle
+        .write(|sql| {
+            sql.execute("UPDATE notes SET body = 'Two' WHERE id = ?1", [NOTE_ONE])?;
+            Ok(())
+        })
+        .await
+        .expect("commit while failing");
+    assert!(body.next().await.is_err(), "the failing run is delivered");
+
+    fail.store(false, Ordering::SeqCst);
+    handle
+        .write(|sql| {
+            sql.execute("UPDATE notes SET body = 'One' WHERE id = ?1", [NOTE_ONE])?;
+            Ok(())
+        })
+        .await
+        .expect("commit the original body back");
+    assert_eq!(
+        body.next().await.expect("body after error"),
+        "One",
+        "an error clears the remembered value, so the repeat is delivered"
+    );
 }

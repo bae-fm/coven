@@ -67,7 +67,7 @@ impl StoreRows {
             + Send
             + Sync
             + 'static,
-        R: Send + 'static,
+        R: Clone + PartialEq + Send + 'static,
     {
         crate::LiveQuery::new(self.writes.clone(), self.read_database.clone(), query)
     }
@@ -83,7 +83,7 @@ impl StoreRows {
             + Send
             + Sync
             + 'static,
-        R: Send + 'static,
+        R: Clone + PartialEq + Send + 'static,
     {
         crate::ReconfigurableLiveQuery::new(
             self.writes.clone(),

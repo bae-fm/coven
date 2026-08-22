@@ -258,7 +258,7 @@ impl CovenHandle {
             + Send
             + Sync
             + 'static,
-        R: Send + 'static,
+        R: Clone + PartialEq + Send + 'static,
     {
         self.rows.subscribe(query)
     }
@@ -279,7 +279,7 @@ impl CovenHandle {
             + Send
             + Sync
             + 'static,
-        R: Send + 'static,
+        R: Clone + PartialEq + Send + 'static,
     {
         self.rows.subscribe_reconfigurable(initial_request, query)
     }

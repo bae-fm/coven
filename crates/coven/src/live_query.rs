@@ -196,6 +196,13 @@ impl<Request, Value> ReconfigurableLiveQueryEvent<Request, Value> {
 /// Request changes and relevant commits are coalesced before each run. If the
 /// request changes while a run is in progress, that result is discarded and
 /// the latest request is evaluated before an event is returned.
+///
+/// A run caused only by committed changes whose value equals the last
+/// delivered value is not delivered: the query's read dependencies are
+/// table-and-key granular, so a paged query (`ORDER BY … LIMIT`) reruns for any
+/// row change in its tables, and most of those reruns leave its window
+/// unchanged. The initial run, a run after a request change, and every error
+/// are always delivered; the first successful value after an error is too.
 pub struct ReconfigurableLiveQuery<Request, Value> {
     _writer: StoreRowWrites,
     reader: StoreDatabase,
@@ -206,12 +213,16 @@ pub struct ReconfigurableLiveQuery<Request, Value> {
     request_receiver: tokio::sync::watch::Receiver<RequestState<Request>>,
     requests: LiveQueryRequests<Request>,
     current: RequestState<Request>,
+    /// The value most recently delivered by `next`, for skipping commit-caused
+    /// reruns that produce it again. `None` before the first delivery and after
+    /// a delivered error.
+    last_delivered: Option<Value>,
 }
 
 impl<Request, Value> ReconfigurableLiveQuery<Request, Value>
 where
     Request: Clone + PartialEq + Send + Sync + 'static,
-    Value: Send + 'static,
+    Value: Clone + PartialEq + Send + 'static,
 {
     pub(crate) fn new<F>(
         writer: StoreRowWrites,
@@ -242,6 +253,7 @@ where
             request_receiver,
             requests: LiveQueryRequests { state, sender },
             current,
+            last_delivered: None,
         }
     }
 
@@ -254,11 +266,22 @@ where
     /// committed database change and return the next event.
     ///
     /// Query errors are events and do not end the subscription. Cancelling the
-    /// future preserves the pending request or database change.
+    /// future preserves the pending request or database change. A commit-caused
+    /// rerun whose value equals the last delivered value is not an event; the
+    /// query goes back to waiting.
     pub async fn next(&mut self) -> ReconfigurableLiveQueryEvent<Request, Value> {
-        self.await_pending().await;
-        self.drain_pending();
+        loop {
+            self.await_pending().await;
+            self.drain_pending();
+            if let Some(event) = self.run().await {
+                return event;
+            }
+        }
+    }
 
+    /// Evaluate the pending run. `None` means the run produced the value
+    /// already delivered and no event is due.
+    async fn run(&mut self) -> Option<ReconfigurableLiveQueryEvent<Request, Value>> {
         loop {
             let state = self.current.clone();
             let query = self.query.clone();
@@ -291,11 +314,17 @@ where
             };
             let pending = self.pending.take().expect("live query run is pending");
             let cause = pending.cause(&self.dependencies);
-            return ReconfigurableLiveQueryEvent {
+            if cause == ReconfigurableLiveQueryCause::DatabaseChanged
+                && matches!((&result, &self.last_delivered), (Ok(value), Some(last)) if value == last)
+            {
+                return None;
+            }
+            self.last_delivered = result.as_ref().ok().cloned();
+            return Some(ReconfigurableLiveQueryEvent {
                 cause,
                 state,
                 result,
-            };
+            });
         }
     }
 
@@ -385,7 +414,7 @@ pub struct LiveQuery<T> {
 
 impl<T> LiveQuery<T>
 where
-    T: Send + 'static,
+    T: Clone + PartialEq + Send + 'static,
 {
     pub(crate) fn new<F>(writer: StoreRowWrites, reader: StoreDatabase, query: F) -> Self
     where
@@ -401,7 +430,8 @@ where
     }
 
     /// Return the query's initial value, or wait for a committed change that can
-    /// affect it and return the value after that commit.
+    /// affect it and return the value after that commit. A commit whose rerun
+    /// produces the value already returned is not a value; the wait continues.
     pub async fn next(&mut self) -> CovenResult<T> {
         self.inner.next().await.into_result()
     }
