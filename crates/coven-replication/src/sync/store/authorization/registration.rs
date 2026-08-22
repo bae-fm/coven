@@ -26,6 +26,8 @@ pub enum StoreRegistrationError {
     AuthorStreamId(#[from] coven_protocol::causal_grants::AuthorStreamIdParseError),
     #[error("Store device registration history: {0}")]
     History(#[source] Box<crate::sync::store::StorePullError>),
+    #[error("Store device registration snapshot stream: {0}")]
+    SnapshotStream(#[source] Box<crate::sync::store::SnapshotError>),
     #[error("{0}")]
     Object(#[from] StoreObjectError),
     #[error("exact Store root authority is absent")]

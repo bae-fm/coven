@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use coven_protocol::store_commit::{
-    OwnerRecoveryNode, OwnerRecoveryNodeRef, SnapshotMeta, StoreAck, StoreAckRef,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreSnapshotRef,
+    OwnerRecoveryNode, OwnerRecoveryNodeRef, StoreAck, StoreAckRef, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef,
 };
 
 use crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError;
@@ -46,14 +46,18 @@ impl<'operation, 'storage> RestoreHistory<'operation, 'storage> {
             .await
     }
 
-    pub(crate) async fn load_store_snapshot(
+    /// Every snapshot `registration` has published, in generation order, as
+    /// the provider holds them now.
+    pub(crate) async fn load_store_snapshot_stream(
         &self,
         registration_ref: &StoreDeviceRegistrationRef,
         registration: &StoreDeviceRegistration,
-        reference: &StoreSnapshotRef,
-    ) -> Result<(StoreSnapshotRef, SnapshotMeta), coven_protocol::objects::StoreObjectError> {
+    ) -> Result<
+        Vec<coven_database::PublishedStoreSnapshot>,
+        crate::sync::store::snapshots::SnapshotError,
+    > {
         self.history
-            .load_store_snapshot(registration_ref, registration, reference)
+            .load_store_snapshot_stream(registration_ref, registration)
             .await
     }
 }

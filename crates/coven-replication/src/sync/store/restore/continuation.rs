@@ -62,15 +62,26 @@ impl<'storage> RestoringStore<'storage> {
             .device_signer(&self.identity)
             .map_err(StoreRegistrationError::from)?;
         let history = self.history.restore_history();
+        // The code's cursors are the device's streams as they stood when the
+        // code was exported; the device kept publishing after that. The pulled
+        // history already holds the device's latest activated acknowledgement,
+        // so the ack stream resumes from that head when it is past the code's.
+        let latest_ack_ref = match self
+            .database
+            .activated_store_ack(&continuation.registration)
+            .await
+            .map_err(StoreRegistrationError::from)?
+        {
+            Some(activated) if activated.reference.sequence > continuation.latest_ack.sequence => {
+                activated.reference
+            }
+            _ => continuation.latest_ack.clone(),
+        };
         let latest = history
-            .load_store_ack(&continuation.latest_ack, &registration)
+            .load_store_ack(&latest_ack_ref, &registration)
             .await?;
         let chain = history
-            .load_acknowledgement_proof_chain(
-                continuation.latest_ack.clone(),
-                latest,
-                &registration,
-            )
+            .load_acknowledgement_proof_chain(latest_ack_ref, latest, &registration)
             .await
             .map_err(crate::sync::store::StorePullError::from)
             .map_err(StoreRegistrationError::from)?
@@ -78,14 +89,31 @@ impl<'storage> RestoringStore<'storage> {
             .rev()
             .map(|(_, value)| value)
             .collect();
-        let latest_snapshot = match &continuation.latest_snapshot {
-            Some(reference) => Some(
-                history
-                    .load_store_snapshot(&continuation.registration, &registration, reference)
-                    .await?,
-            ),
-            None => None,
-        };
+        // The code's snapshot cursor is the stream as it stood when the code
+        // was exported; the device kept publishing after that, so the stream's
+        // head is whatever the provider holds now. Walk it from the
+        // registration's first slot -- every entry is authenticated as this
+        // device's and chained to its predecessor -- and resume from its head.
+        // The code's cursor is a floor: a stream that does not contain it is
+        // not the stream the code was cut from.
+        let published = history
+            .load_store_snapshot_stream(&continuation.registration, &registration)
+            .await
+            .map_err(|error| StoreRegistrationError::SnapshotStream(Box::new(error)))?;
+        if let Some(expected) = &continuation.latest_snapshot {
+            let pinned = published
+                .iter()
+                .find(|snapshot| snapshot.reference.generation == expected.generation);
+            if pinned.map(|snapshot| &snapshot.reference) != Some(expected) {
+                return Err(StoreRegistrationError::Invalid(
+                    "continued snapshot stream does not contain the code's snapshot".into(),
+                ));
+            }
+        }
+        let latest_snapshot = published
+            .into_iter()
+            .last()
+            .map(|snapshot| (snapshot.reference, snapshot.meta));
         self.database
             .install_activated_device_continuation(
                 continuation,

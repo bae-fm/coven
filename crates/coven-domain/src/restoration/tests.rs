@@ -1369,6 +1369,201 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
     .await;
 }
 
+/// A continuation restore code is a cursor taken at export time, and the
+/// device it describes keeps publishing after that. When the device published
+/// its first snapshot after the code was exported, the code carries no
+/// snapshot at all, while the provider holds the device's generation 0 at the
+/// registration's first slot. The restored device must resume the published
+/// stream -- its first snapshot is generation 1, after the one the provider
+/// holds -- instead of restarting at generation 0 into an occupied slot.
+#[tokio::test]
+async fn restore_resumes_a_snapshot_stream_published_after_the_code_was_exported() {
+    Box::pin(async {
+        coven_keys::keys::test_keyring::install();
+
+        let store_id = "restore-stale-snapshot-cursor-test";
+        let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
+        let cloud = coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
+            cloudkit_ops.clone(),
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
+        );
+        let cipher = CloudCipher::Plaintext;
+        let blob_paths = BlobPathScheme::for_storage(HomeStorage::Browsable);
+        let tables = test_synced_tables();
+        let owner_keypair = UserKeypair::generate();
+
+        let owner_storage = Arc::new(CloudSyncConnection::new(
+            Arc::new(cloud.clone()) as Arc<dyn coven_storage::cloud::ExactCloudHome>,
+            cipher.clone(),
+            blob_paths,
+            store_id.to_string(),
+            owner_keypair.clone(),
+        ));
+
+        let db_owner_store_dir = coven_replication::sync::test_helpers::test_store_dir();
+        let db_owner = open_test_db(db_owner_store_dir.clone());
+        let owner_device = TestDevice::create(
+            &db_owner,
+            db_owner_store_dir.clone(),
+            owner_storage.clone(),
+            store_id,
+            owner_keypair.clone(),
+        )
+        .await
+        .expect("initialize owner Store");
+        let store_root = owner_device.store_root().clone();
+        let membership = owner_device
+            .membership()
+            .await
+            .expect("load owner membership");
+        db_owner
+            .execute_test_host_write(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Album Title', 1, '0000000001000-0000-owner', '2026-01-01')",
+            )
+            .await;
+
+        // The code is exported before the device publishes any snapshot.
+        let continuation = owner_device
+            .export_activated_device_continuation()
+            .await
+            .expect("export exact activated continuation");
+        assert_eq!(
+            continuation.latest_snapshot, None,
+            "the code predates the device's first snapshot"
+        );
+
+        // The device lives on and publishes generation 0.
+        let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+        let store_database = coven_database::StoreDatabase::new(&db_owner);
+        crate::test_snapshots::publish_owner_snapshot(
+            &owner_device,
+            &store_database,
+            store_root.clone(),
+            snap_tmp.path(),
+        )
+        .await;
+        let (published_generation, published_bytes) = db_owner
+            .latest_published_store_snapshot_for_test()
+            .await
+            .expect("read the owner's published snapshot");
+        assert_eq!(published_generation, 0);
+        let published: coven_protocol::store_commit::SnapshotMeta =
+            serde_json::from_slice(&published_bytes).expect("parse the owner's snapshot");
+
+        let app = Arc::new(tempfile::tempdir().expect("restore app dir"));
+        let restore_code = encode_restore_code(&RestoreCode {
+            v: RESTORE_CODE_VERSION,
+            sid: store_id.to_string(),
+            ek: None,
+            name: "Restored Store".to_string(),
+            provider: CloudHomeJoinInfo::CloudKit,
+            store_root: store_root.clone(),
+            founder_pubkey: pubkey_hex(&owner_keypair),
+            membership_floor: MembershipFloor(membership.head_refs().to_vec()),
+            authority: RestoreAuthority::ActivatedContinuation(continuation),
+        });
+        let restore_app = app.clone();
+        let restore_tables = tables.clone();
+        let restore_cloudkit = cloudkit_ops.clone();
+        let config = tokio::spawn(async move {
+            let layout = StoreLayout::new(restore_app.path());
+            let cancel = tokio::sync::watch::channel(false).1;
+            restore_from_code(
+                &restore_code,
+                &restore_tables,
+                &test_migrations(),
+                coven_foundation::config::ExactUploadVerification::MetadataHash,
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
+                coven_keys::custody::KeyCustody::Keyring,
+                coven_keys::identity_custody::IdentityCustody::Keyring,
+                coven_storage::oauth::OAuthClients::empty(),
+                None,
+                Some(restore_cloudkit),
+                &layout,
+                Arc::new(SystemClock),
+                Arc::new(SequentialIdProvider::new("device-b")),
+                |_status: &str| {},
+                &cancel,
+            )
+            .await
+        })
+        .await
+        .expect("restore task completes")
+        .expect("restore through code service");
+        let layout = StoreLayout::new(app.path());
+        let lib_b = layout.store_dir(&config.store_id);
+        let db_b = Database::open(
+            &lib_b.db_path(),
+            tables.clone(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            config.device_id.clone(),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            &test_migrations(),
+        )
+        .expect("open B db");
+
+        // The restore found the device's published stream on the provider.
+        let (restored_generation, restored_bytes) = db_b
+            .latest_published_store_snapshot_for_test()
+            .await
+            .expect("read the restored snapshot stream");
+        assert_eq!(
+            restored_generation, 0,
+            "the restore resumes at the published head"
+        );
+        assert_eq!(restored_bytes, published_bytes);
+
+        let joiner_storage = Arc::new(CloudSyncConnection::new(
+            Arc::new(
+                coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
+                    cloudkit_ops,
+                    coven_foundation::config::ExactUploadVerification::MetadataHash,
+                ),
+            ),
+            cipher.clone(),
+            blob_paths,
+            store_id.to_string(),
+            owner_keypair.clone(),
+        ));
+        coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
+            coven_database::StoreDatabase::new(&db_b),
+            lib_b.clone(),
+        )
+        .run_sync_cycle(joiner_storage.clone(), owner_keypair)
+        .await
+        .expect("the restored device's first cycle publishes past the occupied slot");
+        let (successor_generation, successor_bytes) = db_b
+            .latest_published_store_snapshot_for_test()
+            .await
+            .expect("read continued snapshot stream");
+        let successor: coven_protocol::store_commit::SnapshotMeta =
+            serde_json::from_slice(&successor_bytes).expect("parse continued snapshot metadata");
+        assert_eq!(successor_generation, 1);
+        assert_eq!(
+            successor
+                .predecessor
+                .as_ref()
+                .map(|reference| reference.generation),
+            Some(0)
+        );
+        assert_eq!(
+            successor
+                .predecessor
+                .as_ref()
+                .map(|reference| reference.snapshot_hash),
+            Some(
+                coven_protocol::store_commit::SnapshotMeta::semantic_hash_from_bytes(
+                    &published.to_bytes()
+                )
+                .expect("hash the owner's snapshot")
+            )
+        );
+    })
+    .await;
+}
+
 /// Mirrors join_tests.rs's `a_fresh_joiner_refuses_a_rolled_back_membership_head`:
 /// a restore code seeds the same per-author watermark from its own floor. Owner
 /// pinning follows this call in the restore flow, but the accepted floor is

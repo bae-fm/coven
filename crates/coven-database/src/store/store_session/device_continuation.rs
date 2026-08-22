@@ -129,10 +129,18 @@ impl StoreDatabase {
                 "continued acknowledgement chain is empty".into(),
             ));
         };
+        // The chain runs from the device's current head back to its initial
+        // ack. The code's latest ack is where the stream stood at export; the
+        // head is at or past it, and the chain must pass through it exactly.
+        let pinned = ack_chain
+            .iter()
+            .find(|(reference, _)| reference.sequence == continuation.latest_ack.sequence)
+            .map(|(reference, _)| reference);
         if initial_ack.sequence != 1
             || initial_ack.successor.predecessor.is_some()
             || latest_ack.registration != continuation.registration
-            || latest_ack_ref != &continuation.latest_ack
+            || latest_ack_ref.sequence < continuation.latest_ack.sequence
+            || pinned != Some(&continuation.latest_ack)
             || ack_chain.last().map(|(reference, _)| reference) != Some(&continuation.initial_ack)
             || ack_chain.windows(2).any(|pair| {
                 pair[0].1.successor.predecessor.as_ref() != Some(&pair[1].0.object)
@@ -147,9 +155,17 @@ impl StoreDatabase {
             ));
         }
         let latest_successor_slot = latest_ack.successor.next_slot.clone();
+        // `latest_snapshot` is the head of the device's published stream as
+        // the restore found it on the provider; the code's cursor is where the
+        // stream stood when the code was exported, so the head is at or past
+        // it, never behind it.
         match (&continuation.latest_snapshot, &latest_snapshot) {
             (None, None) => {}
-            (Some(expected), Some((reference, meta))) if expected == reference => {
+            (expected, Some((reference, meta)))
+                if expected
+                    .as_ref()
+                    .is_none_or(|expected| expected.generation <= reference.generation) =>
+            {
                 let verified = SnapshotMeta::parse_stream_entry_at(
                     &meta.to_bytes(),
                     &root,
@@ -395,7 +411,14 @@ impl StoreSession<'_> {
                 ));
             }
         }
-        let latest_ref = serde_json::to_string(&continuation.latest_ack)
+        // The chain's first entry is the device's current head, at or past the
+        // code's cursor (the caller verified that).
+        let Some((head_ack_ref, _)) = ack_chain.first() else {
+            return Err(DbError::Message(
+                "continued acknowledgement chain is empty".into(),
+            ));
+        };
+        let latest_ref = serde_json::to_string(head_ack_ref)
             .map_err(|error| DbError::context("continued latest ack", error))?;
         let latest_successor = serde_json::to_string(&latest_successor_slot)
             .map_err(|error| DbError::context("continued ack successor", error))?;
