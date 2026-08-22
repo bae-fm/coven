@@ -40,6 +40,62 @@ pub struct RestoringStore<'storage> {
 }
 
 impl<'storage> RestoringStore<'storage> {
+    /// Record where an adopted registration's published streams stand: the
+    /// acknowledgement head the pulled history activated for it (the initial
+    /// acknowledgement when it never published another) and the snapshot its
+    /// stream on the provider ends on.
+    async fn resume_adopted_device_streams(
+        &self,
+        registration_ref: &StoreDeviceRegistrationRef,
+    ) -> Result<(), StoreRegistrationError> {
+        let registration = self
+            .database
+            .activated_store_device_registration_for_device(registration_ref.device_id)
+            .await
+            .map_err(StoreRegistrationError::from)?
+            .ok_or_else(|| {
+                StoreRegistrationError::Invalid(
+                    "adopted Owner recovery registration is not activated".into(),
+                )
+            })?;
+        let history = self.history.restore_history();
+        let latest_ack_ref = match self
+            .database
+            .activated_store_ack(registration_ref)
+            .await
+            .map_err(StoreRegistrationError::from)?
+        {
+            Some(activated) => activated.reference,
+            None => {
+                let durable = self
+                    .database
+                    .latest_local_store_device_registration()
+                    .await
+                    .map_err(StoreRegistrationError::from)?
+                    .ok_or_else(|| {
+                        StoreRegistrationError::Invalid(
+                            "adopted Owner recovery registration has no local journal".into(),
+                        )
+                    })?;
+                durable.initial_ack_ref
+            }
+        };
+        let latest_ack = history
+            .load_store_ack(&latest_ack_ref, registration.value())
+            .await?;
+        let latest_snapshot = history
+            .load_store_snapshot_stream(registration_ref, registration.value())
+            .await
+            .map_err(|error| StoreRegistrationError::SnapshotStream(Box::new(error)))?
+            .into_iter()
+            .last()
+            .map(|snapshot| (snapshot.reference, snapshot.meta));
+        self.database
+            .resume_local_device_streams((latest_ack_ref, latest_ack), latest_snapshot)
+            .await
+            .map_err(StoreRegistrationError::from)
+    }
+
     pub async fn recover_owner_device(
         &mut self,
         authority: &coven_protocol::recovery::OwnerRecoveryAuthority,
@@ -132,6 +188,11 @@ impl<'storage> RestoringStore<'storage> {
             )
             .await?
         {
+            // The device this authority derives already registered in an
+            // earlier life and published since; resume its streams from the
+            // heads the provider holds rather than the registration's first
+            // slots.
+            self.resume_adopted_device_streams(&registration).await?;
             return Ok(registration);
         }
         let context = |domain| {

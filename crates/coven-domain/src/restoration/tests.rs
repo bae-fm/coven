@@ -1005,12 +1005,14 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
 
 #[tokio::test]
 async fn merge_owner_recovery_restore_code_creates_an_activated_replacement_device() {
-    let fixture = Box::pin(prepare_owner_recovery_restore()).await;
+    let fixture = Box::pin(prepare_owner_recovery_restore("owner-recovery-restore")).await;
     Box::pin(fixture.assert_restored()).await;
 }
 
 struct OwnerRecoveryRestoreFixture {
     code: String,
+    store_id: String,
+    owner: UserKeypair,
     owner_pubkey: String,
     tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
@@ -1022,6 +1024,8 @@ impl OwnerRecoveryRestoreFixture {
     async fn assert_restored(self) {
         let Self {
             code,
+            store_id: _,
+            owner: _,
             owner_pubkey,
             tables,
             migrations,
@@ -1083,9 +1087,10 @@ impl OwnerRecoveryRestoreFixture {
     }
 }
 
-async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
+/// `store_id` keys the process-global test keyring, so every test takes its
+/// own: two tests restoring one id would find each other's owner identity.
+async fn prepare_owner_recovery_restore(store_id: &str) -> OwnerRecoveryRestoreFixture {
     coven_keys::keys::test_keyring::install();
-    let store_id = "owner-recovery-restore";
     let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
     let cloud = Arc::new(
         coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
@@ -1143,12 +1148,248 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     let app = tempfile::tempdir().expect("restore app dir");
     OwnerRecoveryRestoreFixture {
         code,
+        store_id: store_id.to_string(),
         owner_pubkey: pubkey_hex(&owner),
+        owner,
         tables,
         migrations: test_migrations(),
         cloudkit_ops,
         app,
     }
+}
+
+/// The device an Owner recovery code registers is a device like any other
+/// once the restore completes: its first sync cycle pulls and publishes.
+#[tokio::test]
+async fn a_recovered_owner_device_runs_its_first_sync_cycle() {
+    Box::pin(async {
+        let fixture = Box::pin(prepare_owner_recovery_restore("owner-recovery-first-cycle")).await;
+        let OwnerRecoveryRestoreFixture {
+            code,
+            store_id,
+            owner,
+            owner_pubkey: _,
+            tables,
+            migrations: _,
+            cloudkit_ops,
+            app,
+        } = fixture;
+        let layout = StoreLayout::new(app.path());
+        let config = Box::pin(restore_from_code(
+            &code,
+            &tables,
+            &test_migrations(),
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            coven_keys::custody::KeyCustody::Keyring,
+            coven_keys::identity_custody::IdentityCustody::Keyring,
+            coven_storage::oauth::OAuthClients::empty(),
+            None,
+            Some(cloudkit_ops.clone()),
+            &layout,
+            Arc::new(SystemClock),
+            Arc::new(SequentialIdProvider::new("recovery-device")),
+            |_status: &str| {},
+            &tokio::sync::watch::channel(false).1,
+        ))
+        .await
+        .expect("restore through OwnerRecovery code");
+        let store_dir = layout.store_dir(&config.store_id);
+        let database = Database::open(
+            &store_dir.db_path(),
+            tables,
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            config.device_id.clone(),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            &test_migrations(),
+        )
+        .expect("open recovered database");
+        let storage = Arc::new(CloudSyncConnection::new(
+            Arc::new(
+                coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
+                    cloudkit_ops,
+                    coven_foundation::config::ExactUploadVerification::MetadataHash,
+                ),
+            ),
+            CloudCipher::Plaintext,
+            BlobPathScheme::for_storage(HomeStorage::Browsable),
+            store_id.clone(),
+            owner.clone(),
+        ));
+        coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
+            coven_database::StoreDatabase::new(&database),
+            store_dir,
+        )
+        .run_sync_cycle(storage, owner)
+        .await
+        .expect("the recovered device's first cycle");
+    })
+    .await;
+}
+
+/// An Owner recovery code derives one device from its authority, so a second
+/// restore through the same code adopts the device the first restore
+/// registered. That device published after the first restore; the second
+/// restore must resume its published streams -- the snapshot and
+/// acknowledgement heads the provider holds -- instead of restarting them at
+/// the registration's first slots.
+#[tokio::test]
+async fn a_repeated_owner_recovery_restore_resumes_the_device_s_published_streams() {
+    Box::pin(async {
+        let fixture = Box::pin(prepare_owner_recovery_restore("owner-recovery-repeated")).await;
+        let OwnerRecoveryRestoreFixture {
+            code,
+            store_id,
+            owner,
+            owner_pubkey: _,
+            tables,
+            migrations: _,
+            cloudkit_ops,
+            app: first_app,
+        } = fixture;
+        let restore = |app_dir: std::path::PathBuf| {
+            let code = code.clone();
+            let tables = tables.clone();
+            let cloudkit_ops = cloudkit_ops.clone();
+            async move {
+                let layout = StoreLayout::new(&app_dir);
+                let config = Box::pin(restore_from_code(
+                    &code,
+                    &tables,
+                    &test_migrations(),
+                    coven_foundation::config::ExactUploadVerification::MetadataHash,
+                    coven_protocol::blob::TransferLimits::one_at_a_time(),
+                    coven_keys::custody::KeyCustody::Keyring,
+                    coven_keys::identity_custody::IdentityCustody::Keyring,
+                    coven_storage::oauth::OAuthClients::empty(),
+                    None,
+                    Some(cloudkit_ops),
+                    &layout,
+                    Arc::new(SystemClock),
+                    Arc::new(SequentialIdProvider::new("recovery-device")),
+                    |_status: &str| {},
+                    &tokio::sync::watch::channel(false).1,
+                ))
+                .await
+                .expect("restore through OwnerRecovery code");
+                let store_dir = layout.store_dir(&config.store_id);
+                let database = Database::open(
+                    &store_dir.db_path(),
+                    tables,
+                    coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+                    coven_protocol::blob::TransferLimits::one_at_a_time(),
+                    config.device_id.clone(),
+                    std::sync::Arc::new(coven_foundation::clock::SystemClock),
+                    &test_migrations(),
+                )
+                .expect("open recovered database");
+                (database, store_dir)
+            }
+        };
+        let storage = || {
+            Arc::new(CloudSyncConnection::new(
+                Arc::new(
+                    coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
+                        cloudkit_ops.clone(),
+                        coven_foundation::config::ExactUploadVerification::MetadataHash,
+                    ),
+                ),
+                CloudCipher::Plaintext,
+                BlobPathScheme::for_storage(HomeStorage::Browsable),
+                store_id.clone(),
+                owner.clone(),
+            ))
+        };
+
+        // The first restore registers the recovered device; its first cycle
+        // publishes the device's generation 0 and its acknowledgements.
+        let (first_db, first_dir) = restore(first_app.path().to_path_buf()).await;
+        let first_device = first_db
+            .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("load recovered Store device identity")
+            .expect("recovered Store device identity exists");
+        coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
+            coven_database::StoreDatabase::new(&first_db),
+            first_dir,
+        )
+        .run_sync_cycle(storage(), owner.clone())
+        .await
+        .expect("the recovered device's first cycle");
+        let (published_generation, published_bytes) = first_db
+            .latest_published_store_snapshot_for_test()
+            .await
+            .expect("read the recovered device's published snapshot");
+        assert_eq!(published_generation, 0);
+        let first_store = coven_database::StoreDatabase::new(&first_db);
+        let published_ack = first_store
+            .latest_local_store_ack()
+            .await
+            .expect("read the recovered device's acknowledgement head")
+            .expect("the first cycle acknowledged");
+        assert!(
+            published_ack.reference.sequence > 1,
+            "the first cycle published past the initial acknowledgement"
+        );
+        let snapshot_objects = storage()
+            .list_provider_keys_for_test("store-v1/snapshots/")
+            .await
+            .expect("list Store snapshot objects");
+
+        // The second restore through the same code adopts the same device.
+        let second_app = tempfile::tempdir().expect("second restore app dir");
+        let (second_db, second_dir) = restore(second_app.path().to_path_buf()).await;
+        let second_device = second_db
+            .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("load re-recovered Store device identity")
+            .expect("re-recovered Store device identity exists");
+        assert_eq!(
+            second_device, first_device,
+            "the same authority derives the same device"
+        );
+        let (restored_generation, restored_bytes) = second_db
+            .latest_published_store_snapshot_for_test()
+            .await
+            .expect("read the resumed snapshot stream");
+        assert_eq!(
+            restored_generation, 0,
+            "the restore resumes at the published head"
+        );
+        assert_eq!(restored_bytes, published_bytes);
+        let second_store = coven_database::StoreDatabase::new(&second_db);
+        assert_eq!(
+            second_store
+                .latest_local_store_ack()
+                .await
+                .expect("read the resumed acknowledgement head")
+                .map(|ack| ack.reference),
+            Some(published_ack.reference.clone()),
+            "the restore resumes at the acknowledgement head the device published"
+        );
+
+        // Its first cycle stands on the resumed streams: nothing is due, and
+        // nothing it publishes lands on a slot the device already wrote.
+        coven_replication::sync::test_owner_graph::TestOwnerGraph::new(second_store, second_dir)
+            .run_sync_cycle(storage(), owner.clone())
+            .await
+            .expect("the re-recovered device's first cycle");
+        let (generation_after, bytes_after) = second_db
+            .latest_published_store_snapshot_for_test()
+            .await
+            .expect("read the snapshot stream after the cycle");
+        assert_eq!((generation_after, bytes_after), (0, published_bytes));
+        assert_eq!(
+            storage()
+                .list_provider_keys_for_test("store-v1/snapshots/")
+                .await
+                .expect("list Store snapshot objects"),
+            snapshot_objects,
+            "the cycle rewrote no snapshot object"
+        );
+    })
+    .await;
 }
 
 /// A restored continuation preserves its imported immutable snapshot generation.

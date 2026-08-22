@@ -21,6 +21,7 @@ pub(crate) mod device_continuation;
 pub(crate) mod device_exclusion;
 pub(crate) mod device_join_challenges;
 pub(crate) mod device_registration_journal;
+pub(crate) mod device_streams;
 pub(crate) mod host_write_capture;
 pub(crate) mod host_write_operation;
 pub(crate) mod local_blob_cleanup;
