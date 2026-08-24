@@ -8,9 +8,22 @@ use coven_protocol::store_commit::device_join_journal::{
 };
 use coven_protocol::store_commit::{DeviceJoinAttemptId, ObjectHash};
 
+/// The joining device's own journal of in-flight join attempts, kept in its own
+/// SQLite file under the stores root because the Store database it is joining
+/// does not exist yet while the attempt runs.
+///
+/// The file lives exactly as long as the attempts in it. Retiring the last row
+/// closes the connection and deletes the file with its WAL sidecars, so a
+/// device that has joined a store does not leave a dead journal behind forever;
+/// the next attempt reopens the path and gets a new file.
 #[derive(Clone, Debug)]
 pub struct DeviceJoinJournalStore {
-    connection: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+    path: std::path::PathBuf,
+    durability: crate::connection_io::ConnectionDurability,
+    /// `None` between the delete of an emptied journal and the next operation
+    /// that reopens it. The connection is closed before the file is unlinked so
+    /// no later write can land in a file nothing can be read back from.
+    connection: std::sync::Arc<std::sync::Mutex<Option<rusqlite::Connection>>>,
 }
 
 impl DeviceJoinJournalStore {
@@ -27,13 +40,28 @@ impl DeviceJoinJournalStore {
         path: impl AsRef<std::path::Path>,
         durability: crate::connection_io::ConnectionDurability,
     ) -> Result<Self, crate::DbError> {
-        let path = path.as_ref().to_path_buf();
-        if let Some(directory) = path.parent() {
+        let store = Self {
+            path: path.as_ref().to_path_buf(),
+            durability,
+            connection: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        };
+        // Open here rather than on the first operation: a journal file that
+        // cannot be opened is a failure of whoever asked for the journal, and
+        // they find out at the call that asked.
+        store.with_connection(|_| Ok(()))?;
+        Ok(store)
+    }
+
+    /// Put a live connection in `held`, creating the journal file and its one
+    /// table. Called at construction and again by the first operation after a
+    /// completed attempt deleted the file.
+    fn open_into(&self, held: &mut Option<rusqlite::Connection>) -> Result<(), crate::DbError> {
+        if let Some(directory) = self.path.parent() {
             std::fs::create_dir_all(directory).map_err(crate::DbError::from)?;
         }
-        let connection = rusqlite::Connection::open(&path).map_err(crate::DbError::from)?;
-        crate::connection_io::configure_connection_durability(&connection, durability)?;
-        connection
+        let opened = rusqlite::Connection::open(&self.path).map_err(crate::DbError::from)?;
+        crate::connection_io::configure_connection_durability(&opened, self.durability)?;
+        opened
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
                  CREATE TABLE IF NOT EXISTS device_join_journals (
@@ -44,9 +72,29 @@ impl DeviceJoinJournalStore {
                  ) STRICT, WITHOUT ROWID;",
             )
             .map_err(crate::DbError::from)?;
-        Ok(Self {
-            connection: std::sync::Arc::new(std::sync::Mutex::new(connection)),
-        })
+        *held = Some(opened);
+        Ok(())
+    }
+
+    /// Run `operation` on the journal's connection, opening the file first when
+    /// a completed attempt deleted it.
+    fn with_connection<R>(
+        &self,
+        operation: impl FnOnce(&rusqlite::Connection) -> Result<R, crate::DbError>,
+    ) -> Result<R, crate::DbError> {
+        let mut held = self
+            .connection
+            .lock()
+            .map_err(|_| pending_join_connection_poisoned())?;
+        if held.is_none() {
+            self.open_into(&mut held)?;
+        }
+        let connection = held.as_ref().ok_or_else(|| {
+            crate::DbError::Message(
+                "pending device-join journal connection is absent after opening it".to_string(),
+            )
+        })?;
+        operation(connection)
     }
 
     pub fn insert_or_load(
@@ -55,67 +103,61 @@ impl DeviceJoinJournalStore {
         role: &str,
         payload: &str,
     ) -> Result<String, crate::DbError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| pending_join_connection_poisoned())?;
-        let transaction = connection
-            .unchecked_transaction()
-            .map_err(crate::DbError::from)?;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO device_join_journals (attempt_id, role, payload)
-                 VALUES (?1, ?2, ?3)",
-                (attempt_id, role, payload),
-            )
-            .map_err(crate::DbError::from)?;
-        let actual = transaction
-            .query_row(
-                "SELECT payload FROM device_join_journals WHERE attempt_id = ?1 AND role = ?2",
-                (attempt_id, role),
-                |row| row.get(0),
-            )
-            .map_err(crate::DbError::from)?;
-        transaction.commit().map_err(crate::DbError::from)?;
-        Ok(actual)
+        self.with_connection(|connection| {
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(crate::DbError::from)?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO device_join_journals (attempt_id, role, payload)
+                     VALUES (?1, ?2, ?3)",
+                    (attempt_id, role, payload),
+                )
+                .map_err(crate::DbError::from)?;
+            let actual = transaction
+                .query_row(
+                    "SELECT payload FROM device_join_journals WHERE attempt_id = ?1 AND role = ?2",
+                    (attempt_id, role),
+                    |row| row.get(0),
+                )
+                .map_err(crate::DbError::from)?;
+            transaction.commit().map_err(crate::DbError::from)?;
+            Ok(actual)
+        })
     }
 
     pub fn load(&self, attempt_id: &str, role: &str) -> Result<Option<String>, crate::DbError> {
         use rusqlite::OptionalExtension;
 
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| pending_join_connection_poisoned())?;
-        connection
-            .query_row(
-                "SELECT payload FROM device_join_journals WHERE attempt_id = ?1 AND role = ?2",
-                (attempt_id, role),
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(crate::DbError::from)
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT payload FROM device_join_journals WHERE attempt_id = ?1 AND role = ?2",
+                    (attempt_id, role),
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(crate::DbError::from)
+        })
     }
 
     pub fn records(&self) -> Result<Vec<(String, String, String)>, crate::DbError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| pending_join_connection_poisoned())?;
-        query_mapped_rows(
-            &connection,
-            "SELECT attempt_id, role, payload FROM device_join_journals
-                 ORDER BY attempt_id, role",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .map_err(crate::DbError::from)
+        self.with_connection(|connection| {
+            query_mapped_rows(
+                connection,
+                "SELECT attempt_id, role, payload FROM device_join_journals
+                     ORDER BY attempt_id, role",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .map_err(crate::DbError::from)
+        })
     }
 
     pub fn compare_and_swap(
@@ -125,36 +167,49 @@ impl DeviceJoinJournalStore {
         previous_payload: &str,
         next_payload: &str,
     ) -> Result<bool, crate::DbError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| pending_join_connection_poisoned())?;
-        let changed = connection
-            .execute(
-                "UPDATE device_join_journals SET payload = ?1
-                 WHERE attempt_id = ?2 AND role = ?3 AND payload = ?4",
-                (next_payload, attempt_id, role, previous_payload),
-            )
-            .map_err(crate::DbError::from)?;
-        Ok(changed == 1)
+        self.with_connection(|connection| {
+            let changed = connection
+                .execute(
+                    "UPDATE device_join_journals SET payload = ?1
+                     WHERE attempt_id = ?2 AND role = ?3 AND payload = ?4",
+                    (next_payload, attempt_id, role, previous_payload),
+                )
+                .map_err(crate::DbError::from)?;
+            Ok(changed == 1)
+        })
     }
 
     /// Drop one attempt's joiner row, but only while it still holds exactly the
-    /// payload the caller last read.
+    /// payload the caller last read, and delete the journal file when that row
+    /// was the last one in it.
     ///
     /// This is how a joining device finishes: the row is its working notes on
     /// an exchange that is over, and what says the join happened is the
-    /// library's own config file, written before this runs.
+    /// library's own config file, written before this runs. An emptied journal
+    /// answers nothing either, so the file goes with the row rather than
+    /// accumulating one dead SQLite database per store the device ever joined.
+    ///
+    /// The row delete, the emptiness check, and the unlink all happen under the
+    /// one connection lock, so a row begun by another attempt cannot land in a
+    /// file that is about to be deleted.
     pub fn compare_and_forget(
         &self,
         attempt_id: &str,
         role: &str,
         expected_payload: &str,
     ) -> Result<bool, crate::DbError> {
-        let connection = self
+        let mut held = self
             .connection
             .lock()
             .map_err(|_| pending_join_connection_poisoned())?;
+        if held.is_none() {
+            self.open_into(&mut held)?;
+        }
+        let connection = held.as_ref().ok_or_else(|| {
+            crate::DbError::Message(
+                "pending device-join journal connection is absent after opening it".to_string(),
+            )
+        })?;
         let removed = connection
             .execute(
                 "DELETE FROM device_join_journals
@@ -162,19 +217,50 @@ impl DeviceJoinJournalStore {
                 (attempt_id, role, expected_payload),
             )
             .map_err(crate::DbError::from)?;
-        Ok(removed == 1)
+        if removed != 1 {
+            return Ok(false);
+        }
+        let remaining: i64 = connection
+            .query_row("SELECT COUNT(*) FROM device_join_journals", [], |row| {
+                row.get(0)
+            })
+            .map_err(crate::DbError::from)?;
+        if remaining == 0 {
+            if let Some(connection) = held.take() {
+                connection.close().map_err(|(_, error)| error)?;
+            }
+            remove_pending_join_files(&self.path)?;
+        }
+        Ok(true)
     }
 
     #[cfg(test)]
     fn synchronous_for_test(&self) -> Result<i64, crate::DbError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| pending_join_connection_poisoned())?;
-        connection
-            .query_row("PRAGMA synchronous", [], |row| row.get(0))
-            .map_err(crate::DbError::from)
+        self.with_connection(|connection| {
+            connection
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .map_err(crate::DbError::from)
+        })
     }
+}
+
+/// Delete an emptied journal and the WAL sidecars its durable mode writes beside
+/// it. Closing the connection already checkpoints and removes those in the
+/// ordinary case; naming them here is what covers a file left by an earlier
+/// process that did not close.
+fn remove_pending_join_files(path: &std::path::Path) -> Result<(), crate::DbError> {
+    for candidate in [
+        path.to_path_buf(),
+        std::path::PathBuf::from(format!("{}-wal", path.display())),
+        std::path::PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(crate::DbError::from(error)),
+        }
+    }
+    Ok(())
 }
 
 fn pending_join_connection_poisoned() -> crate::DbError {
@@ -438,5 +524,90 @@ mod tests {
             .expect("read synchronous setting");
 
         assert_eq!(synchronous, 0);
+    }
+
+    #[test]
+    fn retiring_the_last_attempt_deletes_the_journal_file() {
+        let pending_dir = tempfile::tempdir().expect("create pending join directory");
+        let path = pending_dir.path().join("pending.sqlite");
+        let pending = DeviceJoinJournalStore::open(&path).expect("open pending join journal");
+        pending
+            .insert_or_load("attempt-one", "joiner", "first")
+            .expect("begin the first attempt");
+        pending
+            .insert_or_load("attempt-two", "joiner", "second")
+            .expect("begin the second attempt");
+
+        assert!(pending
+            .compare_and_forget("attempt-one", "joiner", "first")
+            .expect("retire the first attempt"));
+        assert!(
+            path.exists(),
+            "a journal still holding an attempt keeps its file"
+        );
+
+        assert!(pending
+            .compare_and_forget("attempt-two", "joiner", "second")
+            .expect("retire the last attempt"));
+        assert!(!path.exists(), "an emptied journal deletes its file");
+        for sidecar in ["pending.sqlite-wal", "pending.sqlite-shm"] {
+            assert!(
+                !pending_dir.path().join(sidecar).exists(),
+                "an emptied journal deletes its {sidecar} sidecar"
+            );
+        }
+    }
+
+    #[test]
+    fn a_journal_used_after_its_file_was_deleted_writes_a_new_one() {
+        let pending_dir = tempfile::tempdir().expect("create pending join directory");
+        let path = pending_dir.path().join("pending.sqlite");
+        let pending = DeviceJoinJournalStore::open(&path).expect("open pending join journal");
+        pending
+            .insert_or_load("attempt-one", "joiner", "first")
+            .expect("begin the first attempt");
+        pending
+            .compare_and_forget("attempt-one", "joiner", "first")
+            .expect("retire the first attempt");
+
+        pending
+            .insert_or_load("attempt-two", "joiner", "second")
+            .expect("a later attempt reopens the deleted journal");
+
+        assert!(path.exists());
+        assert_eq!(
+            DeviceJoinJournalStore::open(&path)
+                .expect("reopen the journal")
+                .records()
+                .expect("read the reopened journal"),
+            vec![(
+                "attempt-two".to_string(),
+                "joiner".to_string(),
+                "second".to_string()
+            )],
+            "the later attempt is durable in the new file, not an unlinked one"
+        );
+    }
+
+    #[test]
+    fn a_failed_retire_leaves_the_journal_file_alone() {
+        let pending_dir = tempfile::tempdir().expect("create pending join directory");
+        let path = pending_dir.path().join("pending.sqlite");
+        let pending = DeviceJoinJournalStore::open(&path).expect("open pending join journal");
+        pending
+            .insert_or_load("attempt-one", "joiner", "first")
+            .expect("begin the attempt");
+
+        assert!(!pending
+            .compare_and_forget("attempt-one", "joiner", "stale")
+            .expect("refuse to retire a row whose payload moved on"));
+
+        assert!(path.exists());
+        assert_eq!(
+            pending
+                .load("attempt-one", "joiner")
+                .expect("read the attempt"),
+            Some("first".to_string())
+        );
     }
 }
