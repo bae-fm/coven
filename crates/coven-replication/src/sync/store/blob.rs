@@ -487,6 +487,10 @@ impl LocalStoreBlobAccess {
         self.cache.all_pinned(blobs).await
     }
 
+    pub async fn each_pinned(&self, blobs: &[RowBlobRef]) -> Result<Vec<bool>, BlobCacheError> {
+        self.cache.each_pinned(blobs).await
+    }
+
     pub async fn evict(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
         self.cache.evict(blob).await
     }
@@ -1179,21 +1183,47 @@ impl StoreBlobCache {
                 .ok_or_else(|| BlobCacheError::LocalityUnresolved {
                     id: blob.blob().id.clone(),
                 })?;
-            let locator = stored.locator();
-            if !self
-                .store_dir
-                .pinned_blob_is_exact(
-                    locator.namespace(),
-                    locator.locator_hash(),
-                    blob.plaintext_size(),
-                    blob.plaintext_hash(),
-                )
-                .await?
-            {
+            if !self.pinned_copy_is_exact(blob, stored).await? {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    /// Whether each reference is pinned, one answer per reference. The caller
+    /// resolved these from the live rows itself, so unlike [`all_pinned`] there
+    /// is nothing to re-validate; a reference with no committed cloud object has
+    /// no kept copy to hold and reads as not pinned rather than as an error,
+    /// because a list has to have an answer for every row in it.
+    pub(crate) async fn each_pinned(
+        &self,
+        blobs: &[RowBlobRef],
+    ) -> Result<Vec<bool>, BlobCacheError> {
+        let mut pinned = Vec::with_capacity(blobs.len());
+        for blob in blobs {
+            pinned.push(match blob.stored() {
+                Some(stored) => self.pinned_copy_is_exact(blob, stored).await?,
+                None => false,
+            });
+        }
+        Ok(pinned)
+    }
+
+    async fn pinned_copy_is_exact(
+        &self,
+        blob: &RowBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<bool, BlobCacheError> {
+        let locator = stored.locator();
+        self.store_dir
+            .pinned_blob_is_exact(
+                locator.namespace(),
+                locator.locator_hash(),
+                blob.plaintext_size(),
+                blob.plaintext_hash(),
+            )
+            .await
+            .map_err(BlobCacheError::from)
     }
 
     pub(crate) async fn evict(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {

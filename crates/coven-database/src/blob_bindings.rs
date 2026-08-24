@@ -267,24 +267,42 @@ impl Database {
         })
     }
 
+    /// The exact current blob-bearing row version for `row_id`. A row that is
+    /// not there is an error: a caller naming one row is asking about a row it
+    /// believes exists.
     pub(crate) fn row_blob_ref_on(
         conn: &Connection,
         gates: &Gates,
         table: &SyncedTable,
         row_id: &str,
     ) -> Result<RowBlobRef, DbError> {
+        Self::live_row_blob_ref_on(conn, gates, table, row_id)?.ok_or_else(|| {
+            DbError::Message(format!(
+                "blob-bearing row {:?}/{row_id:?} does not exist",
+                table.name()
+            ))
+        })
+    }
+
+    /// The same reference for a row that may not be there, `None` when it is
+    /// not. This is the shape a list-shaped read needs: a caller asking about
+    /// many ids at once holds ids it has not checked, and one naming no live
+    /// blob-bearing row is an answer about that id, not a failed read.
+    pub(crate) fn live_row_blob_ref_on(
+        conn: &Connection,
+        gates: &Gates,
+        table: &SyncedTable,
+        row_id: &str,
+    ) -> Result<Option<RowBlobRef>, DbError> {
         let declaration = table.blob().ok_or_else(|| {
             DbError::Message(format!(
                 "synced table {:?} has no blob declaration",
                 table.name()
             ))
         })?;
-        let row = live_blob_row(conn, table.name(), row_id, declaration)?.ok_or_else(|| {
-            DbError::Message(format!(
-                "blob-bearing row {:?}/{row_id:?} does not exist",
-                table.name()
-            ))
-        })?;
+        let Some(row) = live_blob_row(conn, table.name(), row_id, declaration)? else {
+            return Ok(None);
+        };
         let audience =
             gate::live_row_audience(conn, gates, table.name(), row_id).map_err(|error| {
                 DbError::context(
@@ -385,6 +403,7 @@ impl Database {
                         RowBlobAuthority::PendingRemote(remote_audience),
                         None,
                     )
+                    .map(Some)
                     .map_err(DbError::from);
                 };
                 if package_authority.remote_audience() != remote_audience {
@@ -425,6 +444,7 @@ impl Database {
             authority,
             stored,
         )
+        .map(Some)
         .map_err(DbError::from)
     }
 

@@ -58,6 +58,28 @@ impl StoreSession<'_> {
         Database::row_blob_ref_on(self.conn, self.gates, table, row_id)
     }
 
+    fn live_row_blob_refs(
+        &self,
+        table_name: &str,
+        row_ids: &[String],
+    ) -> Result<Vec<Option<coven_protocol::blob::RowBlobRef>>, DbError> {
+        let table = self
+            .synced_tables
+            .iter()
+            .find(|candidate| candidate.name() == table_name)
+            .ok_or_else(|| DbError::Message(format!("undeclared synced table {table_name:?}")))?;
+        if table.blob().is_none() {
+            return Err(DbError::Message(format!(
+                "synced table {:?} has no blob declaration",
+                table.name()
+            )));
+        }
+        row_ids
+            .iter()
+            .map(|row_id| Database::live_row_blob_ref_on(self.conn, self.gates, table, row_id))
+            .collect()
+    }
+
     fn row_blob_refs_for_root(
         &self,
         root_table: &str,
@@ -105,6 +127,22 @@ impl StoreDatabase {
         let table = table.to_string();
         let row_id = row_id.to_string();
         self.call_store(move |session| session.row_blob_ref(&table, &row_id))
+            .await
+    }
+
+    /// The exact current blob-bearing row version for each of `row_ids`, in the
+    /// order given, resolved in one read on the connection. `None` where an id
+    /// names no live blob-bearing row.
+    ///
+    /// The list form of [`row_blob_ref`](Self::row_blob_ref): a host about to
+    /// show a page of rows resolves the page in one call instead of one per row.
+    pub async fn live_row_blob_refs(
+        &self,
+        table: &str,
+        row_ids: Vec<String>,
+    ) -> Result<Vec<Option<coven_protocol::blob::RowBlobRef>>, DbError> {
+        let table = table.to_string();
+        self.call_store(move |session| session.live_row_blob_refs(&table, &row_ids))
             .await
     }
 

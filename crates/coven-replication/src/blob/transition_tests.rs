@@ -1732,6 +1732,17 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
             .unwrap(),
         "the dropped cover is not pinned",
     );
+    assert_eq!(
+        store_cache
+            .each_pinned(&[
+                cover_ref(&db, "cover-pin").await,
+                cover_ref(&db, "cover-drop").await,
+            ])
+            .await
+            .unwrap(),
+        vec![true, false],
+        "one call answers per row, in the order asked",
+    );
     assert!(
         storage
             .contains_blob_object(&cover_ref(&db, "cover-pin").await)

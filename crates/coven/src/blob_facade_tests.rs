@@ -745,6 +745,45 @@ async fn a_local_only_blob_has_no_cloud_object_to_remove() {
     );
 }
 
+/// A host drawing a "kept offline" marker down a page asks about the whole page
+/// at once. Every id gets an answer in the order asked: a row whose blob has no
+/// cloud object to keep a copy of is not pinned, and an id naming no row at all
+/// is `None` rather than a failed read of the page.
+#[tokio::test]
+async fn one_call_answers_pin_state_for_a_page_of_rows() {
+    coven_keys::keys::test_keyring::install();
+    let tmp = tempfile::tempdir().expect("store directory");
+    let handle = open_local(crate::StoreDir::new_ephemeral(tmp.path()));
+    let user_dir = tempfile::tempdir().expect("user directory");
+    for (note, photo, name) in [
+        ("note-1", "photo-1", "first.jpg"),
+        ("note-2", "photo-2", "second.jpg"),
+    ] {
+        let bytes = name.as_bytes().to_vec();
+        let path = user_dir.path().join(name);
+        std::fs::write(&path, &bytes).expect("write the user's file");
+        handle
+            .write_note_with_external_photo(note, photo, &path, &bytes)
+            .await
+            .expect("write the note and register its photo");
+    }
+
+    assert_eq!(
+        handle
+            .rows_pinned(
+                "note_photos",
+                vec![
+                    "photo-1".to_string(),
+                    "photo-missing".to_string(),
+                    "photo-2".to_string(),
+                ],
+            )
+            .await
+            .expect("answer pin state for the page"),
+        vec![Some(false), None, Some(false)],
+    );
+}
+
 /// A host that needs the user's actual file — to re-read its tags, to find what
 /// it produced — asks the handle where it is, and gets `None` once the row no
 /// longer points at one.

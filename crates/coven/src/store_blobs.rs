@@ -142,6 +142,13 @@ impl StoreBlobAccess {
     pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
         self.local.all_pinned(blobs).await
     }
+
+    pub(crate) async fn each_pinned(
+        &self,
+        blobs: &[RowBlobRef],
+    ) -> Result<Vec<bool>, BlobCacheError> {
+        self.local.each_pinned(blobs).await
+    }
 }
 
 struct ResolvedBlobConnection {
@@ -241,6 +248,23 @@ impl StoreBlobs {
 
     pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
         self.blobs.all_pinned(blobs).await
+    }
+
+    pub(crate) async fn rows_pinned(
+        &self,
+        table: &str,
+        row_ids: Vec<String>,
+    ) -> Result<Vec<Option<bool>>, BlobCacheError> {
+        let references = self.database.live_row_blob_refs(table, row_ids).await?;
+        let present: Vec<RowBlobRef> = references.iter().flatten().cloned().collect();
+        // `each_pinned` answers one bool per reference it was handed, in order,
+        // so stepping those answers through the `Some` slots puts each back
+        // beside the id it came from.
+        let mut pinned = self.blobs.each_pinned(&present).await?.into_iter();
+        Ok(references
+            .iter()
+            .map(|reference| reference.as_ref().and_then(|_| pinned.next()))
+            .collect())
     }
 
     pub(crate) async fn evict(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {

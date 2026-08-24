@@ -815,6 +815,28 @@ impl CovenHandle {
         self.blobs.all_pinned(blobs).await
     }
 
+    /// Whether each of `table`'s `row_ids` is pinned for offline, one answer per
+    /// id in the order given. `None` where an id names no live blob-bearing row.
+    ///
+    /// [`is_pinned`](Self::is_pinned) answers over blobs that together make up
+    /// one thing — every blob of a release, pinned and unpinned together. This
+    /// answers for many independent rows at once: a host drawing a "kept
+    /// offline" marker per row of a page resolves and answers the whole page in
+    /// one call, instead of a [`row_blob_ref`](Self::row_blob_ref) and an
+    /// `is_pinned` per row.
+    ///
+    /// A row whose blob has no committed cloud object — one still Local, or one
+    /// whose upload has not landed — has no kept copy to hold and reads as not
+    /// pinned. An existence-check failure is still surfaced, never read as "not
+    /// pinned".
+    pub async fn rows_pinned(
+        &self,
+        table: &str,
+        row_ids: Vec<String>,
+    ) -> Result<Vec<Option<bool>>, BlobCacheError> {
+        self.blobs.rows_pinned(table, row_ids).await
+    }
+
     /// Remove one Remote blob's re-fetchable on-device cache copies from both
     /// `storage/pinned/` and `storage/cache/`. This never touches the local store,
     /// whose bytes may be the only usable copy owned by an unpublished write.
