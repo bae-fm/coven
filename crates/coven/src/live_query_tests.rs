@@ -114,18 +114,6 @@ fn open_handle() -> (tempfile::TempDir, crate::CovenHandle) {
     (temp, handle)
 }
 
-fn open_wal_handle() -> (tempfile::TempDir, crate::CovenHandle) {
-    let (temp, handle) = open_handle();
-    let database_path = StoreDir::new_ephemeral(temp.path()).db_path();
-    let journal =
-        coven_database::DatabaseImageTest::open(&database_path).expect("open journal configurator");
-    let mode: String = journal
-        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
-        .expect("enable WAL for live query concurrency tests");
-    assert_eq!(mode, "wal");
-    (temp, handle)
-}
-
 async fn assert_does_not_wake<T: Clone + PartialEq + Send + 'static>(
     query: &mut crate::LiveQuery<T>,
 ) {
@@ -155,7 +143,7 @@ async fn insert_note(handle: &crate::CovenHandle, id: &str, body: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_closure_sees_one_snapshot_across_statements() {
-    let (_temp, handle) = open_wal_handle();
+    let (_temp, handle) = open_handle();
     insert_note(&handle, NOTE_ONE, "Before").await;
     let pause = SnapshotPause::new();
     let read_pause = pause.clone();
@@ -229,7 +217,7 @@ async fn read_transaction_ends_after_every_closure_exit() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fixed_live_query_sees_one_snapshot_across_statements() {
-    let (_temp, handle) = open_wal_handle();
+    let (_temp, handle) = open_handle();
     insert_note(&handle, NOTE_ONE, "Before").await;
     let pause = SnapshotPause::new();
     let query_pause = pause.clone();
@@ -246,7 +234,7 @@ async fn fixed_live_query_sees_one_snapshot_across_statements() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconfigurable_live_query_sees_one_snapshot_across_statements() {
-    let (_temp, handle) = open_wal_handle();
+    let (_temp, handle) = open_handle();
     insert_note(&handle, NOTE_ONE, "Before").await;
     let pause = SnapshotPause::new();
     let query_pause = pause.clone();

@@ -89,28 +89,30 @@ pub(crate) enum ConnectionDurability {
     Disabled,
 }
 
+/// Production selects WAL so a read-only connection on the same database keeps
+/// reading committed rows while this writer commits more, instead of waiting
+/// behind the exclusive lock a rollback journal takes at every commit. The mode
+/// lives in the database header and persists, so a later read-only open finds
+/// the database already in WAL. `FULL` is what puts a committed transaction on
+/// the disk before an external step begins.
+///
+/// Tests select an in-memory journal with no physical sync: transaction
+/// rollback stays real, while crash durability and the filesystem work it costs
+/// are deliberately absent.
 pub(crate) fn configure_connection_durability(
     connection: &Connection,
     durability: ConnectionDurability,
 ) -> Result<(), DbError> {
-    configure_connection_schema_durability(connection, None, durability)
-}
-
-pub(crate) fn configure_connection_schema_durability(
-    connection: &Connection,
-    schema: Option<&str>,
-    durability: ConnectionDurability,
-) -> Result<(), DbError> {
     let (journal_mode, synchronous) = match durability {
-        ConnectionDurability::Full => ("DELETE", "FULL"),
+        ConnectionDurability::Full => ("WAL", "FULL"),
         #[cfg(any(test, feature = "test-utils"))]
         ConnectionDurability::Disabled => ("MEMORY", "OFF"),
     };
     connection
-        .pragma_update_and_check(schema, "journal_mode", journal_mode, |_| Ok(()))
+        .pragma_update_and_check(None, "journal_mode", journal_mode, |_| Ok(()))
         .map_err(DbError::from)?;
     connection
-        .pragma_update(schema, "synchronous", synchronous)
+        .pragma_update(None, "synchronous", synchronous)
         .map_err(DbError::from)
 }
 
@@ -126,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn writable_connection_uses_crash_atomic_rollback_journaling() {
+    fn writable_connection_pins_wal_commit_durability() {
         let directory = tempfile::tempdir().expect("create database directory");
         let connection = connection_with_durability(
             &directory.path().join("store.db"),
@@ -141,7 +143,7 @@ mod tests {
             .expect("read journal mode");
 
         assert_eq!(synchronous, 2);
-        assert_eq!(journal_mode, "delete");
+        assert_eq!(journal_mode, "wal");
     }
 
     #[test]
@@ -163,45 +165,25 @@ mod tests {
         assert_eq!(journal_mode, "memory");
     }
 
+    /// The point of WAL: a writer committing in a loop never blocks a reader on
+    /// a second connection, and never blocks *on* one. Neither side waits, so
+    /// both are run with no busy handler — under a rollback journal the writer's
+    /// commit would need the exclusive lock the open read snapshot holds and
+    /// fail here instead of quietly waiting.
     #[test]
-    fn attached_test_journal_uses_the_store_connections_durability() {
-        let directory = tempfile::tempdir().expect("create database directory");
-        let connection = connection_with_durability(
-            &directory.path().join("store.db"),
-            ConnectionDurability::Disabled,
-        );
-        let pending_path = directory.path().join("pending.db");
-        Connection::open(&pending_path).expect("create pending database");
-        let pending_path = pending_path.to_string_lossy().into_owned();
-        connection
-            .execute("ATTACH DATABASE ?1 AS pending", [&pending_path])
-            .expect("attach pending database");
-
-        configure_connection_schema_durability(
-            &connection,
-            Some("pending"),
-            ConnectionDurability::Disabled,
-        )
-        .expect("configure attached database");
-
-        let synchronous: i64 = connection
-            .query_row("PRAGMA pending.synchronous", [], |row| row.get(0))
-            .expect("read attached synchronous setting");
-        let journal_mode: String = connection
-            .query_row("PRAGMA pending.journal_mode", [], |row| row.get(0))
-            .expect("read attached journal mode");
-        assert_eq!(synchronous, 0);
-        assert_eq!(journal_mode, "memory");
-    }
-
-    #[test]
-    fn rollback_writer_and_secondary_reader_observe_commits() {
+    fn wal_writer_commits_continuously_while_a_reader_holds_a_snapshot() {
         let directory = tempfile::tempdir().expect("create database directory");
         let path = directory.path().join("store.db");
         let writer = connection_with_durability(&path, ConnectionDurability::Full);
         writer
-            .execute_batch("CREATE TABLE values_seen (value INTEGER NOT NULL);")
-            .expect("create table");
+            .execute_batch(
+                "CREATE TABLE values_seen (value INTEGER NOT NULL);
+                 INSERT INTO values_seen VALUES (1);",
+            )
+            .expect("seed the table");
+        writer
+            .busy_timeout(std::time::Duration::ZERO)
+            .expect("writer waits for no lock");
         let reader = Connection::open_with_flags(
             &path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -209,15 +191,32 @@ mod tests {
                 | rusqlite::OpenFlags::SQLITE_OPEN_URI,
         )
         .expect("open secondary reader");
+        reader
+            .busy_timeout(std::time::Duration::ZERO)
+            .expect("reader waits for no lock");
 
-        writer
-            .execute("INSERT INTO values_seen VALUES (1)", [])
-            .expect("commit writer row");
-        let value: i64 = reader
+        let snapshot = reader
+            .unchecked_transaction()
+            .expect("begin the reader snapshot");
+        let before: i64 = snapshot
             .query_row("SELECT value FROM values_seen", [], |row| row.get(0))
-            .expect("secondary reader observes committed row");
+            .expect("reader opens its snapshot");
+        for value in 2..=64 {
+            writer
+                .execute("UPDATE values_seen SET value = ?1", [value])
+                .expect("writer commits while the reader snapshot stays open");
+        }
+        let during: i64 = snapshot
+            .query_row("SELECT value FROM values_seen", [], |row| row.get(0))
+            .expect("reader still reads its snapshot after 63 commits");
+        drop(snapshot);
+        let after: i64 = reader
+            .query_row("SELECT value FROM values_seen", [], |row| row.get(0))
+            .expect("reader observes committed rows once its snapshot closes");
 
-        assert_eq!(value, 1);
+        assert_eq!(before, 1);
+        assert_eq!(during, 1);
+        assert_eq!(after, 64);
     }
 
     #[test]

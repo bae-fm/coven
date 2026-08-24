@@ -190,11 +190,10 @@ impl DatabaseCore {
         let mut timings = StageTimings::start("Store database open");
         let mut conn = timings.mark("open the connection", || {
             let conn = Connection::open(path).map_err(DbError::from)?;
-            // Rollback journaling lets one SQLite transaction commit the Store and an
-            // attached operation journal through a super-journal. Production selects
-            // DELETE + FULL so that cross-file commit is crash-atomic before an external
-            // step begins. Tests select MEMORY + OFF: transaction rollback remains real,
-            // while crash durability and its filesystem work are deliberately absent.
+            // WAL so the read-only connection `Coven::open` pairs with this writer
+            // keeps serving reads while this one commits, rather than queueing
+            // behind a rollback journal's exclusive commit lock. See
+            // `configure_connection_durability` for the whole choice.
             crate::connection_io::configure_connection_durability(&conn, connection_durability)?;
             conn.pragma_update(None, "foreign_keys", "ON")
                 .map_err(DbError::from)?;
