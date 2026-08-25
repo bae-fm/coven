@@ -63,6 +63,7 @@ impl FacadeFixture {
             ),
         )
         .synced_tables(tables.clone())
+        .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
         .migrations(test_migrations())
         .key_custody(crate::KeyCustody::InMemory(keyring))
         .identity_custody(crate::IdentityCustody::InMemory(owner.clone()))
@@ -296,6 +297,7 @@ async fn run_two_devices_pair_end_to_end_over_live_s3_within_the_product_bound()
     config.cloud_home = live.config();
     let handle = crate::Coven::builder(store_dir, config)
         .synced_tables(tables.clone())
+        .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
         .migrations(test_migrations())
         .key_custody(crate::KeyCustody::InMemory(crate::MasterKeyring::generate()))
         .identity_custody(crate::IdentityCustody::InMemory(
@@ -359,6 +361,7 @@ async fn run_two_devices_pair_end_to_end_over_live_s3_within_the_product_bound()
         fixture.layout.clone(),
         fixture.tables.clone(),
         test_migrations(),
+        crate::CovenMigrationPolicy::ApplyPending,
         live.config().exact_upload_verification,
         crate::TransferLimits {
             uploads: std::num::NonZeroUsize::new(3).expect("transfer limit is nonzero"),
@@ -484,6 +487,7 @@ async fn run_a_failed_snapshot_installation_restarts_from_the_durable_pairing() 
         fixture.layout.clone(),
         fixture.tables.clone(),
         test_migrations(),
+        crate::CovenMigrationPolicy::ApplyPending,
         Arc::new(crate::SystemClock),
         fixture.home.clone(),
         attempt_timing,
@@ -528,6 +532,7 @@ async fn run_a_failed_snapshot_installation_restarts_from_the_durable_pairing() 
         fixture.layout.clone(),
         fixture.tables.clone(),
         test_migrations(),
+        crate::CovenMigrationPolicy::ApplyPending,
         Arc::new(crate::SystemClock),
         fixture.home.clone(),
         timing(),
@@ -602,6 +607,7 @@ async fn run_a_facade_only_host_runs_a_whole_join_from_one_scanned_pairing_code(
         fixture.layout.clone(),
         fixture.tables.clone(),
         test_migrations(),
+        crate::CovenMigrationPolicy::ApplyPending,
         Arc::new(crate::SystemClock),
         fixture.home.clone(),
         timing(),
@@ -691,6 +697,7 @@ async fn run_owner_cancellation_reaches_a_joiner_through_the_facade() {
         fixture.layout.clone(),
         fixture.tables.clone(),
         test_migrations(),
+        crate::CovenMigrationPolicy::ApplyPending,
         Arc::new(crate::SystemClock),
         fixture.home.clone(),
         timing(),
@@ -776,6 +783,7 @@ async fn run_facade_cancellation_unwinds_a_persisted_invitation_without_an_appro
         fixture.layout.clone(),
         fixture.tables.clone(),
         test_migrations(),
+        crate::CovenMigrationPolicy::ApplyPending,
         Arc::new(crate::SystemClock),
         fixture.home.clone(),
         timing(),

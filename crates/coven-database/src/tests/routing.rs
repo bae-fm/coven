@@ -10,6 +10,7 @@ async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[],
     )
     .expect("open database");

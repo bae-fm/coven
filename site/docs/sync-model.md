@@ -69,10 +69,12 @@ another's protocol objects.
 The signed Store protocol root binds the store id, founder, schema version, and
 the immutable schema-routing contract; open, join, and restore verify it before
 touching storage or local state. On first open, Coven creates its complete
-internal schema and initialization marker in one SQLite transaction. Later
-writer and read-only opens require the marker; a missing or invalid marker fails
-the open without recreating metadata. Opening works without a provider — the
-store is local-only and complete until one is attached.
+internal schema, version ledger, and initialization marker in one SQLite
+transaction. Later writer and read-only opens require the marker and an exact
+known internal schema manifest. Writers apply or refuse pending Coven migrations
+according to the host's explicit policy; readers always refuse them. A missing
+or invalid marker fails the open without recreating metadata. Opening works
+without a provider — the store is local-only and complete until one is attached.
 
 A single Store commit may carry an optional Store package and one package per
 touched [Circle](/docs/circles) (a private audience inside the store); the
@@ -89,7 +91,7 @@ cannot happen, because the only connection that can write is the one capture
 is attached to.
 
 The host opens the store once through
-`Coven::builder(store_dir, config).synced_tables(...).migrations(...).open()`, declaring
+`Coven::builder(store_dir, config).synced_tables(...).coven_migration_policy(...).migrations(...).open()`, declaring
 its [synced tables](/docs/local-data), and from then on runs all its writes
 through `handle.write(...)`. The writer connection lives on one dedicated
 thread (an actor). Each host transaction gets a SQLite session attached to every
@@ -135,7 +137,8 @@ cannot bypass capture because it cannot write at all.
   [`CovenReadHandle`](rustdoc:struct:coven::CovenReadHandle) — a same-store
   reader for something like a macOS File Provider extension that must serve
   reads while the app holds the full handle open. It takes no store lock
-  and runs no migrations (it refuses a schema newer than its binary), and it
+  and runs no migrations (it refuses pending Coven migrations and a host schema
+  newer than its binary), and it
   exposes reads only: SQL, and blob reads that may fetch from the cloud into
   the device cache. SQLite's locking coordinates the readers with the writer,
   and each new read transaction sees committed state.

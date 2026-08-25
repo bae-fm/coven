@@ -235,6 +235,7 @@ impl CrossPrincipalTestDevice {
             device_id,
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             migrations,
+            coven_database::CovenMigrationPolicy::ApplyPending,
             None,
         )
         .await?)
@@ -773,6 +774,7 @@ mod test_device {
                 offer.attempt_id.to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &migrations,
+                coven_database::CovenMigrationPolicy::ApplyPending,
                 Some(&routing_encryption),
             )
             .await?;
@@ -3023,6 +3025,7 @@ fn open_joined_test_store(
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id,
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        coven_database::CovenMigrationPolicy::ApplyPending,
         migrations,
     )?)
 }

@@ -172,6 +172,7 @@ async fn failed_founder_rollback_is_resumed_before_publication_retry() {
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "founder-rollback-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             &test_migrations(),
         )
         .expect("open founder rollback database")

@@ -1,6 +1,6 @@
 use crate::{
-    Database, DbError, HostWriteError, HostWriteOperation, SqlContext, StoreDatabase,
-    StoreRowWrites,
+    CovenMigrationPolicy, Database, DbError, HostWriteError, HostWriteOperation, SqlContext,
+    StoreDatabase, StoreRowWrites,
 };
 use crate::{Migration, WriteBatch};
 
@@ -34,6 +34,7 @@ fn scoped_store(
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         device.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &migrations,
     )
     .expect("open scoped Store");

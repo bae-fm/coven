@@ -387,6 +387,7 @@ impl TransportFixture {
             self.layout.clone(),
             self.tables.clone(),
             test_migrations(),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             coven_foundation::config::ExactUploadVerification::MetadataHash,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             coven_keys::custody::KeyCustody::Keyring,

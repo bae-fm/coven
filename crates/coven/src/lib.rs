@@ -49,6 +49,7 @@ pub use coven_database::{
     MakeRemoteProgress, QueuedDelete, QueuedMakeRemote, QueuedUpload, QueuedUploadPhase,
     SqlContext, SqlReadContext, WriteBatch,
 };
+pub use coven_database::{CovenMigrationError, CovenMigrationPolicy};
 pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use coven_domain::joining::{join_with_device_pairing, DeviceJoinTransportOutcome};
 pub use coven_domain::joining::{

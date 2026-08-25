@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use coven_database::Migration;
-use coven_database::{Database, SnapshotDatabaseImage};
+use coven_database::{CovenMigrationPolicy, Database, SnapshotDatabaseImage};
 use coven_protocol::objects::StorageError;
 use coven_protocol::synced_schema::SyncedTable;
 use coven_storage::CloudSyncObjectStorage;
@@ -379,6 +379,7 @@ impl PreparedDeviceJoinSnapshot {
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
         migrations: &[Migration],
+        coven_migration_policy: CovenMigrationPolicy,
         routing_encryption: &coven_keys::encryption::EncryptionService,
     ) -> Result<crate::sync::store::InstalledDeviceJoinSnapshot, SnapshotError> {
         let Self {
@@ -419,6 +420,7 @@ impl PreparedDeviceJoinSnapshot {
                 transfer_limits,
                 device_id,
                 clock,
+                coven_migration_policy,
                 migrations,
             )?;
             Ok(crate::sync::store::InstalledDeviceJoinSnapshot {
@@ -480,6 +482,29 @@ impl std::fmt::Debug for PreparedSnapshotBootstrap<'_> {
             .field("coverage", &self.coverage)
             .finish_non_exhaustive()
     }
+}
+
+fn verified_snapshot_bootstrap_install(
+    snapshot: coven_database::PublishedStoreSnapshot,
+    root: &crate::sync::store::protocol_root::VerifiedStoreRoot,
+    founder_registration: coven_protocol::objects::VerifiedObject<
+        coven_protocol::store_commit::StoreDeviceRegistration,
+    >,
+    authority: coven_database::VerifiedStoreSnapshotAuthority,
+    membership: &coven_protocol::membership::MembershipChain,
+    routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+) -> Result<coven_database::VerifiedSnapshotBootstrapInstall, SnapshotError> {
+    coven_database::VerifiedSnapshotBootstrapInstall::new(
+        snapshot,
+        root.object().clone(),
+        founder_registration,
+        authority,
+        coven_database::InitialStoreMembershipAuthority {
+            head_refs: membership.head_refs().to_vec(),
+        },
+        routing_encryption,
+    )
+    .map_err(SnapshotError::from)
 }
 
 impl<'storage> PreparedSnapshotBootstrap<'storage> {
@@ -613,6 +638,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
         migrations: &[Migration],
+        coven_migration_policy: CovenMigrationPolicy,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::RestoringStore<'storage>, SnapshotError> {
         let PreparedSnapshotBootstrap {
@@ -638,17 +664,14 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             }
             let root_ref = root.reference().clone();
             let store_frontier = coverage.clone();
-            let install = coven_database::VerifiedSnapshotBootstrapInstall::new(
+            let install = verified_snapshot_bootstrap_install(
                 snapshot,
-                root.object().clone(),
+                &root,
                 founder_registration,
                 authority,
-                coven_database::InitialStoreMembershipAuthority {
-                    head_refs: membership.head_refs().to_vec(),
-                },
+                &membership,
                 routing_encryption,
-            )
-            .map_err(SnapshotError::from)?;
+            )?;
 
             let circle_installs = match routing_encryption {
                 // Circles exist only in a scoped (Circle-routing) Store; without
@@ -676,6 +699,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                             transfer_limits,
                             device_id.clone(),
                             clock.clone(),
+                            coven_migration_policy,
                             migrations,
                         )
                         .map_err(SnapshotError::from)?;
@@ -714,6 +738,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 transfer_limits,
                 device_id,
                 clock,
+                coven_migration_policy,
                 migrations,
             )
             .map_err(SnapshotError::from)?;
@@ -816,6 +841,9 @@ pub(crate) fn should_create_snapshot(
     false
 }
 
+#[cfg(test)]
+#[path = "coven_migration_snapshot_tests.rs"]
+mod coven_migration_tests;
 #[cfg(test)]
 #[path = "image_tests.rs"]
 mod tests;

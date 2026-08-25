@@ -29,6 +29,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "required-store-root".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[notes_migration()],
     )
     .expect("open database");
@@ -137,6 +138,7 @@ fn fresh_open_rolls_back_host_schema_and_coven_metadata_when_routing_is_invalid(
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "fresh-routing-failure".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[Migration::sql(
             1,
             "invalid routing",
@@ -183,6 +185,7 @@ fn initialized_open_commits_ordinary_migration_without_changing_routing_contract
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "ordinary-first-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &migrations,
     )
     .expect("initial open");
@@ -207,6 +210,7 @@ fn initialized_open_commits_ordinary_migration_without_changing_routing_contract
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "ordinary-first-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &migrations,
     )
     .expect("ordinary migration open");
@@ -254,6 +258,7 @@ fn initialized_open_rolls_back_routing_migration_and_user_version() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "routing-first-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[v1()],
     )
     .expect("initial open");
@@ -278,6 +283,7 @@ fn initialized_open_rolls_back_routing_migration_and_user_version() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "routing-first-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[v1(), v2],
     );
     let error = match result {
@@ -354,6 +360,7 @@ fn writer_and_read_only_open_reject_every_coven_schema_shape_change_without_rewr
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "schema-seed".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            CovenMigrationPolicy::ApplyPending,
             &migrations,
         )
         .expect("seed database");
@@ -370,6 +377,7 @@ fn writer_and_read_only_open_reject_every_coven_schema_shape_change_without_rewr
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "schema-writer".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            CovenMigrationPolicy::ApplyPending,
             &migrations,
         ) {
             Ok(_) => panic!("writer must reject Coven schema mutation {name}"),
@@ -450,6 +458,7 @@ fn first_open_rolls_back_host_migration_when_gate_model_is_invalid() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "invalid-gate-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[migration],
     ) {
         Ok(_) => panic!("an invalid gate model must reject the open"),
@@ -549,6 +558,7 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "invalid-uuid-writer".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[Migration::sql(
             1,
             "things",
@@ -579,6 +589,7 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "invalid-uuid-seed".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[Migration::sql(
             1,
             "things",
@@ -625,6 +636,7 @@ fn database_open_rejects_duplicate_synced_table_declarations() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "duplicate-things".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[things_migration()],
     ) {
         Ok(_) => panic!("one table cannot have two identity declarations"),
@@ -648,6 +660,7 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "invalid-host-identity".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[things_migration()],
     )
     .expect("open");
@@ -693,6 +706,7 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "host-identity-changes".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[things_migration()],
     )
     .expect("open");
@@ -777,6 +791,7 @@ async fn database_open_rejects_empty_device_id() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         String::new(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[],
     );
     let error = match result {
@@ -803,6 +818,7 @@ async fn database_open_rejects_host_declared_reserved_tables() {
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             format!("reserved-{table_name}"),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            CovenMigrationPolicy::ApplyPending,
             &[notes_migration()],
         );
         let error = match result {
@@ -829,6 +845,7 @@ fn database_open_rejects_host_triggers_using_coven_cleanup_guard_names() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "reserved-cleanup-trigger".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[Migration::sql(
             1,
             "reserved cleanup trigger",
@@ -861,6 +878,7 @@ async fn database_open_rejects_empty_synced_table_name() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "empty-synced-table".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[notes_migration()],
     );
     let error = match result {
@@ -886,6 +904,7 @@ async fn database_open_accepts_normal_host_synced_table() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "normal-synced-table".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[notes_migration()],
     )
     .expect("normal host table opens");
@@ -906,6 +925,7 @@ fn open_contract_error(
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[Migration::sql(1, "contract", migration_sql)],
     );
     match result {
@@ -1078,6 +1098,7 @@ async fn database_open_accepts_strict_synced_table() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "strict-synced-table".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[Migration::sql(
             1,
             "contract",
@@ -1102,6 +1123,7 @@ async fn database_open_ignores_undeclared_non_strict_local_table() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "undeclared-local-table".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[Migration::sql(
             1,
             "contract",

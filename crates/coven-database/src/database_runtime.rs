@@ -226,6 +226,7 @@ impl Database {
         transfer_limits: coven_protocol::blob::TransferLimits,
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
+        coven_migration_policy: CovenMigrationPolicy,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
         let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
@@ -235,6 +236,7 @@ impl Database {
             blob_tombstone_grace,
             transfer_limits,
             Arc::new(hlc),
+            coven_migration_policy,
             migrations,
             CovenMetadataOpen::Detect,
         )
@@ -248,6 +250,7 @@ impl Database {
         transfer_limits: coven_protocol::blob::TransferLimits,
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
+        coven_migration_policy: CovenMigrationPolicy,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
         let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
@@ -257,6 +260,7 @@ impl Database {
             blob_tombstone_grace,
             transfer_limits,
             Arc::new(hlc),
+            coven_migration_policy,
             migrations,
             CovenMetadataOpen::VerifiedSnapshot(install),
         )
@@ -268,6 +272,7 @@ impl Database {
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
+        coven_migration_policy: CovenMigrationPolicy,
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<Database, OpenError> {
@@ -280,6 +285,7 @@ impl Database {
             blob_tombstone_grace,
             transfer_limits,
             hlc,
+            coven_migration_policy,
             migrations,
             metadata_open,
         )
@@ -293,6 +299,7 @@ impl Database {
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
+        coven_migration_policy: CovenMigrationPolicy,
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<Database, OpenError> {
@@ -304,6 +311,7 @@ impl Database {
             blob_tombstone_grace,
             transfer_limits,
             hlc,
+            coven_migration_policy,
             migrations,
             metadata_open,
         )?;
@@ -320,6 +328,7 @@ impl Database {
         transfer_limits: coven_protocol::blob::TransferLimits,
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
+        coven_migration_policy: CovenMigrationPolicy,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
         let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
@@ -330,6 +339,7 @@ impl Database {
             blob_tombstone_grace,
             transfer_limits,
             Arc::new(hlc),
+            coven_migration_policy,
             migrations,
         )
     }
@@ -342,6 +352,7 @@ impl Database {
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
+        coven_migration_policy: CovenMigrationPolicy,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
         Self::open_with_hlc_and_coven_metadata_in_store_dir(
@@ -352,6 +363,7 @@ impl Database {
             blob_tombstone_grace,
             transfer_limits,
             hlc,
+            coven_migration_policy,
             migrations,
             CovenMetadataOpen::Detect,
         )
@@ -429,6 +441,7 @@ impl Database {
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
+        coven_migration_policy: CovenMigrationPolicy,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
         Self::open_with_hlc_and_coven_metadata(
@@ -437,6 +450,7 @@ impl Database {
             blob_tombstone_grace,
             transfer_limits,
             hlc,
+            coven_migration_policy,
             migrations,
             CovenMetadataOpen::Detect,
         )

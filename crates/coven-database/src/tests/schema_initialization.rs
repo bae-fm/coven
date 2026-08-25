@@ -1,5 +1,5 @@
-use crate::Database;
 use crate::Migration;
+use crate::{CovenMigrationPolicy, Database};
 use coven_protocol::synced_schema::RowIdentity;
 use coven_protocol::synced_schema::SyncedTable;
 use rusqlite::Connection;
@@ -25,6 +25,7 @@ fn ordinary_open_rejects_coven_schema_without_initialization_marker() {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "unmarked-schema-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[Migration::sql(
             1,
             "things",

@@ -106,9 +106,18 @@ mod changeset_identity;
 mod circle_operation_records;
 mod cloud_outbox_records;
 mod connection_io;
+mod coven_migration;
 mod coven_schema;
+mod coven_schema_definitions;
 mod database_connection;
 pub(crate) use connection_io::capture_changeset;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use coven_migration::COVEN_SCHEMA_VERSION_STATE_KEY;
+pub(crate) use coven_migration::{
+    initialize_coven_schema_version, run_coven_migrations_in_transaction,
+    run_uninitialized_snapshot_coven_migrations_in_transaction, validate_coven_schema_for_reader,
+};
+pub use coven_migration::{CovenMigrationError, CovenMigrationPolicy};
 #[cfg(test)]
 pub(crate) use coven_schema::all_table_names;
 pub(crate) use coven_schema::{
@@ -739,6 +748,8 @@ where
 /// [`DbError`] string.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
+    #[error(transparent)]
+    CovenMigration(#[from] CovenMigrationError),
     #[error(transparent)]
     Migration(#[from] MigrationError),
     #[error(transparent)]

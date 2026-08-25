@@ -26,13 +26,15 @@ use coven_replication::sync::MemberAdmission;
 
 /// Complete the joining side after scanning the existing device's one pairing
 /// code. The local session returns the invitation sealed to this attempt; the
-/// existing Store transport then performs registration and bootstrap.
+/// existing Store transport then performs registration and bootstrap. The
+/// caller's Coven migration policy controls every writer open during bootstrap.
 #[allow(clippy::too_many_arguments)]
 pub async fn join_with_device_pairing(
     pairing: &crate::joining::PreparedDevicePairing,
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
+    coven_migration_policy: coven_database::CovenMigrationPolicy,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
     transfer_limits: coven_protocol::blob::TransferLimits,
     key_custody: coven_keys::custody::KeyCustody,
@@ -75,6 +77,7 @@ pub async fn join_with_device_pairing(
         layout.clone(),
         synced_tables,
         migrations,
+        coven_migration_policy,
         exact_upload_verification,
         transfer_limits,
         key_custody,
@@ -321,6 +324,7 @@ fn invitation_client(
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
+    coven_migration_policy: coven_database::CovenMigrationPolicy,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
     transfer_limits: coven_protocol::blob::TransferLimits,
     key_custody: coven_keys::custody::KeyCustody,
@@ -339,6 +343,7 @@ fn invitation_client(
         layout,
         synced_tables,
         migrations,
+        coven_migration_policy,
         exact_upload_verification,
         transfer_limits,
         key_custody,
@@ -362,6 +367,7 @@ fn invitation_test_client(
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
+    coven_migration_policy: coven_database::CovenMigrationPolicy,
     clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn coven_storage::cloud::ExactCloudHome>,
 ) -> Result<DeviceJoinClient, BootstrapError> {
@@ -371,6 +377,7 @@ fn invitation_test_client(
         layout,
         synced_tables,
         migrations,
+        coven_migration_policy,
         coven_foundation::config::ExactUploadVerification::MetadataHash,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
@@ -391,6 +398,7 @@ pub async fn join_with_device_pairing_over_test_home(
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
+    coven_migration_policy: coven_database::CovenMigrationPolicy,
     clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn coven_storage::cloud::ExactCloudHome>,
     timing: DeviceJoinTransportTiming,
@@ -423,6 +431,7 @@ pub async fn join_with_device_pairing_over_test_home(
         layout.clone(),
         synced_tables,
         migrations,
+        coven_migration_policy,
         clock,
         home,
     )?;

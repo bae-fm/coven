@@ -32,6 +32,7 @@ fn database() -> coven_database::StoreDatabase {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "status-test".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        coven_database::CovenMigrationPolicy::ApplyPending,
         &[],
     )
     .expect("open status test database");

@@ -77,6 +77,7 @@ shared root secret and never reused across stores.
 Coven::builder(store_dir, config)
     .key_custody(coven::KeyCustody::Keyring)   // the default
     .synced_tables(tables)
+    .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
     .migrations(migrations)
     .open()?;
 ```
@@ -102,6 +103,7 @@ builder, with
 Coven::builder(store_dir, config)
     .identity_custody(coven::IdentityCustody::Keyring)   // the default
     .synced_tables(tables)
+    .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
     .migrations(migrations)
     .open()?;
 ```

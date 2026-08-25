@@ -605,6 +605,7 @@ mod tests {
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "liveness".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            CovenMigrationPolicy::ApplyPending,
             &[],
         )
         .expect("open database");
@@ -650,6 +651,7 @@ mod tests {
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "drop-async".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            CovenMigrationPolicy::ApplyPending,
             &[],
         )
         .expect("open");

@@ -1151,6 +1151,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
             "restored-snapshot-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             None,
         )
         .await

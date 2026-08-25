@@ -51,6 +51,32 @@ impl DatabaseImageTest {
         crate::apply_coven_schema(&self.connection).map_err(DbError::from)
     }
 
+    pub fn downgrade_coven_schema_to_v0(&self, include_routing: bool) -> Result<(), DbError> {
+        crate::coven_schema::downgrade_coven_schema_to_v0_for_test(
+            &self.connection,
+            include_routing,
+        )
+    }
+
+    pub fn validate_uninitialized_coven_schema_v0(
+        &self,
+        include_routing: bool,
+    ) -> Result<(), crate::CovenMigrationError> {
+        crate::coven_migration::validate_uninitialized_coven_schema_v0_for_test(
+            &self.connection,
+            include_routing,
+        )
+    }
+
+    pub fn validate_current_initialized_coven_schema(
+        &self,
+        include_routing: bool,
+    ) -> Result<(), crate::OpenError> {
+        crate::database_open::load_coven_metadata(&self.connection)?;
+        crate::validate_coven_schema_for_reader(&self.connection, include_routing)?;
+        Ok(())
+    }
+
     pub fn payload(
         &self,
         store_dir: &coven_foundation::store_dir::StoreDir,

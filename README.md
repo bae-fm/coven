@@ -24,7 +24,7 @@ Open a store, declaring the tables that sync and the migration ladder that
 builds your schema. Tables you don't declare stay local to the device.
 
 ```rust
-use coven::{Coven, Migration, RowIdentity, SyncedTable};
+use coven::{Coven, CovenMigrationPolicy, Migration, RowIdentity, SyncedTable};
 
 let handle = Coven::builder(store_dir, config)
     .synced_tables(vec![
@@ -32,9 +32,15 @@ let handle = Coven::builder(store_dir, config)
         SyncedTable::new("photos", RowIdentity::IndependentUuid)
             .carries_blob(photo_blob_decl),
     ])
+    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
     .open()?;
 ```
+
+Every writer makes that policy choice explicitly. `ApplyPending` authorizes
+Coven to advance its own bookkeeping-schema ladder before the host ladder;
+`RefusePending` opens only when no Coven migration is pending. Read-only opens
+never authorize migration and always refuse pending Coven schema changes.
 
 `(table, id)` identifies one logical row across every device. Independently
 created rows use canonical UUIDv4 or UUIDv7 ids; `RowIdentity::SharedKey` is for

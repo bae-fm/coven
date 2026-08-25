@@ -71,6 +71,7 @@ fn open_performs_no_keyring_interaction_for_either_custody() {
             "notes",
             coven::RowIdentity::SharedKey,
         )])
+        .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
         .migrations(vec![notes_migration()])
         .open()
         .expect("open must succeed while performing no keyring credential build");
@@ -87,6 +88,7 @@ fn open_performs_no_keyring_interaction_for_either_custody() {
             "notes",
             coven::RowIdentity::IndependentUuid,
         )])
+        .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
         .migrations(vec![notes_migration()])
         .open();
     let error = match invalid {

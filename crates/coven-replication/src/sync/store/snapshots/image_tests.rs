@@ -495,6 +495,7 @@ impl PublishedScopedSnapshot {
                 "joining-device".to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
+                coven_database::CovenMigrationPolicy::ApplyPending,
                 Some(&routing),
             )
             .await
@@ -965,6 +966,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
             "joining-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &target_migrations,
+            coven_database::CovenMigrationPolicy::ApplyPending,
             Some(&routing),
         )
         .await
@@ -1205,6 +1207,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
                 "joining-device".to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
+                coven_database::CovenMigrationPolicy::ApplyPending,
                 None,
             )
             .await

@@ -33,6 +33,7 @@ async fn join_eager_fixture(fixture: &FacadeFixture) -> coven_foundation::config
         fixture.layout.clone(),
         fixture.tables.clone(),
         test_migrations(),
+        crate::CovenMigrationPolicy::ApplyPending,
         Arc::new(crate::SystemClock),
         fixture.home.clone(),
         timing(),
@@ -89,6 +90,7 @@ async fn run_eager_artwork_fills_only_after_the_joined_library_opens() {
     let joined_store_dir = fixture.layout.store_dir(store_id);
     let joined_handle = crate::Coven::builder(joined_store_dir.clone(), config)
         .synced_tables(fixture.tables.clone())
+        .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
         .migrations(test_migrations())
         .open()
         .expect("open joined library");
@@ -220,6 +222,7 @@ async fn run_eager_artwork_can_be_cancelled_without_stopping_sync() {
 
     let joined_handle = crate::Coven::builder(fixture.layout.store_dir(store_id), config)
         .synced_tables(fixture.tables.clone())
+        .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
         .migrations(test_migrations())
         .open()
         .expect("open joined library");
@@ -279,6 +282,7 @@ async fn run_stopping_sync_cancels_the_post_open_eager_fill() {
 
     let joined_handle = crate::Coven::builder(fixture.layout.store_dir(store_id), config)
         .synced_tables(fixture.tables.clone())
+        .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
         .migrations(test_migrations())
         .open()
         .expect("open joined library");
@@ -372,6 +376,7 @@ async fn run_eager_artwork_arriving_after_open_still_fills() {
     let joined_store_dir = fixture.layout.store_dir(store_id);
     let joined_handle = crate::Coven::builder(joined_store_dir.clone(), config)
         .synced_tables(fixture.tables.clone())
+        .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
         .migrations(test_migrations())
         .open()
         .expect("open joined library");

@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use tracing::info;
 
 use crate::joining::{build_config, derive_credentials, BootstrapCleanup, BootstrapError};
-use coven_database::Migration;
+use coven_database::{CovenMigrationPolicy, Migration};
 use coven_foundation::config::{Config, HomeStorage};
 use coven_foundation::store_dir::StoreLayout;
 use coven_keys::custody::KeyCustody;
@@ -208,7 +208,8 @@ impl RestoreSource {
 /// protocol, and sets the store as active. `keypair` is the restored device's
 /// signing identity (recovered from the restore code); the storage signs the
 /// control objects it writes with it, and it is the same key the caller imports
-/// once restore succeeds.
+/// once restore succeeds. The caller's Coven migration policy controls every
+/// writer open while installing the restored database.
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_from_cloud(
     store_id: &str,
@@ -217,6 +218,7 @@ pub async fn restore_from_cloud(
     store_name: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
+    coven_migration_policy: CovenMigrationPolicy,
     transfer_limits: coven_protocol::blob::TransferLimits,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
@@ -384,6 +386,7 @@ pub async fn restore_from_cloud(
                 device_id.clone(),
                 clock.clone(),
                 migrations,
+                coven_migration_policy,
                 routing_encryption.as_ref(),
             )
             .await?;
@@ -441,12 +444,14 @@ pub async fn restore_from_cloud(
 ///
 /// Decodes the restore code, fills a `RestoreSource` from its join info plus
 /// the caller-supplied OAuth tokens and CloudKit driver, imports the signing
-/// key, and delegates to `restore_from_cloud`.
+/// key, and delegates to `restore_from_cloud` with the caller's Coven migration
+/// policy unchanged.
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_from_code(
     code: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
+    coven_migration_policy: CovenMigrationPolicy,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
     transfer_limits: coven_protocol::blob::TransferLimits,
     key_custody: KeyCustody,
@@ -525,6 +530,7 @@ pub async fn restore_from_code(
         &parsed.name,
         synced_tables,
         migrations,
+        coven_migration_policy,
         transfer_limits,
         key_custody,
         identity_custody,

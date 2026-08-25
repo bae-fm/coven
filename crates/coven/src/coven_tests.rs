@@ -30,6 +30,28 @@ fn builder(dir: StoreDir) -> CovenBuilder {
             "Test".to_string(),
         ),
     )
+    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
+}
+
+#[test]
+fn writer_builder_requires_coven_migration_policy() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let error = match Coven::builder(
+        StoreDir::new_ephemeral(tmp.path()),
+        Config::with_defaults(
+            "missing-coven-policy".to_string(),
+            "device-test".to_string(),
+            "Test".to_string(),
+        ),
+    )
+    .synced_tables(vec![gated_roots_table()])
+    .migrations(vec![gated_roots_migration()])
+    .open()
+    {
+        Ok(_) => panic!("writer open must require a Coven migration policy"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, CovenError::MissingCovenMigrationPolicy));
 }
 
 async fn query_handle_text(handle: &CovenHandle, sql: &str) -> String {
@@ -2781,6 +2803,7 @@ async fn lock_is_held_until_the_sync_loop_exits_its_cycle() {
             "Test".to_string(),
         ),
     )
+    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .synced_tables(vec![files_table()])
     .migrations(vec![files_migration()])
     .key_custody(crate::KeyCustody::InMemory(encryption.clone().into()))
@@ -2852,6 +2875,7 @@ async fn normal_shutdown_releases_the_lock_for_reopen() {
             "Test".to_string(),
         ),
     )
+    .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .synced_tables(vec![files_table()])
     .migrations(vec![files_migration()])
     .key_custody(crate::KeyCustody::InMemory(encryption.clone().into()))

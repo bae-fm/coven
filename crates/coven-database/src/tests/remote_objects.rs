@@ -24,6 +24,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
             )
             .expect("create test register clock"),
         ),
+        CovenMigrationPolicy::ApplyPending,
         &[],
     )
     .expect("open database");

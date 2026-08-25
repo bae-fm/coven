@@ -8,8 +8,8 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use coven_database::supported_version;
-use coven_database::Database;
 use coven_database::Migration;
+use coven_database::{CovenMigrationPolicy, Database};
 #[cfg(feature = "oauth-providers")]
 use coven_foundation::config::CloudProvider;
 use coven_foundation::config::{Config, ConfigError, HomeStorage};
@@ -478,6 +478,7 @@ pub(crate) struct DeviceJoinClient {
     layout: StoreLayout,
     synced_tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
+    coven_migration_policy: CovenMigrationPolicy,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
     transfer_limits: coven_protocol::blob::TransferLimits,
     store_keys: StoreKeys,
@@ -508,6 +509,7 @@ impl DeviceJoinClient {
         layout: StoreLayout,
         synced_tables: Vec<SyncedTable>,
         migrations: Vec<Migration>,
+        coven_migration_policy: CovenMigrationPolicy,
         exact_upload_verification: coven_foundation::config::ExactUploadVerification,
         transfer_limits: coven_protocol::blob::TransferLimits,
         key_custody: coven_keys::custody::KeyCustody,
@@ -536,6 +538,7 @@ impl DeviceJoinClient {
             layout,
             synced_tables,
             migrations,
+            coven_migration_policy,
             exact_upload_verification,
             transfer_limits,
             store_keys,
@@ -795,6 +798,7 @@ impl DeviceJoinClient {
                     device_id,
                     self.clock.clone(),
                     &self.migrations,
+                    self.coven_migration_policy,
                     Some(&routing_encryption),
                 ),
             )
@@ -879,6 +883,7 @@ impl DeviceJoinClient {
             self.transfer_limits,
             device_id.clone(),
             self.clock.clone(),
+            self.coven_migration_policy,
             &self.migrations,
         )?;
         let database = coven_database::StoreDatabase::from_database(db.clone());
@@ -1031,6 +1036,7 @@ impl DeviceJoinClient {
                     device_id.clone(),
                     self.clock.clone(),
                     &self.migrations,
+                    self.coven_migration_policy,
                     &routing_encryption,
                 )
             })

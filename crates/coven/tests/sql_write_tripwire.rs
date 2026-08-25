@@ -11,6 +11,7 @@ async fn read_on_write_path_is_rejected_after_payload_spooling() {
     );
     let handle = Coven::builder(store_dir, config)
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
+        .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
         .migrations(vec![Migration::sql(
             1,
             "notes",
@@ -47,6 +48,7 @@ async fn no_op_update_is_still_a_write() {
     );
     let handle = Coven::builder(store_dir, config)
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
+        .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
         .migrations(vec![Migration::sql(
             1,
             "notes",

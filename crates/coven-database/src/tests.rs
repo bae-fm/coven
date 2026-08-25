@@ -1,3 +1,5 @@
+#[path = "tests/coven_migration.rs"]
+mod coven_migration;
 #[path = "tests/fixtures.rs"]
 mod fixtures;
 #[path = "tests/history.rs"]

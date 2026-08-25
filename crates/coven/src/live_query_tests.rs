@@ -84,6 +84,7 @@ fn open_handle() -> (tempfile::TempDir, crate::CovenHandle) {
             "Test Store".to_string(),
         ),
     )
+    .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
     .synced_tables(vec![SyncedTable::new(
         "notes",
         RowIdentity::IndependentUuid,

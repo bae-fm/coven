@@ -56,6 +56,7 @@ fn initialize_coven_metadata_on(
         (COVEN_SCHEMA_MANIFEST_STATE_KEY, schema_manifest),
     )
     .map_err(DbError::from)?;
+    initialize_coven_schema_version(conn)?;
     conn.execute(
         "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
         (
@@ -179,6 +180,7 @@ impl DatabaseCore {
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
+        coven_migration_policy: CovenMigrationPolicy,
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<Self, OpenError> {
@@ -220,14 +222,21 @@ impl DatabaseCore {
         let pinned_routing_contract = initialized
             .then(|| load_coven_metadata(&conn))
             .transpose()?;
-        if let Some(pinned) = &pinned_routing_contract {
-            validate_initialized_coven_schema(&conn, pinned.has_scoped_graph())?;
-        }
         let (schema_version, sync_routing_contract, gates, blob_decls) = {
             let tx = conn.transaction().map_err(DbError::from)?;
             let outcome = (|| -> Result<_, OpenError> {
-                let schema_version =
-                    timings.mark("migrate", || run_migrations_in_transaction(&tx, migrations))?;
+                if let Some(pinned) = &pinned_routing_contract {
+                    timings.mark("migrate Coven schema", || {
+                        run_coven_migrations_in_transaction(
+                            &tx,
+                            pinned.has_scoped_graph(),
+                            coven_migration_policy,
+                        )
+                    })?;
+                }
+                let schema_version = timings.mark("migrate host schema", || {
+                    run_migrations_in_transaction(&tx, migrations)
+                })?;
 
                 // The host ladder and routing validation share this transaction.
                 // A pending migration that changes confidentiality topology cannot
@@ -242,15 +251,33 @@ impl DatabaseCore {
                     timings.mark("resolve the host tables", || {
                         let resolved = SyncRoutingContract::from_connection(&tx, &synced_tables)
                             .map_err(DbError::from)?;
-                        if let Some(pinned) = &pinned_routing_contract {
-                            validate_sync_routing_contract(pinned, &resolved)?;
-                            validate_initialized_coven_schema(&tx, resolved.has_scoped_graph())?;
-                        } else {
-                            initialize_coven_metadata_on(
-                                &tx,
-                                &resolved,
-                                resolved.has_scoped_graph(),
-                            )?;
+                        match (&pinned_routing_contract, &metadata_open) {
+                            (Some(pinned), _) => {
+                                validate_sync_routing_contract(pinned, &resolved)?;
+                                validate_initialized_coven_schema(
+                                    &tx,
+                                    resolved.has_scoped_graph(),
+                                )?;
+                            }
+                            (None, CovenMetadataOpen::VerifiedSnapshot(_)) => {
+                                run_uninitialized_snapshot_coven_migrations_in_transaction(
+                                    &tx,
+                                    resolved.has_scoped_graph(),
+                                    coven_migration_policy,
+                                )?;
+                                initialize_coven_metadata_on(
+                                    &tx,
+                                    &resolved,
+                                    resolved.has_scoped_graph(),
+                                )?;
+                            }
+                            (None, CovenMetadataOpen::Detect) => {
+                                initialize_coven_metadata_on(
+                                    &tx,
+                                    &resolved,
+                                    resolved.has_scoped_graph(),
+                                )?;
+                            }
                         }
                         pin_host_device_id_on(&tx, hlc.device_id(), initialized)?;
                         let gates =
@@ -380,7 +407,7 @@ impl DatabaseCore {
         // open rather than mid-read.
         validate_host_synced_tables(&conn, &synced_tables)?;
         let pinned_routing_contract = load_coven_metadata(&conn)?;
-        validate_initialized_coven_schema(&conn, pinned_routing_contract.has_scoped_graph())?;
+        validate_coven_schema_for_reader(&conn, pinned_routing_contract.has_scoped_graph())?;
         validate_host_device_id_on(&conn, hlc.device_id())?;
         let sync_routing_contract =
             SyncRoutingContract::from_connection(&conn, &synced_tables).map_err(DbError::from)?;

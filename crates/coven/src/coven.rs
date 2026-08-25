@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::handle::CovenHandle;
 use crate::store_sync::ConfigProvider;
 use crate::{Migration, MigrationError};
-use coven_database::{Database, DbError, OpenError};
+use coven_database::{CovenMigrationPolicy, Database, DbError, OpenError};
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::config::{Config, HomeStorage};
 use coven_foundation::store_dir::{LocalBlobStoreError, PathTokenError};
@@ -27,6 +27,8 @@ pub enum CovenError {
     Database(#[source] Box<DbError>),
     #[error("migration error: {0}")]
     Migration(MigrationError),
+    #[error("Coven schema migration error: {0}")]
+    CovenMigration(coven_database::CovenMigrationError),
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("file error: {0}")]
@@ -61,6 +63,8 @@ pub enum CovenError {
     MissingSyncedTables,
     #[error("migrations must be set before opening a coven store")]
     MissingMigrations,
+    #[error("coven_migration_policy must be set before opening a coven store for writing")]
+    MissingCovenMigrationPolicy,
     #[error("candidate resolution failed: {0}")]
     CandidateResolution(Box<coven_replication::sync::SyncError>),
     #[error("blob declaration failed: {0}")]
@@ -93,6 +97,7 @@ impl From<DbError> for CovenError {
 impl From<OpenError> for CovenError {
     fn from(value: OpenError) -> Self {
         match value {
+            OpenError::CovenMigration(e) => CovenError::CovenMigration(e),
             OpenError::Migration(e) => CovenError::Migration(e),
             OpenError::Db(e) => CovenError::from(e),
         }
@@ -156,6 +161,7 @@ impl Coven {
             config,
             synced_tables: None,
             migrations: None,
+            coven_migration_policy: None,
             blob_tombstone_grace: coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             max_concurrent_uploads: NonZeroUsize::MIN,
             max_concurrent_downloads: NonZeroUsize::MIN,
@@ -185,6 +191,7 @@ pub struct CovenBuilder {
     config: CovenConfig,
     synced_tables: Option<Vec<SyncedTable>>,
     migrations: Option<Vec<Migration>>,
+    coven_migration_policy: Option<CovenMigrationPolicy>,
     blob_tombstone_grace: chrono::Duration,
     max_concurrent_uploads: NonZeroUsize,
     max_concurrent_downloads: NonZeroUsize,
@@ -252,6 +259,13 @@ impl CovenBuilder {
         self
     }
 
+    /// Whether this writer may apply pending changes to Coven's own
+    /// bookkeeping schema while opening the store.
+    pub fn coven_migration_policy(mut self, policy: CovenMigrationPolicy) -> Self {
+        self.coven_migration_policy = Some(policy);
+        self
+    }
+
     pub fn clock(mut self, clock: ClockRef) -> Self {
         self.clock = clock;
         self
@@ -312,6 +326,9 @@ impl CovenBuilder {
         let config = self.config.current();
         let tables = validated_synced_tables(&config, self.synced_tables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
+        let coven_migration_policy = self
+            .coven_migration_policy
+            .ok_or(CovenError::MissingCovenMigrationPolicy)?;
         if self.blob_tombstone_grace <= chrono::Duration::zero() {
             return Err(CovenError::InvalidBlobTombstoneGrace);
         }
@@ -331,6 +348,7 @@ impl CovenBuilder {
             transfer_limits,
             config.device_id.clone(),
             self.clock.clone(),
+            coven_migration_policy,
             &migrations,
         )?;
         // A second, read-only connection on the same database, opened after the
@@ -376,11 +394,10 @@ impl CovenBuilder {
     /// Unlike [`open`](Self::open) this takes no store lock (see
     /// `StoreOpenGuard`): it succeeds while a writer holds the exclusive lock,
     /// and any number of read-only opens coexist. It opens a `SQLITE_OPEN_READONLY`
-    /// connection against the schema on disk, running no migration ladder — but it
-    /// refuses a db a newer binary migrated past what this binary supports
-    /// ([`CovenError::Migration`] with [`MigrationError::SchemaTooNew`]), the same
-    /// policy the writer enforces. It runs no orphan-temp cleanup either (that is a
-    /// write the lock-holding writer owns).
+    /// connection against the schema on disk and runs no migration ladder. It
+    /// refuses pending changes to Coven's bookkeeping schema and host schemas
+    /// newer than this binary supports. It runs no orphan-temp cleanup either
+    /// (that is a write the lock-holding writer owns).
     ///
     /// SQLite's locking coordinates the read-only connection with the writer; a
     /// blob read that misses locally fetches from the cloud into the per-device

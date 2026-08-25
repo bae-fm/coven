@@ -9,6 +9,10 @@
 //! runs against the connection it owns during open. The host does not implement
 //! any of this; app SQL goes through `CovenHandle::write` or `CovenHandle::read`.
 
+use crate::coven_schema_definitions::{
+    BLOB_MAKE_REMOTE_INTENTS_COLUMNS, BLOB_MAKE_REMOTE_INTENTS_V0_COLUMNS, CLOUD_OUTBOX_COLUMNS,
+    CLOUD_OUTBOX_V0_COLUMNS, OBJECT_OWNERSHIP_TRIGGERS,
+};
 use crate::{query_mapped_rows, DbError};
 
 macro_rules! coven_tables {
@@ -123,59 +127,8 @@ macro_rules! coven_tables {
     PRIMARY KEY (table_name, row_id, column_name, row_stamp)
 "
         );
-        $visit!(
-            cloud_outbox,
-            "
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    operation TEXT NOT NULL CHECK (operation IN ('upload', 'delete')),
-    table_name TEXT,
-    row_id TEXT,
-    column_name TEXT,
-    row_stamp TEXT,
-    root_table TEXT,
-    root_id TEXT,
-    root_label TEXT,
-    row_ref TEXT CHECK (row_ref IS NULL OR json_valid(row_ref)),
-    upload_state TEXT CHECK (upload_state IS NULL OR json_valid(upload_state)),
-    stored_ref TEXT CHECK (stored_ref IS NULL OR json_valid(stored_ref)),
-    source_path TEXT,
-    retain_pinned INTEGER CHECK (retain_pinned IS NULL OR retain_pinned IN (0, 1)),
-    created_at TEXT NOT NULL,
-    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-    last_error TEXT,
-    last_attempt_at TEXT,
-    CHECK (
-        (operation = 'upload' AND table_name IS NOT NULL AND row_id IS NOT NULL
-         AND column_name IS NOT NULL AND row_stamp IS NOT NULL
-         AND root_table IS NOT NULL AND root_id IS NOT NULL AND root_label IS NOT NULL
-         AND row_ref IS NOT NULL
-         AND stored_ref IS NULL AND source_path IS NOT NULL AND retain_pinned IS NOT NULL
-         AND upload_state IS NOT NULL)
-        OR
-        (operation = 'delete' AND table_name IS NULL AND row_id IS NULL
-         AND column_name IS NULL AND row_stamp IS NULL
-         AND root_table IS NULL AND root_id IS NULL AND root_label IS NULL
-         AND row_ref IS NULL
-         AND stored_ref IS NOT NULL AND source_path IS NULL AND retain_pinned IS NULL
-         AND upload_state IS NULL)
-    ),
-    UNIQUE (operation, table_name, row_id, column_name, row_stamp),
-    UNIQUE (stored_ref)
-"
-        );
-        $visit!(
-            blob_make_remote_intents,
-            "
-    root_table TEXT NOT NULL,
-    root_id TEXT NOT NULL,
-    root_label TEXT NOT NULL,
-    retain_pinned INTEGER NOT NULL CHECK (retain_pinned IN (0, 1)),
-    state TEXT NOT NULL CHECK (state IN ('uploading', 'cancelling', 'publishing')),
-    write_id TEXT UNIQUE,
-    CHECK ((state = 'publishing') = (write_id IS NOT NULL)),
-    PRIMARY KEY (root_table, root_id)
-"
-        );
+        $visit!(cloud_outbox, CLOUD_OUTBOX_COLUMNS);
+        $visit!(blob_make_remote_intents, BLOB_MAKE_REMOTE_INTENTS_COLUMNS);
         $visit!(
             local_cleanup_intents,
             "
@@ -668,93 +621,6 @@ macro_rules! coven_routing_tables {
     };
 }
 
-const OBJECT_OWNERSHIP_TRIGGERS: &str = "
-CREATE TRIGGER IF NOT EXISTS remote_object_identity_must_not_be_inert_on_insert
-BEFORE INSERT ON remote_objects
-WHEN EXISTS (
-    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'remote object identity is protocol-inert');
-END;
-CREATE TRIGGER IF NOT EXISTS remote_object_identity_must_not_be_inert_on_update
-BEFORE UPDATE OF object_id ON remote_objects
-WHEN EXISTS (
-    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'remote object identity is protocol-inert');
-END;
-CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_remote_on_insert
-BEFORE INSERT ON protocol_inert_objects
-WHEN EXISTS (
-    SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'protocol-inert object identity has active ownership');
-END;
-CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_remote_on_update
-BEFORE UPDATE OF object_id ON protocol_inert_objects
-WHEN EXISTS (
-    SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'protocol-inert object identity has active ownership');
-END;
-CREATE TRIGGER IF NOT EXISTS remote_object_identity_must_not_be_reclaimed_on_insert
-BEFORE INSERT ON remote_objects
-WHEN EXISTS (
-    SELECT 1 FROM reclaimed_store_packages WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'remote object identity is a reclaimed Store package');
-END;
-CREATE TRIGGER IF NOT EXISTS remote_object_identity_must_not_be_reclaimed_on_update
-BEFORE UPDATE OF object_id ON remote_objects
-WHEN EXISTS (
-    SELECT 1 FROM reclaimed_store_packages WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'remote object identity is a reclaimed Store package');
-END;
-CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_reclaimed_on_insert
-BEFORE INSERT ON protocol_inert_objects
-WHEN EXISTS (
-    SELECT 1 FROM reclaimed_store_packages WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'protocol-inert object identity is a reclaimed Store package');
-END;
-CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_reclaimed_on_update
-BEFORE UPDATE OF object_id ON protocol_inert_objects
-WHEN EXISTS (
-    SELECT 1 FROM reclaimed_store_packages WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'protocol-inert object identity is a reclaimed Store package');
-END;
-CREATE TRIGGER IF NOT EXISTS reclaimed_store_package_identity_must_be_closed_on_insert
-BEFORE INSERT ON reclaimed_store_packages
-WHEN EXISTS (
-    SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
-    UNION ALL
-    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'reclaimed Store package identity has another ownership state');
-END;
-CREATE TRIGGER IF NOT EXISTS reclaimed_store_package_identity_must_be_closed_on_update
-BEFORE UPDATE OF object_id ON reclaimed_store_packages
-WHEN EXISTS (
-    SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
-    UNION ALL
-    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'reclaimed Store package identity has another ownership state');
-END;
-";
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CovenSchemaManifest {
@@ -857,7 +723,7 @@ fn normalize_schema_sql(sql: &str) -> String {
 fn all_coven_table_names() -> std::collections::BTreeSet<&'static str> {
     let mut names = std::collections::BTreeSet::new();
     macro_rules! collect_name {
-        ($name:ident, $columns:literal) => {
+        ($name:ident, $columns:expr) => {
             names.insert(stringify!($name));
         };
     }
@@ -939,11 +805,39 @@ fn build_expected_coven_schema_manifest(
     live_coven_schema_manifest(&conn)
 }
 
+fn recreate_table(conn: &rusqlite::Connection, table: &str, columns: &str) -> rusqlite::Result<()> {
+    conn.execute_batch(&format!(
+        "DROP TABLE {table}; CREATE TABLE {table} ({columns}) STRICT;"
+    ))
+}
+
+fn build_expected_coven_schema_v0_manifest(
+    include_routing: bool,
+) -> rusqlite::Result<CovenSchemaManifest> {
+    let conn = rusqlite::Connection::open_in_memory()?;
+    apply_coven_schema(&conn)?;
+    if include_routing {
+        apply_coven_routing_schema(&conn)?;
+    }
+    recreate_table(&conn, "cloud_outbox", CLOUD_OUTBOX_V0_COLUMNS)?;
+    recreate_table(
+        &conn,
+        "blob_make_remote_intents",
+        BLOB_MAKE_REMOTE_INTENTS_V0_COLUMNS,
+    )?;
+    live_coven_schema_manifest(&conn)
+}
+
 static EXPECTED_COVEN_SCHEMA: std::sync::LazyLock<Result<CovenSchemaManifest, rusqlite::Error>> =
     std::sync::LazyLock::new(|| build_expected_coven_schema_manifest(false));
 static EXPECTED_ROUTED_COVEN_SCHEMA: std::sync::LazyLock<
     Result<CovenSchemaManifest, rusqlite::Error>,
 > = std::sync::LazyLock::new(|| build_expected_coven_schema_manifest(true));
+static EXPECTED_COVEN_SCHEMA_V0: std::sync::LazyLock<Result<CovenSchemaManifest, rusqlite::Error>> =
+    std::sync::LazyLock::new(|| build_expected_coven_schema_v0_manifest(false));
+static EXPECTED_ROUTED_COVEN_SCHEMA_V0: std::sync::LazyLock<
+    Result<CovenSchemaManifest, rusqlite::Error>,
+> = std::sync::LazyLock::new(|| build_expected_coven_schema_v0_manifest(true));
 
 pub fn expected_coven_schema_manifest(
     include_routing: bool,
@@ -956,19 +850,67 @@ pub fn expected_coven_schema_manifest(
     expected.as_ref().map_err(DbError::ExpectedSchema)
 }
 
+pub(crate) fn expected_coven_schema_v0_manifest(
+    include_routing: bool,
+) -> Result<&'static CovenSchemaManifest, DbError> {
+    let expected = if include_routing {
+        &*EXPECTED_ROUTED_COVEN_SCHEMA_V0
+    } else {
+        &*EXPECTED_COVEN_SCHEMA_V0
+    };
+    expected.as_ref().map_err(DbError::ExpectedSchema)
+}
+
+pub(crate) fn recreate_current_transition_tables(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<()> {
+    recreate_table(conn, "cloud_outbox", CLOUD_OUTBOX_COLUMNS)?;
+    recreate_table(
+        conn,
+        "blob_make_remote_intents",
+        BLOB_MAKE_REMOTE_INTENTS_COLUMNS,
+    )
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn downgrade_coven_schema_to_v0_for_test(
+    conn: &rusqlite::Connection,
+    include_routing: bool,
+) -> Result<(), DbError> {
+    let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+    recreate_table(&tx, "cloud_outbox", CLOUD_OUTBOX_V0_COLUMNS).map_err(DbError::from)?;
+    recreate_table(
+        &tx,
+        "blob_make_remote_intents",
+        BLOB_MAKE_REMOTE_INTENTS_V0_COLUMNS,
+    )
+    .map_err(DbError::from)?;
+    let manifest = serde_json::to_string(expected_coven_schema_v0_manifest(include_routing)?)
+        .map_err(DbError::from)?;
+    tx.execute(
+        "UPDATE protocol_state SET value = ?2 WHERE key = ?1",
+        (crate::COVEN_SCHEMA_MANIFEST_STATE_KEY, manifest),
+    )
+    .map_err(DbError::from)?;
+    tx.execute(
+        "DELETE FROM protocol_state WHERE key = ?1",
+        [crate::COVEN_SCHEMA_VERSION_STATE_KEY],
+    )
+    .map_err(DbError::from)?;
+    tx.commit().map_err(DbError::from)
+}
+
 /// Creates Coven's bookkeeping tables after the fresh host schema has passed
 /// sync-routing validation, inside the same open transaction. Idempotent (`IF
 /// NOT EXISTS`). STRICT: every column here is already TEXT/INTEGER/BLOB, so
 /// STRICT only forecloses a future column drifting off its declared affinity.
 pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     macro_rules! apply_table {
-        ($name:ident, $columns:literal) => {
-            conn.execute_batch(concat!(
-                "CREATE TABLE IF NOT EXISTS ",
+        ($name:ident, $columns:expr) => {
+            conn.execute_batch(&format!(
+                "CREATE TABLE IF NOT EXISTS {} ({}) STRICT;",
                 stringify!($name),
-                " (",
                 $columns,
-                ") STRICT;"
             ))?;
         };
     }
@@ -983,13 +925,11 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
 /// shape before committing initialization.
 pub(crate) fn apply_coven_routing_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     macro_rules! apply_table {
-        ($name:ident, $columns:literal) => {
-            conn.execute_batch(concat!(
-                "CREATE TABLE IF NOT EXISTS ",
+        ($name:ident, $columns:expr) => {
+            conn.execute_batch(&format!(
+                "CREATE TABLE IF NOT EXISTS {} ({}) STRICT, WITHOUT ROWID;",
                 stringify!($name),
-                " (",
                 $columns,
-                ") STRICT, WITHOUT ROWID;"
             ))?;
         };
     }
@@ -1002,7 +942,7 @@ pub(crate) fn apply_coven_routing_schema(conn: &rusqlite::Connection) -> rusqlit
 /// declare these as synced tables.
 pub fn is_reserved_table_name(name: &str) -> bool {
     macro_rules! matches_table {
-        ($table:ident, $columns:literal) => {
+        ($table:ident, $columns:expr) => {
             if name == stringify!($table) {
                 return true;
             }
@@ -1036,7 +976,7 @@ pub(crate) fn user_table_names(conn: &rusqlite::Connection) -> rusqlite::Result<
 pub(crate) fn table_names() -> Vec<&'static str> {
     let mut names = Vec::new();
     macro_rules! collect_name {
-        ($name:ident, $columns:literal) => {
+        ($name:ident, $columns:expr) => {
             names.push(stringify!($name));
         };
     }

@@ -42,6 +42,7 @@ fn builder_rejects_browsable_storage_with_scoped_tables() {
     let store_dir = StoreDir::new_ephemeral(temp.path());
     let result = Coven::builder(store_dir.clone(), config(HomeStorage::Browsable))
         .synced_tables(tables())
+        .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
         .migrations(migrations())
         .open();
 
@@ -66,6 +67,7 @@ fn opaque_storage_accepts_scoped_tables() {
     let store_dir = StoreDir::new_ephemeral(temp.path());
     let handle = Coven::builder(store_dir, config(HomeStorage::Opaque))
         .synced_tables(tables())
+        .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
         .migrations(migrations())
         .open()
         .expect("opaque storage accepts scoped tables");

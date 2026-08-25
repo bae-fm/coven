@@ -624,6 +624,7 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
                 "post-snapshot-joining-device".to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
+                coven_database::CovenMigrationPolicy::ApplyPending,
                 None,
             )
             .await
@@ -2026,6 +2027,7 @@ impl<'storage> PublishedExclusionSnapshot<'storage> {
                 device_id,
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
+                coven_database::CovenMigrationPolicy::ApplyPending,
                 None,
             )
             .await

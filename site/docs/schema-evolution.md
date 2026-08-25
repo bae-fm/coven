@@ -35,12 +35,14 @@ not of whichever binary happens to open it. That is what the ladder over
 
 The host passes an ordered ladder of
 [`Migration`](rustdoc:struct:coven::Migration)s to the builder;
-Coven applies it over `PRAGMA user_version` at every open, after installing or
-verifying its one current internal schema:
+Coven applies it over `PRAGMA user_version` at every writer open. The host also
+chooses whether that writer may advance Coven's separate bookkeeping-schema
+ladder:
 
 ```rust
 let handle = Coven::builder(store_dir, config)
     .synced_tables(synced_tables)
+    .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
     .migrations(vec![
         Migration::sql(1, "initial", include_str!("migrations/0001_initial.sql")),
         Migration::sql(2, "add_due_date", include_str!("migrations/0002_add_due_date.sql")),
@@ -62,7 +64,7 @@ let handle = Coven::builder(store_dir, config)
 <line class="arrd" x1="484" y1="63" x2="524" y2="63" marker-end="url(#fam)"/>
 <rect class="chipo" x="528" y="48" width="118" height="30" rx="7"/>
 <text class="lbl s11" x="587" y="67" text-anchor="middle">wire version 2</text>
-<text class="sub" x="330" y="112" text-anchor="middle">each rung runs in its own transaction with the version bump: a failed step rolls back whole</text>
+<text class="sub" x="330" y="112" text-anchor="middle">all pending rungs and their version bumps share the open transaction: a failure rolls back all</text>
 <text class="sub" x="330" y="130" text-anchor="middle">the top rung is the schema_version every changeset is stamped with</text>
 </svg>
 
@@ -70,10 +72,10 @@ The rules, all enforced before any database access:
 
 - Versions must be exactly contiguous `1..=N`. A gap, a duplicate, or a set
   that does not start at 1 is a startup error, not a silent skip.
-- Each step (`Migration::sql` for a DDL batch, or a closure for rebuilds and
-  backfills DDL cannot express) runs in its own transaction together with its
-  `PRAGMA user_version` bump, so the ledger never advances over a half-applied
-  migration.
+- Every pending step (`Migration::sql` for a DDL batch, or a closure for
+  rebuilds and backfills DDL cannot express) and its `PRAGMA user_version` bump
+  share the open transaction, so a failure rolls the full pending ladder back
+  and the ledger never advances over a half-applied migration.
 - If the on-disk `user_version` exceeds the ladder's top, the binary refuses to
   open with
   [`MigrationError::SchemaTooNew`](rustdoc:enum:coven::MigrationError)
@@ -87,10 +89,18 @@ is the wire `schema_version` every changeset is stamped with. Bumping the
 schema *is* adding a migration; a device cannot stamp a version it has not
 migrated to.
 
-The ladder covers the host's *synced* schema only. Coven's internal tables are
-installed atomically for a new database and must match the current declarative
-schema on every later open; Coven never alters or adopts another internal
-shape.
+That ladder covers the host's *synced* schema only. Coven owns a separate,
+ordered ladder and version ledger for its bookkeeping tables. Every known Coven
+version has one exact stored and live schema manifest. A writer configured with
+`CovenMigrationPolicy::ApplyPending` may advance from that exact version;
+`RefusePending` reports the pending migration without writing. A read-only open
+always refuses pending Coven migrations. Fresh databases are initialized at the
+latest Coven version under either writer policy.
+
+On an existing database, the Coven ladder runs before the host ladder in the
+same open transaction. The new Coven schema and ledger, every host migration,
+and final schema validation commit together; a failure in any later step rolls
+the whole open back to its previous Coven and host versions.
 
 ## Additive vs. structural changes
 

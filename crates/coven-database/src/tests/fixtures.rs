@@ -167,6 +167,7 @@ pub(crate) fn open_outbox_database(device_id: &str) -> Database {
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        CovenMigrationPolicy::ApplyPending,
         &[],
     )
     .expect("open outbox database")

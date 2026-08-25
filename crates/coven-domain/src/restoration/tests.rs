@@ -457,6 +457,7 @@ async fn restore_result_for(
         code_str,
         &test_synced_tables(),
         &test_migrations(),
+        coven_database::CovenMigrationPolicy::ApplyPending,
         coven_foundation::config::ExactUploadVerification::MetadataHash,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
@@ -503,6 +504,7 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
         &code,
         &tables,
         &test_migrations(),
+        coven_database::CovenMigrationPolicy::ApplyPending,
         coven_foundation::config::ExactUploadVerification::MetadataHash,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
@@ -690,6 +692,7 @@ async fn restore_with_cancel(
         code,
         &test_synced_tables(),
         &test_migrations(),
+        coven_database::CovenMigrationPolicy::ApplyPending,
         coven_foundation::config::ExactUploadVerification::MetadataHash,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
@@ -886,6 +889,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         "Late Step Test",
         &tables,
         &migrations,
+        coven_database::CovenMigrationPolicy::ApplyPending,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
@@ -970,6 +974,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         "Late Step Test",
         &tables,
         &migrations,
+        coven_database::CovenMigrationPolicy::ApplyPending,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
@@ -1037,6 +1042,7 @@ impl OwnerRecoveryRestoreFixture {
             &code,
             &tables,
             &migrations,
+            coven_database::CovenMigrationPolicy::ApplyPending,
             coven_foundation::config::ExactUploadVerification::MetadataHash,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             coven_keys::custody::KeyCustody::Keyring,
@@ -1060,6 +1066,7 @@ impl OwnerRecoveryRestoreFixture {
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             &migrations,
         )
         .expect("open recovered database");
@@ -1179,6 +1186,7 @@ async fn a_recovered_owner_device_runs_its_first_sync_cycle() {
             &code,
             &tables,
             &test_migrations(),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             coven_foundation::config::ExactUploadVerification::MetadataHash,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             coven_keys::custody::KeyCustody::Keyring,
@@ -1202,6 +1210,7 @@ async fn a_recovered_owner_device_runs_its_first_sync_cycle() {
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             &test_migrations(),
         )
         .expect("open recovered database");
@@ -1258,6 +1267,7 @@ async fn a_repeated_owner_recovery_restore_resumes_the_device_s_published_stream
                     &code,
                     &tables,
                     &test_migrations(),
+                    coven_database::CovenMigrationPolicy::ApplyPending,
                     coven_foundation::config::ExactUploadVerification::MetadataHash,
                     coven_protocol::blob::TransferLimits::one_at_a_time(),
                     coven_keys::custody::KeyCustody::Keyring,
@@ -1281,6 +1291,7 @@ async fn a_repeated_owner_recovery_restore_resumes_the_device_s_published_stream
                     coven_protocol::blob::TransferLimits::one_at_a_time(),
                     config.device_id.clone(),
                     std::sync::Arc::new(coven_foundation::clock::SystemClock),
+                    coven_database::CovenMigrationPolicy::ApplyPending,
                     &test_migrations(),
                 )
                 .expect("open recovered database");
@@ -1497,6 +1508,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
                 &restore_code,
                 &restore_tables,
                 &test_migrations(),
+                coven_database::CovenMigrationPolicy::ApplyPending,
                 coven_foundation::config::ExactUploadVerification::MetadataHash,
                 coven_protocol::blob::TransferLimits::one_at_a_time(),
                 coven_keys::custody::KeyCustody::Keyring,
@@ -1552,6 +1564,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             &test_migrations(),
         )
         .expect("open B db");
@@ -1714,6 +1727,7 @@ async fn restore_resumes_a_snapshot_stream_published_after_the_code_was_exported
                 &restore_code,
                 &restore_tables,
                 &test_migrations(),
+                coven_database::CovenMigrationPolicy::ApplyPending,
                 coven_foundation::config::ExactUploadVerification::MetadataHash,
                 coven_protocol::blob::TransferLimits::one_at_a_time(),
                 coven_keys::custody::KeyCustody::Keyring,
@@ -1741,6 +1755,7 @@ async fn restore_resumes_a_snapshot_stream_published_after_the_code_was_exported
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             &test_migrations(),
         )
         .expect("open B db");
@@ -2083,6 +2098,7 @@ async fn restore_bootstrap_defers_eager_blob_files_until_open() {
             "Restored Store",
             &tables,
             &test_migrations(),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
@@ -2119,6 +2135,7 @@ async fn restore_bootstrap_defers_eager_blob_files_until_open() {
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id,
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             &test_migrations(),
         )
         .expect("open restored database");

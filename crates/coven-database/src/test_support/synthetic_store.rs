@@ -5,7 +5,7 @@
 //! mechanics rather than any host's real shape.
 
 use crate::Migration;
-use crate::{Database, DbError};
+use crate::{CovenMigrationPolicy, Database, DbError};
 use coven_protocol::synced_schema::{BlobDecl, SyncedTable};
 
 impl Database {
@@ -27,6 +27,7 @@ impl Database {
             transfer_limits,
             device_id,
             clock,
+            CovenMigrationPolicy::ApplyPending,
             migrations,
         )
     }
@@ -47,6 +48,7 @@ impl Database {
             grace,
             transfer_limits,
             hlc,
+            CovenMigrationPolicy::ApplyPending,
             migrations,
         )
     }
@@ -390,6 +392,7 @@ fn open_synthetic_database(
         grace,
         transfer_limits,
         hlc,
+        CovenMigrationPolicy::ApplyPending,
         &migrations,
     )
     .expect("open test database");

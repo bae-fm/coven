@@ -46,6 +46,7 @@ fn builder(dir: crate::StoreDir) -> crate::CovenBuilder {
             "Blob Facade Store".to_string(),
         ),
     )
+    .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
 }
 
 /// Open a store whose blobs are user files, with nothing connected: an upload

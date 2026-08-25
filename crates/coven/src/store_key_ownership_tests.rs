@@ -30,6 +30,7 @@ async fn caller_driven_test_home_establishes_the_master_key_it_needs() {
         config.clone(),
     )
     .synced_tables(coven_replication::sync::test_helpers::test_synced_tables())
+    .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
     .migrations(coven_replication::sync::test_helpers::test_migrations())
     .open()
     .expect("open store");
@@ -87,6 +88,7 @@ fn public_s3_setup_survives_a_narrow_host_stack() {
         let handle =
             crate::Coven::builder(crate::StoreDir::new_ephemeral(directory.path()), config)
                 .synced_tables(coven_replication::sync::test_helpers::test_synced_tables())
+                .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
                 .migrations(coven_replication::sync::test_helpers::test_migrations())
                 .open()
                 .expect("open store");

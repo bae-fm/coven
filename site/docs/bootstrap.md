@@ -131,7 +131,8 @@ The snapshot image carries its SQLite schema and the signed metadata repeats its
 schema version before download:
 
 - A binary at or above the snapshot version opens the image and runs the same
-  migration ladder used by an existing device.
+  host migration ladder used by an existing device. The join or restore caller
+  also passes its explicit policy for Coven's bookkeeping-schema ladder.
 - A binary below the snapshot version refuses it with `SnapshotError::SchemaTooNew`
   before installing the database.
 

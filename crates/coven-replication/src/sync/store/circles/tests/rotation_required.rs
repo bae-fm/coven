@@ -1373,6 +1373,7 @@ async fn restore_store_snapshot<'a>(
             device_id.to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &circle_routing_migrations(),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             Some(&EncryptionService::from_key([42; 32])),
         )
         .await
@@ -1622,6 +1623,7 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
             "crash-restore-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &circle_routing_migrations(),
+            coven_database::CovenMigrationPolicy::ApplyPending,
             Some(&routing),
         )
         .await;
