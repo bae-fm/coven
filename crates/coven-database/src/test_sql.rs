@@ -1303,6 +1303,23 @@ impl DatabaseTestSql<'_> {
         ExternalBlobRecords::new(self.connection).register(reference, path)
     }
 
+    /// Drop a root's make-remote intent while leaving its queue alone — the
+    /// shape a root reaches when its transition ended before its uploads did.
+    pub(crate) fn delete_make_remote_intent(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), DbError> {
+        self.connection
+            .execute(
+                "DELETE FROM blob_make_remote_intents
+                 WHERE root_table = ?1 AND root_id = ?2",
+                (root_table, root_id),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+    }
+
     pub(crate) fn make_remote_intent_exists(
         &self,
         root_table: &str,
@@ -1324,6 +1341,7 @@ impl DatabaseTestSql<'_> {
         &self,
         root_table: &str,
         root_id: &str,
+        root_label: &str,
         row: &coven_protocol::blob::RowBlobRef,
         source_path: &std::path::Path,
         retain_pinned: bool,
@@ -1332,6 +1350,7 @@ impl DatabaseTestSql<'_> {
         crate::CloudOutboxRecords::new(self.connection).enqueue_upload(
             root_table,
             root_id,
+            root_label,
             row,
             source_path,
             retain_pinned,

@@ -64,6 +64,11 @@ pub enum QueuedUploadPhase {
 pub struct QueuedMakeRemote {
     pub root_table: String,
     pub root_id: String,
+    /// What the host called this root when it queued the work, snapshotted here
+    /// so the queue can name its own entries. The root row is exactly what a
+    /// cancelled or deleted root no longer has, and an entry that cannot say
+    /// what it is is an entry a host cannot render or a person cancel.
+    pub root_label: String,
     pub retain_pinned: bool,
     pub progress: MakeRemoteProgress,
 }
@@ -113,6 +118,11 @@ pub struct QueuedUpload {
     /// one root shares this pair, and the root is what a host groups by.
     pub root_table: String,
     pub root_id: String,
+    /// What the host called this root when it queued the work, snapshotted here
+    /// so the queue can name its own entries. The root row is exactly what a
+    /// cancelled or deleted root no longer has, and an entry that cannot say
+    /// what it is is an entry a host cannot render or a person cancel.
+    pub root_label: String,
     /// Whether the transition asked for the plaintext to stay cached locally
     /// once the upload lands.
     pub retain_pinned: bool,
@@ -144,7 +154,7 @@ impl StoreSession<'_> {
         &mut self,
         root: Option<(String, String)>,
     ) -> Result<Vec<QueuedUpload>, DbError> {
-        const COLUMNS: &str = "SELECT row_ref, root_table, root_id, retain_pinned,
+        const COLUMNS: &str = "SELECT row_ref, root_table, root_id, root_label, retain_pinned,
                     upload_state, attempt_count, last_error, created_at, last_attempt_at
              FROM cloud_outbox WHERE operation = 'upload'";
         let (sql, parameters): (String, Vec<String>) = match root {
@@ -183,20 +193,20 @@ impl StoreSession<'_> {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT root_table, root_id, retain_pinned, state
+                "SELECT root_table, root_id, root_label, retain_pinned, state
                  FROM blob_make_remote_intents ORDER BY root_table, root_id",
             )
             .map_err(DbError::from)?;
         let make_remotes = statement
             .query_map([], |row| {
-                let state: String = row.get(3)?;
+                let state: String = row.get(4)?;
                 let progress = match state.as_str() {
                     "uploading" => MakeRemoteProgress::Uploading,
                     "cancelling" => MakeRemoteProgress::Cancelling,
                     "publishing" => MakeRemoteProgress::Publishing,
                     _ => {
                         return Err(rusqlite::Error::FromSqlConversionFailure(
-                            3,
+                            4,
                             rusqlite::types::Type::Text,
                             Box::new(std::io::Error::other(format!(
                                 "invalid make_remote state {state:?}"
@@ -207,7 +217,8 @@ impl StoreSession<'_> {
                 Ok(QueuedMakeRemote {
                     root_table: row.get(0)?,
                     root_id: row.get(1)?,
-                    retain_pinned: row.get(2)?,
+                    root_label: row.get(2)?,
+                    retain_pinned: row.get(3)?,
                     progress,
                 })
             })
@@ -708,9 +719,9 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
     let encoded: String = row.get(0)?;
     let reference: coven_protocol::blob::RowBlobRef =
         serde_json::from_str(&encoded).map_err(|error| invalid(0, Box::new(error)))?;
-    let state_json: String = row.get(4)?;
+    let state_json: String = row.get(5)?;
     let state: OutboxUploadState =
-        serde_json::from_str(&state_json).map_err(|error| invalid(4, Box::new(error)))?;
+        serde_json::from_str(&state_json).map_err(|error| invalid(5, Box::new(error)))?;
     let (phase, provider_bytes_total) = match &state {
         OutboxUploadState::Pending => (QueuedUploadPhase::Pending, None),
         OutboxUploadState::Prepared { stored, .. } => (
@@ -722,18 +733,19 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
             Some(stored.object().stored_size()),
         ),
     };
-    let attempt_count: i64 = row.get(5)?;
+    let attempt_count: i64 = row.get(6)?;
     Ok(QueuedUpload {
         blob: reference,
         root_table: row.get(1)?,
         root_id: row.get(2)?,
-        retain_pinned: row.get(3)?,
+        root_label: row.get(3)?,
+        retain_pinned: row.get(4)?,
         phase,
         provider_bytes_total,
-        attempt_count: u64::try_from(attempt_count).map_err(|error| invalid(5, Box::new(error)))?,
-        last_error: row.get(6)?,
-        created_at: row.get(7)?,
-        last_attempt_at: row.get(8)?,
+        attempt_count: u64::try_from(attempt_count).map_err(|error| invalid(6, Box::new(error)))?,
+        last_error: row.get(7)?,
+        created_at: row.get(8)?,
+        last_attempt_at: row.get(9)?,
     })
 }
 

@@ -853,13 +853,22 @@ impl CovenHandle {
     /// uploads host-provided blobs. `pin` keeps the uploaded blobs in the cache as
     /// pinned offline copies. Errors with [`MakeRemoteError::SyncNotReady`] when no
     /// provider is connected.
+    ///
+    /// `root_label` is what the host calls this root, snapshotted onto the queue
+    /// rows and the intent. The queue outlives the root row on purpose — a
+    /// cancelled or deleted root still has cloud objects to unwind — so an entry
+    /// that had to read the row to name itself could not be rendered at exactly
+    /// the moment a person most needs to see it.
     pub async fn make_remote(
         &self,
         root_table: &str,
         root_id: &str,
+        root_label: &str,
         pin: bool,
     ) -> Result<(), MakeRemoteError> {
-        self.sync.make_remote(root_table, root_id, pin).await
+        self.sync
+            .make_remote(root_table, root_id, root_label, pin)
+            .await
     }
 
     /// Cancel an in-flight make_remote of `(root_table, root_id)`: clear its intent

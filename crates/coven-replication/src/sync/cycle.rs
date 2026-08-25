@@ -1171,10 +1171,11 @@ impl SyncComponents {
         &self,
         root_table: &str,
         root_id: &str,
+        root_label: &str,
         pin: bool,
     ) -> Result<(), crate::blob::transition::MakeRemoteError> {
         self.blob_transitions
-            .make_remote(root_table, root_id, pin)
+            .make_remote(root_table, root_id, root_label, pin)
             .await
     }
 

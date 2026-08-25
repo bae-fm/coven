@@ -3162,7 +3162,7 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
         coven_database::StoreDatabase::new(&db),
         db_store_dir.clone(),
     )
-    .make_remote("notes", "n1", false)
+    .make_remote("notes", "n1", "Notes Root", false)
     .await
     .expect("queue the host-provided make_remote intent");
 
@@ -3260,7 +3260,7 @@ async fn ready_make_remote_provider_transport_is_offline() {
         coven_database::StoreDatabase::new(&db),
         db_store_dir.clone(),
     )
-    .make_remote("notes", "transport-root", false)
+    .make_remote("notes", "transport-root", "Notes Root", false)
     .await
     .expect("queue make_remote intent");
     fail_exact_create_on(&storage, 1);
@@ -5886,7 +5886,7 @@ async fn a_device_join_reads_no_blob_content() {
             .await;
     }
     crate::sync::test_owner_graph::TestOwnerGraph::new(database, owner_db_store_dir.clone())
-        .make_remote("notes", "joined-root", false)
+        .make_remote("notes", "joined-root", "Notes Root", false)
         .await
         .expect("make the planted blobs remote");
     let device = storage

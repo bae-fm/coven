@@ -1813,7 +1813,7 @@ mod test_device {
                 self.db.clone(),
                 self.store_dir.clone(),
             )
-            .make_remote("notes", root_id, false)
+            .make_remote("notes", root_id, "Notes Root", false)
             .await
             .expect("start exact make_remote");
             let clock = coven_foundation::clock::FixedClock(

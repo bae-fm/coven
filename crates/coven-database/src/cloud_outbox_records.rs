@@ -148,10 +148,12 @@ impl<'connection> CloudOutboxRecords<'connection> {
         self.upload_entries_for_rows(&rows)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn enqueue_upload(
         &self,
         root_table: &str,
         root_id: &str,
+        root_label: &str,
         row: &RowBlobRef,
         source_path: &Path,
         retain_pinned: bool,
@@ -178,11 +180,12 @@ impl<'connection> CloudOutboxRecords<'connection> {
             .execute(
                 "INSERT INTO cloud_outbox
                  (operation, table_name, row_id, column_name, row_stamp, root_table, root_id,
-                  row_ref, upload_state, source_path, retain_pinned, created_at)
-                 VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                  root_label, row_ref, upload_state, source_path, retain_pinned, created_at)
+                 VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(operation, table_name, row_id, column_name, row_stamp) DO UPDATE SET
                    root_table = excluded.root_table,
                    root_id = excluded.root_id,
+                   root_label = excluded.root_label,
                    source_path = excluded.source_path,
                    retain_pinned = excluded.retain_pinned,
                    attempt_count = 0,
@@ -198,6 +201,7 @@ impl<'connection> CloudOutboxRecords<'connection> {
                     row.row_stamp(),
                     root_table,
                     root_id,
+                    root_label,
                     encoded,
                     pending,
                     source_path,

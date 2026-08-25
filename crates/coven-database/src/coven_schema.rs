@@ -134,6 +134,7 @@ macro_rules! coven_tables {
     row_stamp TEXT,
     root_table TEXT,
     root_id TEXT,
+    root_label TEXT,
     row_ref TEXT CHECK (row_ref IS NULL OR json_valid(row_ref)),
     upload_state TEXT CHECK (upload_state IS NULL OR json_valid(upload_state)),
     stored_ref TEXT CHECK (stored_ref IS NULL OR json_valid(stored_ref)),
@@ -146,13 +147,15 @@ macro_rules! coven_tables {
     CHECK (
         (operation = 'upload' AND table_name IS NOT NULL AND row_id IS NOT NULL
          AND column_name IS NOT NULL AND row_stamp IS NOT NULL
-         AND root_table IS NOT NULL AND root_id IS NOT NULL AND row_ref IS NOT NULL
+         AND root_table IS NOT NULL AND root_id IS NOT NULL AND root_label IS NOT NULL
+         AND row_ref IS NOT NULL
          AND stored_ref IS NULL AND source_path IS NOT NULL AND retain_pinned IS NOT NULL
          AND upload_state IS NOT NULL)
         OR
         (operation = 'delete' AND table_name IS NULL AND row_id IS NULL
          AND column_name IS NULL AND row_stamp IS NULL
-         AND root_table IS NULL AND root_id IS NULL AND row_ref IS NULL
+         AND root_table IS NULL AND root_id IS NULL AND root_label IS NULL
+         AND row_ref IS NULL
          AND stored_ref IS NOT NULL AND source_path IS NULL AND retain_pinned IS NULL
          AND upload_state IS NULL)
     ),
@@ -165,6 +168,7 @@ macro_rules! coven_tables {
             "
     root_table TEXT NOT NULL,
     root_id TEXT NOT NULL,
+    root_label TEXT NOT NULL,
     retain_pinned INTEGER NOT NULL CHECK (retain_pinned IN (0, 1)),
     state TEXT NOT NULL CHECK (state IN ('uploading', 'cancelling', 'publishing')),
     write_id TEXT UNIQUE,

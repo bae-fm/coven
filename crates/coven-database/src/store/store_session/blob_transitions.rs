@@ -51,6 +51,7 @@ impl StoreSession<'_> {
         &self,
         root_table: &str,
         root_id: &str,
+        root_label: &str,
         pin: bool,
         created_at: &str,
         uploads: &[(RowBlobRef, std::path::PathBuf)],
@@ -77,12 +78,19 @@ impl StoreSession<'_> {
                     "blob rows below {root_table:?}/{root_id:?} changed while make_remote verified their sources"
                 )));
             }
-            Database::insert_make_remote_intent_on(&transaction, root_table, root_id, pin)?;
+            Database::insert_make_remote_intent_on(
+                &transaction,
+                root_table,
+                root_id,
+                root_label,
+                pin,
+            )?;
             let cloud_outbox = CloudOutboxRecords::new(&transaction);
             for (reference, source_path) in uploads {
                 cloud_outbox.enqueue_upload(
                     root_table,
                     root_id,
+                    root_label,
                     reference,
                     source_path,
                     pin,
@@ -272,10 +280,23 @@ impl StoreSession<'_> {
                     "make_remote for {root_table:?}/{root_id:?} is already publishing as {write_id}"
                 )));
             }
+            // No intent, but the queue may still hold work for the root — one
+            // already Remote when more was queued for it, or one whose
+            // transition ended while its uploads had not. That work is exactly
+            // what a cancel is for, so it is adopted and unwound. A root with
+            // nothing queued either has genuinely nothing to cancel, and saying
+            // so is how a cancel that arrives after completion is told it
+            // changed nothing.
             None => {
-                return Err(DbError::Message(format!(
-                    "make_remote for {root_table:?}/{root_id:?} does not exist"
-                )));
+                if !Database::adopt_cancelling_intent_from_queue_on(
+                    &transaction,
+                    root_table,
+                    root_id,
+                )? {
+                    return Err(DbError::Message(format!(
+                        "make_remote for {root_table:?}/{root_id:?} does not exist"
+                    )));
+                }
             }
         }
         transaction.commit().map_err(DbError::from)
@@ -294,18 +315,28 @@ impl StoreDatabase {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn begin_make_remote(
         &self,
         root_table: &str,
         root_id: &str,
+        root_label: &str,
         pin: bool,
         created_at: String,
         uploads: Vec<(RowBlobRef, std::path::PathBuf)>,
     ) -> Result<Option<bool>, DbError> {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
+        let root_label = root_label.to_string();
         self.call_store(move |session| {
-            session.begin_make_remote(&root_table, &root_id, pin, &created_at, &uploads)
+            session.begin_make_remote(
+                &root_table,
+                &root_id,
+                &root_label,
+                pin,
+                &created_at,
+                &uploads,
+            )
         })
         .await
     }

@@ -442,7 +442,7 @@ impl UploadFixture {
             self.database.clone(),
             self.store_dir.clone(),
         )
-        .make_remote("notes", ROOT_ID, retain_pinned)
+        .make_remote("notes", ROOT_ID, "Notes Root", retain_pinned)
         .await
         .expect("enqueue real make_remote upload journals");
         paths

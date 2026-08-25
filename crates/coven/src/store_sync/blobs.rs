@@ -37,25 +37,37 @@ impl StoreSync {
         &self,
         root_table: &str,
         root_id: &str,
+        root_label: &str,
         pin: bool,
     ) -> Result<(), MakeRemoteError> {
         active_sync!(self)
             .ok_or(MakeRemoteError::SyncNotReady)?
-            .make_remote(root_table, root_id, pin)
+            .make_remote(root_table, root_id, root_label, pin)
             .await?;
         self.trigger();
         Ok(())
     }
 
+    /// Record that a transition is to be unwound, connected or not.
+    ///
+    /// Recording the cancel is a local write; carrying it out — taking any
+    /// object already written back out of the cloud — is the drain's, and the
+    /// drain needs the provider. Requiring one here made the *decision*
+    /// unavailable offline, which is the one moment a person most wants it:
+    /// the upload they are watching is not going anywhere either.
     pub(crate) async fn cancel_make_remote(
         &self,
         root_table: &str,
         root_id: &str,
     ) -> Result<(), MakeRemoteError> {
-        active_sync!(self)
-            .ok_or(MakeRemoteError::SyncNotReady)?
-            .cancel_make_remote(root_table, root_id)
-            .await?;
+        match active_sync!(self) {
+            Some(sync) => sync.cancel_make_remote(root_table, root_id).await?,
+            None => self
+                .database
+                .cancel_make_remote(root_table, root_id)
+                .await
+                .map_err(MakeRemoteError::from)?,
+        }
         self.trigger();
         Ok(())
     }

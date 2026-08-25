@@ -640,7 +640,7 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
                 .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
                 .await;
             handle
-                .make_remote("notes", "note-cover-1", false)
+                .make_remote("notes", "note-cover-1", "Notes Root", false)
                 .await
                 .expect("queue the exact row/blob transition");
             tokio::time::timeout(Duration::from_secs(20), upload_pause.reached.notified())
@@ -782,7 +782,7 @@ async fn caller_driven_connect_leaves_the_only_drain_to_the_caller() {
                 .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
                 .await;
             handle
-                .make_remote("notes", "note-cover-1", false)
+                .make_remote("notes", "note-cover-1", "Notes Root", false)
                 .await
                 .expect("queue the exact row/blob transition");
 
@@ -929,7 +929,7 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
                 .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
                 .await;
             handle
-                .make_remote("notes", "note-cover-1", false)
+                .make_remote("notes", "note-cover-1", "Notes Root", false)
                 .await
                 .expect("queue the exact row/blob transition");
             tokio::time::timeout(Duration::from_secs(20), upload_pause.reached.notified())
@@ -2039,7 +2039,9 @@ async fn stopped_installed_loop_blocks_blob_transitions() {
                     .stop_loop_for_test()
                     .expect("stop installed loop");
 
-                let make_remote = handle.make_remote("notes", "note-1", false).await;
+                let make_remote = handle
+                    .make_remote("notes", "note-1", "Notes Root", false)
+                    .await;
                 assert!(matches!(make_remote, Err(MakeRemoteError::SyncNotReady)));
 
                 let (_cancel_tx, cancel_rx) = watch::channel(false);

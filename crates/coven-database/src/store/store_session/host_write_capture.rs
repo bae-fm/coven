@@ -221,6 +221,21 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
     }
 }
 
+/// The rows a captured changeset removed, as `(table, row id)`.
+///
+/// A delete's changeset entry carries the row's old values, so its identity is
+/// still readable here even though the row is not: by the time anything runs
+/// after the host's SQL, the live table no longer holds it, and every resolver
+/// that walks from a row to its root answers `None`.
+fn deleted_rows(captured: &[u8]) -> Result<std::collections::HashSet<(String, String)>, DbError> {
+    Ok(crate::walk_changeset(captured)
+        .map_err(DbError::Changeset)?
+        .into_iter()
+        .filter(|change| matches!(change.op, coven_foundation::changeset::ChangeOp::Delete))
+        .filter_map(|change| change.pk().map(|id| (change.table.clone(), id.to_string())))
+        .collect())
+}
+
 impl StoreDatabase {
     fn drain_host_change_journal_on(
         session: &mut rusqlite::session::Session<'_>,
@@ -865,6 +880,15 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             let mut captured =
                 StoreDatabase::drain_host_change_journal(&mut journal, synced_tables)
                     .map_err(E::from)?;
+            // A root the host just deleted takes its cloud transition with it,
+            // in this same transaction. The rows it queued are read out of the
+            // journal rather than the tables, the row being what has just
+            // stopped being there to read.
+            crate::Database::cancel_transitions_for_deleted_roots_on(
+                &tx,
+                &deleted_rows(&captured).map_err(E::from)?,
+            )
+            .map_err(E::from)?;
             validate_scoped_foreign_key_audiences(&tx, gates)
                 .map_err(DbError::from)
                 .map_err(E::from)?;

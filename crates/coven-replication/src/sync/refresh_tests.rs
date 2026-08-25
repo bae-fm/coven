@@ -1572,7 +1572,7 @@ mod blob_identity_across_rotation {
             .register_external_blob_for_test("note_photos", "rotation-blob", &source)
             .await;
         crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), db_store_dir.clone())
-            .make_remote("notes", ROOT_ID, false)
+            .make_remote("notes", ROOT_ID, "Notes Root", false)
             .await
             .expect("enqueue the blob upload");
         let device = store

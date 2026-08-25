@@ -326,7 +326,7 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
     );
 
     handle
-        .make_remote("notes", "note-1", true)
+        .make_remote("notes", "note-1", "Notes Root", true)
         .await
         .expect("start the transition");
 
@@ -476,7 +476,7 @@ async fn retry_uploads_now_bypasses_backoff() {
         .await
         .expect("write note and photo");
     handle
-        .make_remote("notes", "note-1", false)
+        .make_remote("notes", "note-1", "Notes Root", false)
         .await
         .expect("enqueue make remote");
 
@@ -562,7 +562,7 @@ async fn cloud_outbox_subscription_follows_committed_queue_changes() {
         .is_empty());
 
     handle
-        .make_remote("notes", "note-1", false)
+        .make_remote("notes", "note-1", "Notes Root", false)
         .await
         .expect("enqueue make remote");
     let queued = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
@@ -576,6 +576,7 @@ async fn cloud_outbox_subscription_follows_committed_queue_changes() {
         vec![crate::QueuedMakeRemote {
             root_table: "notes".to_string(),
             root_id: "note-1".to_string(),
+            root_label: "Notes Root".to_string(),
             retain_pinned: false,
             progress: crate::MakeRemoteProgress::Uploading,
         }],
@@ -833,5 +834,135 @@ async fn the_handle_reports_where_a_row_s_user_file_lives() {
             .expect("read the cleared registration"),
         None,
         "a cleared registration is an absence, not a failure",
+    );
+}
+
+/// A store with one note, one externally-registered photo under it, and a
+/// connected caller-driven home: everything a transition needs, with nothing
+/// drained.
+async fn queued_upload_fixture(
+    note_id: &str,
+    photo_id: &str,
+) -> (crate::CovenHandle, tempfile::TempDir, tempfile::TempDir) {
+    coven_keys::keys::test_keyring::install();
+    let tmp = tempfile::tempdir().expect("store directory");
+    let dir = crate::StoreDir::new_ephemeral(tmp.path());
+    let owner = coven_keys::keys::UserKeypair::generate();
+    let encryption = crate::EncryptionService::from_key([42; 32]);
+    let keyring = crate::MasterKeyring::from(encryption.clone());
+    let handle = builder(dir.clone())
+        .synced_tables(note_tables())
+        .migrations(test_migrations())
+        .key_custody(crate::KeyCustody::InMemory(keyring))
+        .identity_custody(crate::IdentityCustody::InMemory(owner.clone()))
+        .open()
+        .expect("open the store");
+    let home = coven_replication::sync::test_helpers::test_cloud_home();
+    handle
+        .create_test_store("blob-facade-test", owner, home.clone())
+        .await
+        .expect("create the Store");
+    handle
+        .connect_sync_with_test_home_caller_driven(
+            home,
+            coven_storage::CloudCipher::Encrypted(encryption),
+        )
+        .await
+        .expect("connect the store to its home");
+
+    let user_dir = tempfile::tempdir().expect("user directory");
+    let bytes = b"a photo the user owns".to_vec();
+    let path = user_dir.path().join("photo.jpg");
+    std::fs::write(&path, &bytes).expect("write the user's file");
+    handle
+        .write_note_with_external_photo(note_id, photo_id, &path, &bytes)
+        .await
+        .expect("write the note and register its photo");
+    (handle, tmp, user_dir)
+}
+
+/// Deleting a gated root does not end its cloud work — an upload that already
+/// wrote an object still has that object to take back out, and only the drain
+/// can do that. So the queue outlives the row deliberately, in the state that
+/// says what is left to do, and the entry still names itself: the row a host
+/// would have read that name from is exactly what is gone.
+#[tokio::test]
+async fn deleting_a_root_leaves_its_queue_cancelling_and_still_named() {
+    tokio::spawn(run_deleting_a_root_leaves_its_queue_cancelling_and_still_named())
+        .await
+        .expect("root deletion task");
+}
+
+async fn run_deleting_a_root_leaves_its_queue_cancelling_and_still_named() {
+    let (handle, _tmp, _user_dir) = queued_upload_fixture("note-1", "photo-1").await;
+    handle
+        .make_remote("notes", "note-1", "The Note", true)
+        .await
+        .expect("start the transition");
+    assert_eq!(
+        handle.queued_uploads().await.expect("read the queue").len(),
+        1
+    );
+
+    handle
+        .write(|sql| {
+            sql.execute("DELETE FROM notes WHERE id = 'note-1'", [])?;
+            Ok(())
+        })
+        .await
+        .expect("delete the root");
+
+    let queued = handle.queued_uploads().await.expect("read the queue");
+    assert_eq!(
+        queued.len(),
+        1,
+        "the unwind still owes this object: {queued:?}"
+    );
+    assert_eq!(
+        queued[0].root_label, "The Note",
+        "the entry names itself without the row",
+    );
+    assert_eq!(
+        handle
+            .make_remote_progress("notes", "note-1")
+            .await
+            .expect("read the transition state"),
+        Some(crate::MakeRemoteProgress::Cancelling),
+        "the deleted root's transition is being unwound",
+    );
+}
+
+/// A cancel is a decision, and deciding is local. Only carrying it out needs
+/// the provider, so a person with no network can still say "stop this" and
+/// watch it wait.
+#[tokio::test]
+async fn a_cancel_is_recordable_with_no_provider_connected() {
+    tokio::spawn(run_a_cancel_is_recordable_with_no_provider_connected())
+        .await
+        .expect("offline cancel task");
+}
+
+async fn run_a_cancel_is_recordable_with_no_provider_connected() {
+    let (handle, _tmp, _user_dir) = queued_upload_fixture("note-1", "photo-1").await;
+    handle
+        .make_remote("notes", "note-1", "The Note", true)
+        .await
+        .expect("start the transition");
+    handle
+        .disconnect_cloud_home()
+        .await
+        .expect("disconnect the provider");
+
+    handle
+        .cancel_make_remote("notes", "note-1")
+        .await
+        .expect("a cancel records without a provider");
+
+    assert_eq!(
+        handle
+            .make_remote_progress("notes", "note-1")
+            .await
+            .expect("read the transition state"),
+        Some(crate::MakeRemoteProgress::Cancelling),
     );
 }

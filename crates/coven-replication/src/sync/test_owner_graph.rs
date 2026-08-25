@@ -85,7 +85,7 @@ impl TestOwnerGraph {
             .open_into_store_database(&self.database, self.store_dir.clone())
             .await
             .expect("open exact test Store");
-        self.make_remote("notes", note_id, false)
+        self.make_remote("notes", note_id, "Notes Root", false)
             .await
             .expect("queue exact remote fixture upload");
         let outcome = store
@@ -151,10 +151,11 @@ impl TestOwnerGraph {
         &self,
         root_table: &str,
         root_id: &str,
+        root_label: &str,
         pin: bool,
     ) -> Result<(), crate::blob::transition::MakeRemoteError> {
         self.local_transitions
-            .make_remote(root_table, root_id, pin)
+            .make_remote(root_table, root_id, root_label, pin)
             .await
     }
 

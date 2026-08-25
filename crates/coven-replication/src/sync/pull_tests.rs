@@ -434,7 +434,7 @@ impl PullTestStoreOps for TestStore {
             .await
             .expect("load exact fixture Store");
         crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(db), store_dir.clone())
-            .make_remote("notes", root_id, false)
+            .make_remote("notes", root_id, "Notes Root", false)
             .await
             .expect("queue exact blob fixture upload");
         let outcome = device
@@ -7785,7 +7785,7 @@ mod blob_path_traversal {
         let store_dir = db1_store_dir.clone();
         let error =
             crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(&db1), store_dir)
-                .make_remote("notes", "n1", false)
+                .make_remote("notes", "n1", "Notes Root", false)
                 .await
                 .expect_err("a traversal blob id cannot enter the upload journal");
         assert!(matches!(
@@ -7818,7 +7818,7 @@ mod blob_path_traversal {
         let store_dir = db1_store_dir.clone();
         let error =
             crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(&db1), store_dir)
-                .make_remote("notes", "n1", false)
+                .make_remote("notes", "n1", "Notes Root", false)
                 .await
                 .expect_err("a missing short-id source cannot enter the upload journal");
         assert!(matches!(

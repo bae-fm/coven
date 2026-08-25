@@ -134,6 +134,7 @@ impl Database {
             database.enqueue_blob_upload(
                 "notes",
                 "pending-root",
+                "Pending Root",
                 &row,
                 std::path::Path::new("/nonexistent/pending-blob"),
                 false,
@@ -348,6 +349,17 @@ impl Database {
 
     pub async fn has_store_partition_for_test(&self) -> Result<bool, DbError> {
         self.test_sql(|database| database.has_store_partition())
+            .await
+    }
+
+    pub async fn delete_make_remote_intent_for_test(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), DbError> {
+        let root_table = root_table.to_string();
+        let root_id = root_id.to_string();
+        self.test_sql(move |database| database.delete_make_remote_intent(&root_table, &root_id))
             .await
     }
 
@@ -807,11 +819,13 @@ impl Database {
     ) -> Result<(), DbError> {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
+        let root_label = format!("{root_table}/{root_id}");
         let created_at = created_at.to_string();
         self.test_sql(move |database| {
             database.enqueue_blob_upload(
                 &root_table,
                 &root_id,
+                &root_label,
                 &row,
                 &source_path,
                 retain_pinned,
@@ -831,12 +845,14 @@ impl Database {
     ) -> Result<(), DbError> {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
+        let root_label = format!("{root_table}/{root_id}");
         let created_at = created_at.to_string();
         self.test_sql(move |database| {
             database.rolled_back_transaction(|transaction| {
                 transaction.enqueue_blob_upload(
                     &root_table,
                     &root_id,
+                    &root_label,
                     &row,
                     &source_path,
                     false,

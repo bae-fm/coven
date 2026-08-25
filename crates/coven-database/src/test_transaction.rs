@@ -96,6 +96,7 @@ impl DatabaseTestTransaction<'_, '_> {
         &self,
         root_table: &str,
         root_id: &str,
+        root_label: &str,
         row: &coven_protocol::blob::RowBlobRef,
         source_path: &std::path::Path,
         retain_pinned: bool,
@@ -104,6 +105,7 @@ impl DatabaseTestTransaction<'_, '_> {
         crate::CloudOutboxRecords::new(self.transaction).enqueue_upload(
             root_table,
             root_id,
+            root_label,
             row,
             source_path,
             retain_pinned,

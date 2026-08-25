@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 
 use crate::blob::transition::LocalBlobTransitions;
+
 use crate::sync::test_helpers::{TestStore, TestStoreParts};
 use crate::sync::test_owner_graph::TestOwnerGraph;
 use coven_database::Database;
@@ -411,7 +412,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     // A makes it Remote: enqueue the upload + intent, then the next cycle's drain
     // uploads the blob and flips the gate.
     owners_a
-        .make_remote("notes", "n1", true)
+        .make_remote("notes", "n1", "Notes Root", true)
         .await
         .expect("make_remote");
     let recorder = Recorder::default();
@@ -523,7 +524,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
         .await;
 
     owners
-        .make_remote("notes", "n1", false)
+        .make_remote("notes", "n1", "Notes Root", false)
         .await
         .expect("make_remote pin=false");
     assert!(
@@ -533,7 +534,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
 
     // A second make_remote with a pin, before the upload drains.
     owners
-        .make_remote("notes", "n1", true)
+        .make_remote("notes", "n1", "Notes Root", true)
         .await
         .expect("make_remote pin=true");
     assert!(
@@ -567,7 +568,7 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
         .seed_local_release(&user_dir, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes)
         .await;
     owners
-        .make_remote("notes", "n1", false)
+        .make_remote("notes", "n1", "Notes Root", false)
         .await
         .expect("first make_remote");
     assert_eq!(
@@ -585,7 +586,7 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
     std::fs::remove_file(&src1).unwrap();
 
     owners
-        .make_remote("notes", "n1", false)
+        .make_remote("notes", "n1", "Notes Root", false)
         .await
         .expect("second make_remote");
     assert_eq!(
@@ -628,7 +629,7 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
         )
         .await;
     owners
-        .make_remote("notes", "n1", false)
+        .make_remote("notes", "n1", "Notes Root", false)
         .await
         .expect("make_remote");
     storage
@@ -1014,7 +1015,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
         .register_external_blob_for_test("note_photos", "photo-user-scoped", &source)
         .await;
     owners
-        .make_remote("notes", "n-user-scoped", false)
+        .make_remote("notes", "n-user-scoped", "Notes Root", false)
         .await
         .expect("queue scoped user-provided make_remote");
     let stamp_before = gate_stamp(&db, "n-user-scoped").await;
@@ -1165,7 +1166,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     .await
     .expect("store host-provided fixture");
     owners
-        .make_remote("notes", "n-host-scoped", false)
+        .make_remote("notes", "n-host-scoped", "Notes Root", false)
         .await
         .expect("queue scoped host-provided make_remote");
     let stamp_before = gate_stamp(&db, "n-host-scoped").await;
@@ -1348,7 +1349,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     // make_remote: the photo drains, the gate flips, and this cycle's inline push
     // uploads the cover from the local store and keeps the requested pin.
     owners_a
-        .make_remote("notes", "n1", true)
+        .make_remote("notes", "n1", "Notes Root", true)
         .await
         .expect("make_remote");
     storage
@@ -1517,7 +1518,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     assert_eq!(before, cover);
 
     owners_a
-        .make_remote("notes", "n-host", true)
+        .make_remote("notes", "n-host", "Notes Root", true)
         .await
         .expect("make host-provided-only root remote");
     assert_eq!(
@@ -1636,11 +1637,11 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
             .expect("store host-provided cover");
     }
     owners
-        .make_remote("notes", "n-pin", true)
+        .make_remote("notes", "n-pin", "Notes Root", true)
         .await
         .expect("make_remote pin");
     owners
-        .make_remote("notes", "n-drop", false)
+        .make_remote("notes", "n-drop", "Notes Root", false)
         .await
         .expect("make_remote drop");
 
@@ -2044,7 +2045,7 @@ async fn make_remote_rejects_remote_root() {
     .expect("store host-provided blob");
 
     let err = owners
-        .make_remote("notes", "n-remote-root", true)
+        .make_remote("notes", "n-remote-root", "Notes Root", true)
         .await
         .expect_err("remote roots have no make_remote transition");
     assert!(
@@ -2150,7 +2151,7 @@ async fn make_remote_rejects_already_remote_root() {
     let stamp_before = gate_stamp(&db, "n-host").await;
 
     let err = owners
-        .make_remote("notes", "n-host", true)
+        .make_remote("notes", "n-host", "Notes Root", true)
         .await
         .expect_err("a root already Remote has no make_remote transition");
     assert!(
@@ -2216,7 +2217,7 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
     let stamp_before = gate_stamp(&db, "n1").await;
 
     let err = owners
-        .make_remote("notes", "n1", true)
+        .make_remote("notes", "n1", "Notes Root", true)
         .await
         .expect_err("a source whose length drifted from its blob row aborts make_remote");
     assert!(
@@ -2345,7 +2346,7 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
         .await;
 
     owners
-        .make_remote("notes", "n1", true)
+        .make_remote("notes", "n1", "Notes Root", true)
         .await
         .expect("make_remote");
     assert_eq!(pending_uploads(&db).await, 2, "both uploads queued");
@@ -2454,7 +2455,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .await;
 
     owners
-        .make_remote("notes", "n1", false)
+        .make_remote("notes", "n1", "Notes Root", false)
         .await
         .expect("queue both same-locator uploads");
     storage
@@ -2922,7 +2923,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
         .await;
 
     owners
-        .make_remote("notes", "n1", true)
+        .make_remote("notes", "n1", "Notes Root", true)
         .await
         .expect("make_remote");
 
@@ -3089,7 +3090,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
         )
         .await;
     owners
-        .make_remote("notes", "n1", true)
+        .make_remote("notes", "n1", "Notes Root", true)
         .await
         .expect("make_remote 1");
     storage
@@ -3140,7 +3141,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
     // Second make_remote: the external file is uploaded to a new exact object and
     // the gate flips back on.
     owners
-        .make_remote("notes", "n1", true)
+        .make_remote("notes", "n1", "Notes Root", true)
         .await
         .expect("make_remote 2");
     storage
@@ -3225,7 +3226,7 @@ async fn a_drained_upload_keeps_no_staged_copy() {
         )
         .await;
     owners
-        .make_remote("notes", "n-spool", true)
+        .make_remote("notes", "n-spool", "Notes Root", true)
         .await
         .expect("make the release remote");
 
@@ -3282,7 +3283,7 @@ async fn a_failed_upload_keeps_its_staged_copy_for_the_resume() {
         )
         .await;
     owners
-        .make_remote("notes", "n-resume", true)
+        .make_remote("notes", "n-resume", "Notes Root", true)
         .await
         .expect("make the release remote");
 
@@ -3324,5 +3325,106 @@ async fn a_failed_upload_keeps_its_staged_copy_for_the_resume() {
         staged_upload_copies(&lib),
         Vec::<String>::new(),
         "the resumed upload left its staged copy behind",
+    );
+}
+
+/// A root deleted while one of its objects is already in the cloud owes that
+/// object's removal. The delete records the unwind in its own transaction and
+/// the drain carries it out, so the object leaves with the root rather than
+/// being stranded under a row nothing can reach.
+#[tokio::test]
+async fn deleting_a_root_mid_upload_takes_its_created_object_back_out() {
+    let (db, storage, cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
+    let user = tmp.path().join("user");
+
+    let _src1 = owners
+        .seed_local_release(&user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first")
+        .await;
+    // A second photo whose source disappears holds the transition open, so the
+    // first object is in the cloud while the root is still Local.
+    let src2 = user.join("photobbb.jpg");
+    std::fs::write(&src2, b"second").unwrap();
+    db.add_local_photo_for_test("n1", "photobbb", "cv/photobbb.jpg", b"second", &src2)
+        .await;
+    owners
+        .make_remote("notes", "n1", "Notes Root", true)
+        .await
+        .expect("make_remote");
+    std::fs::remove_file(&src2).unwrap();
+    storage
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
+        .await
+        .expect("partial drain");
+    let uploaded = created_upload_blob(&db, "photoaaa").await;
+    cloud_storage
+        .clone()
+        .verify_blob_object(&uploaded)
+        .await
+        .expect("photoaaa reached the cloud");
+
+    db.execute_test_host_write(
+        "DELETE FROM note_photos WHERE note_id = 'n1'; DELETE FROM notes WHERE id = 'n1'",
+    )
+    .await;
+
+    // The delete is what recorded it; nothing had to notice afterwards.
+    assert!(
+        db.make_remote_intent_exists_for_test("notes", "n1")
+            .await
+            .expect("inspect make_remote intent"),
+        "the deleted root's transition is still there to unwind",
+    );
+    storage
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
+        .await
+        .expect("drain the deleted root's unwind");
+
+    assert_eq!(pending_uploads(&db).await, 0, "the queue emptied");
+    assert!(
+        !db.make_remote_intent_exists_for_test("notes", "n1")
+            .await
+            .expect("inspect make_remote intent"),
+        "and the transition is finished",
+    );
+    assert!(
+        cloud_storage
+            .clone()
+            .verify_blob_object(&uploaded)
+            .await
+            .is_err(),
+        "the object left the cloud with the root",
+    );
+}
+
+/// A root with queued uploads and no intent is what a transition that ended
+/// before its queue did leaves behind. The work is real and the cancel adopts
+/// it, rather than refusing because the intent it expected is missing.
+#[tokio::test]
+async fn cancel_make_remote_adopts_queued_work_with_no_intent() {
+    let (db, _storage, _cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
+    let store_database = StoreDatabase::new(&db);
+    let user = tmp.path().join("user");
+    let _src = owners
+        .seed_local_release(&user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first")
+        .await;
+    owners
+        .make_remote("notes", "n1", "Notes Root", true)
+        .await
+        .expect("make_remote");
+    db.delete_make_remote_intent_for_test("notes", "n1")
+        .await
+        .expect("drop the intent, keeping the queue");
+    assert_eq!(pending_uploads(&db).await, 1, "the work is still queued");
+
+    LocalBlobTransitions::new(store_database, lib.clone())
+        .cancel_make_remote("notes", "n1")
+        .await
+        .expect("the cancel adopts the queue it found");
+
+    assert!(
+        db.make_remote_intent_exists_for_test("notes", "n1")
+            .await
+            .expect("inspect make_remote intent"),
+        "the adopted work has a transition to unwind under",
     );
 }

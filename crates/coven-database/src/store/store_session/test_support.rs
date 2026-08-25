@@ -364,6 +364,7 @@ impl StoreSession<'_> {
         crate::DatabaseTestSql::new(self.conn).enqueue_blob_upload(
             root_table,
             root_id,
+            &format!("{root_table}/{root_id}"),
             reference,
             source_path,
             false,

@@ -1,6 +1,18 @@
 use super::*;
 use crate::query_mapped_rows;
 
+/// The rows a set of applied changes removed, as `(table, row id)`.
+///
+/// A delete carries the row's old values, which is what makes the identity
+/// readable after the row itself is gone.
+fn deleted_rows(changes: &[RowChange]) -> std::collections::HashSet<(String, String)> {
+    changes
+        .iter()
+        .filter(|change| matches!(change.op, coven_foundation::changeset::ChangeOp::Delete))
+        .filter_map(|change| change.pk().map(|id| (change.table.clone(), id.to_string())))
+        .collect()
+}
+
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
     pub(crate) fn activate_store_operation_remote_objects(
         &self,
@@ -98,6 +110,20 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         for intent in cleanup {
             self.record_obsolete_blob_cleanup_intent(blob_decls, &intent)?;
         }
+        // A root another device deleted is deleted here too, and this device's
+        // queue for it is this device's to unwind — the peer that removed the
+        // row knows nothing about what is still queued on this one.
+        //
+        // No test reaches this today: an upload can only be queued against a
+        // Local blob reference, and a Local root is this device's alone, so a
+        // peer has none to delete. It is here because that is an argument about
+        // two distant rules rather than a property of this code, and the defect
+        // this fixes was exactly a state we had reasoned could not happen. It
+        // costs one query, and only when a merge deleted something.
+        crate::Database::cancel_transitions_for_deleted_roots_on(
+            self.store.transaction,
+            &deleted_rows(&actual_changes),
+        )?;
         Ok(MergeSubsetOutcome::Applied(winning_rows))
     }
 
@@ -379,6 +405,12 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             crate::walk_changeset(&removal_changeset).map_err(DbError::Changeset)?;
         let removal_cleanup = local_blob_cleanup_intents(blob_decls, &removed, &removal_changes)
             .map_err(DbError::from)?;
+        // A root pruned because its circle went inactive is as gone as one a
+        // peer deleted, and owes the same unwind.
+        crate::Database::cancel_transitions_for_deleted_roots_on(
+            conn,
+            &deleted_rows(&removal_changes),
+        )?;
         returned_changes.extend(removal_changes);
         for intent in removal_cleanup {
             self.record_obsolete_blob_cleanup_intent(blob_decls, &intent)?;

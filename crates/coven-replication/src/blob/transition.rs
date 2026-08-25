@@ -345,6 +345,7 @@ impl LocalBlobTransitions {
         &self,
         root_table: &str,
         root_id: &str,
+        root_label: &str,
         pin: bool,
     ) -> Result<(), MakeRemoteError> {
         let db = &self.database;
@@ -419,7 +420,7 @@ impl LocalBlobTransitions {
 
         let created_at = db.stamp();
         let locality = db
-            .begin_make_remote(root_table, root_id, pin, created_at, uploads)
+            .begin_make_remote(root_table, root_id, root_label, pin, created_at, uploads)
             .await?;
         match locality {
             Some(false) => Ok(()),
@@ -555,9 +556,12 @@ impl ConnectedBlobTransitions {
         &self,
         root_table: &str,
         root_id: &str,
+        root_label: &str,
         pin: bool,
     ) -> Result<(), MakeRemoteError> {
-        self.local.make_remote(root_table, root_id, pin).await
+        self.local
+            .make_remote(root_table, root_id, root_label, pin)
+            .await
     }
 
     pub(crate) async fn cancel_make_remote(
