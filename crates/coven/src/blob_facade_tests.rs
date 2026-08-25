@@ -327,7 +327,7 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
     );
 
     handle
-        .make_remote("notes", "note-1", "Notes Root", true)
+        .make_remote_with_discovered_order_for_test("notes", "note-1", "Notes Root", true)
         .await
         .expect("start the transition");
 
@@ -477,7 +477,7 @@ async fn retry_uploads_now_bypasses_backoff() {
         .await
         .expect("write note and photo");
     handle
-        .make_remote("notes", "note-1", "Notes Root", false)
+        .make_remote_with_discovered_order_for_test("notes", "note-1", "Notes Root", false)
         .await
         .expect("enqueue make remote");
 
@@ -563,7 +563,7 @@ async fn cloud_outbox_subscription_follows_committed_queue_changes() {
         .is_empty());
 
     handle
-        .make_remote("notes", "note-1", "Notes Root", false)
+        .make_remote_with_discovered_order_for_test("notes", "note-1", "Notes Root", false)
         .await
         .expect("enqueue make remote");
     let queued = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
@@ -897,7 +897,7 @@ async fn deleting_a_root_leaves_its_queue_cancelling_and_still_named() {
 async fn run_deleting_a_root_leaves_its_queue_cancelling_and_still_named() {
     let (handle, _tmp, _user_dir) = queued_upload_fixture("note-1", "photo-1").await;
     handle
-        .make_remote("notes", "note-1", "The Note", true)
+        .make_remote_with_discovered_order_for_test("notes", "note-1", "The Note", true)
         .await
         .expect("start the transition");
     assert_eq!(
@@ -946,7 +946,7 @@ async fn a_cancel_is_recordable_with_no_provider_connected() {
 async fn run_a_cancel_is_recordable_with_no_provider_connected() {
     let (handle, _tmp, _user_dir) = queued_upload_fixture("note-1", "photo-1").await;
     handle
-        .make_remote("notes", "note-1", "The Note", true)
+        .make_remote_with_discovered_order_for_test("notes", "note-1", "The Note", true)
         .await
         .expect("start the transition");
     handle

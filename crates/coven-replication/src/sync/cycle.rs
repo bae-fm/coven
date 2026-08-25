@@ -95,6 +95,22 @@ impl SyncCycleFailure {
         self.kind == SyncCycleFailureKind::Offline
     }
 
+    fn concurrent(first: Self, second: Self) -> Self {
+        let kind = if first.is_offline() || second.is_offline() {
+            SyncCycleFailureKind::Offline
+        } else {
+            SyncCycleFailureKind::Failed
+        };
+        Self {
+            kind,
+            operation: "run Store publication and blob upload lanes",
+            cause: Box::new(SyncCycleCause::Concurrent {
+                first: Box::new(first),
+                second: Box::new(second),
+            }),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn contains(&self, pattern: &str) -> bool {
         self.to_string().contains(pattern)
@@ -115,6 +131,11 @@ impl std::error::Error for SyncCycleFailure {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SyncCycleCause {
+    #[error("{first}; concurrently, {second}")]
+    Concurrent {
+        first: Box<SyncCycleFailure>,
+        second: Box<SyncCycleFailure>,
+    },
     #[error("{0}")]
     Database(#[from] coven_database::DbError),
     #[error("{0}")]
@@ -221,6 +242,7 @@ struct AuthorizedSyncCycle<'cycle, 'store> {
     local_blob_access: &'cycle super::store::blob::LocalStoreBlobAccess,
     observer: Option<&'cycle dyn BlobTransitionObserver>,
     settled: &'cycle super::store::SettledCycle,
+    store: &'store Store,
     authorization: AuthorizedWriterOperation<'store>,
 }
 
@@ -443,28 +465,7 @@ impl AuthorizedSyncCycle<'_, '_> {
                 )
                 .await
                 .map_err(|error| SyncCycleFailure::operation("drain queued blob uploads", error))?;
-            match outcome {
-                DrainOutcome::Drained {
-                    uploaded,
-                    yielded_for_publish,
-                    failures,
-                } => {
-                    if failures.has_transport_failure() {
-                        return Err(SyncCycleFailure::operation("upload queued blobs", failures));
-                    }
-                    resume_drain_promptly = yielded_for_publish;
-                    if uploaded > 0 {
-                        info!(count = uploaded, "Drained blob uploads");
-                    }
-                }
-                DrainOutcome::QueueEmpty => {}
-                DrainOutcome::AllInBackoff => {
-                    debug!("Every queued blob upload is inside its retry backoff");
-                }
-                DrainOutcome::Paused => {
-                    debug!("Blob uploads are paused by the host; nothing was admitted");
-                }
-            }
+            Self::record_upload_outcome(outcome, &mut resume_drain_promptly)?;
         }
 
         if rotation_pending.is_none() {
@@ -494,22 +495,48 @@ impl AuthorizedSyncCycle<'_, '_> {
     ) -> Result<CompletedPullCycle, SyncCycleFailure> {
         let PreparedCycle {
             sync_time,
-            resume_drain_promptly,
+            mut resume_drain_promptly,
             rotation_pending,
         } = prepared;
         if rotation_pending.is_none() {
             // Pull installs the membership state that decides whether this active
-            // member may write. One capability then retains that decision through
-            // preparation and publication of every pending Store write.
-            let published = timings
-                .stage(
-                    "publish pending writes",
-                    self.authorization.publish_pending_store_writes(),
-                )
-                .await?;
+            // member may write. Publication and the next make_remote root then use
+            // separate capabilities from that same refreshed membership state.
+            let upload_authorization = self.store.authorize_writer().await.map_err(|error| {
+                SyncCycleFailure::operation("authorize blob upload lane", error)
+            })?;
+            let lanes = timings
+                .stage("publish pending writes and drain next blob root", async {
+                    tokio::join!(
+                        self.authorization.publish_pending_store_writes(),
+                        upload_authorization.drain_uploads(
+                            self.clock,
+                            self.routing_encryption,
+                            self.observer,
+                        ),
+                    )
+                })
+                .await;
+            let (published, drained) = match lanes {
+                (Ok(published), Ok(drained)) => (published, drained),
+                (Err(first), Err(second)) => {
+                    return Err(SyncCycleFailure::concurrent(
+                        first,
+                        SyncCycleFailure::operation("drain queued blob uploads", second),
+                    ));
+                }
+                (Err(error), Ok(_)) => return Err(error),
+                (Ok(_), Err(error)) => {
+                    return Err(SyncCycleFailure::operation(
+                        "drain queued blob uploads",
+                        error,
+                    ));
+                }
+            };
             if published > 0 {
                 info!(published, "Published Store writes");
             }
+            Self::record_upload_outcome(drained, &mut resume_drain_promptly)?;
         }
 
         let local_seq = timings
@@ -576,6 +603,35 @@ impl AuthorizedSyncCycle<'_, '_> {
             resume_drain_promptly,
             rotation_pending,
         })
+    }
+
+    fn record_upload_outcome(
+        outcome: DrainOutcome,
+        resume_drain_promptly: &mut bool,
+    ) -> Result<(), SyncCycleFailure> {
+        match outcome {
+            DrainOutcome::Drained {
+                uploaded,
+                yielded_for_publish,
+                failures,
+            } => {
+                if failures.has_transport_failure() {
+                    return Err(SyncCycleFailure::operation("upload queued blobs", failures));
+                }
+                *resume_drain_promptly |= yielded_for_publish;
+                if uploaded > 0 {
+                    info!(count = uploaded, "Drained blob uploads");
+                }
+            }
+            DrainOutcome::QueueEmpty => {}
+            DrainOutcome::AllInBackoff => {
+                debug!("Every queued blob upload is inside its retry backoff");
+            }
+            DrainOutcome::Paused => {
+                debug!("Blob uploads are paused by the host; nothing was admitted");
+            }
+        }
+        Ok(())
     }
 
     /// Stand on the snapshot this device has acknowledged, and say every cycle
@@ -1173,9 +1229,10 @@ impl SyncComponents {
         root_id: &str,
         root_label: &str,
         pin: bool,
+        refs: Vec<coven_protocol::blob::RowBlobRef>,
     ) -> Result<(), crate::blob::transition::MakeRemoteError> {
         self.blob_transitions
-            .make_remote(root_table, root_id, root_label, pin)
+            .make_remote(root_table, root_id, root_label, pin, refs)
             .await
     }
 
@@ -1417,6 +1474,7 @@ impl SyncComponents {
             local_blob_access: &self.local_blob_access,
             observer,
             settled: self.settled.as_ref(),
+            store: &self.store,
             authorization,
         }
         .run()

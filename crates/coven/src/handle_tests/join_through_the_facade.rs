@@ -88,7 +88,12 @@ impl FacadeFixture {
                 .expect("connect fixture storage for eager image publication");
             seed_eager_library_images(&handle, image_count).await;
             handle
-                .make_remote("notes", "image-root", "Notes Root", false)
+                .make_remote_with_discovered_order_for_test(
+                    "notes",
+                    "image-root",
+                    "Notes Root",
+                    false,
+                )
                 .await
                 .expect("queue fixture eager images for cloud storage");
             wait_for_initial_sync(&handle).await;
@@ -311,7 +316,7 @@ async fn run_two_devices_pair_end_to_end_over_live_s3_within_the_product_bound()
         .await
         .expect("create the owner's Store on live S3");
     handle
-        .make_remote("notes", "image-root", "Notes Root", false)
+        .make_remote_with_discovered_order_for_test("notes", "image-root", "Notes Root", false)
         .await
         .expect("queue live eager images for cloud storage");
     wait_for_initial_sync(&handle).await;

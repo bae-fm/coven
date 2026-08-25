@@ -279,6 +279,17 @@ impl StoreBlobs {
         self.database.row_blob_ref(table, row_id).await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn row_blob_refs_for_root(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Vec<RowBlobRef>, coven_database::DbError> {
+        self.database
+            .row_blob_refs_for_root(root_table, root_id)
+            .await
+    }
+
     pub(crate) async fn queued_uploads(
         &self,
     ) -> Result<Vec<crate::QueuedUpload>, coven_database::DbError> {

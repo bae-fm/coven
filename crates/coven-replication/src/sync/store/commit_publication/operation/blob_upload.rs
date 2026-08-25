@@ -67,12 +67,53 @@ impl AuthorizedWriterOperation<'_> {
             return Ok(DrainOutcome::QueueEmpty);
         }
 
+        // Queue ids are assigned while each make_remote is admitted. Drain one
+        // root at a time so transfer concurrency applies within that transition,
+        // never across later transitions. Created rows for a root already in
+        // Publishing remain journaled until its Store write activates; skip those
+        // rows so publication and the next root's uploads can occupy separate
+        // lanes.
+        let mut head_root = None;
+        for entry in &uploads {
+            let OutboxOperation::Upload {
+                root_table,
+                root_id,
+                ..
+            } = &entry.operation
+            else {
+                unreachable!("pending_blob_uploads returns only Upload rows");
+            };
+            if self
+                .blob_upload_intent_state(root_table, root_id)
+                .await?
+                .is_some_and(|state| {
+                    matches!(state, coven_database::MakeRemoteIntentState::Publishing(_))
+                })
+            {
+                continue;
+            }
+            head_root = Some((root_table.clone(), root_id.clone()));
+            break;
+        }
+        let Some((head_table, head_id)) = head_root else {
+            return Ok(DrainOutcome::QueueEmpty);
+        };
+        let uploads = uploads.into_iter().filter(|entry| {
+            matches!(
+                &entry.operation,
+                OutboxOperation::Upload {
+                    root_table,
+                    root_id,
+                    ..
+                } if root_table == &head_table && root_id == &head_id
+            )
+        });
+
         let now = clock.now();
         let mut count = 0;
         let mut yielded_for_publish = false;
 
         let eligible = uploads
-            .into_iter()
             .map(|entry| {
                 crate::blob::retry::entry_in_backoff(&entry, now)
                     .map(|in_backoff| (entry, in_backoff))

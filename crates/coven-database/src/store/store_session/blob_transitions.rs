@@ -68,12 +68,14 @@ impl StoreSession<'_> {
                 root_table,
                 root_id,
             )?;
-            if current.len() != uploads.len()
-                || current
-                    .iter()
-                    .zip(uploads)
-                    .any(|(current, (verified, _))| current != verified)
-            {
+            let supplied_are_current = current.len() == uploads.len()
+                && uploads.iter().enumerate().all(|(index, (verified, _))| {
+                    current.contains(verified)
+                        && !uploads[..index]
+                            .iter()
+                            .any(|(earlier, _)| earlier == verified)
+                });
+            if !supplied_are_current {
                 return Err(DbError::Message(format!(
                     "blob rows below {root_table:?}/{root_id:?} changed while make_remote verified their sources"
                 )));

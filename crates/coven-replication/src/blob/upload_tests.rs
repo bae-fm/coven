@@ -409,8 +409,16 @@ impl UploadFixture {
     }
 
     async fn plant_local_rows(&self, rows: &[(&str, &[u8])]) -> Vec<std::path::PathBuf> {
+        self.plant_local_rows_for(ROOT_ID, rows).await
+    }
+
+    async fn plant_local_rows_for(
+        &self,
+        root_id: &str,
+        rows: &[(&str, &[u8])],
+    ) -> Vec<std::path::PathBuf> {
         self.db
-            .insert_local_upload_rows_for_test(ROOT_ID, rows)
+            .insert_local_upload_rows_for_test(root_id, rows)
             .await
             .expect("plant exact Local blob rows");
         let mut paths = Vec::new();
@@ -429,6 +437,23 @@ impl UploadFixture {
                 .await;
             paths.push(path);
         }
+        paths
+    }
+
+    async fn plant_uploads_for(
+        &self,
+        root_id: &str,
+        rows: &[(&str, &[u8])],
+        retain_pinned: bool,
+    ) -> Vec<std::path::PathBuf> {
+        let paths = self.plant_local_rows_for(root_id, rows).await;
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            self.database.clone(),
+            self.store_dir.clone(),
+        )
+        .make_remote("notes", root_id, "Notes Root", retain_pinned)
+        .await
+        .expect("enqueue real make_remote upload journals");
         paths
     }
 
@@ -735,11 +760,11 @@ async fn upload_observer_receives_the_exact_blob_bearing_row() {
     assert_eq!(*observer.started.lock().unwrap(), vec![row]);
 }
 
-/// A pass that finishes what an earlier pass created counts no upload — the
-/// object was already written — but it is a `Drained` pass, not an empty one:
-/// the entry was attempted and retired here.
+/// A Created entry whose root is publishing belongs to the publication lane,
+/// not another upload pass. Its journal stays until activation, but it is not
+/// upload work and the provider object is not created twice.
 #[tokio::test]
-async fn a_second_pass_over_a_created_entry_drains_without_counting_it() {
+async fn a_second_pass_skips_a_created_entry_that_is_publishing() {
     let fixture = UploadFixture::new(1).await;
     fixture
         .plant_uploads(&[("twice001", b"bytes")], false)
@@ -756,12 +781,7 @@ async fn a_second_pass_over_a_created_entry_drains_without_counting_it() {
     assert!(is_created(&fixture.journal("twice001").await));
 
     let outcome = fixture.drain(&fixed_clock(T0), None).await.unwrap();
-    assert_eq!(
-        outcome.uploaded(),
-        0,
-        "the object was created by the first pass, so this one creates none",
-    );
-    assert!(outcome.failures().failures().is_empty());
+    assert!(matches!(outcome, DrainOutcome::QueueEmpty));
     assert_eq!(
         fixture.home.create_calls(),
         1,
@@ -1246,6 +1266,113 @@ async fn concurrent_drain_overlaps_up_to_the_limit() {
     for id in ids {
         assert!(is_created(&fixture.journal(&id).await));
     }
+}
+
+#[tokio::test]
+async fn drain_admits_only_the_first_make_remote_root() {
+    let fixture = UploadFixture::new(3).await;
+    fixture
+        .plant_uploads_for("first-root", &[("first001", b"first")], false)
+        .await;
+    fixture
+        .plant_uploads_for(
+            "second-root",
+            &[("second01", b"second one"), ("second02", b"second two")],
+            false,
+        )
+        .await;
+
+    let outcome = fixture.drain(&fixed_clock(T0), None).await.unwrap();
+
+    assert_eq!(outcome.uploaded(), 1);
+    assert!(outcome.yielded_for_publish());
+    assert!(is_created(&fixture.journal("first001").await));
+    assert!(!is_created(&fixture.journal("second01").await));
+    assert!(!is_created(&fixture.journal("second02").await));
+}
+
+#[tokio::test]
+async fn cycle_publishes_one_root_while_uploading_the_next() {
+    let home = Arc::new(InstrumentedHome::new());
+    let fixture = UploadFixture::with_home(2, home.clone(), FixtureSchema::RowBlobs).await;
+    fixture
+        .plant_uploads_for("first-root", &[("first001", b"first")], false)
+        .await;
+    fixture
+        .plant_uploads_for("second-root", &[("second01", b"second")], false)
+        .await;
+    home.slow_creates(1 << 20, std::time::Duration::from_millis(20));
+    home.reset_observations();
+
+    let result = fixture
+        .device
+        .run_cycle(None)
+        .await
+        .expect("run the upload and publication lanes");
+
+    assert!(result.resume_drain_promptly);
+    assert_eq!(
+        fixture
+            .database
+            .make_remote_intent_state("notes", "first-root")
+            .await
+            .unwrap(),
+        None,
+    );
+    assert_eq!(
+        fixture
+            .database
+            .make_remote_intent_state("notes", "second-root")
+            .await
+            .unwrap(),
+        None,
+    );
+    assert!(matches!(
+        fixture
+            .database
+            .row_blob_ref("note_photos", "second01")
+            .await
+            .unwrap()
+            .authority(),
+        RowBlobAuthority::Remote(_),
+    ));
+    assert_eq!(home.max_inflight(), 2);
+}
+
+#[tokio::test]
+async fn make_remote_enqueues_blobs_in_the_hosts_order() {
+    let fixture = UploadFixture::new(1).await;
+    fixture
+        .plant_local_rows(&[("alphabetic-first", b"one"), ("cover-first", b"two")])
+        .await;
+    let cover = fixture
+        .database
+        .row_blob_ref("note_photos", "cover-first")
+        .await
+        .unwrap();
+    let track = fixture
+        .database
+        .row_blob_ref("note_photos", "alphabetic-first")
+        .await
+        .unwrap();
+
+    crate::blob::transition::LocalBlobTransitions::new(
+        fixture.database.clone(),
+        fixture.store_dir.clone(),
+    )
+    .make_remote("notes", ROOT_ID, "Notes Root", false, vec![cover, track])
+    .await
+    .expect("enqueue make_remote in host order");
+
+    let queued = fixture.database.pending_blob_uploads().await.unwrap();
+    let ids = queued
+        .iter()
+        .map(|entry| match &entry.operation {
+            coven_database::OutboxOperation::Upload { row, .. } => row.row_id(),
+            _ => panic!("pending_blob_uploads returned a non-upload"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["cover-first", "alphabetic-first"]);
 }
 
 #[tokio::test]

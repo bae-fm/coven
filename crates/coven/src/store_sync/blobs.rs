@@ -39,10 +39,11 @@ impl StoreSync {
         root_id: &str,
         root_label: &str,
         pin: bool,
+        refs: Vec<coven_protocol::blob::RowBlobRef>,
     ) -> Result<(), MakeRemoteError> {
         active_sync!(self)
             .ok_or(MakeRemoteError::SyncNotReady)?
-            .make_remote(root_table, root_id, root_label, pin)
+            .make_remote(root_table, root_id, root_label, pin, refs)
             .await?;
         self.trigger();
         Ok(())

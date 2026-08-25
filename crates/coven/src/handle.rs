@@ -854,6 +854,8 @@ impl CovenHandle {
     /// pinned offline copies. Errors with [`MakeRemoteError::SyncNotReady`] when no
     /// provider is connected.
     ///
+    /// `refs` is the root's complete current blob set in the order the host wants
+    /// uploads admitted. coven validates the set atomically before enqueueing it.
     /// `root_label` is what the host calls this root, snapshotted onto the queue
     /// rows and the intent. The queue outlives the root row on purpose — a
     /// cancelled or deleted root still has cloud objects to unwind — so an entry
@@ -865,9 +867,26 @@ impl CovenHandle {
         root_id: &str,
         root_label: &str,
         pin: bool,
+        refs: Vec<coven_protocol::blob::RowBlobRef>,
     ) -> Result<(), MakeRemoteError> {
         self.sync
-            .make_remote(root_table, root_id, root_label, pin)
+            .make_remote(root_table, root_id, root_label, pin, refs)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn make_remote_with_discovered_order_for_test(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        root_label: &str,
+        pin: bool,
+    ) -> Result<(), MakeRemoteError> {
+        let refs = self
+            .blobs
+            .row_blob_refs_for_root(root_table, root_id)
+            .await?;
+        self.make_remote(root_table, root_id, root_label, pin, refs)
             .await
     }
 

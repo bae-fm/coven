@@ -154,8 +154,12 @@ impl TestOwnerGraph {
         root_label: &str,
         pin: bool,
     ) -> Result<(), crate::blob::transition::MakeRemoteError> {
+        let refs = self
+            .database
+            .row_blob_refs_for_root(root_table, root_id)
+            .await?;
         self.local_transitions
-            .make_remote(root_table, root_id, root_label, pin)
+            .make_remote(root_table, root_id, root_label, pin, refs)
             .await
     }
 

@@ -567,10 +567,11 @@ impl SyncLoopHandle {
         root_id: &str,
         root_label: &str,
         pin: bool,
+        refs: Vec<coven_protocol::blob::RowBlobRef>,
     ) -> Result<(), crate::blob::transition::MakeRemoteError> {
         self.inner
             .components
-            .make_remote(root_table, root_id, root_label, pin)
+            .make_remote(root_table, root_id, root_label, pin, refs)
             .await
     }
 

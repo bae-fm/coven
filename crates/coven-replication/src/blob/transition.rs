@@ -331,13 +331,15 @@ impl LocalBlobTransitions {
     }
 
     /// Start making `(root_table, root_id)` Remote: refuse a root already Remote, then
-    /// verify each user-provided blob's external source file, enqueue an upload per blob,
+    /// verify each supplied user-provided blob's external source file, enqueue an upload per blob
+    /// in the supplied order,
     /// and record the make_remote intent in one transaction. Returns once enqueued — the
     /// sync cycle uploads all needed blobs, prepares the gate change only after they
     /// land, and publishes that change before the durable intent completes. The caller
     /// triggers a sync cycle to start that work.
     ///
-    /// Verifying every source up front (exists + length matches the registered size)
+    /// The supplied rows must be exactly the root's current blob set. Verifying every source up front
+    /// (exists + length matches the registered size)
     /// means a missing file aborts with nothing enqueued, rather than leaving a
     /// half-queued make_remote. `pin` becomes each upload's `retain_pinned`, so the
     /// blob is kept in coven's cache as a pinned (offline) copy.
@@ -347,6 +349,7 @@ impl LocalBlobTransitions {
         root_id: &str,
         root_label: &str,
         pin: bool,
+        refs: Vec<coven_protocol::blob::RowBlobRef>,
     ) -> Result<(), MakeRemoteError> {
         let db = &self.database;
         require_make_remote_root(db, root_table)?;
@@ -367,7 +370,6 @@ impl LocalBlobTransitions {
             }
         }
 
-        let refs = db.row_blob_refs_for_root(root_table, root_id).await?;
         if refs.is_empty() {
             return Err(MakeRemoteError::NothingToMakeRemote(
                 root_table.to_string(),
@@ -558,9 +560,10 @@ impl ConnectedBlobTransitions {
         root_id: &str,
         root_label: &str,
         pin: bool,
+        refs: Vec<coven_protocol::blob::RowBlobRef>,
     ) -> Result<(), MakeRemoteError> {
         self.local
-            .make_remote(root_table, root_id, root_label, pin)
+            .make_remote(root_table, root_id, root_label, pin, refs)
             .await
     }
 
