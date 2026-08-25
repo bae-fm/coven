@@ -196,6 +196,72 @@ async fn store_creation_installs_generation_zero_replay_baseline() {
     }
 }
 
+#[tokio::test]
+async fn writer_migrates_the_retained_replay_image_with_the_store() {
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let path = db_store_dir.db_path();
+    let open = |policy| {
+        coven_database::Database::open_in_store_dir_for_test(
+            &path,
+            db_store_dir.clone(),
+            crate::sync::test_helpers::test_synced_tables(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            "retained-replay-migration".to_string(),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            policy,
+            &crate::sync::test_helpers::test_migrations(),
+        )
+    };
+    let db =
+        open(coven_database::CovenMigrationPolicy::ApplyPending).expect("create Store database");
+    TestStore::create(
+        &db,
+        db_store_dir.clone(),
+        "retained-replay-migration",
+        UserKeypair::generate(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store with retained replay baseline");
+    let database = coven_database::StoreDatabase::new(&db);
+    let old_image_hash = database
+        .downgrade_replay_baseline_coven_schema_to_v0_for_test(false)
+        .await
+        .expect("create exact Coven v0 replay image fixture");
+    drop(db);
+
+    let error = match open(coven_database::CovenMigrationPolicy::RefusePending) {
+        Ok(_) => panic!("retained replay migration must require writer authorization"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        coven_database::OpenError::CovenMigration(coven_database::CovenMigrationError::Pending {
+            current: 0,
+            target: 1
+        })
+    ));
+
+    let reopened = open(coven_database::CovenMigrationPolicy::ApplyPending)
+        .expect("migrate Store and retained replay image");
+    let database = coven_database::StoreDatabase::new(&reopened);
+    let migrated = database
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect("migrated retained replay image loads through the production path");
+    assert_ne!(migrated.image_payload_hash, old_image_hash);
+    assert!(!database
+        .has_payload_for_test(old_image_hash)
+        .await
+        .expect("check superseded replay payload"));
+    assert!(database
+        .owed_payload_cleanup()
+        .await
+        .expect("read payload cleanup obligations")
+        .is_empty());
+}
+
 /// The baseline's database image and authority are payloads its row names: the
 /// row claims both hashes, the payload store holds exactly those bytes, and a
 /// baseline whose image bytes are gone fails to load instead of

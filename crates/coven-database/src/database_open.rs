@@ -90,14 +90,7 @@ pub(crate) fn validate_initialized_coven_schema(
     include_routing: bool,
 ) -> Result<(), DbError> {
     let expected = expected_coven_schema_manifest(include_routing)?;
-    let stored_json =
-        get_protocol_state_on(conn, COVEN_SCHEMA_MANIFEST_STATE_KEY)?.ok_or_else(|| {
-            DbError::Message(
-                "Store database is missing required Coven schema manifest metadata".to_string(),
-            )
-        })?;
-    let stored: CovenSchemaManifest = serde_json::from_str(&stored_json)
-        .map_err(|error| DbError::context("Store Coven schema manifest is invalid", error))?;
+    let stored = stored_coven_schema_manifest(conn)?;
     if stored != *expected {
         return Err(DbError::Message(format!(
             "Store Coven schema manifest does not match the current schema: stored {stored:?}, current {expected:?}"
@@ -105,6 +98,30 @@ pub(crate) fn validate_initialized_coven_schema(
     }
     validate_live_coven_schema(conn, include_routing)?;
     Ok(())
+}
+
+pub(crate) fn initialized_coven_schema_is_current(
+    conn: &Connection,
+    include_routing: bool,
+) -> Result<bool, DbError> {
+    let expected = expected_coven_schema_manifest(include_routing)?;
+    let stored = stored_coven_schema_manifest(conn)?;
+    if stored != *expected {
+        return Ok(false);
+    }
+    validate_live_coven_schema(conn, include_routing)?;
+    Ok(true)
+}
+
+fn stored_coven_schema_manifest(conn: &Connection) -> Result<CovenSchemaManifest, DbError> {
+    let stored_json =
+        get_protocol_state_on(conn, COVEN_SCHEMA_MANIFEST_STATE_KEY)?.ok_or_else(|| {
+            DbError::Message(
+                "Store database is missing required Coven schema manifest metadata".to_string(),
+            )
+        })?;
+    serde_json::from_str(&stored_json)
+        .map_err(|error| DbError::context("Store Coven schema manifest is invalid", error))
 }
 
 pub(crate) fn load_coven_metadata(conn: &Connection) -> Result<SyncRoutingContract, DbError> {
@@ -229,6 +246,7 @@ impl DatabaseCore {
                     timings.mark("migrate Coven schema", || {
                         run_coven_migrations_in_transaction(
                             &tx,
+                            &store_dir,
                             pinned.has_scoped_graph(),
                             coven_migration_policy,
                         )
@@ -326,6 +344,9 @@ impl DatabaseCore {
             }
         };
         let sync_routing_hash = sync_routing_contract.hash();
+        timings.mark("finish payload cleanup", || {
+            crate::payload_store::pay_owed_payload_deletions_on(&conn, &store_dir)
+        })?;
         // Both of these walk the whole database rather than anything this open
         // changed: the foreign-key check visits every row of every child table,
         // and the clock seed reads a max per synced table — over an expression

@@ -365,6 +365,46 @@ impl StoreRecords<'_> {
         )
     }
 
+    pub(crate) fn replace_retained_replay_image(
+        self,
+        baseline: &crate::RetainedReplayBaseline,
+        image_bytes: &[u8],
+    ) -> Result<(), DbError> {
+        let image_payload_hash = self
+            .install_payload(image_bytes)
+            .map_err(|error| DbError::context("install migrated retained replay image", error))?;
+        let authority_hash = coven_protocol::store_commit::ObjectHash::digest(
+            &baseline.canonical_authority_bytes()?,
+        );
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE retained_replay_baselines
+                 SET image_payload_hash = ?1
+                 WHERE singleton = 1 AND image_payload_hash = ?2",
+                rusqlite::params![
+                    image_payload_hash.to_string(),
+                    baseline.image_payload_hash.to_string()
+                ],
+            )
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError::Message(format!(
+                "replacing the retained replay image changed {updated} rows"
+            )));
+        }
+        crate::payload_store::set_payload_owner_claims_on(
+            self.conn,
+            crate::payload_store::RETAINED_REPLAY_BASELINE_OWNER_KEY,
+            &BTreeSet::from([image_payload_hash, authority_hash]),
+        )?;
+
+        let mut migrated = baseline.clone();
+        migrated.image_payload_hash = image_payload_hash;
+        self.validate_replay_baseline_image(&migrated)?;
+        self.validate_replay_authority(&migrated)
+    }
+
     pub(crate) fn accepted_history_count(self) -> Result<i64, DbError> {
         self.conn
             .query_row(

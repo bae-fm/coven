@@ -19,6 +19,51 @@ use coven_protocol::store_commit::{
 
 pub const GENERATION_ZERO: u64 = 0;
 
+pub(crate) fn migrate_retained_replay_coven_schema_on(
+    conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    policy: crate::CovenMigrationPolicy,
+) -> Result<(), crate::CovenMigrationError> {
+    let records = StoreRecords::new(conn, store_dir);
+    let Some(baseline) = load_replay_baseline_metadata_on(records)? else {
+        return Ok(());
+    };
+    let mut image = Connection::open_in_memory().map_err(DbError::from)?;
+    crate::connection_io::deserialize_database_image_into(
+        &mut image,
+        &baseline.image_bytes(conn, store_dir)?,
+    )
+    .map_err(|error| DbError::context("open retained replay database image", error))?;
+    let routing = crate::database_open::load_coven_metadata(&image)?;
+    if crate::database_open::initialized_coven_schema_is_current(
+        &image,
+        routing.has_scoped_graph(),
+    )? {
+        return Ok(());
+    }
+    let had_schema_version = crate::get_protocol_state_on(
+        &image,
+        crate::coven_migration::COVEN_SCHEMA_VERSION_STATE_KEY,
+    )?
+    .is_some();
+    let transaction = image.unchecked_transaction().map_err(DbError::from)?;
+    crate::coven_migration::run_initialized_coven_schema_migrations_in_transaction(
+        &transaction,
+        routing.has_scoped_graph(),
+        policy,
+    )?;
+    if !had_schema_version {
+        crate::delete_protocol_state_on(
+            &transaction,
+            crate::coven_migration::COVEN_SCHEMA_VERSION_STATE_KEY,
+        )?;
+    }
+    transaction.commit().map_err(DbError::from)?;
+    let image_bytes = crate::connection_io::serialize_database_image(&image)?;
+    records.replace_retained_replay_image(&baseline, &image_bytes)?;
+    Ok(())
+}
+
 pub(crate) fn load_generation_zero_replay_baseline_on(
     records: StoreRecords<'_>,
 ) -> Result<Option<RetainedReplayBaseline>, DbError> {

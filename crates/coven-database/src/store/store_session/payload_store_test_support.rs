@@ -68,6 +68,16 @@ impl StoreDatabase {
         self.call_store(move |session| session.remove_payload_bytes_for_test(hash))
             .await
     }
+
+    pub async fn downgrade_replay_baseline_coven_schema_to_v0_for_test(
+        &self,
+        include_routing: bool,
+    ) -> Result<ObjectHash, DbError> {
+        self.call_store(move |session| {
+            session.downgrade_replay_baseline_coven_schema_to_v0_for_test(include_routing)
+        })
+        .await
+    }
 }
 
 impl StoreSession<'_> {
@@ -182,5 +192,53 @@ impl StoreSession<'_> {
             }
         }
         Ok(())
+    }
+
+    fn downgrade_replay_baseline_coven_schema_to_v0_for_test(
+        &self,
+        include_routing: bool,
+    ) -> Result<ObjectHash, DbError> {
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
+        let baseline = crate::store::retained_replay::load_replay_baseline_metadata_on(records)?
+            .ok_or_else(|| DbError::Message("retained replay baseline is absent".to_string()))?;
+        let authority_hash = ObjectHash::digest(&baseline.canonical_authority_bytes()?);
+        let mut image = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
+        crate::connection_io::deserialize_database_image_into(
+            &mut image,
+            &baseline.image_bytes(self.conn, self.store_dir)?,
+        )
+        .map_err(|error| DbError::context("open retained replay database image", error))?;
+        crate::coven_schema::downgrade_coven_schema_to_v0_for_test(&image, include_routing)?;
+        let image_bytes = crate::connection_io::serialize_database_image(&image)?;
+
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let records = crate::store::store_session::StoreRecords::new(&transaction, self.store_dir);
+        let image_hash = records
+            .install_payload(&image_bytes)
+            .map_err(DbError::from)?;
+        let updated = transaction
+            .execute(
+                "UPDATE retained_replay_baselines
+                 SET image_payload_hash = ?1
+                 WHERE singleton = 1 AND image_payload_hash = ?2",
+                rusqlite::params![
+                    image_hash.to_string(),
+                    baseline.image_payload_hash.to_string()
+                ],
+            )
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError::Message(format!(
+                "replacing the retained replay image changed {updated} rows"
+            )));
+        }
+        set_payload_owner_claims_on(
+            &transaction,
+            RETAINED_REPLAY_BASELINE_OWNER_KEY,
+            &std::collections::BTreeSet::from([image_hash, authority_hash]),
+        )?;
+        transaction.commit().map_err(DbError::from)?;
+        pay_owed_payload_deletions_on(self.conn, self.store_dir)?;
+        Ok(image_hash)
     }
 }
