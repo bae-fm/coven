@@ -242,7 +242,6 @@ struct AuthorizedSyncCycle<'cycle, 'store> {
     local_blob_access: &'cycle super::store::blob::LocalStoreBlobAccess,
     observer: Option<&'cycle dyn BlobTransitionObserver>,
     settled: &'cycle super::store::SettledCycle,
-    store: &'store Store,
     authorization: AuthorizedWriterOperation<'store>,
 }
 
@@ -499,12 +498,11 @@ impl AuthorizedSyncCycle<'_, '_> {
             rotation_pending,
         } = prepared;
         if rotation_pending.is_none() {
-            // Pull installs the membership state that decides whether this active
-            // member may write. Publication and the next make_remote root then use
-            // separate capabilities from that same refreshed membership state.
-            let upload_authorization = self.store.authorize_writer().await.map_err(|error| {
-                SyncCycleFailure::operation("authorize blob upload lane", error)
-            })?;
+            // Pull updates this cycle's authorized operation to the current
+            // membership state. Split its upload lane from that same operation so
+            // publication and the next make_remote root run concurrently without
+            // loading and verifying the Store authority again.
+            let upload_authorization = self.authorization.blob_upload_lane();
             let lanes = timings
                 .stage("publish pending writes and drain next blob root", async {
                     tokio::join!(
@@ -1474,7 +1472,6 @@ impl SyncComponents {
             local_blob_access: &self.local_blob_access,
             observer,
             settled: self.settled.as_ref(),
-            store: &self.store,
             authorization,
         }
         .run()

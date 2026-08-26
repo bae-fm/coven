@@ -17,8 +17,18 @@ use crate::blob::{DrainOutcome, UploadFailure, UploadFailureCause, UploadFailure
 
 use super::AuthorizedWriterOperation;
 
+/// The upload half of one authorized writer operation. It carries the exact
+/// database and provider session already authorized for the cycle, while owning
+/// no mutable publication state, so upload and publication can run concurrently
+/// without loading authorization twice.
+pub(crate) struct AuthorizedBlobUploadLane<'storage> {
+    database: coven_database::StoreDatabase,
+    storage: &'storage std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
+    store_dir: &'storage coven_foundation::store_dir::StoreDir,
+}
+
 struct BlobUploadAttempt<'operation, 'storage, 'authority> {
-    writer: &'operation AuthorizedWriterOperation<'storage>,
+    writer: &'operation AuthorizedBlobUploadLane<'storage>,
     authority: &'operation coven_protocol::objects::BlobWriteAuthority<'authority>,
     routing_encryption: Option<&'operation EncryptionService>,
     observer: Option<&'operation dyn BlobTransitionObserver>,
@@ -26,7 +36,28 @@ struct BlobUploadAttempt<'operation, 'storage, 'authority> {
     entry: OutboxEntry,
 }
 
-impl AuthorizedWriterOperation<'_> {
+impl<'storage> AuthorizedWriterOperation<'storage> {
+    pub(crate) fn blob_upload_lane(&self) -> AuthorizedBlobUploadLane<'storage> {
+        AuthorizedBlobUploadLane {
+            database: self.database.clone(),
+            storage: self.storage,
+            store_dir: self.store_dir,
+        }
+    }
+
+    pub(crate) async fn drain_uploads(
+        &self,
+        clock: &dyn coven_foundation::clock::Clock,
+        routing_encryption: Option<&EncryptionService>,
+        observer: Option<&dyn BlobTransitionObserver>,
+    ) -> Result<DrainOutcome, DbError> {
+        self.blob_upload_lane()
+            .drain_uploads(clock, routing_encryption, observer)
+            .await
+    }
+}
+
+impl AuthorizedBlobUploadLane<'_> {
     /// Drain pending blob uploads: read each local file, seal it under its scope,
     /// create its exact cloud object — and, for an entry marked `retain_pinned`, keep the
     /// plaintext in the protected locator-keyed local cache so the blob
