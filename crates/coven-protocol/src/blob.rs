@@ -737,10 +737,10 @@ pub enum RowBlobRefError {
 /// restart. `on_root_made_local` reports the synchronous opposite direction;
 /// `on_blob_materialize_progress` moves its per-file progress bar.
 ///
-/// `should_skip_uploads` lets the host pause the upload pipeline without touching
-/// the queue: the sync cycle consults it before draining so a paused queue still
-/// accepts new entries but doesn't drain (the queue checks once at the top of each
-/// entry; in-flight uploads complete normally).
+/// The upload-pause methods let the host suspend the upload pipeline without
+/// touching the queue or discarding an open provider upload. The drain checks
+/// the absolute state before admitting work and stops polling active preparation
+/// and provider futures while paused; resume continues those same futures.
 ///
 #[async_trait::async_trait]
 pub trait BlobTransitionObserver: Send + Sync {
@@ -786,11 +786,24 @@ pub trait BlobTransitionObserver: Send + Sync {
     /// An upload attempt failed; the entry remains queued for retry.
     async fn on_blob_upload_failed(&self, upload: &RowBlobRef, error: &str);
 
-    /// If true, the sync cycle skips the upload drain this round and
-    /// the queue stops before pulling the next queued entry. The default is `false`
-    /// so existing implementations don't need a stub.
+    /// Whether upload work is currently paused. The drain checks this before
+    /// admission and while provider work is active. The default is `false` so
+    /// existing implementations don't need a stub.
     fn should_skip_uploads(&self) -> bool {
         false
+    }
+
+    /// Complete when the absolute upload-pause state becomes paused. The
+    /// default never completes because the default state never pauses.
+    async fn wait_until_uploads_paused(&self) {
+        std::future::pending::<()>().await;
+    }
+
+    /// Complete when the absolute upload-pause state becomes running. An
+    /// observer that can return `true` from [`Self::should_skip_uploads`] must
+    /// override this so a suspended transfer can resume.
+    async fn wait_until_uploads_resumed(&self) {
+        std::future::pending::<()>().await;
     }
 
     /// coven completed a make_local of `(root_table, root_id)`: every blob is back

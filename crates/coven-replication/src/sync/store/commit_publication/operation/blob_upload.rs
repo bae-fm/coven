@@ -135,8 +135,7 @@ impl AuthorizedWriterOperation<'_> {
         let limit = self.database.transfer_limits().uploads.get();
         let mut pending = eligible.into_iter();
         let mut inflight = FuturesUnordered::new();
-        // Set once a pause is seen or a make_remote completes: stop admitting new
-        // uploads while letting those already in flight finish (never aborting them).
+        // Set once a make_remote completes, so this pass yields to publication.
         let mut stop_admitting = false;
         // Entries this pass handed to an upload attempt. Zero means the pause was
         // seen on the very first admission check, since eligible entries exist and
@@ -146,13 +145,16 @@ impl AuthorizedWriterOperation<'_> {
 
         loop {
             while !stop_admitting && inflight.len() < limit {
-                // Host-driven pause: checked before admitting each entry so a freshly
-                // paused queue stops admitting without aborting in-flight uploads, and a
-                // resume mid-cycle picks back up.
+                // A queue paused before this pass admits nothing and reports that
+                // disposition. Once this pass owns work, it stays parked here so
+                // resume continues the same drain and its open provider sessions.
                 if let Some(obs) = observer {
                     if obs.should_skip_uploads() {
-                        stop_admitting = true;
-                        break;
+                        if admitted == 0 && inflight.is_empty() {
+                            return Ok(DrainOutcome::Paused);
+                        }
+                        obs.wait_until_uploads_resumed().await;
+                        continue;
                     }
                 }
                 let Some(entry) = pending.next() else {
@@ -194,9 +196,6 @@ impl AuthorizedWriterOperation<'_> {
             }
         }
 
-        if admitted == 0 {
-            return Ok(DrainOutcome::Paused);
-        }
         Ok(DrainOutcome::Drained {
             uploaded: count,
             yielded_for_publish,
@@ -622,7 +621,12 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         };
         tokio::pin!(prepare);
         let result = loop {
+            while observer.should_skip_uploads() {
+                observer.wait_until_uploads_resumed().await;
+            }
             tokio::select! {
+                biased;
+                _ = observer.wait_until_uploads_paused() => {}
                 result = &mut prepare => break result,
                 current = progress.changed() => {
                     observer
@@ -658,7 +662,12 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         };
         tokio::pin!(create);
         let result = loop {
+            while observer.should_skip_uploads() {
+                observer.wait_until_uploads_resumed().await;
+            }
             tokio::select! {
+                biased;
+                _ = observer.wait_until_uploads_paused() => {}
                 result = &mut create => break result,
                 current = progress.changed() => {
                     observer
