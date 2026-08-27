@@ -12,7 +12,7 @@ use bytes::Bytes;
 use reqwest::StatusCode;
 
 use super::http::range_content_header;
-use super::{combine_cleanup_failure, CloudHomeError};
+use super::{combine_cleanup_failure, CloudHomeError, UploadControl};
 
 /// Maps a non-success upload response `(status, body)` to a `CloudHomeError` —
 /// the per-provider quota/error classifier.
@@ -35,12 +35,16 @@ impl ResumableSession {
         offset: u64,
         end: u64,
         total: u64,
+        control: &UploadControl,
     ) -> Result<reqwest::Response, CloudHomeError> {
+        let length = part.len();
         self.client
             .put(&self.url)
-            .header("Content-Length", part.len())
+            .header("Content-Length", length)
             .header("Content-Range", range_content_header(offset, end, total))
-            .body(part)
+            .body(reqwest::Body::wrap_stream(
+                control.stream_part(part, offset),
+            ))
             .send()
             .await
             .map_err(|error| CloudHomeError::transport(format!("upload chunk {}", self.key), error))
@@ -119,8 +123,9 @@ impl RangePutUploader {
         part: Bytes,
         offset: u64,
         is_last: bool,
+        control: &UploadControl,
     ) -> Result<Option<reqwest::Response>, CloudHomeError> {
-        self.send_part_with_completion(part, offset, is_last, true)
+        self.send_part_with_completion(part, offset, is_last, true, control)
             .await
     }
 
@@ -129,8 +134,9 @@ impl RangePutUploader {
         part: Bytes,
         offset: u64,
         is_last: bool,
+        control: &UploadControl,
     ) -> Result<Option<reqwest::Response>, CloudHomeError> {
-        self.send_part_with_completion(part, offset, is_last, false)
+        self.send_part_with_completion(part, offset, is_last, false, control)
             .await
     }
 
@@ -140,9 +146,14 @@ impl RangePutUploader {
         offset: u64,
         is_last: bool,
         completes_on_final_part: bool,
+        control: &UploadControl,
     ) -> Result<Option<reqwest::Response>, CloudHomeError> {
         let end = offset + part.len() as u64 - 1;
-        let response = match self.session.send_part(part, offset, end, self.total).await {
+        let response = match self
+            .session
+            .send_part(part, offset, end, self.total, control)
+            .await
+        {
             Ok(response) => response,
             Err(operation) => {
                 let cleanup = self.abort().await;
@@ -251,8 +262,12 @@ impl super::PartSink for RangePutSink {
         part: Bytes,
         offset: u64,
         is_last: bool,
+        control: &UploadControl,
     ) -> Result<(), CloudHomeError> {
-        self.0.send_part(part, offset, is_last).await.map(drop)
+        self.0
+            .send_part(part, offset, is_last, control)
+            .await
+            .map(drop)
     }
 
     async fn abort(&mut self) -> Result<(), CloudHomeError> {
@@ -279,6 +294,10 @@ mod tests {
 
     fn cancellation_succeeded(status: StatusCode) -> bool {
         status.is_success() || status == StatusCode::NOT_FOUND
+    }
+
+    fn running_control() -> UploadControl {
+        UploadControl::running(crate::cloud::no_progress())
     }
 
     fn spawn_cancellation_endpoint(
@@ -356,6 +375,37 @@ mod tests {
             Router::new().fallback(successful_upload_endpoint),
         )
         .await
+    }
+
+    #[derive(Clone)]
+    struct PausableUploadState {
+        received: Arc<AtomicUsize>,
+        first_chunk: Arc<tokio::sync::Notify>,
+    }
+
+    async fn pausable_upload_endpoint(
+        State(state): State<PausableUploadState>,
+        request: axum::extract::Request,
+    ) -> Response<Body> {
+        use futures_util::StreamExt;
+
+        if request.method() != Method::PUT {
+            return Response::builder()
+                .status(StatusCode::METHOD_NOT_ALLOWED)
+                .body(Body::empty())
+                .expect("build method response");
+        }
+        let mut body = request.into_body().into_data_stream();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.expect("read resumable request body");
+            state.received.fetch_add(chunk.len(), Ordering::SeqCst);
+            state.first_chunk.notify_waiters();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Response::builder()
+            .status(StatusCode::CREATED)
+            .body(Body::from(r#"{"id":"provider-file-id"}"#))
+            .expect("build completion response")
     }
 
     async fn failed_upload_endpoint(
@@ -443,7 +493,7 @@ mod tests {
         );
 
         let err = sink
-            .send_part(Bytes::from_static(b"data"), 0, true)
+            .send_part(Bytes::from_static(b"data"), 0, true, &running_control())
             .await
             .expect_err("final incomplete status must fail");
         assert_eq!(
@@ -468,7 +518,7 @@ mod tests {
         );
 
         let error = uploader
-            .send_part(Bytes::from_static(b"data"), 0, false)
+            .send_part(Bytes::from_static(b"data"), 0, false, &running_control())
             .await
             .expect_err("premature completion must fail");
         assert!(error.to_string().contains("201 Created"), "{error}");
@@ -490,7 +540,7 @@ mod tests {
         );
 
         let body = uploader
-            .send_part(Bytes::from_static(b"data"), 0, true)
+            .send_part(Bytes::from_static(b"data"), 0, true, &running_control())
             .await
             .expect("final part succeeds")
             .expect("final part returns response")
@@ -498,6 +548,56 @@ mod tests {
             .await
             .expect("read final response body");
         assert_eq!(body.as_ref(), br#"{"id":"provider-file-id"}"#);
+        shutdown.send(()).expect("shut down upload endpoint");
+    }
+
+    #[tokio::test]
+    async fn active_range_put_stops_and_resumes_the_same_request_body() {
+        let received = Arc::new(AtomicUsize::new(0));
+        let first_chunk = Arc::new(tokio::sync::Notify::new());
+        let (endpoint, shutdown) = crate::cloud::test_server::spawn_test_server(
+            Router::new()
+                .fallback(pausable_upload_endpoint)
+                .with_state(PausableUploadState {
+                    received: received.clone(),
+                    first_chunk: first_chunk.clone(),
+                }),
+        )
+        .await;
+        let bytes = Bytes::from(vec![4; 16 * 1024 * 1024 + 17]);
+        let mut uploader = RangePutUploader::new(
+            reqwest::Client::new(),
+            endpoint,
+            StatusCode::PERMANENT_REDIRECT.as_u16(),
+            bytes.len() as u64,
+            bytes.len(),
+            "objects/blob".to_string(),
+            Box::new(|status, body| CloudHomeError::Transport(format!("{status}: {body}"))),
+            cancellation_succeeded,
+        );
+        let (pause_sender, pause) = tokio::sync::watch::channel(false);
+        let control = UploadControl::pausable(crate::cloud::no_progress(), pause);
+        let upload = uploader.send_part(bytes.clone(), 0, true, &control);
+        tokio::pin!(upload);
+
+        tokio::select! {
+            _ = first_chunk.notified() => {}
+            result = &mut upload => panic!("range PUT completed before pause: {result:?}"),
+        }
+        pause_sender.send_replace(true);
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let received_while_paused = received.load(Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(
+            received.load(Ordering::SeqCst),
+            received_while_paused,
+            "the range PUT request body kept advancing while paused",
+        );
+        assert!(received_while_paused < bytes.len());
+
+        pause_sender.send_replace(false);
+        upload.await.expect("resume the same range PUT");
+        assert_eq!(received.load(Ordering::SeqCst), bytes.len());
         shutdown.send(()).expect("shut down upload endpoint");
     }
 
@@ -516,7 +616,7 @@ mod tests {
         );
 
         uploader
-            .send_part(Bytes::from_static(b"data"), 0, false)
+            .send_part(Bytes::from_static(b"data"), 0, false, &running_control())
             .await
             .expect_err("failed part must surface");
         assert_eq!(delete_count.load(Ordering::SeqCst), 1);
@@ -538,7 +638,7 @@ mod tests {
         );
 
         let error = uploader
-            .send_part(Bytes::from_static(b"data"), 0, false)
+            .send_part(Bytes::from_static(b"data"), 0, false, &running_control())
             .await
             .expect_err("failed part and cancellation must surface");
         let (operation, cleanup) = error

@@ -84,42 +84,6 @@ fn host_blob_test_db(namespace: &str, store_dir: &StoreDir) -> coven_database::D
     .expect("open host blob test database")
 }
 
-struct PausedUploadDrain {
-    paused: std::sync::atomic::AtomicBool,
-    reached: tokio::sync::Notify,
-}
-
-impl PausedUploadDrain {
-    fn new() -> Self {
-        Self {
-            paused: std::sync::atomic::AtomicBool::new(true),
-            reached: tokio::sync::Notify::new(),
-        }
-    }
-
-    fn resume(&self) {
-        self.paused
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-#[async_trait::async_trait]
-impl coven_protocol::blob::BlobTransitionObserver for PausedUploadDrain {
-    async fn on_blob_upload_started(&self, _upload: &RowBlobRef) {}
-
-    async fn on_blob_uploaded(&self, _upload: &RowBlobRef) {}
-
-    async fn on_blob_upload_failed(&self, _upload: &RowBlobRef, _error: &str) {}
-
-    fn should_skip_uploads(&self) -> bool {
-        let paused = self.paused.load(std::sync::atomic::Ordering::SeqCst);
-        if paused {
-            self.reached.notify_one();
-        }
-        paused
-    }
-}
-
 trait HostBlobTestOps {
     async fn queue_host_blob(
         &self,
@@ -562,10 +526,9 @@ impl CloudKitOps for TestCloudKitOps {
 }
 
 /// `connect_sync_with_test_home` starts the production sync loop over an injected
-/// `InMemoryCloudHome`. A host write creates a pending exact Store row/blob;
-/// the public drain uploads its prepared blob object, the next cycle publishes
-/// the row with its exact locator, and `read_blob` uses that row-bound locator
-/// to read the same object through the handle.
+/// `InMemoryCloudHome`. A host write creates a pending exact Store row/blob; the
+/// loop uploads and publishes it, and `read_blob` uses the activated row-bound
+/// locator to read the same object through the handle.
 #[tokio::test]
 async fn test_home_drives_drain_and_read_through_the_handle() {
     let local = tokio::task::LocalSet::new();
@@ -591,7 +554,6 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
                 let config = config.clone();
                 Arc::new(move || config.clone())
             };
-            let upload_pause = Arc::new(PausedUploadDrain::new());
             let signer = coven_keys::keys::UserKeypair::generate();
             let home = coven_replication::sync::test_helpers::test_cloud_home();
             TestStore::create(
@@ -619,7 +581,7 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
                 coven_storage::oauth::OAuthClients::empty(),
                 Arc::new(SystemClock),
                 None,
-                Some(upload_pause.clone()),
+                None,
                 StoreOpenGuard::acquire_for_test(&store_dir),
                 coven_storage::BlobChunking::DEFAULT,
             );
@@ -632,9 +594,14 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
                 )
                 .await
                 .expect("connect over the injected test home");
+            let mut outbox = handle.subscribe_cloud_outbox();
+            assert!(outbox
+                .next()
+                .await
+                .expect("read initial cloud outbox")
+                .uploads
+                .is_empty());
 
-            // The loop prepares the exact blob upload from the pending Store write,
-            // then the observer pauses before it can drain the queue itself.
             let plaintext = b"cover-art-bytes-for-the-test-home".to_vec();
             handle
                 .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
@@ -648,35 +615,21 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
                 )
                 .await
                 .expect("queue the exact row/blob transition");
-            tokio::time::timeout(Duration::from_secs(20), upload_pause.reached.notified())
-                .await
-                .expect("the loop reaches the paused upload drain");
-            let local = handle
-                .row_blob_ref("note_photos", "cover-1")
-                .await
-                .expect("capture Local row while upload is paused");
-            assert!(
-                matches!(
-                    local.authority(),
-                    coven_protocol::blob::RowBlobAuthority::Local
-                ),
-                "the row stays Local until the exact upload completes",
-            );
-            assert!(local.stored().is_none());
-
-            upload_pause.resume();
-            let outcome = handle
-                .drain_uploads()
-                .await
-                .expect("drain the prepared exact blob through the public handle");
-            assert_eq!(outcome.uploaded(), 1);
-            assert!(outcome.yielded_for_publish());
-            assert!(outcome.failures().failures().is_empty());
-
+            handle.sync_now();
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    let snapshot = outbox.next().await.expect("read cloud outbox change");
+                    if snapshot.uploads.is_empty() && snapshot.make_remotes.is_empty() {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("the production loop publishes the make-remote transition");
             let blob = handle
                 .row_blob_ref("note_photos", "cover-1")
                 .await
-                .expect("capture Remote row after exact upload");
+                .expect("capture Remote row after loop publication");
             let object = blob
                 .stored()
                 .expect("published blob has exact storage")
@@ -901,10 +854,6 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
             let store_keys = test_store_keys("lib-chunking");
             let identity_custody = coven_keys::identity_custody::IdentityCustody::InMemory(signer)
                 .resolve(&store_keys, &store_dir);
-            // Holds the loop off the upload queue so this test's explicit
-            // `drain_uploads` is the call that seals the object.
-            let upload_pause = Arc::new(PausedUploadDrain::new());
-
             let handle = CovenHandle::new(
                 db.clone(),
                 // `read_db`: this test never calls `read`, so the writer clone stands in.
@@ -917,13 +866,13 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
                 coven_storage::oauth::OAuthClients::empty(),
                 Arc::new(SystemClock),
                 None,
-                Some(upload_pause.clone()),
+                None,
                 StoreOpenGuard::acquire_for_test(&store_dir),
                 chunking,
             );
 
             handle
-                .connect_sync_with_test_home(
+                .connect_sync_with_test_home_caller_driven(
                     home.clone(),
                     CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
                 )
@@ -947,11 +896,6 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
                 )
                 .await
                 .expect("queue the exact row/blob transition");
-            tokio::time::timeout(Duration::from_secs(20), upload_pause.reached.notified())
-                .await
-                .expect("the loop reaches the paused upload drain");
-
-            upload_pause.resume();
             let outcome = handle
                 .drain_uploads()
                 .await

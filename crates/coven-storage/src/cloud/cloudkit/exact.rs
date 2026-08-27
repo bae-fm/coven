@@ -302,7 +302,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
     async fn create_at(
         &self,
         upload: &crate::cloud::ExactUpload<'_>,
-        progress: &UploadProgress,
+        control: &crate::cloud::UploadControl,
     ) -> Result<crate::cloud::ExactCreateOutcome, CloudHomeError> {
         if matches!(
             self.exact_upload_verification,
@@ -326,6 +326,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
         let mut requested_keys = Vec::with_capacity(part_count + 1);
         let mut written_len = 0usize;
         for index in 0..part_count {
+            control.wait_until_resumed().await;
             let part = match body.next_part(CHUNK_SIZE).await {
                 Ok(Some(part)) => part,
                 Ok(None) => {
@@ -439,7 +440,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
             matches!(outcome, crate::cloud::ExactCreateOutcome::Created),
         )
         .await?;
-        progress(total_len as u64);
+        control.report(total_len as u64);
         Ok(outcome)
     }
 

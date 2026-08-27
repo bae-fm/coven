@@ -7,7 +7,7 @@ use coven::{
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudObjectStream,
     CloudVersionedObject, CovenHandle, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
     ObjectSlot, PhysicalObjectLocator, ProviderDeviceBinding, ProviderPrincipalId,
-    ResolvedProviderBinding, StoreProviderBinding,
+    ResolvedProviderBinding, StoreProviderBinding, UploadControl,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -296,7 +296,7 @@ impl ExactSlotStorage for ExternalProvider {
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,
-        progress: &coven::UploadProgress,
+        control: &UploadControl,
     ) -> Result<ExactCreateOutcome, CloudHomeError> {
         let slot = upload.object().slot();
         assert_eq!(slot.logical_key(), "objects/default-create");
@@ -306,7 +306,7 @@ impl ExactSlotStorage for ExternalProvider {
         );
         let data = upload.body().await?.collect().await?;
         self.exact_create_called.store(true, Ordering::SeqCst);
-        progress(data.len() as u64);
+        control.report(data.len() as u64);
         Ok(ExactCreateOutcome::Created)
     }
 
@@ -376,8 +376,9 @@ async fn external_provider_can_name_and_implement_the_full_cloud_home_surface() 
     );
     let created_upload =
         ExactUpload::from_bytes(&created_object, created_bytes).expect("valid exact upload");
+    let control = UploadControl::running(coven::no_progress());
     provider
-        .create_at(&created_upload, &coven::no_progress())
+        .create_at(&created_upload, &control)
         .await
         .expect("provider creates the exact slot");
     assert_eq!(created.logical_key(), "objects/default-create");

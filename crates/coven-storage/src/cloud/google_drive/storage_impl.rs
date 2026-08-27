@@ -109,8 +109,9 @@ impl crate::cloud::PartSink for DriveMultipartSink<'_> {
         part: Bytes,
         offset: u64,
         is_last: bool,
+        control: &crate::cloud::UploadControl,
     ) -> Result<(), CloudHomeError> {
-        self.inner.send_part(part, offset, is_last).await
+        self.inner.send_part(part, offset, is_last, control).await
     }
 
     async fn abort(&mut self) -> Result<(), CloudHomeError> {
@@ -516,7 +517,7 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
     async fn create_at(
         &self,
         upload: &crate::cloud::ExactUpload<'_>,
-        progress: &UploadProgress,
+        control: &crate::cloud::UploadControl,
     ) -> Result<crate::cloud::ExactCreateOutcome, CloudHomeError> {
         if matches!(
             self.exact_upload_verification,
@@ -530,7 +531,7 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
             self,
             upload.object().slot(),
             upload.body().await?,
-            progress,
+            control,
         )
         .await;
         settle_exact_create(operation, |observed| {

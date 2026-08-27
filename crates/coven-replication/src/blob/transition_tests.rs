@@ -2546,14 +2546,11 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             )
             .await
             .expect("record Prepared exact handoff");
+        let control =
+            coven_storage::cloud::UploadControl::running(coven_storage::cloud::no_progress());
         cloud_storage
             .clone()
-            .create_blob_object_from_file(
-                &stored,
-                &authority,
-                &spool,
-                &coven_storage::cloud::no_progress(),
-            )
+            .create_blob_object_from_file(&stored, &authority, &spool, &control)
             .await
             .expect("create exact blob");
         let prepared = coven_database::StoreDatabase::new(&db)

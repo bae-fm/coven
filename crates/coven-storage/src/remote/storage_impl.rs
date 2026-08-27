@@ -435,7 +435,10 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         let upload =
             crate::cloud::ExactUpload::from_bytes(prepared.reference(), prepared.stored_bytes())?;
         self.home
-            .create_at(&upload, &crate::cloud::no_progress())
+            .create_at(
+                &upload,
+                &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
+            )
             .await
             .map(drop)
             .map_err(Into::into)
@@ -819,7 +822,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &Path,
-        progress: &crate::cloud::UploadProgress,
+        control: &crate::cloud::UploadControl,
     ) -> Result<(), StorageError> {
         let locator = blob.locator();
         let object = blob.object();
@@ -835,7 +838,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         }
         let upload = crate::cloud::ExactUpload::from_file(object, stored_file).await?;
         self.home
-            .create_at(&upload, progress)
+            .create_at(&upload, control)
             .await
             .map(drop)
             .map_err(Into::into)

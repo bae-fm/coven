@@ -17,7 +17,7 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::{
     combine_cleanup_failure, sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome, UploadProgress,
+    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome,
 };
 use crate::oauth::OAuthConfig;
 use coven_protocol::objects::ObjectSlot;
@@ -269,7 +269,7 @@ impl OneDriveCloudHome {
         &self,
         slot: &ObjectSlot,
         mut body: BlobBody,
-        progress: &UploadProgress,
+        control: &super::UploadControl,
     ) -> Result<(), CloudHomeError> {
         slot.require_logical_key_for("OneDrive")?;
         let full_logical_key = slot.logical_key();
@@ -312,9 +312,11 @@ impl OneDriveCloudHome {
             };
             let length = part.len() as u64;
             let is_last = offset + length >= total;
-            let completion = uploader.send_deferred_part(part, offset, is_last).await?;
+            let completion = uploader
+                .send_deferred_part(part, offset, is_last, control)
+                .await?;
             offset += length;
-            progress(offset);
+            control.report(offset);
             if let Some(response) = completion {
                 response.bytes().await.map_err(|error| {
                     CloudHomeError::transport(
@@ -713,7 +715,7 @@ impl ExactSlotStorage for OneDriveCloudHome {
     async fn create_at(
         &self,
         upload: &super::ExactUpload<'_>,
-        progress: &UploadProgress,
+        control: &super::UploadControl,
     ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
         if matches!(
             self.exact_upload_verification,
@@ -728,7 +730,7 @@ impl ExactSlotStorage for OneDriveCloudHome {
             self,
             upload.object().slot(),
             upload.body().await?,
-            progress,
+            control,
         )
         .await;
         super::exact_upload::settle_exact_create(operation, |observed| {

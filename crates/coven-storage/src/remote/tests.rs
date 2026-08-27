@@ -206,7 +206,12 @@ async fn publish_sealed_blob(
         .await
         .expect("prepare exact blob");
     storage
-        .create_blob_object_from_file(&blob, &authority, &spool, &crate::cloud::no_progress())
+        .create_blob_object_from_file(
+            &blob,
+            &authority,
+            &spool,
+            &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
+        )
         .await
         .expect("create exact blob");
     (storage, blob, audience_key, temp)
@@ -417,7 +422,12 @@ async fn a_blob_stored_in_the_clear_refuses_ranged_reading() {
         .await
         .expect("prepare exact blob");
     storage
-        .create_blob_object_from_file(&blob, &authority, &spool, &crate::cloud::no_progress())
+        .create_blob_object_from_file(
+            &blob,
+            &authority,
+            &spool,
+            &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
+        )
         .await
         .expect("create exact blob");
 
@@ -1004,7 +1014,12 @@ async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
         .await
         .expect("prepare exact blob");
     storage
-        .create_blob_object_from_file(&blob, &authority, &spool, &crate::cloud::no_progress())
+        .create_blob_object_from_file(
+            &blob,
+            &authority,
+            &spool,
+            &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
+        )
         .await
         .expect("create exact blob");
 
@@ -1079,7 +1094,12 @@ async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
         .await
         .unwrap();
     storage
-        .create_blob_object_from_file(&blob, &authority, &spool, &crate::cloud::no_progress())
+        .create_blob_object_from_file(
+            &blob,
+            &authority,
+            &spool,
+            &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
+        )
         .await
         .unwrap();
     home.replace_exact_object(blob.object().slot(), b"corrupt".to_vec());

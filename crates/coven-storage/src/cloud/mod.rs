@@ -58,7 +58,8 @@ pub(crate) use blob_body::PROGRESS_CHUNK_SIZE;
 pub(crate) use blob_body::{combine_cleanup_failure, MultipartUpload};
 pub use blob_body::{no_download_progress, no_preparation_progress, no_progress};
 pub use blob_body::{
-    BlobBody, BoxPartSink, DownloadProgress, PartSink, PreparationProgress, UploadProgress,
+    BlobBody, BoxPartSink, DownloadProgress, PartSink, PreparationProgress, UploadControl,
+    UploadProgress,
 };
 pub use exact_upload::{ExactUpload, ExactUploadSource};
 
@@ -75,7 +76,9 @@ pub(crate) async fn create_exact_bytes(
         coven_protocol::store_commit::ObjectHash::digest(bytes),
     );
     let upload = ExactUpload::from_bytes(&object, bytes).map_err(CloudHomeError::from)?;
-    storage.create_at(&upload, progress).await
+    storage
+        .create_at(&upload, &UploadControl::running(progress.clone()))
+        .await
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -549,7 +552,7 @@ pub trait ExactSlotStorage: Send + Sync {
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,
-        progress: &UploadProgress,
+        control: &UploadControl,
     ) -> Result<ExactCreateOutcome, CloudHomeError>;
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError>;
@@ -664,7 +667,8 @@ pub trait CloudHome: Send + Sync {
             return Ok(());
         }
         let sink = self.open_multipart(key, body.len()).await?;
-        MultipartUpload::new(key, body, sink, progress).run().await
+        let control = UploadControl::running(progress.clone());
+        MultipartUpload::new(key, body, sink, &control).run().await
     }
 
     /// Read the full contents of a key.

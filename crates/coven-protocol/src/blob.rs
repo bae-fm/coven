@@ -739,8 +739,9 @@ pub enum RowBlobRefError {
 ///
 /// The upload-pause methods let the host suspend the upload pipeline without
 /// touching the queue or discarding an open provider upload. The drain checks
-/// the absolute state before admitting work and stops polling active preparation
-/// and provider futures while paused; resume continues those same futures.
+/// the absolute state before admitting work, stops polling active preparation,
+/// and stops active provider request bodies from yielding bytes while paused;
+/// resume continues those same operations.
 ///
 #[async_trait::async_trait]
 pub trait BlobTransitionObserver: Send + Sync {

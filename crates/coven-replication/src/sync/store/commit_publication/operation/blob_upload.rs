@@ -298,10 +298,10 @@ impl AuthorizedBlobUploadLane<'_> {
         blob: &StoredBlobRef,
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         spool_path: &std::path::Path,
-        progress: &coven_storage::cloud::UploadProgress,
+        control: &coven_storage::cloud::UploadControl,
     ) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage
-            .create_blob_object_from_file(blob, authority, spool_path, progress)
+            .create_blob_object_from_file(blob, authority, spool_path, control)
             .await
     }
 
@@ -685,21 +685,33 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         let total = blob.object().stored_size();
         let mut progress = crate::blob::progress::TransferProgress::new();
         let callback = progress.callback();
+        let Some(observer) = self.observer else {
+            let control = coven_storage::cloud::UploadControl::running(callback);
+            return self
+                .writer
+                .create_blob_upload_object(blob, self.authority, spool_path, &control)
+                .await;
+        };
+        let (pause_sender, pause) = tokio::sync::watch::channel(observer.should_skip_uploads());
+        let control = coven_storage::cloud::UploadControl::pausable(callback, pause);
         let create =
             self.writer
-                .create_blob_upload_object(blob, self.authority, spool_path, &callback);
-        let Some(observer) = self.observer else {
-            return create.await;
-        };
+                .create_blob_upload_object(blob, self.authority, spool_path, &control);
         tokio::pin!(create);
         let result = loop {
-            while observer.should_skip_uploads() {
+            let paused = observer.should_skip_uploads();
+            pause_sender.send_replace(paused);
+            if paused {
                 observer.wait_until_uploads_resumed().await;
+                pause_sender.send_replace(observer.should_skip_uploads());
+                continue;
             }
             tokio::select! {
                 biased;
-                _ = observer.wait_until_uploads_paused() => {}
                 result = &mut create => break result,
+                _ = observer.wait_until_uploads_paused() => {
+                    pause_sender.send_replace(observer.should_skip_uploads());
+                }
                 current = progress.changed() => {
                     observer
                         .on_blob_upload_progress(upload, current, total)

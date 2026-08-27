@@ -154,7 +154,7 @@ pub use coven_storage::{
     CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudKitShareAcceptance,
     CloudKitSharePermission, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
     DownloadProgress, ExactCloudHome, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
-    ExactUploadSource, PartSink, S3CloudHome, UploadProgress,
+    ExactUploadSource, PartSink, S3CloudHome, UploadControl, UploadProgress,
 };
 pub use device_pairing::{ApproveDevicePairingError, StartDevicePairingError};
 pub use handle::CovenHandle;

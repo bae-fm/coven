@@ -108,9 +108,9 @@ impl ExactSlotStorage for CountingCloudHome {
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,
-        progress: &UploadProgress,
+        control: &UploadControl,
     ) -> Result<ExactCreateOutcome, CloudHomeError> {
-        self.counted().create_at(upload, progress).await
+        self.counted().create_at(upload, control).await
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {

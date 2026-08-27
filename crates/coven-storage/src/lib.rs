@@ -32,7 +32,8 @@ pub use cloud::{
     no_progress, write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome,
     CloudAccessState, CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo,
     CloudObjectStream, CloudObjectVersion, CloudVersionedObject, DownloadProgress, ExactCloudHome,
-    ExactCreateOutcome, ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink, UploadProgress,
+    ExactCreateOutcome, ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink, UploadControl,
+    UploadProgress,
 };
 
 #[cfg(feature = "oauth-providers")]

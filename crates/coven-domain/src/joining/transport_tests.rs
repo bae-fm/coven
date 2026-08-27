@@ -16,7 +16,7 @@ use coven_replication::sync::store::{
     DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportTiming,
 };
 use coven_replication::sync::test_helpers::*;
-use coven_storage::cloud::{no_progress, ExactSlotStorage, ExactUpload};
+use coven_storage::cloud::{no_progress, ExactSlotStorage, ExactUpload, UploadControl};
 
 /// Fast enough that the drivers hand off within a test, generous enough that a
 /// loaded machine never trips the deadline.
@@ -1718,7 +1718,7 @@ async fn tampered_slot_bytes_refuse_to_open() {
             .expect("tampered bytes match their replacement exact reference");
         fixture
             .home
-            .create_at(&tampered_upload, &no_progress())
+            .create_at(&tampered_upload, &UploadControl::running(no_progress()))
             .await
             .expect("plant the tampered bytes");
 

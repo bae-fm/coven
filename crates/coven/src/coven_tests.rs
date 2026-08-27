@@ -12,7 +12,7 @@ use coven_replication::sync::test_helpers::TestStore;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::{
     BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    ExactCreateOutcome, ExactSlotStorage, ExactUpload, UploadProgress,
+    ExactCreateOutcome, ExactSlotStorage, ExactUpload, UploadControl,
 };
 use coven_storage::CloudCipher;
 use rusqlite::{params, OptionalExtension};
@@ -2723,10 +2723,10 @@ impl ExactSlotStorage for GateCloudHome {
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,
-        progress: &UploadProgress,
+        control: &UploadControl,
     ) -> Result<ExactCreateOutcome, CloudHomeError> {
         self.gate().await;
-        ExactSlotStorage::create_at(&self.inner, upload, progress).await
+        ExactSlotStorage::create_at(&self.inner, upload, control).await
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {

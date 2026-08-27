@@ -72,6 +72,33 @@ struct ActivePauseObserver {
     progressed: tokio::sync::Notify,
 }
 
+struct ResumedBeforePauseNotificationObserver {
+    upload_started: AtomicBool,
+    started: tokio::sync::Notify,
+    emitted_stale_pause: AtomicBool,
+}
+
+#[async_trait]
+impl BlobTransitionObserver for ResumedBeforePauseNotificationObserver {
+    async fn on_blob_upload_started(&self, _upload: &RowBlobRef) {
+        self.upload_started.store(true, Ordering::SeqCst);
+        self.started.notify_waiters();
+    }
+    async fn on_blob_uploaded(&self, _upload: &RowBlobRef) {}
+    async fn on_blob_upload_failed(&self, _upload: &RowBlobRef, _error: &str) {}
+
+    async fn wait_until_uploads_paused(&self) {
+        loop {
+            if self.upload_started.load(Ordering::SeqCst)
+                && !self.emitted_stale_pause.swap(true, Ordering::SeqCst)
+            {
+                return;
+            }
+            self.started.notified().await;
+        }
+    }
+}
+
 impl ActivePauseObserver {
     fn new() -> Self {
         Self {
@@ -192,4 +219,30 @@ async fn pausing_suspends_an_active_upload_and_resume_continues_the_same_create(
     let outcome = drain.await.expect("resume the upload drain");
     assert_eq!(outcome.uploaded(), 1);
     assert_eq!(fixture.home.create_calls(), 1);
+}
+
+#[tokio::test]
+async fn a_pause_notification_observed_after_resume_does_not_suspend_the_upload() {
+    let fixture = UploadFixture::new(1).await;
+    fixture
+        .plant_uploads(&[("stale-pause", &[7; 10_000])], false)
+        .await;
+    fixture
+        .home
+        .slow_creates(1_000, std::time::Duration::from_millis(5));
+    let observer = ResumedBeforePauseNotificationObserver {
+        upload_started: AtomicBool::new(false),
+        started: tokio::sync::Notify::new(),
+        emitted_stale_pause: AtomicBool::new(false),
+    };
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fixture.drain(&fixed_clock(T0), Some(&observer)),
+    )
+    .await
+    .expect("a stale pause notification cannot suspend a running observer")
+    .expect("upload drain succeeds");
+
+    assert_eq!(outcome.uploaded(), 1);
 }

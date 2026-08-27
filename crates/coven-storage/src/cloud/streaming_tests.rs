@@ -187,6 +187,7 @@ impl PartSink for RecordingSink<'_> {
         part: Bytes,
         offset: u64,
         _is_last: bool,
+        _control: &UploadControl,
     ) -> Result<(), CloudHomeError> {
         assert_eq!(
             offset,
@@ -331,6 +332,7 @@ impl PartSink for FailingPartSink<'_> {
         _part: Bytes,
         _offset: u64,
         _is_last: bool,
+        _control: &UploadControl,
     ) -> Result<(), CloudHomeError> {
         Err(CloudHomeError::Transport(
             "injected part failure".to_string(),

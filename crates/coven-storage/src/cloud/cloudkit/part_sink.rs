@@ -88,7 +88,9 @@ impl crate::cloud::PartSink for CloudKitPartSink {
         part: bytes::Bytes,
         _offset: u64,
         _is_last: bool,
+        control: &crate::cloud::UploadControl,
     ) -> Result<(), CloudHomeError> {
+        control.wait_until_resumed().await;
         let i = self.index;
         self.index += 1;
         self.written_len += part.len();

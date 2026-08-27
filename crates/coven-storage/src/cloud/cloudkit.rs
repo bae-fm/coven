@@ -18,7 +18,6 @@ use coven_foundation::id_provider::{IdRef, UuidProvider};
 use super::{
     combine_cleanup_failure, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
     CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject, ExactSlotStorage, RevokeOutcome,
-    UploadProgress,
 };
 use coven_protocol::objects::ObjectSlot;
 

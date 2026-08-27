@@ -378,7 +378,7 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         authority: &BlobWriteAuthority<'_>,
         stored_file: &Path,
-        progress: &crate::cloud::UploadProgress,
+        control: &crate::cloud::UploadControl,
     ) -> Result<(), StorageError>;
 
     /// Read one exact stored blob body and verify its signed size/hash reference.

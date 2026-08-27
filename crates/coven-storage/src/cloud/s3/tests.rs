@@ -5,6 +5,7 @@ use axum::http::header::{CONTENT_LENGTH, CONTENT_RANGE, IF_NONE_MATCH, RANGE};
 use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
 use axum::Router;
 use bytes::Bytes;
+use futures_util::StreamExt as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -926,6 +927,122 @@ struct FakeMultipartState {
     aborted_uploads: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
+#[derive(Clone)]
+struct FakePausableMultipartState {
+    bucket: String,
+    received: Arc<AtomicUsize>,
+    first_chunk: Arc<tokio::sync::Notify>,
+}
+
+async fn fake_s3_pausable_multipart_endpoint(
+    State(state): State<FakePausableMultipartState>,
+    request: axum::extract::Request,
+) -> Response<Body> {
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let path_ok = uri.path().starts_with(&format!("/{}/", state.bucket));
+    if method == Method::POST && path_ok && uri.query() == Some("uploads") {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/xml")
+            .body(Body::from(format!(
+                "<InitiateMultipartUploadResult><Bucket>{}</Bucket><Key>object</Key><UploadId>upload-paused</UploadId></InitiateMultipartUploadResult>",
+                state.bucket
+            )))
+            .expect("build create response");
+    }
+    if method == Method::PUT && path_ok {
+        let mut body = request.into_body().into_data_stream();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.expect("read multipart request body");
+            state.received.fetch_add(chunk.len(), Ordering::SeqCst);
+            state.first_chunk.notify_waiters();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("etag", "part-etag")
+            .body(Body::empty())
+            .expect("build part response");
+    }
+    if method == Method::POST && path_ok && uri.query() == Some("uploadId=upload-paused") {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/xml")
+            .body(Body::from(
+                "<CompleteMultipartUploadResult><ETag>\"etag\"</ETag></CompleteMultipartUploadResult>",
+            ))
+            .expect("build complete response");
+    }
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .body(Body::from(format!("unexpected request: {method} {uri}")))
+        .expect("build response")
+}
+
+#[tokio::test]
+async fn active_exact_upload_stops_its_s3_request_body_while_paused() {
+    let bucket = "pausable-multipart-test".to_string();
+    let received = Arc::new(AtomicUsize::new(0));
+    let first_chunk = Arc::new(tokio::sync::Notify::new());
+    let (endpoint, shutdown) = spawn_fake_s3(
+        Router::new()
+            .fallback(fake_s3_pausable_multipart_endpoint)
+            .with_state(FakePausableMultipartState {
+                bucket: bucket.clone(),
+                received: received.clone(),
+                first_chunk: first_chunk.clone(),
+            }),
+    )
+    .await;
+    let home = standard_test_home(bucket, endpoint).await;
+    let (pause_sender, pause) = tokio::sync::watch::channel(false);
+    let control = UploadControl::pausable(crate::cloud::no_progress(), pause);
+    let slot = ObjectSlot::logical("immutable/pausable".to_string()).unwrap();
+    let body = BlobBody::from_bytes(vec![9; MULTIPART_THRESHOLD + 1]);
+    let upload = home.create_at_slot(&slot, body, None, &control);
+    tokio::pin!(upload);
+
+    tokio::select! {
+        _ = first_chunk.notified() => {}
+        result = &mut upload => panic!("upload completed before it could be paused: {result:?}"),
+    }
+    pause_sender.send_replace(true);
+    // Bytes already accepted by the socket can still reach the endpoint after
+    // the body stops yielding. Let that bounded transport buffer drain, then
+    // prove the provider receives nothing further while the pause remains set.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let received_while_paused = received.load(Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let received_after_wait = received.load(Ordering::SeqCst);
+    assert_eq!(
+        received_after_wait, received_while_paused,
+        "the S3 request body kept advancing while paused",
+    );
+    assert!(received_after_wait < MULTIPART_PART_SIZE);
+
+    pause_sender.send_replace(false);
+    tokio::select! {
+        _ = first_chunk.notified() => {}
+        result = &mut upload => panic!("upload completed before its second pause: {result:?}"),
+    }
+    pause_sender.send_replace(true);
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let received_during_second_pause = received.load(Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(
+        received.load(Ordering::SeqCst),
+        received_during_second_pause,
+        "the resumed S3 request body did not stop at its second pause",
+    );
+    assert!(received_during_second_pause < MULTIPART_THRESHOLD + 1);
+
+    pause_sender.send_replace(false);
+    upload.await.expect("resume the same exact upload");
+    assert_eq!(received.load(Ordering::SeqCst), MULTIPART_THRESHOLD + 1);
+    shutdown.send(()).expect("shut down fake S3");
+}
+
 async fn fake_s3_multipart_endpoint(
     State(state): State<FakeMultipartState>,
     method: Method,
@@ -1217,7 +1334,12 @@ async fn immutable_append_reports_body_and_multipart_abort_failures() {
 
     let slot = ObjectSlot::logical("immutable/body-failure".to_string()).unwrap();
     let error = home
-        .create_at_slot(&slot, body, None, &crate::cloud::no_progress())
+        .create_at_slot(
+            &slot,
+            body,
+            None,
+            &UploadControl::running(crate::cloud::no_progress()),
+        )
         .await
         .expect_err("body failure must abort synchronously");
 

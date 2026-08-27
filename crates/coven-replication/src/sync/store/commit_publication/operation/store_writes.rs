@@ -554,6 +554,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 )
                 .map_err(StoreError::from)?;
                 if prepared_state {
+                    let control = coven_storage::cloud::UploadControl::running(
+                        coven_storage::cloud::no_progress(),
+                    );
                     let path = prepared.spool_path.as_deref().ok_or_else(|| {
                         StoreError::InvalidOutbound(format!(
                             "prepared blob {} awaiting upload has no local spool",
@@ -561,12 +564,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         ))
                     })?;
                     storage
-                        .create_blob_object_from_file(
-                            &blob,
-                            &authority,
-                            path,
-                            &coven_storage::cloud::no_progress(),
-                        )
+                        .create_blob_object_from_file(&blob, &authority, path, &control)
                         .await
                         .map_err(|source| StoreError::BlobStorage {
                             namespace: blob.locator().namespace().to_string(),

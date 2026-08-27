@@ -22,7 +22,7 @@ use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::{
     BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError, CloudHome,
     CloudHomeError, CloudHomeJoinInfo, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
-    RevokeOutcome, UploadProgress,
+    RevokeOutcome, UploadControl,
 };
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
@@ -192,7 +192,7 @@ impl ExactSlotStorage for InstrumentedHome {
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,
-        progress: &UploadProgress,
+        control: &UploadControl,
     ) -> Result<ExactCreateOutcome, CloudHomeError> {
         self.create_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_creates.load(Ordering::SeqCst) {
@@ -211,20 +211,25 @@ impl ExactSlotStorage for InstrumentedHome {
         }
         let chunk = self.slow_chunk.load(Ordering::SeqCst);
         let result = if chunk == 0 {
-            ExactSlotStorage::create_at(&self.inner, upload, progress).await
+            ExactSlotStorage::create_at(&self.inner, upload, control).await
         } else {
             let bytes = upload.body().await?.collect().await?;
             let mut sent = 0;
             while sent < bytes.len() {
+                control.wait_until_resumed().await;
                 sent = (sent + chunk).min(bytes.len());
                 tokio::time::sleep(std::time::Duration::from_millis(
                     self.slow_delay_ms.load(Ordering::SeqCst),
                 ))
                 .await;
-                progress(sent as u64);
+                control.report(sent as u64);
             }
-            ExactSlotStorage::create_at(&self.inner, upload, &coven_storage::cloud::no_progress())
-                .await
+            ExactSlotStorage::create_at(
+                &self.inner,
+                upload,
+                &UploadControl::running(coven_storage::cloud::no_progress()),
+            )
+            .await
         };
         self.inflight.fetch_sub(1, Ordering::SeqCst);
         if result.is_ok() {

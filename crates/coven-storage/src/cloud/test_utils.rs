@@ -15,7 +15,7 @@ use bytes::Bytes;
 
 use super::{
     BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError, CloudHome,
-    CloudHomeError, ExactSlotStorage, PartSink, UploadProgress,
+    CloudHomeError, ExactSlotStorage, PartSink,
 };
 use coven_protocol::objects::ObjectSlot;
 
@@ -568,7 +568,7 @@ impl InMemoryCloudHome {
     async fn create_at_slot(
         &self,
         upload: &super::ExactUpload<'_>,
-        progress: &UploadProgress,
+        control: &super::UploadControl,
     ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
         if self.fail_writes.load(Ordering::SeqCst) {
             return Err(CloudHomeError::Transport(
@@ -586,7 +586,7 @@ impl InMemoryCloudHome {
             )));
         }
         let bytes = upload.body().await?.collect().await?;
-        progress(bytes.len() as u64);
+        control.report(bytes.len() as u64);
         {
             let mut writes = self.writes.lock().unwrap();
             if let Some(existing) = writes.get(&key) {
@@ -853,6 +853,7 @@ impl PartSink for InMemoryPartSink {
         part: Bytes,
         _offset: u64,
         _is_last: bool,
+        _control: &super::UploadControl,
     ) -> Result<(), CloudHomeError> {
         self.buf.extend_from_slice(&part);
         Ok(())
@@ -992,9 +993,9 @@ impl ExactSlotStorage for InMemoryCloudHome {
     async fn create_at(
         &self,
         upload: &super::ExactUpload<'_>,
-        progress: &UploadProgress,
+        control: &super::UploadControl,
     ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
-        InMemoryCloudHome::create_at_slot(self, upload, progress).await
+        InMemoryCloudHome::create_at_slot(self, upload, control).await
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {

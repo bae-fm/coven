@@ -727,9 +727,14 @@ fn mutable_cancellation_cleanup_failure_does_not_terminate_the_process() {
                 .open_multipart("mutable/cancel", (CHUNK_SIZE + 1) as u64)
                 .await
                 .expect("open CloudKit multipart upload");
-            sink.send_part(Bytes::from(vec![7; CHUNK_SIZE]), 0, false)
-                .await
-                .expect("write first multipart part");
+            sink.send_part(
+                Bytes::from(vec![7; CHUNK_SIZE]),
+                0,
+                false,
+                &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
+            )
+            .await
+            .expect("write first multipart part");
             ops.fail_delete(&chunk_part_key("mutable/cancel", "cloudkit-upload-0", 0));
             drop(sink);
         });
@@ -759,7 +764,7 @@ async fn write_reports_progress_per_chunk_record() {
     let ticks = Arc::new(AtomicU64::new(0));
     let last2 = last.clone();
     let ticks2 = ticks.clone();
-    let sink: UploadProgress = Arc::new(move |n: u64| {
+    let sink: crate::cloud::UploadProgress = Arc::new(move |n: u64| {
         last2.store(n, Ordering::Relaxed);
         ticks2.fetch_add(1, Ordering::Relaxed);
     });

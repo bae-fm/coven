@@ -24,7 +24,7 @@ use super::s3_common::{
 use super::{
     combine_cleanup_failure, range_header, BlobBody, CloudAccessOutcome, CloudAccessState,
     CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, MultipartUpload, RevokeOutcome,
-    UploadProgress,
+    UploadControl,
 };
 use coven_foundation::id_provider::{IdRef, UuidProvider};
 use coven_protocol::objects::{ObjectSlot, StorageBackendFailure};
@@ -287,6 +287,7 @@ impl S3CloudHome {
         key: &str,
         data: Vec<u8>,
         checksum_sha256: Option<String>,
+        control: UploadControl,
     ) -> Result<(), S3CreateOnlyPutError> {
         let full = self.full_key(key);
         let logical_key = key.to_string();
@@ -322,7 +323,7 @@ impl S3CloudHome {
                             size,
                             &payload_hash,
                             now,
-                            super::no_progress(),
+                            control,
                         )
                         .await
                         .map_err(|error| match error {
@@ -332,11 +333,22 @@ impl S3CloudHome {
                             error => S3CreateOnlyPutError::Other(error),
                         });
                 }
+                let content_length = i64::try_from(data.len()).map_err(|_| {
+                    S3CreateOnlyPutError::Other(CloudHomeError::Transport(format!(
+                        "object {logical_key} exceeds S3's content-length range"
+                    )))
+                })?;
+                let body =
+                    reqwest::Body::wrap_stream(control.stream_part(bytes::Bytes::from(data), 0));
+                let body = aws_sdk_s3::primitives::ByteStream::new(
+                    aws_sdk_s3::primitives::SdkBody::from_body_1_x(body),
+                );
                 let mut request = client
                     .put_object()
                     .bucket(&bucket)
                     .key(&full)
-                    .body(data.into());
+                    .content_length(content_length)
+                    .body(body);
                 if let Some(checksum) = checksum_sha256 {
                     request = request.checksum_sha256(checksum);
                 }
@@ -370,7 +382,7 @@ impl S3CloudHome {
         source: GoogleUploadSource,
         size: u64,
         payload_hash: String,
-        progress: UploadProgress,
+        control: UploadControl,
     ) -> Result<(), CloudHomeError> {
         let full = self.full_key(key);
         let google_xml = self.google_xml.clone().ok_or_else(|| {
@@ -400,7 +412,7 @@ impl S3CloudHome {
                         size,
                         &payload_hash,
                         now,
-                        progress,
+                        control,
                     )
                     .await
             })
@@ -414,9 +426,14 @@ impl S3CloudHome {
         data: Vec<u8>,
         checksum_sha256: Option<String>,
     ) -> Result<(), CloudHomeError> {
-        self.put_create_only_raw(key, data, checksum_sha256)
-            .await
-            .map_err(S3CreateOnlyPutError::into_cloud_error)
+        self.put_create_only_raw(
+            key,
+            data,
+            checksum_sha256,
+            UploadControl::running(super::no_progress()),
+        )
+        .await
+        .map_err(S3CreateOnlyPutError::into_cloud_error)
     }
 
     async fn append_create_only(
@@ -424,19 +441,19 @@ impl S3CloudHome {
         key: &str,
         body: BlobBody,
         exact_sha256: Option<String>,
-        progress: &UploadProgress,
+        control: &UploadControl,
     ) -> Result<(), CloudHomeError> {
         if body.len() <= self.multipart_threshold() {
             let data = body.collect().await?;
-            let length = data.len() as u64;
-            self.put_create_only(key, data, exact_sha256).await?;
-            progress(length);
-            return Ok(());
+            return self
+                .put_create_only_raw(key, data, exact_sha256, control.clone())
+                .await
+                .map_err(S3CreateOnlyPutError::into_cloud_error);
         }
         let sink = self
             .open_multipart_sink(key, MultipartCompletion::CreateOnly, exact_sha256)
             .await?;
-        MultipartUpload::new(key, body, sink, progress).run().await
+        MultipartUpload::new(key, body, sink, control).run().await
     }
 
     async fn create_at_slot(
@@ -444,11 +461,11 @@ impl S3CloudHome {
         slot: &ObjectSlot,
         body: BlobBody,
         exact_sha256: Option<String>,
-        progress: &UploadProgress,
+        control: &UploadControl,
     ) -> Result<(), CloudHomeError> {
         slot.require_logical_key_for("S3")
             .map_err(CloudHomeError::from)?;
-        self.append_create_only(slot.logical_key(), body, exact_sha256, progress)
+        self.append_create_only(slot.logical_key(), body, exact_sha256, control)
             .await
     }
 
@@ -641,7 +658,12 @@ impl S3CloudHome {
                     ExactUploadVerification::UploadChecksum => {
                     let wrong = sha256_bytes_base64(b"different bytes");
                     match self
-                        .put_create_only_raw(&bad_key, bytes.clone(), Some(wrong))
+                        .put_create_only_raw(
+                            &bad_key,
+                            bytes.clone(),
+                            Some(wrong),
+                            UploadControl::running(super::no_progress()),
+                        )
                         .await
                     {
                         Err(S3CreateOnlyPutError::ChecksumRejected(_)) => {}
@@ -758,6 +780,8 @@ struct S3PartSink {
 enum S3MultipartCommand {
     SendPart {
         part: bytes::Bytes,
+        offset: u64,
+        control: UploadControl,
         response: tokio::sync::oneshot::Sender<Result<(), CloudHomeError>>,
     },
     Abort,
@@ -784,8 +808,13 @@ impl S3MultipartOwner {
     ) -> Result<(), CloudHomeError> {
         while let Some(command) = commands.recv().await {
             match command {
-                S3MultipartCommand::SendPart { part, response } => {
-                    let result = self.send_part(part).await;
+                S3MultipartCommand::SendPart {
+                    part,
+                    offset,
+                    control,
+                    response,
+                } => {
+                    let result = self.send_part(part, offset, control).await;
                     if response.send(result).is_err() {
                         return self.abort().await;
                     }
@@ -797,13 +826,28 @@ impl S3MultipartOwner {
         self.abort().await
     }
 
-    async fn send_part(&mut self, part: bytes::Bytes) -> Result<(), CloudHomeError> {
+    async fn send_part(
+        &mut self,
+        part: bytes::Bytes,
+        offset: u64,
+        control: UploadControl,
+    ) -> Result<(), CloudHomeError> {
         let part_number = self.next_part_number;
         self.next_part_number += 1;
         let part_sha256 = self
             .exact_sha256
             .as_ref()
             .map(|_| sha256_bytes_base64(&part));
+        let content_length = i64::try_from(part.len()).map_err(|_| {
+            CloudHomeError::Transport(format!(
+                "multipart part {part_number} for {} exceeds S3's content-length range",
+                self.key
+            ))
+        })?;
+        let request_body = reqwest::Body::wrap_stream(control.stream_part(part, offset));
+        let body = aws_sdk_s3::primitives::ByteStream::new(
+            aws_sdk_s3::primitives::SdkBody::from_body_1_x(request_body),
+        );
         let mut request = self
             .client
             .upload_part()
@@ -811,7 +855,8 @@ impl S3MultipartOwner {
             .key(&self.key)
             .upload_id(&self.upload_id)
             .part_number(part_number)
-            .body(part.into());
+            .content_length(content_length)
+            .body(body);
         if let Some(checksum) = part_sha256.as_ref() {
             request = request.checksum_sha256(checksum);
         }
@@ -996,15 +1041,21 @@ impl super::PartSink for S3PartSink {
     async fn send_part(
         &mut self,
         part: bytes::Bytes,
-        _offset: u64,
+        offset: u64,
         _is_last: bool,
+        control: &UploadControl,
     ) -> Result<(), CloudHomeError> {
         let commands = self.commands.as_ref().ok_or_else(|| {
             CloudHomeError::Transport("S3 multipart upload is already settled".to_string())
         })?;
         let (response, result) = tokio::sync::oneshot::channel();
         commands
-            .send(S3MultipartCommand::SendPart { part, response })
+            .send(S3MultipartCommand::SendPart {
+                part,
+                offset,
+                control: control.clone(),
+                response,
+            })
             .await
             .map_err(|_| {
                 CloudHomeError::Transport(
@@ -1527,7 +1578,7 @@ impl ExactSlotStorage for S3CloudHome {
     async fn create_at(
         &self,
         upload: &super::ExactUpload<'_>,
-        progress: &UploadProgress,
+        control: &UploadControl,
     ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
         let checksum = matches!(
             self.exact_upload_verification,
@@ -1542,7 +1593,7 @@ impl ExactSlotStorage for S3CloudHome {
                     upload.object().slot(),
                     upload.body().await?,
                     checksum,
-                    progress,
+                    control,
                 )
                 .await
             }
@@ -1562,14 +1613,14 @@ impl ExactSlotStorage for S3CloudHome {
                         source,
                         upload.object().stored_size(),
                         hex::encode(upload.object().stored_hash().as_bytes()),
-                        progress.clone(),
+                        control.clone(),
                     )
                     .await;
                 if result.is_ok() {
                     // The body already reported every chunk it handed over; this
                     // settles the count on the exact stored size once the
                     // provider has acknowledged the whole object.
-                    progress(upload.object().stored_size());
+                    control.report(upload.object().stored_size());
                 }
                 result
             }

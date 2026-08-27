@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::StreamExt;
 
 use super::exact_upload::settle_exact_create;
 use super::http::{self, ensure_ok, ok_bytes, ok_json, NotFound};
@@ -20,7 +21,7 @@ use super::oauth_session::OAuthSession;
 use super::resumable::RangePutSink;
 use super::{
     sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome,
-    CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome, UploadProgress,
+    CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome,
 };
 use crate::oauth::OAuthConfig;
 use coven_foundation::id_provider::{IdRef, UuidProvider};
@@ -656,6 +657,7 @@ impl GoogleDriveCloudHome {
         &self,
         slot: &ObjectSlot,
         data: Vec<u8>,
+        control: &super::UploadControl,
     ) -> Result<(), CloudHomeError> {
         use sha2::{Digest, Sha256};
 
@@ -671,13 +673,29 @@ impl GoogleDriveCloudHome {
             "appProperties": { (LOGICAL_KEY_PROPERTY): slot.logical_key() },
         })
         .to_string();
-        let mut body = Vec::with_capacity(metadata.len() + data.len() + boundary.len() * 3 + 128);
-        body.extend_from_slice(format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes());
-        body.extend_from_slice(&data);
-        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-        let response = match self
+        let prefix = Bytes::from(format!(
+            "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n"
+        ));
+        let data = Bytes::from(data);
+        let suffix = Bytes::from(format!("\r\n--{boundary}--\r\n"));
+        let content_length = prefix.len() + data.len() + suffix.len();
+        let response = self
             .session
             .api_call(|oauth| {
+                let prefix_control = control.clone();
+                let prefix = prefix.clone();
+                let prefix = futures_util::stream::once(async move {
+                    prefix_control.wait_until_resumed().await;
+                    Ok::<_, std::io::Error>(prefix)
+                });
+                let payload = control.clone().stream_part(data.clone(), 0);
+                let suffix_control = control.clone();
+                let suffix = suffix.clone();
+                let suffix = futures_util::stream::once(async move {
+                    suffix_control.wait_until_resumed().await;
+                    Ok::<_, std::io::Error>(suffix)
+                });
+                let body = reqwest::Body::wrap_stream(prefix.chain(payload).chain(suffix));
                 supports_all_drives(oauth.post(format!(
                     "{}/files?uploadType=multipart&fields=id",
                     self.upload_api
@@ -686,29 +704,25 @@ impl GoogleDriveCloudHome {
                     "Content-Type",
                     format!("multipart/related; boundary={boundary}"),
                 )
-                .body(body.clone())
+                .header("Content-Length", content_length)
+                .body(body)
             })
-            .await
-        {
-            Ok(response) => response,
-            Err(operation) => return Err(operation),
-        };
+            .await?;
         let status = response.status();
-        if !status.is_success() {
-            if status == reqwest::StatusCode::CONFLICT {
-                return Err(CloudHomeError::AlreadyExists(
-                    slot.logical_key().to_string(),
-                ));
-            }
-            let operation = classify_write_error(
-                status,
-                &http::body_text(response).await,
-                slot.logical_key(),
-                "create exact",
-            );
-            return Err(operation);
+        if status.is_success() {
+            return Ok(());
         }
-        Ok(())
+        if status == reqwest::StatusCode::CONFLICT {
+            return Err(CloudHomeError::AlreadyExists(
+                slot.logical_key().to_string(),
+            ));
+        }
+        Err(classify_write_error(
+            status,
+            &http::body_text(response).await,
+            slot.logical_key(),
+            "create exact",
+        ))
     }
 
     /// Open a resumable upload session for an existing Drive file and return its
@@ -804,17 +818,14 @@ impl GoogleDriveCloudHome {
         &self,
         slot: &ObjectSlot,
         body: BlobBody,
-        progress: &UploadProgress,
+        control: &super::UploadControl,
     ) -> Result<(), CloudHomeError> {
-        let file_id = self.validate_slot(slot)?.to_string();
         if body.len() <= self.multipart_threshold() {
-            let bytes = body.collect().await?;
-            let length = bytes.len() as u64;
-            self.create_small_at(slot, bytes).await?;
-            progress(length);
-            return Ok(());
+            return self
+                .create_small_at(slot, body.collect().await?, control)
+                .await;
         }
-
+        let file_id = self.validate_slot(slot)?.to_string();
         let attempt = DriveAppendAttempt {
             file_id,
             create_token: format!("exact:{}", slot.logical_key()),
@@ -835,7 +846,7 @@ impl GoogleDriveCloudHome {
             classify,
             drive_upload_cancellation_succeeded,
         );
-        super::blob_body::MultipartUpload::new(slot.logical_key(), body, Box::new(sink), progress)
+        super::blob_body::MultipartUpload::new(slot.logical_key(), body, Box::new(sink), control)
             .run()
             .await
     }

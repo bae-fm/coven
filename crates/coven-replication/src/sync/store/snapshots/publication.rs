@@ -63,13 +63,11 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
                 .map_err(SnapshotError::from)?;
             let authority = coven_protocol::objects::BlobWriteAuthority::new(&registration);
             if let Some(spool_path) = &prepared.spool_path {
+                let control = coven_storage::cloud::UploadControl::running(
+                    coven_storage::cloud::no_progress(),
+                );
                 self.storage
-                    .create_blob_object_from_file(
-                        blob,
-                        &authority,
-                        spool_path,
-                        &coven_storage::cloud::no_progress(),
-                    )
+                    .create_blob_object_from_file(blob, &authority, spool_path, &control)
                     .await
                     .map_err(SnapshotError::Bucket)?;
             } else if !prepared.remote.records_verified_upload() {

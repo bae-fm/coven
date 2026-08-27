@@ -11,6 +11,79 @@ use super::*;
 /// callback could not outlive the call that started the request.
 pub type UploadProgress = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
 
+/// One exact upload's progress reporting and absolute pause state. Provider
+/// request bodies consult this before yielding each network chunk, so pausing
+/// stops the active request without closing its upload session; resuming lets
+/// that same request continue from the next byte.
+#[derive(Clone)]
+pub struct UploadControl {
+    progress: UploadProgress,
+    paused: tokio::sync::watch::Receiver<bool>,
+    reported: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl UploadControl {
+    /// A transfer that remains running for its lifetime.
+    pub fn running(progress: UploadProgress) -> Self {
+        let (_sender, paused) = tokio::sync::watch::channel(false);
+        Self::pausable(progress, paused)
+    }
+
+    /// A transfer controlled by the supplied absolute pause state.
+    pub fn pausable(progress: UploadProgress, paused: tokio::sync::watch::Receiver<bool>) -> Self {
+        Self {
+            progress,
+            paused,
+            reported: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    pub async fn wait_until_resumed(&self) {
+        let mut paused = self.paused.clone();
+        while *paused.borrow_and_update() {
+            paused
+                .changed()
+                .await
+                .expect("exact upload owns its pause sender until the provider request finishes");
+        }
+    }
+
+    pub fn report(&self, bytes_done: u64) {
+        use std::sync::atomic::Ordering;
+
+        let previous = self.reported.fetch_max(bytes_done, Ordering::SeqCst);
+        if bytes_done > previous {
+            (self.progress)(bytes_done);
+        }
+    }
+
+    /// Turn one provider part into bounded request-body chunks. The stream owns
+    /// its control handle, so it remains pause-aware after a provider moves the
+    /// request onto its retained network runtime.
+    pub(crate) fn stream_part(
+        &self,
+        part: Bytes,
+        offset: u64,
+    ) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static {
+        const REQUEST_CHUNK_SIZE: usize = 64 * 1024;
+
+        futures_util::stream::unfold(
+            (part, offset, self.clone()),
+            |(mut remaining, sent, control)| async move {
+                if remaining.is_empty() {
+                    return None;
+                }
+                control.wait_until_resumed().await;
+                let take = remaining.len().min(REQUEST_CHUNK_SIZE);
+                let chunk = remaining.split_to(take);
+                let sent = sent + take as u64;
+                control.report(sent);
+                Some((Ok(chunk), (remaining, sent, control)))
+            },
+        )
+    }
+}
+
 /// Reports how many bytes of a cloud object have arrived from the provider.
 /// The count is cumulative and advances once per received stream buffer.
 pub type DownloadProgress = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
@@ -271,6 +344,7 @@ pub trait PartSink: Send {
         part: Bytes,
         offset: u64,
         is_last: bool,
+        control: &UploadControl,
     ) -> Result<(), CloudHomeError>;
 
     /// Cancel the open upload and remove its unpublished provider state. The
@@ -305,25 +379,25 @@ pub(crate) fn combine_cleanup_failure(
 /// One open multipart upload, including its source body, provider session, and
 /// progress reporting. The operation either finishes the provider session or
 /// awaits its abort and preserves both the operation and cleanup failures.
-pub(crate) struct MultipartUpload<'sink, 'progress> {
+pub(crate) struct MultipartUpload<'sink, 'control> {
     key: String,
     body: BlobBody,
     sink: BoxPartSink<'sink>,
-    progress: &'progress UploadProgress,
+    control: &'control UploadControl,
 }
 
-impl<'sink, 'progress> MultipartUpload<'sink, 'progress> {
+impl<'sink, 'control> MultipartUpload<'sink, 'control> {
     pub(crate) fn new(
         key: &str,
         body: BlobBody,
         sink: BoxPartSink<'sink>,
-        progress: &'progress UploadProgress,
+        control: &'control UploadControl,
     ) -> Self {
         Self {
             key: key.to_string(),
             body,
             sink,
-            progress,
+            control,
         }
     }
 
@@ -346,11 +420,15 @@ impl<'sink, 'progress> MultipartUpload<'sink, 'progress> {
             };
             let n = part.len() as u64;
             let is_last = offset + n >= total;
-            if let Err(operation) = self.sink.send_part(part, offset, is_last).await {
+            if let Err(operation) = self
+                .sink
+                .send_part(part, offset, is_last, self.control)
+                .await
+            {
                 return Err(self.abort(operation).await);
             }
             offset += n;
-            (self.progress)(offset);
+            self.control.report(offset);
         }
         self.sink.finish().await
     }

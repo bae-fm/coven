@@ -22,7 +22,7 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::{
     combine_cleanup_failure, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome,
-    CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome, UploadProgress,
+    CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome,
 };
 use crate::oauth::OAuthConfig;
 use coven_protocol::objects::ObjectSlot;
@@ -167,27 +167,36 @@ impl DropboxCloudHome {
             })
     }
 
-    async fn append_small(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+    async fn append_small(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        control: &super::UploadControl,
+    ) -> Result<(), CloudHomeError> {
         let namespace_id = self.get_or_create_shared_folder_id().await?;
         let path_root = Self::path_root_header(&namespace_id);
         let body = Bytes::from(data);
+        let length = body.len();
         let api_arg = dropbox_api_arg(&serde_json::json!({
             "path": Self::namespace_path(key),
-                    "mode": { ".tag": "add" },
-                    "autorename": false,
-                    "strict_conflict": true,
-                    "mute": true,
+            "mode": { ".tag": "add" },
+            "autorename": false,
+            "strict_conflict": true,
+            "mute": true,
         }));
         let response = self
             .session
             .api_call_no_transient_retry(|oauth| {
+                let request_body =
+                    reqwest::Body::wrap_stream(control.clone().stream_part(body.clone(), 0));
                 Self::scoped_request(
                     oauth.post(format!("{}/files/upload", self.content_base)),
                     &path_root,
                 )
                 .header("Dropbox-API-Arg", &api_arg)
                 .header("Content-Type", "application/octet-stream")
-                .body(body.clone())
+                .header("Content-Length", length)
+                .body(request_body)
             })
             .await?;
         self.validate_create_response(key, response).await.map(drop)
@@ -680,6 +689,7 @@ impl super::PartSink for DropboxSessionSink<'_> {
         part: bytes::Bytes,
         offset: u64,
         is_last: bool,
+        control: &super::UploadControl,
     ) -> Result<(), CloudHomeError> {
         let length = part.len() as u64;
         let namespace_id = self.home.get_or_create_shared_folder_id().await?;
@@ -704,6 +714,9 @@ impl super::PartSink for DropboxSessionSink<'_> {
             self.home
                 .session
                 .api_call_no_transient_retry(|oauth| {
+                    let body = reqwest::Body::wrap_stream(
+                        control.clone().stream_part(part.clone(), offset),
+                    );
                     DropboxCloudHome::scoped_request(
                         oauth.post(format!(
                             "{}/files/upload_session/finish",
@@ -713,7 +726,8 @@ impl super::PartSink for DropboxSessionSink<'_> {
                     )
                     .header("Dropbox-API-Arg", &arg)
                     .header("Content-Type", "application/octet-stream")
-                    .body(part.clone())
+                    .header("Content-Length", length)
+                    .body(body)
                 })
                 .await?
         } else {
@@ -724,6 +738,9 @@ impl super::PartSink for DropboxSessionSink<'_> {
             self.home
                 .session
                 .api_call_no_transient_retry(|oauth| {
+                    let body = reqwest::Body::wrap_stream(
+                        control.clone().stream_part(part.clone(), offset),
+                    );
                     DropboxCloudHome::scoped_request(
                         oauth.post(format!(
                             "{}/files/upload_session/append_v2",
@@ -733,7 +750,8 @@ impl super::PartSink for DropboxSessionSink<'_> {
                     )
                     .header("Dropbox-API-Arg", &arg)
                     .header("Content-Type", "application/octet-stream")
-                    .body(part.clone())
+                    .header("Content-Length", length)
+                    .body(body)
                 })
                 .await?
         };
@@ -1240,7 +1258,7 @@ impl ExactSlotStorage for DropboxCloudHome {
     async fn create_at(
         &self,
         upload: &super::ExactUpload<'_>,
-        progress: &UploadProgress,
+        control: &super::UploadControl,
     ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
         if matches!(
             self.exact_upload_verification,
@@ -1255,12 +1273,7 @@ impl ExactSlotStorage for DropboxCloudHome {
         slot.require_logical_key_for("Dropbox")?;
         let key = slot.logical_key();
         if body.len() <= self.multipart_threshold() {
-            let data = body.collect().await?;
-            let length = data.len() as u64;
-            let operation = self.append_small(key, data).await;
-            if operation.is_ok() {
-                progress(length);
-            }
+            let operation = self.append_small(key, body.collect().await?, control).await;
             return super::exact_upload::settle_exact_create(operation, |observed| {
                 self.verify_exact_upload(upload, observed)
             })
@@ -1276,7 +1289,7 @@ impl ExactSlotStorage for DropboxCloudHome {
             confirmed_offset: 0,
             settled: false,
         };
-        let operation = super::blob_body::MultipartUpload::new(key, body, Box::new(sink), progress)
+        let operation = super::blob_body::MultipartUpload::new(key, body, Box::new(sink), control)
             .run()
             .await;
         super::exact_upload::settle_exact_create(operation, |observed| {

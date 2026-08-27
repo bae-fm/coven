@@ -6,7 +6,7 @@ use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_replication::sync::test_helpers::*;
-use coven_storage::cloud::{no_progress, ExactSlotStorage, ExactUpload};
+use coven_storage::cloud::{no_progress, ExactSlotStorage, ExactUpload, UploadControl};
 
 /// A cancel receiver whose sender is dropped immediately: `borrow()` reads the
 /// initial `false` forever, so the join/restore flows run to completion exactly
@@ -264,7 +264,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     );
     let activation_upload = ExactUpload::from_bytes(&activation_object, &activation_bytes)
         .expect("activation bytes match their exact reference");
-    home.create_at(&activation_upload, &no_progress())
+    home.create_at(&activation_upload, &UploadControl::running(no_progress()))
         .await
         .expect("restore activation commit after interruption");
     let config = new_client()

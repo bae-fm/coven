@@ -1991,13 +1991,10 @@ mod test_device {
                 .prepare_blob_object(&locator, &authority, slot, &spool)
                 .await
                 .expect("prepare exact blob object");
+            let control =
+                coven_storage::cloud::UploadControl::running(coven_storage::cloud::no_progress());
             self.storage
-                .create_blob_object_from_file(
-                    &stored,
-                    &authority,
-                    &spool,
-                    &coven_storage::cloud::no_progress(),
-                )
+                .create_blob_object_from_file(&stored, &authority, &spool, &control)
                 .await
                 .expect("create exact blob object");
             stored
@@ -2057,13 +2054,10 @@ mod test_device {
                 .prepare_blob_object(&locator, &authority, slot, &spool)
                 .await
                 .expect("prepare browsable blob object");
+            let control =
+                coven_storage::cloud::UploadControl::running(coven_storage::cloud::no_progress());
             self.storage
-                .create_blob_object_from_file(
-                    &stored,
-                    &authority,
-                    &spool,
-                    &coven_storage::cloud::no_progress(),
-                )
+                .create_blob_object_from_file(&stored, &authority, &spool, &control)
                 .await
                 .expect("create browsable blob object");
             stored
@@ -5809,11 +5803,11 @@ where
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &std::path::Path,
-        progress: &coven_storage::cloud::UploadProgress,
+        control: &coven_storage::cloud::UploadControl,
     ) -> Result<(), coven_protocol::objects::StorageError> {
         self.interceptor.before_blob_create(blob).await?;
         self.inner
-            .create_blob_object_from_file(blob, authority, stored_file, progress)
+            .create_blob_object_from_file(blob, authority, stored_file, control)
             .await
     }
 
