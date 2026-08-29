@@ -56,6 +56,10 @@ use tokio::sync::watch;
 /// Why a make_remote (or its cancel) could not be started.
 #[derive(Debug, thiserror::Error)]
 pub enum MakeRemoteError {
+    #[error("a make_remote batch must contain at least one root")]
+    EmptyBatch,
+    #[error("root {0:?} appears more than once in the make_remote batch")]
+    DuplicateRoot(String),
     #[error("sync is not running, so a transition cannot start")]
     SyncNotReady,
     #[error("table {0:?} is not a gated root, so it has no Local/Remote state")]
@@ -86,6 +90,13 @@ pub enum MakeRemoteError {
     },
     #[error("database error: {0}")]
     Db(#[from] DbError),
+}
+
+#[derive(Clone)]
+pub struct MakeRemoteRoot {
+    pub id: String,
+    pub label: String,
+    pub refs: Vec<RowBlobRef>,
 }
 
 /// Why a make_local could not complete.
@@ -351,8 +362,42 @@ impl LocalBlobTransitions {
         pin: bool,
         refs: Vec<coven_protocol::blob::RowBlobRef>,
     ) -> Result<(), MakeRemoteError> {
+        require_make_remote_root(&self.database, root_table)?;
+        let prepared = self
+            .prepare_make_remote(root_table, root_id, root_label, refs)
+            .await?;
+        let locality = self
+            .database
+            .begin_make_remote(
+                root_table,
+                &prepared.root_id,
+                &prepared.root_label,
+                pin,
+                self.database.stamp(),
+                prepared.uploads,
+            )
+            .await?;
+        match locality {
+            Some(false) => Ok(()),
+            Some(true) => Err(MakeRemoteError::AlreadyRemote(
+                root_table.to_string(),
+                root_id.to_string(),
+            )),
+            None => Err(MakeRemoteError::UnresolvedLocality(
+                root_table.to_string(),
+                root_id.to_string(),
+            )),
+        }
+    }
+
+    async fn prepare_make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        root_label: &str,
+        refs: Vec<RowBlobRef>,
+    ) -> Result<coven_database::MakeRemoteAdmission, MakeRemoteError> {
         let db = &self.database;
-        require_make_remote_root(db, root_table)?;
         let locality = db.gated_root_locality(root_table, root_id).await?;
         match locality {
             Some(false) => {}
@@ -369,7 +414,6 @@ impl LocalBlobTransitions {
                 ));
             }
         }
-
         if refs.is_empty() {
             return Err(MakeRemoteError::NothingToMakeRemote(
                 root_table.to_string(),
@@ -419,22 +463,40 @@ impl LocalBlobTransitions {
                 })?;
             uploads.push((reference, source_path));
         }
+        Ok(coven_database::MakeRemoteAdmission {
+            root_id: root_id.to_string(),
+            root_label: root_label.to_string(),
+            uploads,
+        })
+    }
 
-        let created_at = db.stamp();
-        let locality = db
-            .begin_make_remote(root_table, root_id, root_label, pin, created_at, uploads)
-            .await?;
-        match locality {
-            Some(false) => Ok(()),
-            Some(true) => Err(MakeRemoteError::AlreadyRemote(
-                root_table.to_string(),
-                root_id.to_string(),
-            )),
-            None => Err(MakeRemoteError::UnresolvedLocality(
-                root_table.to_string(),
-                root_id.to_string(),
-            )),
+    pub(crate) async fn make_remote_batch(
+        &self,
+        root_table: &str,
+        roots: Vec<MakeRemoteRoot>,
+        pin: bool,
+    ) -> Result<(), MakeRemoteError> {
+        require_make_remote_root(&self.database, root_table)?;
+        if roots.is_empty() {
+            return Err(MakeRemoteError::EmptyBatch);
         }
+        let mut root_ids = std::collections::HashSet::with_capacity(roots.len());
+        for root in &roots {
+            if !root_ids.insert(root.id.clone()) {
+                return Err(MakeRemoteError::DuplicateRoot(root.id.clone()));
+            }
+        }
+        let mut prepared = Vec::with_capacity(roots.len());
+        for root in roots {
+            prepared.push(
+                self.prepare_make_remote(root_table, &root.id, &root.label, root.refs)
+                    .await?,
+            );
+        }
+        self.database
+            .begin_make_remote_batch(root_table, pin, self.database.stamp(), prepared)
+            .await
+            .map_err(MakeRemoteError::from)
     }
 
     pub(crate) async fn cancel_make_remote(
@@ -565,6 +627,15 @@ impl ConnectedBlobTransitions {
         self.local
             .make_remote(root_table, root_id, root_label, pin, refs)
             .await
+    }
+
+    pub(crate) async fn make_remote_batch(
+        &self,
+        root_table: &str,
+        roots: Vec<MakeRemoteRoot>,
+        pin: bool,
+    ) -> Result<(), MakeRemoteError> {
+        self.local.make_remote_batch(root_table, roots, pin).await
     }
 
     pub(crate) async fn cancel_make_remote(

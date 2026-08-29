@@ -121,7 +121,7 @@ pub use coven_protocol::{
 pub use coven_replication::blob::{
     DrainOutcome, UploadFailure, UploadFailureCause, UploadFailures,
 };
-pub use coven_replication::blob::{MakeLocalError, MakeRemoteError};
+pub use coven_replication::blob::{MakeLocalError, MakeRemoteError, MakeRemoteRoot};
 pub use coven_replication::sync::{
     AdmittingDeviceJoinProgress, BlobCacheError, BlobStream, DeviceActivity, DeviceJoinAbandonment,
     DeviceJoinAction, DeviceJoinActivation, DeviceJoinApproval, DeviceJoinApprovalPolicy,

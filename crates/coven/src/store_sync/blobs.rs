@@ -49,6 +49,20 @@ impl StoreSync {
         Ok(())
     }
 
+    pub(crate) async fn make_remote_batch(
+        &self,
+        root_table: &str,
+        roots: Vec<coven_replication::blob::MakeRemoteRoot>,
+        pin: bool,
+    ) -> Result<(), MakeRemoteError> {
+        active_sync!(self)
+            .ok_or(MakeRemoteError::SyncNotReady)?
+            .make_remote_batch(root_table, roots, pin)
+            .await?;
+        self.trigger();
+        Ok(())
+    }
+
     /// Record that a transition is to be unwound, connected or not.
     ///
     /// Recording the cancel is a local write; carrying it out — taking any

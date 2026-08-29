@@ -10,7 +10,7 @@ pub(crate) mod retry;
 pub mod transition;
 
 pub use delete::BlobTombstoneJson;
-pub use transition::{MakeLocalError, MakeRemoteError};
+pub use transition::{MakeLocalError, MakeRemoteError, MakeRemoteRoot};
 
 #[derive(Debug)]
 pub enum DrainOutcome {

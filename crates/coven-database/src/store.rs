@@ -63,7 +63,9 @@ pub use blob_outbox::{
     QueuedUploadPhase,
 };
 pub use blob_outbox::{OutboxEntry, OutboxOperation, OutboxUploadState};
-pub use blob_transitions::{BlobTransitionRoot, MaterializedLocalBlob, PostUpload};
+pub use blob_transitions::{
+    BlobTransitionRoot, MakeRemoteAdmission, MaterializedLocalBlob, PostUpload,
+};
 #[cfg(any(test, feature = "test-utils"))]
 pub use candidate_records::select_author_exclusion_activation_locator;
 pub use candidate_records::CandidateCleanupObject;

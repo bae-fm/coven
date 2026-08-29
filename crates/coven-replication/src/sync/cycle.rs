@@ -1234,6 +1234,17 @@ impl SyncComponents {
             .await
     }
 
+    pub(crate) async fn make_remote_batch(
+        &self,
+        root_table: &str,
+        roots: Vec<crate::blob::MakeRemoteRoot>,
+        pin: bool,
+    ) -> Result<(), crate::blob::transition::MakeRemoteError> {
+        self.blob_transitions
+            .make_remote_batch(root_table, roots, pin)
+            .await
+    }
+
     pub(crate) async fn cancel_make_remote(
         &self,
         root_table: &str,

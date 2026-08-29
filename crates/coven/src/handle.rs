@@ -874,6 +874,15 @@ impl CovenHandle {
             .await
     }
 
+    pub async fn make_remote_batch(
+        &self,
+        root_table: &str,
+        roots: Vec<crate::MakeRemoteRoot>,
+        pin: bool,
+    ) -> Result<(), MakeRemoteError> {
+        self.sync.make_remote_batch(root_table, roots, pin).await
+    }
+
     #[cfg(test)]
     pub(crate) async fn make_remote_with_discovered_order_for_test(
         &self,
@@ -888,6 +897,21 @@ impl CovenHandle {
             .await?;
         self.make_remote(root_table, root_id, root_label, pin, refs)
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn make_remote_batch_with_discovered_order_for_test(
+        &self,
+        root_table: &str,
+        roots: Vec<(String, String)>,
+        pin: bool,
+    ) -> Result<(), MakeRemoteError> {
+        let mut prepared = Vec::with_capacity(roots.len());
+        for (id, label) in roots {
+            let refs = self.blobs.row_blob_refs_for_root(root_table, &id).await?;
+            prepared.push(crate::MakeRemoteRoot { id, label, refs });
+        }
+        self.make_remote_batch(root_table, prepared, pin).await
     }
 
     /// Cancel an in-flight make_remote of `(root_table, root_id)`: clear its intent

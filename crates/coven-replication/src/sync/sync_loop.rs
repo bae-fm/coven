@@ -575,6 +575,18 @@ impl SyncLoopHandle {
             .await
     }
 
+    pub async fn make_remote_batch(
+        &self,
+        root_table: &str,
+        roots: Vec<crate::blob::MakeRemoteRoot>,
+        pin: bool,
+    ) -> Result<(), crate::blob::transition::MakeRemoteError> {
+        self.inner
+            .components
+            .make_remote_batch(root_table, roots, pin)
+            .await
+    }
+
     pub async fn cancel_make_remote(
         &self,
         root_table: &str,

@@ -268,7 +268,7 @@ pub use store::{
     BlockedWriteDiscard, CandidateCleanupObject, CircleAckPublicationInput, CreatedSnapshot,
     DeviceJoinJournalStore, DurableStoreReclaimObject, DurableStoreReclaimOperation,
     HostWriteBlobTransaction, HostWriteError, HostWriteOperation, IncomingTimestampPolicy,
-    InstalledReplayBaseline, LocalBlobCleanup, MaterializedLocalBlob,
+    InstalledReplayBaseline, LocalBlobCleanup, MakeRemoteAdmission, MaterializedLocalBlob,
     MergeCandidateAbandonmentPreparation, OutboxEntry, OutboxOperation, OutboxUploadState,
     OwnStreamAuthorship, OwnedVerifiedMergeMaterialization, PreparedCircleObjects,
     ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,

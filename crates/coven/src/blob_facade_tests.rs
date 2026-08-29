@@ -882,6 +882,86 @@ async fn queued_upload_fixture(
     (handle, tmp, user_dir)
 }
 
+#[tokio::test]
+async fn a_make_remote_batch_admits_every_root_or_none() {
+    let (handle, _tmp, user_dir) = queued_upload_fixture("note-1", "photo-1").await;
+    let missing_path = user_dir.path().join("missing.jpg");
+    let bytes = b"another user-owned photo";
+    std::fs::write(&missing_path, bytes).expect("write the second user's file");
+    handle
+        .write_note_with_external_photo("note-2", "photo-2", &missing_path, bytes)
+        .await
+        .expect("write the second note and register its photo");
+    std::fs::remove_file(&missing_path).expect("remove the second source before admission");
+
+    handle
+        .make_remote_batch_with_discovered_order_for_test(
+            "notes",
+            vec![
+                ("note-1".to_string(), "First note".to_string()),
+                ("note-2".to_string(), "Second note".to_string()),
+            ],
+            false,
+        )
+        .await
+        .expect_err("one invalid root refuses the whole batch");
+
+    assert!(
+        handle
+            .queued_uploads()
+            .await
+            .expect("read the queue")
+            .is_empty(),
+        "the valid root was not admitted before the invalid root failed",
+    );
+    assert_eq!(
+        handle
+            .make_remote_progress("notes", "note-1")
+            .await
+            .expect("read the first root's transition"),
+        None,
+    );
+}
+
+#[tokio::test]
+async fn an_existing_transition_refuses_a_make_remote_batch_without_admitting_new_roots() {
+    let (handle, _tmp, user_dir) = queued_upload_fixture("note-1", "photo-1").await;
+    let second_path = user_dir.path().join("second.jpg");
+    let bytes = b"another user-owned photo";
+    std::fs::write(&second_path, bytes).expect("write the second user's file");
+    handle
+        .write_note_with_external_photo("note-2", "photo-2", &second_path, bytes)
+        .await
+        .expect("write the second note and register its photo");
+    handle
+        .make_remote_with_discovered_order_for_test("notes", "note-2", "Second note", false)
+        .await
+        .expect("admit the existing transition");
+
+    handle
+        .make_remote_batch_with_discovered_order_for_test(
+            "notes",
+            vec![
+                ("note-1".to_string(), "First note".to_string()),
+                ("note-2".to_string(), "Second note".to_string()),
+            ],
+            false,
+        )
+        .await
+        .expect_err("an existing transition refuses the whole batch");
+
+    let queued = handle.queued_uploads().await.expect("read the queue");
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].root_id, "note-2");
+    assert_eq!(
+        handle
+            .make_remote_progress("notes", "note-1")
+            .await
+            .expect("read the new root's transition"),
+        None,
+    );
+}
+
 /// Deleting a gated root does not end its cloud work — an upload that already
 /// wrote an object still has that object to take back out, and only the drain
 /// can do that. So the queue outlives the row deliberately, in the state that

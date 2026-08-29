@@ -24,6 +24,12 @@ pub struct MaterializedLocalBlob {
     pub destination: Option<std::path::PathBuf>,
 }
 
+pub struct MakeRemoteAdmission {
+    pub root_id: String,
+    pub root_label: String,
+    pub uploads: Vec<(RowBlobRef, std::path::PathBuf)>,
+}
+
 impl StoreSession<'_> {
     fn gated_root_gate_column(&self, root_table: &str) -> Result<&str, DbError> {
         self.synced_tables
@@ -47,8 +53,9 @@ impl StoreSession<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn begin_make_remote(
+    fn admit_make_remote_on(
         &self,
+        connection: &rusqlite::Connection,
         root_table: &str,
         root_id: &str,
         root_label: &str,
@@ -57,12 +64,11 @@ impl StoreSession<'_> {
         uploads: &[(RowBlobRef, std::path::PathBuf)],
     ) -> Result<Option<bool>, DbError> {
         let gate_column = self.gated_root_gate_column(root_table)?;
-        let transaction = self.conn.unchecked_transaction()?;
-        let locality = crate::query_truth(&transaction, root_table, gate_column, root_id)
+        let locality = crate::query_truth(connection, root_table, gate_column, root_id)
             .map_err(DbError::from)?;
         if locality == Some(false) {
             let current = Database::row_blob_refs_for_root_on(
-                &transaction,
+                connection,
                 self.gates,
                 self.synced_tables,
                 root_table,
@@ -81,13 +87,9 @@ impl StoreSession<'_> {
                 )));
             }
             Database::insert_make_remote_intent_on(
-                &transaction,
-                root_table,
-                root_id,
-                root_label,
-                pin,
+                connection, root_table, root_id, root_label, pin,
             )?;
-            let cloud_outbox = CloudOutboxRecords::new(&transaction);
+            let cloud_outbox = CloudOutboxRecords::new(connection);
             for (reference, source_path) in uploads {
                 cloud_outbox.enqueue_upload(
                     root_table,
@@ -99,9 +101,78 @@ impl StoreSession<'_> {
                     created_at,
                 )?;
             }
-            transaction.commit().map_err(DbError::from)?;
         }
         Ok(locality)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        root_label: &str,
+        pin: bool,
+        created_at: &str,
+        uploads: &[(RowBlobRef, std::path::PathBuf)],
+    ) -> Result<Option<bool>, DbError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let locality = self.admit_make_remote_on(
+            &transaction,
+            root_table,
+            root_id,
+            root_label,
+            pin,
+            created_at,
+            uploads,
+        )?;
+        transaction.commit().map_err(DbError::from)?;
+        Ok(locality)
+    }
+
+    fn begin_make_remote_batch(
+        &self,
+        root_table: &str,
+        pin: bool,
+        created_at: &str,
+        roots: &[MakeRemoteAdmission],
+    ) -> Result<(), DbError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        for root in roots {
+            if Database::make_remote_intent_state(&transaction, root_table, &root.root_id)?
+                .is_some()
+            {
+                return Err(DbError::Message(format!(
+                    "make_remote for {root_table:?}/{:?} is already in progress",
+                    root.root_id
+                )));
+            }
+        }
+        for root in roots {
+            match self.admit_make_remote_on(
+                &transaction,
+                root_table,
+                &root.root_id,
+                &root.root_label,
+                pin,
+                created_at,
+                &root.uploads,
+            )? {
+                Some(false) => {}
+                Some(true) => {
+                    return Err(DbError::Message(format!(
+                        "root {root_table:?}/{:?} is already Remote",
+                        root.root_id
+                    )));
+                }
+                None => {
+                    return Err(DbError::Message(format!(
+                        "root {root_table:?}/{:?} has no resolvable Local/Remote state",
+                        root.root_id
+                    )));
+                }
+            }
+        }
+        transaction.commit().map_err(DbError::from)
     }
 
     fn finalize_created_blob_upload(
@@ -339,6 +410,20 @@ impl StoreDatabase {
                 &created_at,
                 &uploads,
             )
+        })
+        .await
+    }
+
+    pub async fn begin_make_remote_batch(
+        &self,
+        root_table: &str,
+        pin: bool,
+        created_at: String,
+        roots: Vec<MakeRemoteAdmission>,
+    ) -> Result<(), DbError> {
+        let root_table = root_table.to_string();
+        self.call_store(move |session| {
+            session.begin_make_remote_batch(&root_table, pin, &created_at, &roots)
         })
         .await
     }
