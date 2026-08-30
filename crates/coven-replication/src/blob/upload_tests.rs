@@ -28,6 +28,7 @@ use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 mod pause_tests;
 mod publication_tests;
+mod scheduling_tests;
 
 const T0: &str = "2024-06-01T00:00:00Z";
 const ROOT_ID: &str = "upload-root";
@@ -1257,8 +1258,9 @@ async fn concurrent_drain_overlaps_up_to_the_limit() {
 }
 
 #[tokio::test]
-async fn drain_admits_only_the_first_make_remote_root() {
-    let fixture = UploadFixture::new(3).await;
+async fn drain_fills_idle_slots_from_the_next_make_remote_root() {
+    let home = Arc::new(InstrumentedHome::new());
+    let fixture = UploadFixture::with_home(3, home.clone(), FixtureSchema::RowBlobs).await;
     fixture
         .plant_uploads_for("first-root", &[("first001", b"first")], false)
         .await;
@@ -1269,14 +1271,16 @@ async fn drain_admits_only_the_first_make_remote_root() {
             false,
         )
         .await;
+    home.slow_creates(1, std::time::Duration::from_millis(20));
 
     let outcome = fixture.drain(&fixed_clock(T0), None).await.unwrap();
 
-    assert_eq!(outcome.uploaded(), 1);
+    assert_eq!(outcome.uploaded(), 3);
     assert!(outcome.yielded_for_publish());
+    assert_eq!(home.max_inflight(), 3);
     assert!(is_created(&fixture.journal("first001").await));
-    assert!(!is_created(&fixture.journal("second01").await));
-    assert!(!is_created(&fixture.journal("second02").await));
+    assert!(is_created(&fixture.journal("second01").await));
+    assert!(is_created(&fixture.journal("second02").await));
 }
 
 #[tokio::test]

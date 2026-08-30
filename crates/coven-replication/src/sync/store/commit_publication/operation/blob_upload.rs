@@ -98,14 +98,15 @@ impl AuthorizedBlobUploadLane<'_> {
             return Ok(DrainOutcome::QueueEmpty);
         }
 
-        // Queue ids are assigned while each make_remote is admitted. Drain one
-        // root at a time so transfer concurrency applies within that transition,
-        // never across later transitions. Created rows for a root already in
+        // Queue ids are assigned while each make_remote is admitted. Keep every
+        // uploadable entry in that order so a later root fills only the slots an
+        // earlier root cannot fill itself. Created rows for a root already in
         // Publishing remain journaled until its Store write activates; skip those
-        // rows so publication and the next root's uploads can occupy separate
-        // lanes.
+        // rows so publication and upload do not both act on the same transition.
+        let mut publishing_by_root = std::collections::HashMap::new();
         let mut head_root = None;
-        for entry in &uploads {
+        let mut pending = Vec::new();
+        for entry in uploads {
             let OutboxOperation::Upload {
                 root_table,
                 root_id,
@@ -114,37 +115,35 @@ impl AuthorizedBlobUploadLane<'_> {
             else {
                 unreachable!("pending_blob_uploads returns only Upload rows");
             };
-            if self
-                .blob_upload_intent_state(root_table, root_id)
-                .await?
-                .is_some_and(|state| {
-                    matches!(state, coven_database::MakeRemoteIntentState::Publishing(_))
-                })
-            {
+            let root = (root_table.clone(), root_id.clone());
+            let publishing = if let Some(publishing) = publishing_by_root.get(&root) {
+                *publishing
+            } else {
+                let publishing = self
+                    .blob_upload_intent_state(root_table, root_id)
+                    .await?
+                    .is_some_and(|state| {
+                        matches!(state, coven_database::MakeRemoteIntentState::Publishing(_))
+                    });
+                publishing_by_root.insert(root.clone(), publishing);
+                publishing
+            };
+            if publishing {
                 continue;
             }
-            head_root = Some((root_table.clone(), root_id.clone()));
-            break;
+            head_root.get_or_insert_with(|| root.clone());
+            pending.push(entry);
         }
-        let Some((head_table, head_id)) = head_root else {
+        let Some(head_root) = head_root else {
             return Ok(DrainOutcome::QueueEmpty);
         };
-        let uploads = uploads.into_iter().filter(|entry| {
-            matches!(
-                &entry.operation,
-                OutboxOperation::Upload {
-                    root_table,
-                    root_id,
-                    ..
-                } if root_table == &head_table && root_id == &head_id
-            )
-        });
 
         let now = clock.now();
         let mut count = 0;
         let mut yielded_for_publish = false;
 
-        let eligible = uploads
+        let eligible = pending
+            .into_iter()
             .map(|entry| {
                 crate::blob::retry::entry_in_backoff(&entry, now)
                     .map(|in_backoff| (entry, in_backoff))
@@ -166,7 +165,11 @@ impl AuthorizedBlobUploadLane<'_> {
         let limit = self.database.transfer_limits().uploads.get();
         let mut pending = eligible.into_iter();
         let mut inflight = FuturesUnordered::new();
-        // Set once a make_remote completes, so this pass yields to publication.
+        // Set once the oldest root this pass can advance completes. A later root
+        // may complete first when the oldest root has one long transfer left; it
+        // does not stop admission and strand the newly free slots. Once the oldest
+        // root completes, this pass stops growing its window and yields to publish
+        // after the attempts already in flight settle.
         let mut stop_admitting = false;
         // Entries this pass handed to an upload attempt. Zero means the pause was
         // seen on the very first admission check, since eligible entries exist and
@@ -207,18 +210,17 @@ impl AuthorizedBlobUploadLane<'_> {
 
             match inflight.next().await {
                 Some(EntryOutcome::Uploaded {
-                    made_remote,
+                    made_remote_root,
                     created_this_pass,
                 }) => {
                     if created_this_pass {
                         count += 1;
                     }
-                    if made_remote {
-                        // This upload prepared the make_remote's Store write. Yield so this
-                        // cycle publishes and activates it before another root advances; the
-                        // uploads already in flight still finish here.
+                    if let Some(completed_root) = made_remote_root {
                         yielded_for_publish = true;
-                        stop_admitting = true;
+                        if completed_root == head_root {
+                            stop_admitting = true;
+                        }
                     }
                 }
                 Some(EntryOutcome::NotUploaded(failure)) => failures.push(failure),
@@ -410,10 +412,11 @@ enum EntryOutcome {
     NotUploaded(UploadFailure),
     /// The cloud write succeeded. It counts toward the drained pass's `uploaded`
     /// only when this pass is the one that created the object.
-    /// `made_remote` is true iff the post-upload commit completed a make_remote, so
-    /// the drain yields to publish and stops admitting new uploads.
+    /// `made_remote_root` identifies the root whose post-upload commit completed,
+    /// so the drain can distinguish its oldest scheduling boundary from a later
+    /// root that used otherwise-idle slots.
     Uploaded {
-        made_remote: bool,
+        made_remote_root: Option<(String, String)>,
         created_this_pass: bool,
     },
 }
@@ -606,14 +609,14 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             .await
         {
             Ok(coven_database::PostUpload::Waiting) => EntryOutcome::Uploaded {
-                made_remote: false,
+                made_remote_root: None,
                 created_this_pass,
             },
             Ok(coven_database::PostUpload::MadeRemote {
-                root_table: _,
-                root_id: _,
+                root_table,
+                root_id,
             }) => EntryOutcome::Uploaded {
-                made_remote: true,
+                made_remote_root: Some((root_table, root_id)),
                 created_this_pass,
             },
             Ok(coven_database::PostUpload::Cancelled) => {
@@ -736,7 +739,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
 
         match cleanup {
             Ok(_) => EntryOutcome::Uploaded {
-                made_remote: false,
+                made_remote_root: None,
                 created_this_pass: false,
             },
             Err(cause) => {
