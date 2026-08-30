@@ -394,11 +394,11 @@ impl AuthorizedBlobUploadLane<'_> {
     async fn record_outbox_failure(
         &self,
         entry: &OutboxEntry,
-        error: &str,
+        failure: coven_database::OutboxFailure,
         attempt_time: &chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
         self.database
-            .record_outbox_failure(entry, error, &attempt_time.to_rfc3339())
+            .record_outbox_failure(entry, failure, &attempt_time.to_rfc3339())
             .await
     }
 }
@@ -740,8 +740,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                 created_this_pass: false,
             },
             Err(cause) => {
-                let message = cause.to_string();
-                self.record_failure(upload, &message).await;
+                self.record_failure(upload, &cause).await;
                 EntryOutcome::NotUploaded(UploadFailure {
                     entry_id: self.entry.id,
                     object_key: self.label(),
@@ -757,8 +756,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         object_key: String,
         cause: UploadFailureCause,
     ) -> EntryOutcome {
-        let message = cause.to_string();
-        self.record_failure(upload, &message).await;
+        self.record_failure(upload, &cause).await;
         EntryOutcome::NotUploaded(UploadFailure {
             entry_id: self.entry.id,
             object_key,
@@ -771,20 +769,31 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         upload: &RowBlobRef,
         error: coven_protocol::objects::StorageError,
     ) -> EntryOutcome {
-        let message = error.to_string();
-        warn!("Upload failed for {}: {message}", self.label());
-        self.record_failure(upload, &message).await;
+        let cause = UploadFailureCause::Storage(error);
+        warn!("Upload failed for {}: {cause}", self.label());
+        self.record_failure(upload, &cause).await;
         EntryOutcome::NotUploaded(UploadFailure {
             entry_id: self.entry.id,
             object_key: self.label(),
-            cause: UploadFailureCause::Storage(error),
+            cause,
         })
     }
 
-    async fn record_failure(&self, upload: &RowBlobRef, error: &str) {
+    async fn record_failure(&self, upload: &RowBlobRef, cause: &UploadFailureCause) {
+        let message = cause.to_string();
+        let failure = match cause {
+            UploadFailureCause::Storage(
+                coven_protocol::objects::StorageError::LocalFilesystem(
+                    coven_foundation::atomic_file::FileError::Path { path, source, .. },
+                ),
+            ) if source.kind() == std::io::ErrorKind::NotFound => {
+                coven_database::OutboxFailure::source_unavailable(path.clone(), &message)
+            }
+            _ => coven_database::OutboxFailure::other(&message),
+        };
         if let Err(record_error) = self
             .writer
-            .record_outbox_failure(&self.entry, error, &self.now)
+            .record_outbox_failure(&self.entry, failure, &self.now)
             .await
         {
             warn!(
@@ -793,7 +802,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             );
         }
         if let Some(observer) = self.observer {
-            observer.on_blob_upload_failed(upload, error).await;
+            observer.on_blob_upload_failed(upload, &message).await;
         }
     }
 

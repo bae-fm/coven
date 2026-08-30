@@ -300,7 +300,11 @@ impl<'a> TombstoneDrain<'a> {
     ) -> Result<(), TombstoneDrainError> {
         if let Err(record_error) = self
             .db
-            .record_outbox_failure(entry, error, attempted_at)
+            .record_outbox_failure(
+                entry,
+                coven_database::OutboxFailure::other(error),
+                attempted_at,
+            )
             .await
         {
             return Err(TombstoneDrainError::RecordFailure {

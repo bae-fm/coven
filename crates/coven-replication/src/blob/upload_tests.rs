@@ -796,6 +796,20 @@ async fn bad_item_does_not_block_good_later_item() {
         outcome.failures().failures()[0].cause,
         crate::blob::UploadFailureCause::Storage(_)
     ));
+    let queued = StoreDatabase::new(&fixture.db)
+        .queued_uploads()
+        .await
+        .unwrap();
+    let failed = queued
+        .iter()
+        .find(|upload| upload.blob.blob().id == "bad00001")
+        .unwrap();
+    assert_eq!(
+        failed.last_failure.as_ref().map(|failure| &failure.kind),
+        Some(&coven_database::OutboxFailureKind::SourceUnavailable {
+            path: paths[0].clone(),
+        })
+    );
     assert_eq!(fixture.journal_attempt("bad00001").await.0, 1);
     assert!(is_created(&fixture.journal("good0001").await));
 }
@@ -845,7 +859,7 @@ async fn backoff_skips_item_inside_window() {
     fixture.home.fail_creates();
     let entry = fixture.journal("backoff1").await;
     coven_database::StoreDatabase::new(&fixture.db)
-        .record_outbox_failure(&entry, "prior", T0)
+        .record_outbox_failure(&entry, coven_database::OutboxFailure::other("prior"), T0)
         .await
         .unwrap();
 

@@ -46,8 +46,8 @@ pub use cloud_outbox_live_query::CloudOutboxLiveQuery;
 pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
 pub use coven_database::{
     BlobFileFailure, BlobFileFailures, CloudOutboxSnapshot, DbError, ExternalBlob,
-    MakeRemoteProgress, QueuedDelete, QueuedMakeRemote, QueuedUpload, QueuedUploadPhase,
-    SqlContext, SqlReadContext, WriteBatch,
+    MakeRemoteProgress, OutboxFailure, OutboxFailureKind, QueuedDelete, QueuedMakeRemote,
+    QueuedUpload, QueuedUploadPhase, SqlContext, SqlReadContext, WriteBatch,
 };
 pub use coven_database::{CovenMigrationError, CovenMigrationPolicy};
 pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};

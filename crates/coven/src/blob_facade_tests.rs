@@ -352,7 +352,7 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
         upload.attempt_count, 0,
         "a freshly queued upload has not been tried",
     );
-    assert_eq!(upload.last_error, None);
+    assert_eq!(upload.last_failure, None);
     assert_eq!(
         upload.phase,
         crate::QueuedUploadPhase::Pending,

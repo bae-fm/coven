@@ -62,7 +62,9 @@ pub use blob_outbox::{
     CloudOutboxSnapshot, MakeRemoteProgress, QueuedDelete, QueuedMakeRemote, QueuedUpload,
     QueuedUploadPhase,
 };
-pub use blob_outbox::{OutboxEntry, OutboxOperation, OutboxUploadState};
+pub use blob_outbox::{
+    OutboxEntry, OutboxFailure, OutboxFailureKind, OutboxOperation, OutboxUploadState,
+};
 pub use blob_transitions::{
     BlobTransitionRoot, MakeRemoteAdmission, MaterializedLocalBlob, PostUpload,
 };

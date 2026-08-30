@@ -374,7 +374,11 @@ async fn repeated_exact_delete_resets_retry_state_without_duplication() {
         .pop()
         .expect("delete entry");
     crate::StoreDatabase::new(&db)
-        .record_outbox_failure(&failed, "provider unavailable", "2026-07-16T10:00:30Z")
+        .record_outbox_failure(
+            &failed,
+            crate::OutboxFailure::other("provider unavailable"),
+            "2026-07-16T10:00:30Z",
+        )
         .await
         .expect("record delete failure");
     db.enqueue_blob_delete_for_test(&stored, "2026-07-16T10:01:00Z")

@@ -1,6 +1,36 @@
 use super::*;
 use crate::{MakeRemoteIntentState, OutboxIdentity};
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct OutboxFailure {
+    pub message: String,
+    pub kind: OutboxFailureKind,
+}
+
+impl OutboxFailure {
+    pub fn other(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: OutboxFailureKind::Other,
+        }
+    }
+
+    pub fn source_unavailable(path: std::path::PathBuf, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: OutboxFailureKind::SourceUnavailable { path },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum OutboxFailureKind {
+    Other,
+    SourceUnavailable { path: std::path::PathBuf },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEntry {
     pub id: i64,
@@ -136,7 +166,7 @@ pub struct QueuedUpload {
     /// Failed transfer attempts so far; 0 for an upload never yet tried.
     pub attempt_count: u64,
     /// Why the last attempt failed, if one has.
-    pub last_error: Option<String>,
+    pub last_failure: Option<OutboxFailure>,
     /// When the upload was enqueued.
     pub created_at: String,
     /// When it was last attempted, if it has been.
@@ -376,10 +406,12 @@ impl StoreSession<'_> {
     fn record_outbox_failure(
         &mut self,
         entry: OutboxEntry,
-        error: String,
+        failure: OutboxFailure,
         attempted_at: String,
     ) -> Result<(), DbError> {
         let identity = crate::outbox_identity(&entry.operation)?;
+        let encoded = serde_json::to_string(&failure)
+            .map_err(|error| DbError::context("serialize outbox failure", error))?;
         let updated = match identity {
             OutboxIdentity::Upload {
                 table,
@@ -392,7 +424,7 @@ impl StoreSession<'_> {
                  WHERE id = ?3 AND operation = 'upload' AND table_name = ?4
                    AND row_id = ?5 AND column_name = ?6 AND row_stamp = ?7",
                 rusqlite::params![
-                    error,
+                    encoded,
                     attempted_at,
                     entry.id,
                     table,
@@ -405,7 +437,7 @@ impl StoreSession<'_> {
                 "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
                      last_error = ?1, last_attempt_at = ?2
                      WHERE id = ?3 AND operation = ?4 AND stored_ref = ?5",
-                rusqlite::params![error, attempted_at, entry.id, operation, stored],
+                rusqlite::params![encoded, attempted_at, entry.id, operation, stored],
             ),
         }
         .map_err(DbError::from)?;
@@ -646,13 +678,12 @@ impl StoreDatabase {
     pub async fn record_outbox_failure(
         &self,
         entry: &OutboxEntry,
-        error: &str,
+        failure: OutboxFailure,
         attempted_at: &str,
     ) -> Result<(), DbError> {
         let entry = entry.clone();
-        let error = error.to_string();
         let attempted_at = attempted_at.to_string();
-        self.call_store(move |session| session.record_outbox_failure(entry, error, attempted_at))
+        self.call_store(move |session| session.record_outbox_failure(entry, failure, attempted_at))
             .await
     }
 
@@ -734,6 +765,10 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
         ),
     };
     let attempt_count: i64 = row.get(6)?;
+    let last_failure = row
+        .get::<_, Option<String>>(7)?
+        .map(|encoded| serde_json::from_str(&encoded).map_err(|error| invalid(7, Box::new(error))))
+        .transpose()?;
     Ok(QueuedUpload {
         blob: reference,
         root_table: row.get(1)?,
@@ -743,7 +778,7 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
         phase,
         provider_bytes_total,
         attempt_count: u64::try_from(attempt_count).map_err(|error| invalid(6, Box::new(error)))?,
-        last_error: row.get(7)?,
+        last_failure,
         created_at: row.get(8)?,
         last_attempt_at: row.get(9)?,
     })
@@ -757,11 +792,19 @@ fn row_to_queued_delete(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedDelet
     let stored: coven_protocol::blob::locator::StoredBlobRef =
         serde_json::from_str(&encoded).map_err(|error| invalid(0, Box::new(error)))?;
     let attempt_count: i64 = row.get(1)?;
+    let last_error = row
+        .get::<_, Option<String>>(2)?
+        .map(|encoded| {
+            serde_json::from_str::<OutboxFailure>(&encoded)
+                .map(|failure| failure.message)
+                .map_err(|error| invalid(2, Box::new(error)))
+        })
+        .transpose()?;
     Ok(QueuedDelete {
         namespace: stored.locator().namespace().to_string(),
         blob_id: stored.locator().blob_id().to_string(),
         attempt_count: u64::try_from(attempt_count).map_err(|error| invalid(1, Box::new(error)))?,
-        last_error: row.get(2)?,
+        last_error,
         created_at: row.get(3)?,
         last_attempt_at: row.get(4)?,
     })
