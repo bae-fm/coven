@@ -68,8 +68,9 @@ async fn wait_for_pause_state(paused: &tokio::sync::watch::Sender<bool>, target:
 
 struct ActivePauseObserver {
     paused: tokio::sync::watch::Sender<bool>,
-    progress_count: AtomicUsize,
+    block_next_progress: AtomicBool,
     progressed: tokio::sync::Notify,
+    continue_progress: tokio::sync::Notify,
 }
 
 struct ResumedBeforePauseNotificationObserver {
@@ -103,13 +104,18 @@ impl ActivePauseObserver {
     fn new() -> Self {
         Self {
             paused: tokio::sync::watch::channel(false).0,
-            progress_count: AtomicUsize::new(0),
+            block_next_progress: AtomicBool::new(true),
             progressed: tokio::sync::Notify::new(),
+            continue_progress: tokio::sync::Notify::new(),
         }
     }
 
     fn set_paused(&self, paused: bool) {
         self.paused.send_replace(paused);
+    }
+
+    fn continue_progress(&self) {
+        self.continue_progress.notify_one();
     }
 }
 
@@ -118,8 +124,10 @@ impl BlobTransitionObserver for ActivePauseObserver {
     async fn on_blob_upload_started(&self, _upload: &RowBlobRef) {}
 
     async fn on_blob_upload_progress(&self, _upload: &RowBlobRef, _done: u64, _total: u64) {
-        self.progress_count.fetch_add(1, Ordering::SeqCst);
-        self.progressed.notify_one();
+        if self.block_next_progress.swap(false, Ordering::SeqCst) {
+            self.progressed.notify_one();
+            self.continue_progress.notified().await;
+        }
     }
 
     async fn on_blob_uploaded(&self, _upload: &RowBlobRef) {}
@@ -192,7 +200,7 @@ async fn pausing_suspends_an_active_upload_and_resume_continues_the_same_create(
     fixture.plant_uploads(&[("pausable", &bytes)], false).await;
     fixture
         .home
-        .slow_creates(1_000, std::time::Duration::from_millis(25));
+        .slow_creates(1_000, std::time::Duration::from_millis(50));
     let observer = ActivePauseObserver::new();
     let clock = fixed_clock(T0);
     let drain = fixture.drain(&clock, Some(&observer));
@@ -203,16 +211,10 @@ async fn pausing_suspends_an_active_upload_and_resume_continues_the_same_create(
         result = &mut drain => panic!("upload completed before it could be paused: {result:?}"),
     }
     observer.set_paused(true);
-    let progress_at_pause = observer.progress_count.load(Ordering::SeqCst);
-
-    tokio::select! {
-        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
-        result = &mut drain => panic!("paused upload completed: {result:?}"),
-    }
-    assert_eq!(
-        observer.progress_count.load(Ordering::SeqCst),
-        progress_at_pause,
-        "provider progress advanced while uploads were paused",
+    observer.continue_progress();
+    assert!(
+        matches!(futures_util::poll!(&mut drain), std::task::Poll::Pending),
+        "paused upload completed",
     );
 
     observer.set_paused(false);
