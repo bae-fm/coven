@@ -19,11 +19,12 @@ use coven_protocol::store_commit::{
 
 pub const GENERATION_ZERO: u64 = 0;
 
-pub(crate) fn migrate_retained_replay_coven_schema_on(
+pub(crate) fn migrate_retained_replay_schema_on(
     conn: &Connection,
     store_dir: &coven_foundation::store_dir::StoreDir,
     policy: crate::CovenMigrationPolicy,
-) -> Result<(), crate::CovenMigrationError> {
+    migrations: &[crate::Migration],
+) -> Result<(), crate::OpenError> {
     let records = StoreRecords::new(conn, store_dir);
     let Some(baseline) = load_replay_baseline_metadata_on(records)? else {
         return Ok(());
@@ -35,10 +36,13 @@ pub(crate) fn migrate_retained_replay_coven_schema_on(
     )
     .map_err(|error| DbError::context("open retained replay database image", error))?;
     let routing = crate::database_open::load_coven_metadata(&image)?;
-    if crate::database_open::initialized_coven_schema_is_current(
+    let coven_schema_is_current = crate::database_open::initialized_coven_schema_is_current(
         &image,
         routing.has_scoped_graph(),
-    )? {
+    )?;
+    let host_schema_version = crate::ensure_schema_supported(&image, migrations)?;
+    let target_host_schema_version = crate::supported_version(migrations);
+    if coven_schema_is_current && host_schema_version == target_host_schema_version {
         return Ok(());
     }
     let had_schema_version = crate::get_protocol_state_on(
@@ -52,6 +56,8 @@ pub(crate) fn migrate_retained_replay_coven_schema_on(
         routing.has_scoped_graph(),
         policy,
     )?;
+    let migrated_host_schema_version =
+        crate::run_migrations_in_transaction(&transaction, migrations)?;
     if !had_schema_version {
         crate::delete_protocol_state_on(
             &transaction,
@@ -60,7 +66,13 @@ pub(crate) fn migrate_retained_replay_coven_schema_on(
     }
     transaction.commit().map_err(DbError::from)?;
     let image_bytes = crate::connection_io::serialize_database_image(&image)?;
-    records.replace_retained_replay_image(&baseline, &image_bytes)?;
+    records.replace_retained_replay_image(&baseline, migrated_host_schema_version, &image_bytes)?;
+    tracing::info!(
+        previous_host_schema_version = baseline.schema_version,
+        migrated_host_schema_version,
+        coven_schema_migrated = !coven_schema_is_current,
+        "Migrated retained replay baseline schema"
+    );
     Ok(())
 }
 
@@ -166,13 +178,23 @@ pub(crate) fn ensure_founder_replay_baseline_on(
                     && existing.founder_registration == authority.founder_registration
             }
         };
-        if existing.schema_version != schema_version
-            || existing.routing_hash != routing_hash
-            || !authority_matches
-        {
-            return Err(DbError::Message(
-                "retained replay baseline differs from the installed founder authority".to_string(),
-            ));
+        if existing.schema_version != schema_version {
+            return Err(DbError::Message(format!(
+                "retained replay baseline schema version {} differs from database schema version {schema_version}",
+                existing.schema_version,
+            )));
+        }
+        if existing.routing_hash != routing_hash {
+            return Err(DbError::Message(format!(
+                "retained replay baseline routing hash {} differs from database routing hash {routing_hash}",
+                existing.routing_hash,
+            )));
+        }
+        if !authority_matches {
+            return Err(DbError::Message(format!(
+                "retained replay baseline authority {:?} differs from installed founder authority {:?}",
+                existing.authority, authority,
+            )));
         }
         return Ok(existing);
     }

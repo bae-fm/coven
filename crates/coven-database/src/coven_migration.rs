@@ -365,7 +365,6 @@ pub(crate) fn initialize_coven_schema_version(conn: &Connection) -> Result<(), D
 
 pub(crate) fn run_coven_migrations_in_transaction(
     conn: &Connection,
-    store_dir: &coven_foundation::store_dir::StoreDir,
     include_routing: bool,
     policy: CovenMigrationPolicy,
 ) -> Result<(), CovenMigrationError> {
@@ -375,9 +374,7 @@ pub(crate) fn run_coven_migrations_in_transaction(
         policy,
         expected_coven_schema_v0_manifest(include_routing)?,
         &migrations,
-    )?;
-    crate::store::migrate_retained_replay_coven_schema_on(conn, store_dir, policy)?;
-    Ok(())
+    )
 }
 
 pub(crate) fn run_initialized_coven_schema_migrations_in_transaction(

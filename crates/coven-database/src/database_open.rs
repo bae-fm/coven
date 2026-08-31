@@ -246,7 +246,6 @@ impl DatabaseCore {
                     timings.mark("migrate Coven schema", || {
                         run_coven_migrations_in_transaction(
                             &tx,
-                            &store_dir,
                             pinned.has_scoped_graph(),
                             coven_migration_policy,
                         )
@@ -255,6 +254,16 @@ impl DatabaseCore {
                 let schema_version = timings.mark("migrate host schema", || {
                     run_migrations_in_transaction(&tx, migrations)
                 })?;
+                if pinned_routing_contract.is_some() {
+                    timings.mark("migrate retained replay schema", || {
+                        crate::store::migrate_retained_replay_schema_on(
+                            &tx,
+                            &store_dir,
+                            coven_migration_policy,
+                            migrations,
+                        )
+                    })?;
+                }
 
                 // The host ladder and routing validation share this transaction.
                 // A pending migration that changes confidentiality topology cannot

@@ -262,6 +262,69 @@ async fn writer_migrates_the_retained_replay_image_with_the_store() {
         .is_empty());
 }
 
+#[tokio::test]
+async fn writer_migrates_the_retained_replay_image_with_the_host_schema() {
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let path = db_store_dir.db_path();
+    let open = |migrations: &[coven_database::Migration]| {
+        coven_database::Database::open_in_store_dir_for_test(
+            &path,
+            db_store_dir.clone(),
+            crate::sync::test_helpers::test_synced_tables(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            "retained-replay-host-migration".to_string(),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            coven_database::CovenMigrationPolicy::ApplyPending,
+            migrations,
+        )
+    };
+    let version_one = crate::sync::test_helpers::test_migrations();
+    let db = open(&version_one).expect("create Store database");
+    let founder = UserKeypair::generate();
+    let (store, storage) = TestStore::create_with_connection(
+        &db,
+        db_store_dir.clone(),
+        "retained-replay-host-migration",
+        founder.clone(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store with retained replay baseline");
+    let root = store.root();
+    let old_image_hash = coven_database::StoreDatabase::new(&db)
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect("load version-one replay baseline")
+        .image_payload_hash;
+    drop(store);
+    drop(db);
+
+    let mut version_two = crate::sync::test_helpers::test_migrations();
+    version_two.push(coven_database::Migration::sql(
+        2,
+        "ordinary host column",
+        "ALTER TABLE notes ADD COLUMN ordinary TEXT DEFAULT 'ordinary';",
+    ));
+    let reopened = open(&version_two).expect("migrate Store host schema");
+    let migrated = coven_database::StoreDatabase::new(&reopened)
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect("load host-migrated replay baseline");
+
+    assert_eq!(migrated.schema_version, 2);
+    assert_ne!(migrated.image_payload_hash, old_image_hash);
+    crate::sync::store::Store::open(
+        coven_database::StoreDatabase::new(&reopened),
+        storage,
+        db_store_dir,
+        &root,
+        &founder,
+    )
+    .await
+    .expect("open Store after migrating its host schema");
+}
+
 /// The baseline's database image and authority are payloads its row names: the
 /// row claims both hashes, the payload store holds exactly those bytes, and a
 /// baseline whose image bytes are gone fails to load instead of

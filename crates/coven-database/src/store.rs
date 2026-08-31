@@ -115,7 +115,7 @@ pub use reclaim::journal::{
     ReclaimedStorePackage, StoreReclaimCandidateLoss, StoreReclaimJournalError,
 };
 pub(crate) use retained_replay::copy_table_with_conflicts;
-pub(crate) use retained_replay::migrate_retained_replay_coven_schema_on;
+pub(crate) use retained_replay::migrate_retained_replay_schema_on;
 pub use retained_replay::{
     projection_table_names, RetainedReplayAuthority, RetainedReplayBaseline,
     RetainedReplayGenesisAuthority, GENERATION_ZERO,

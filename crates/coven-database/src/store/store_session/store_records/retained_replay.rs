@@ -368,6 +368,7 @@ impl StoreRecords<'_> {
     pub(crate) fn replace_retained_replay_image(
         self,
         baseline: &crate::RetainedReplayBaseline,
+        schema_version: u32,
         image_bytes: &[u8],
     ) -> Result<(), DbError> {
         let image_payload_hash = self
@@ -380,10 +381,14 @@ impl StoreRecords<'_> {
             .conn
             .execute(
                 "UPDATE retained_replay_baselines
-                 SET image_payload_hash = ?1
-                 WHERE singleton = 1 AND image_payload_hash = ?2",
+                 SET schema_version = ?1, image_payload_hash = ?2
+                 WHERE singleton = 1
+                   AND schema_version = ?3
+                   AND image_payload_hash = ?4",
                 rusqlite::params![
+                    i64::from(schema_version),
                     image_payload_hash.to_string(),
+                    i64::from(baseline.schema_version),
                     baseline.image_payload_hash.to_string()
                 ],
             )
@@ -400,6 +405,7 @@ impl StoreRecords<'_> {
         )?;
 
         let mut migrated = baseline.clone();
+        migrated.schema_version = schema_version;
         migrated.image_payload_hash = image_payload_hash;
         self.validate_replay_baseline_image(&migrated)?;
         self.validate_replay_authority(&migrated)
