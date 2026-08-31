@@ -2,6 +2,94 @@ use coven_replication::sync::test_helpers::*;
 
 use crate::blob_facade_tests::{builder, open_local, ExternalPhotoTestHost};
 
+fn open_local_with_required_hash(dir: crate::StoreDir) -> crate::CovenHandle {
+    let mut migrations = test_migrations();
+    migrations.push(crate::Migration::sql(
+        2,
+        "require photo hashes",
+        "ALTER TABLE note_photos RENAME TO note_photos_nullable;
+         CREATE TABLE note_photos (
+            id TEXT PRIMARY KEY,
+            note_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            size INTEGER NOT NULL DEFAULT 0,
+            hash TEXT NOT NULL,
+            _updated_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            cloud_path TEXT,
+            blob_id TEXT,
+            FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
+         ) STRICT;
+         DROP TABLE note_photos_nullable;",
+    ));
+    builder(dir)
+        .synced_tables(test_synced_tables_with_blob(crate::BlobDecl::new(
+            "photos",
+            crate::Provenance::UserProvided,
+            crate::CacheFill::CacheLazy,
+        )))
+        .migrations(migrations)
+        .key_custody(crate::KeyCustody::InMemory(crate::MasterKeyring::from(
+            crate::EncryptionService::from_key([42; 32]),
+        )))
+        .identity_custody(crate::IdentityCustody::InMemory(
+            coven_keys::keys::UserKeypair::generate(),
+        ))
+        .open()
+        .expect("open store with required blob hashes")
+}
+
+#[tokio::test]
+async fn insert_registration_keeps_the_hash_private_and_satisfies_not_null() {
+    coven_keys::keys::test_keyring::install();
+    let tmp = tempfile::tempdir().expect("store directory");
+    let handle = open_local_with_required_hash(crate::StoreDir::new_ephemeral(tmp.path()));
+    let user_dir = tempfile::tempdir().expect("user directory");
+    let path = user_dir.path().join("photo.jpg");
+    std::fs::write(&path, b"opaque content").expect("write external file");
+    let prepared = crate::prepare_external_blob(&path, |_| {})
+        .await
+        .expect("prepare external file");
+
+    handle
+        .write(move |sql| {
+            let stamp = sql.stamp();
+            sql.execute(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+                 VALUES ('note-1', 'Note', 0, ?1, ?1)",
+                [&stamp],
+            )?;
+            sql.insert_external_blob(
+                "note_photos",
+                "photo-1",
+                prepared,
+                "INSERT INTO note_photos (
+                    id, note_id, kind, size, hash, _updated_at, created_at
+                 ) VALUES (
+                    'photo-1', 'note-1', 'photo', 14,
+                    :coven_external_blob_hash, :stamp, :stamp
+                 )",
+                rusqlite::named_params! { ":stamp": stamp },
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("insert and register external file");
+
+    let stored_hash = handle
+        .read(|sql| {
+            sql.query_row(
+                "SELECT hash FROM note_photos WHERE id = 'photo-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(crate::CovenError::from)
+        })
+        .await
+        .expect("read Coven-owned hash");
+    assert_eq!(stored_hash, crate::content_hash(b"opaque content"));
+}
+
 #[tokio::test]
 async fn preparation_reports_bytes_and_registration_sets_the_row_hash() {
     coven_keys::keys::test_keyring::install();
