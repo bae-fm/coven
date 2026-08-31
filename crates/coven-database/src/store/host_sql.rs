@@ -1,7 +1,5 @@
-use std::path::Path;
-
 use crate::Gates;
-use crate::{CloudOutboxRecords, Database, DbError, ExternalBlobRecords};
+use crate::{CloudOutboxRecords, Database, DbError, ExternalBlobRecords, PreparedExternalBlob};
 use coven_protocol::blob::Provenance;
 
 use coven_protocol::hlc::UpdatedAtStamper;
@@ -176,20 +174,64 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
         &self,
         table: &str,
         row_id: &str,
-        path: &Path,
+        prepared: PreparedExternalBlob,
     ) -> Result<(), DbError> {
         crate::observe_host_sql_write();
         crate::with_coven_sql_authority(|| {
             let declared = self.blob_table(table)?;
-            let reference =
-                Database::row_blob_ref_on(self.transaction, self.gates, declared, row_id)?;
-            if reference.blob().provenance != Provenance::UserProvided {
+            let blob = declared.blob().expect("blob_table requires a declaration");
+            if blob.provenance != Provenance::UserProvided {
                 return Err(DbError::Message(format!(
                     "table {table:?} declares host-provided blobs, which Coven copies; \
                      an external file registration on it would never be read"
                 )));
             }
-            ExternalBlobRecords::new(self.transaction).register(&reference, path)
+            prepared.validate_current()?;
+            let table_ident = crate::quote_ident(table);
+            let size_ident = crate::quote_ident(&blob.size_column);
+            let hash_ident = crate::quote_ident(&blob.hash_column);
+            let select =
+                format!("SELECT {size_ident}, {hash_ident} FROM {table_ident} WHERE id = ?1");
+            let (declared_size, declared_hash) =
+                self.transaction.query_row(&select, [row_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+                })?;
+            let declared_size = u64::try_from(declared_size).map_err(|_| {
+                DbError::Message(format!(
+                    "external blob row {table:?}/{row_id:?} has negative size"
+                ))
+            })?;
+            if declared_size != prepared.size() {
+                return Err(DbError::Message(format!(
+                    "external blob row {table:?}/{row_id:?} declares {declared_size} bytes, but Coven read {}",
+                    prepared.size()
+                )));
+            }
+            match declared_hash {
+                Some(hash) if hash != prepared.hash() => {
+                    return Err(DbError::Message(format!(
+                        "external blob row {table:?}/{row_id:?} already declares different content"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    let update = format!(
+                        "UPDATE {table_ident} SET {hash_ident} = ?1 \
+                         WHERE id = ?2 AND {hash_ident} IS NULL"
+                    );
+                    let updated = self
+                        .transaction
+                        .execute(&update, rusqlite::params![prepared.hash(), row_id])?;
+                    if updated != 1 {
+                        return Err(DbError::Message(format!(
+                            "external blob row {table:?}/{row_id:?} changed before registration"
+                        )));
+                    }
+                }
+            }
+            let reference =
+                Database::row_blob_ref_on(self.transaction, self.gates, declared, row_id)?;
+            ExternalBlobRecords::new(self.transaction).register(&reference, prepared.path())
         })
     }
 

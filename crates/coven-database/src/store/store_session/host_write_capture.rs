@@ -915,6 +915,10 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                             .map_err(E::from)?;
                 }
             }
+            blob_decls
+                .validate_changed_rows(&tx, &captured)
+                .map_err(DbError::from)
+                .map_err(E::from)?;
             let partitioned = match routing {
                 StoreWriteRouting::MergeScoped(encryption) => {
                     let store_root_hash =

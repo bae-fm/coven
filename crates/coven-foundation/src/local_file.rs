@@ -701,6 +701,18 @@ pub async fn file_facts(path: &Path) -> Result<(u64, [u8; 32]), FileError> {
     Ok((size, digest))
 }
 
+/// Size and SHA-256 digest of the file at `path`, reporting cumulative bytes
+/// consumed after each read.
+pub async fn file_facts_with_progress(
+    path: &Path,
+    progress: impl Fn(u64) + Send + Sync,
+) -> Result<(u64, [u8; 32]), FileError> {
+    let (_, size, digest) =
+        read_selected_with_facts_and_progress(path, ExactReadSelection::IdentityOnly, &progress)
+            .await?;
+    Ok((size, digest))
+}
+
 pub async fn file_len(path: &Path) -> Result<u64, FileError> {
     tokio::fs::metadata(path)
         .await
@@ -719,16 +731,34 @@ async fn read_selected_with_facts(
     path: &Path,
     selection: ExactReadSelection,
 ) -> Result<(Vec<u8>, u64, [u8; 32]), FileError> {
+    read_selected_with_facts_and_progress(path, selection, &|_| {}).await
+}
+
+async fn read_selected_with_facts_and_progress(
+    path: &Path,
+    selection: ExactReadSelection,
+    progress: &(dyn Fn(u64) + Sync),
+) -> Result<(Vec<u8>, u64, [u8; 32]), FileError> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|source| FileError::at("open exact file", path, source))?;
-    read_open_file_with_facts(&mut file, path, selection).await
+    read_open_file_with_facts_and_progress(&mut file, path, selection, progress).await
 }
 
+#[cfg(test)]
 async fn read_open_file_with_facts(
     file: &mut tokio::fs::File,
     path: &Path,
     selection: ExactReadSelection,
+) -> Result<(Vec<u8>, u64, [u8; 32]), FileError> {
+    read_open_file_with_facts_and_progress(file, path, selection, &|_| {}).await
+}
+
+async fn read_open_file_with_facts_and_progress(
+    file: &mut tokio::fs::File,
+    path: &Path,
+    selection: ExactReadSelection,
+    progress: &(dyn Fn(u64) + Sync),
 ) -> Result<(Vec<u8>, u64, [u8; 32]), FileError> {
     use sha2::{Digest, Sha256};
 
@@ -754,6 +784,7 @@ async fn read_open_file_with_facts(
                 path: path.to_path_buf(),
             })?;
         hasher.update(&buffer[..read]);
+        progress(size);
         match selection {
             ExactReadSelection::IdentityOnly => {}
             #[cfg(test)]

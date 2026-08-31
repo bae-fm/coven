@@ -44,8 +44,12 @@ pub enum BlobDeclError {
     MissingColumn { table: String, column: String },
     /// A schema read (`PRAGMA table_info`) failed.
     Sqlite(rusqlite::Error),
+    /// A captured host changeset could not be read.
+    Changeset(crate::ChangesetError),
     /// A row's declared size column is negative.
     InvalidSize { table: String, value: i64 },
+    /// A row names a blob but has no content hash.
+    MissingHash { table: String, row_id: String },
     /// New and old changeset walks produced different row counts.
     ChangesetWalkMismatch { old_count: usize, new_count: usize },
     /// A blob-bearing INSERT or UPDATE has no primary key.
@@ -85,9 +89,16 @@ impl std::fmt::Display for BlobDeclError {
                 )
             }
             BlobDeclError::Sqlite(e) => write!(f, "blob declaration schema read failed: {e}"),
+            BlobDeclError::Changeset(error) => {
+                write!(f, "blob declaration changeset read failed: {error}")
+            }
             BlobDeclError::InvalidSize { table, value } => {
                 write!(f, "blob declaration found invalid size in {table}: {value}")
             }
+            BlobDeclError::MissingHash { table, row_id } => write!(
+                f,
+                "blob-bearing row {table:?}/{row_id:?} has no content hash"
+            ),
             BlobDeclError::ChangesetWalkMismatch {
                 old_count,
                 new_count,
@@ -283,8 +294,17 @@ impl TableBlob {
         })
     }
 
-    fn hash_from_row(&self, row: &rusqlite::Row<'_>) -> Result<String, BlobDeclError> {
-        row.get(self.hash_col).map_err(BlobDeclError::from)
+    fn hash_from_row(
+        &self,
+        table: &str,
+        row_id: &str,
+        row: &rusqlite::Row<'_>,
+    ) -> Result<String, BlobDeclError> {
+        row.get::<_, Option<String>>(self.hash_col)?
+            .ok_or_else(|| BlobDeclError::MissingHash {
+                table: table.to_string(),
+                row_id: row_id.to_string(),
+            })
     }
 }
 
@@ -484,6 +504,34 @@ impl BlobDecls {
             .transpose()
     }
 
+    /// Require every inserted or updated blob-bearing row in `changeset` to
+    /// carry complete final content facts before its transaction can commit.
+    pub(crate) fn validate_changed_rows(
+        &self,
+        conn: &Connection,
+        changeset: &[u8],
+    ) -> Result<(), BlobDeclError> {
+        let changes = crate::walk_changeset(changeset).map_err(BlobDeclError::Changeset)?;
+        for change in changes {
+            if !matches!(change.op, ChangeOp::Insert | ChangeOp::Update)
+                || !self.tables.contains_key(&change.table)
+            {
+                continue;
+            }
+            let row_id =
+                change
+                    .pk()
+                    .ok_or_else(|| BlobDeclError::MissingPublicationPrimaryKey {
+                        table: change.table.clone(),
+                    })?;
+            match self.publication_blob_for_row(conn, &change.table, row_id) {
+                Ok(_) | Err(BlobDeclError::MissingPublicationBlob { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     /// Every exact blob-bearing row version currently present in `conn`.
     pub(crate) fn publication_blobs_in_db(
         &self,
@@ -498,14 +546,15 @@ impl BlobDecls {
                 let Some(reference) = blob.ref_from_row(table, row)? else {
                     continue;
                 };
+                let row_id = row.get::<_, String>("id")?;
                 out.push(PublicationBlob {
                     table: table.clone(),
-                    row_id: row.get("id")?,
+                    row_id: row_id.clone(),
                     row_stamp: row.get("_updated_at")?,
                     column: blob.id_col_name.clone(),
                     blob: reference,
                     plaintext_size: blob.size_from_row(table, row)?,
-                    plaintext_hash: blob.hash_from_row(row)?,
+                    plaintext_hash: blob.hash_from_row(table, &row_id, row)?,
                 });
             }
         }
@@ -665,6 +714,7 @@ fn publication_blob_from_row(
                 table: table.to_string(),
                 primary_key: row_id.clone(),
             })?;
+    let plaintext_hash = blob.hash_from_row(table, &row_id, row)?;
     Ok(PublicationBlob {
         table: table.to_string(),
         row_id,
@@ -672,6 +722,6 @@ fn publication_blob_from_row(
         column: blob.id_col_name.clone(),
         blob: reference,
         plaintext_size: blob.size_from_row(table, row)?,
-        plaintext_hash: blob.hash_from_row(row)?,
+        plaintext_hash,
     })
 }

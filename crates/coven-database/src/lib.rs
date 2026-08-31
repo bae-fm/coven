@@ -139,6 +139,7 @@ mod make_remote;
 mod migration;
 mod operation_models;
 mod prepared_audience_objects;
+mod prepared_external_blob;
 mod remote_object_records;
 mod routing_contract;
 mod schema_contract;
@@ -226,6 +227,7 @@ pub use prepared_audience_objects::{
     PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage, PreparedRemoteObject,
     StoredBlobReferenceState,
 };
+pub use prepared_external_blob::{prepare_external_blob, PreparedExternalBlob};
 pub use routing_contract::SyncRoutingContract;
 pub use routing_contract::SyncRoutingContractError;
 use schema_contract::validate_host_synced_tables;

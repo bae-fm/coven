@@ -37,7 +37,7 @@ fn note_tables() -> Vec<crate::SyncedTable> {
     test_synced_tables_with_blob(user_file_decl())
 }
 
-fn builder(dir: crate::StoreDir) -> crate::CovenBuilder {
+pub(crate) fn builder(dir: crate::StoreDir) -> crate::CovenBuilder {
     crate::Coven::builder(
         dir,
         crate::Config::with_defaults(
@@ -51,7 +51,7 @@ fn builder(dir: crate::StoreDir) -> crate::CovenBuilder {
 
 /// Open a store whose blobs are user files, with nothing connected: an upload
 /// queue reader must work before sync exists.
-fn open_local(dir: crate::StoreDir) -> crate::CovenHandle {
+pub(crate) fn open_local(dir: crate::StoreDir) -> crate::CovenHandle {
     builder(dir)
         .synced_tables(note_tables())
         .migrations(test_migrations())
@@ -68,7 +68,7 @@ fn open_local(dir: crate::StoreDir) -> crate::CovenHandle {
 /// Write a note and a photo row pointing at `path`, registering the file in the
 /// same write — the order a host must use, since the registration binds to the
 /// row version this write produces.
-trait ExternalPhotoTestHost {
+pub(crate) trait ExternalPhotoTestHost {
     async fn write_note_with_external_photo(
         &self,
         note_id: &str,
@@ -86,11 +86,10 @@ impl ExternalPhotoTestHost for crate::CovenHandle {
         path: &std::path::Path,
         bytes: &[u8],
     ) -> Result<(), crate::CovenError> {
-        let hash = crate::content_hash(bytes);
+        let prepared = crate::prepare_external_blob(path, |_| {}).await?;
         let size = bytes.len() as i64;
         let note = note_id.to_string();
         let photo = photo_id.to_string();
-        let path = path.to_path_buf();
         self.write(move |sql| {
             sql.execute(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at)
@@ -99,147 +98,15 @@ impl ExternalPhotoTestHost for crate::CovenHandle {
             )?;
             sql.execute(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at)
-                 VALUES (?1, ?2, 'photo', ?3, ?4, ?5, ?5)",
-                rusqlite::params![photo, note, size, hash, sql.stamp()],
+                 VALUES (?1, ?2, 'photo', ?3, NULL, ?4, ?4)",
+                rusqlite::params![photo, note, size, sql.stamp()],
             )?;
-            sql.register_external_blob("note_photos", &photo, &path)?;
+            sql.register_external_blob("note_photos", &photo, prepared)?;
             Ok(())
         })
         .await
         .map(|_| ())
     }
-}
-
-/// A file coven references but does not own reads back through the handle, and
-/// the registration can be dropped and remade.
-#[tokio::test]
-async fn an_external_file_reads_back_through_the_handle() {
-    coven_keys::keys::test_keyring::install();
-    let tmp = tempfile::tempdir().expect("store directory");
-    let handle = open_local(crate::StoreDir::new_ephemeral(tmp.path()));
-    let user_dir = tempfile::tempdir().expect("user directory");
-
-    let bytes = b"the user's own file, never copied".to_vec();
-    let path = user_dir.path().join("photo.jpg");
-    std::fs::write(&path, &bytes).expect("write the user's file");
-
-    handle
-        .write_note_with_external_photo("note-1", "photo-1", &path, &bytes)
-        .await
-        .expect("register the external file in the write that created the row");
-
-    let reference = handle
-        .row_blob_ref("note_photos", "photo-1")
-        .await
-        .expect("resolve the row's blob reference");
-    assert_eq!(
-        handle.read_blob(&reference).await.expect("read the blob"),
-        bytes,
-        "the bytes come from the user's file",
-    );
-
-    // Clearing the registration leaves the row, and the blob has nowhere to be
-    // read from until it is registered again.
-    handle
-        .write(|sql| {
-            sql.clear_external_blob("note_photos", "photo-1")?;
-            Ok(())
-        })
-        .await
-        .expect("clear the registration");
-    let cleared = handle.row_blob_ref("note_photos", "photo-1").await;
-    let cleared = match cleared {
-        Ok(reference) => handle.read_blob(&reference).await.err(),
-        Err(_) => None,
-    };
-    assert!(
-        cleared.is_some(),
-        "a cleared registration leaves the blob unreadable",
-    );
-
-    // Re-registering the same file restores the read.
-    let moved = user_dir.path().join("photo-moved.jpg");
-    std::fs::rename(&path, &moved).expect("the user moves their file");
-    handle
-        .write({
-            let moved = moved.clone();
-            move |sql| {
-                sql.execute(
-                    "UPDATE note_photos SET _updated_at = ?1 WHERE id = 'photo-1'",
-                    rusqlite::params![sql.stamp()],
-                )?;
-                sql.register_external_blob("note_photos", "photo-1", &moved)?;
-                Ok(())
-            }
-        })
-        .await
-        .expect("re-register the moved file");
-    let reference = handle
-        .row_blob_ref("note_photos", "photo-1")
-        .await
-        .expect("resolve the row's blob reference again");
-    assert_eq!(
-        handle.read_blob(&reference).await.expect("read the blob"),
-        bytes,
-        "the re-registered file reads back",
-    );
-}
-
-/// A table whose blobs coven copies takes no external file: the registration
-/// would be written and never read, so it is refused instead.
-#[tokio::test]
-async fn a_host_provided_table_refuses_an_external_file() {
-    coven_keys::keys::test_keyring::install();
-    let tmp = tempfile::tempdir().expect("store directory");
-    let handle = builder(crate::StoreDir::new_ephemeral(tmp.path()))
-        .synced_tables(test_synced_tables_with_blob(crate::BlobDecl::new(
-            "photos",
-            crate::Provenance::HostProvided,
-            crate::CacheFill::CacheLazy,
-        )))
-        .migrations(test_migrations())
-        .key_custody(crate::KeyCustody::InMemory(crate::MasterKeyring::generate()))
-        .identity_custody(crate::IdentityCustody::InMemory(
-            coven_keys::keys::UserKeypair::generate(),
-        ))
-        .open()
-        .expect("open the store");
-    let user_dir = tempfile::tempdir().expect("user directory");
-    let path = user_dir.path().join("photo.jpg");
-    std::fs::write(&path, b"bytes").expect("write the user's file");
-
-    let refused = handle
-        .write_note_with_external_photo("note-1", "photo-1", &path, b"bytes")
-        .await;
-    assert!(
-        refused.is_err(),
-        "a host-provided table must refuse an external file, got {refused:?}",
-    );
-}
-
-/// An undeclared table, or one with no blob, is named in the error rather than
-/// silently registering nothing.
-#[tokio::test]
-async fn registering_against_a_table_with_no_blob_is_refused() {
-    coven_keys::keys::test_keyring::install();
-    let tmp = tempfile::tempdir().expect("store directory");
-    let handle = open_local(crate::StoreDir::new_ephemeral(tmp.path()));
-
-    let refused = handle
-        .write(|sql| {
-            sql.execute(
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at)
-                 VALUES ('n', 'N', 0, ?1, ?1)",
-                rusqlite::params![sql.stamp()],
-            )?;
-            sql.register_external_blob("notes", "n", std::path::Path::new("/tmp/x"))?;
-            Ok(())
-        })
-        .await;
-    assert!(
-        refused.is_err(),
-        "a table with no blob declaration is refused, got {refused:?}",
-    );
 }
 
 /// Open the same store again over the same directory and key, the way a
