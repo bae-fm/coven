@@ -214,19 +214,7 @@ impl DatabaseConnection {
         self.on_connection_thread(move |core| {
             capture_committed_changes(core, |core| {
                 let outcome = {
-                    let mut session = crate::store::StoreSession::new(
-                        &core.conn,
-                        &core.context.store_dir,
-                        &mut core.verified_store_authority,
-                        &core.context.gates,
-                        &core.context.synced_tables,
-                        core.context.schema_version,
-                        core.context.sync_routing_hash,
-                        &core.context.hlc,
-                        &core.context.blob_decls,
-                        #[cfg(any(test, feature = "test-utils"))]
-                        &core.context.merge_materialization_failure,
-                    );
+                    let mut session = store_session(core);
                     operation(&mut session)
                 };
                 let cleanup = crate::payload_store::pay_owed_payload_deletions_on(
@@ -245,6 +233,33 @@ impl DatabaseConnection {
             })
         })
         .await
+    }
+
+    pub(crate) async fn read_store<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
+    where
+        F: for<'connection> FnOnce(crate::store::SqlReadContext<'connection>) -> Result<R, E>
+            + Send
+            + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.on_connection_thread(move |core| store_session(core).read(read))
+            .await
+    }
+
+    pub(crate) async fn read_store_tracked<F, R, E>(
+        &self,
+        read: F,
+    ) -> Result<(Result<R, E>, crate::QueryDependencies), DbError>
+    where
+        F: for<'connection> FnOnce(crate::store::SqlReadContext<'connection>) -> Result<R, E>
+            + Send
+            + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.on_connection_thread(move |core| store_session(core).read_tracked(read))
+            .await
     }
 
     pub(crate) fn store_schema_version(&self) -> u32 {
@@ -527,6 +542,22 @@ impl DatabaseConnection {
             }
         }
     }
+}
+
+fn store_session(core: &mut DatabaseCore) -> crate::store::StoreSession<'_> {
+    crate::store::StoreSession::new(
+        &core.conn,
+        &core.context.store_dir,
+        &mut core.verified_store_authority,
+        &core.context.gates,
+        &core.context.synced_tables,
+        core.context.schema_version,
+        core.context.sync_routing_hash,
+        &core.context.hlc,
+        &core.context.blob_decls,
+        #[cfg(any(test, feature = "test-utils"))]
+        &core.context.merge_materialization_failure,
+    )
 }
 
 /// A unit of work for the connection thread: a caller's closure to run against

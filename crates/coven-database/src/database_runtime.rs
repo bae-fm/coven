@@ -55,6 +55,31 @@ impl Database {
         self.connection.call_store(operation).await
     }
 
+    pub(crate) async fn read_store<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
+    where
+        F: for<'connection> FnOnce(crate::store::SqlReadContext<'connection>) -> Result<R, E>
+            + Send
+            + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.connection.read_store(read).await
+    }
+
+    pub(crate) async fn read_store_tracked<F, R, E>(
+        &self,
+        read: F,
+    ) -> Result<(Result<R, E>, crate::QueryDependencies), DbError>
+    where
+        F: for<'connection> FnOnce(crate::store::SqlReadContext<'connection>) -> Result<R, E>
+            + Send
+            + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.connection.read_store_tracked(read).await
+    }
+
     pub(crate) fn store_schema_version(&self) -> u32 {
         self.connection.store_schema_version()
     }

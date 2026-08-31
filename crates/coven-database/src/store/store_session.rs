@@ -258,14 +258,14 @@ impl<'session> StoreSession<'session> {
         Ok(value)
     }
 
-    pub(super) fn read<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
+    pub(crate) fn read<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
     where
         F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<R, E>,
     {
         StoreRecords::new(self.conn, self.store_dir).host_sql_read(read)
     }
 
-    pub(super) fn read_tracked<F, R, E>(
+    pub(crate) fn read_tracked<F, R, E>(
         &self,
         read: F,
     ) -> Result<(Result<R, E>, crate::live_query::QueryDependencies), DbError>
