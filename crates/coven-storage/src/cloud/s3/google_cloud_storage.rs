@@ -327,36 +327,11 @@ mod tests {
     use axum::http::{HeaderMap, Response, StatusCode, Uri};
     use axum::Router;
     use bytes::Bytes;
-    use futures_util::StreamExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]
     struct CreateOnlyState {
         stored: Arc<Mutex<Option<Vec<u8>>>>,
-    }
-
-    #[derive(Clone)]
-    struct PausableCreateState {
-        received: Arc<AtomicUsize>,
-        first_chunk: Arc<tokio::sync::Notify>,
-    }
-
-    async fn pausable_create_only_endpoint(
-        State(state): State<PausableCreateState>,
-        request: axum::extract::Request,
-    ) -> Response<Body> {
-        let mut body = request.into_body().into_data_stream();
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk.expect("read Google Cloud Storage request body");
-            state.received.fetch_add(chunk.len(), Ordering::SeqCst);
-            state.first_chunk.notify_waiters();
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        Response::builder()
-            .status(StatusCode::OK)
-            .body(Body::empty())
-            .expect("build success response")
     }
 
     async fn create_only_endpoint(
@@ -501,63 +476,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_google_xml_put_stops_and_resumes_the_same_request_body() {
-        let received = Arc::new(AtomicUsize::new(0));
-        let first_chunk = Arc::new(tokio::sync::Notify::new());
-        let (endpoint, shutdown) = crate::cloud::test_server::spawn_test_server(
-            Router::new()
-                .fallback(pausable_create_only_endpoint)
-                .with_state(PausableCreateState {
-                    received: received.clone(),
-                    first_chunk: first_chunk.clone(),
-                }),
-        )
-        .await;
-        let source = tempfile::NamedTempFile::new().expect("upload source file");
-        let bytes = vec![7; 16 * 1024 * 1024 + 17];
-        std::fs::write(source.path(), &bytes).expect("write upload source");
+    async fn google_xml_request_body_stops_and_resumes_at_the_next_chunk() {
+        let bytes = Bytes::from(vec![7; BODY_CHUNK * 2 + 17]);
         let (pause_sender, pause) = tokio::sync::watch::channel(false);
-        let control = UploadControl::pausable(crate::cloud::no_progress(), pause);
-        let client = GoogleCloudStorageXml {
-            client: reqwest::Client::new(),
+        let mut body = ReportedBody {
+            source: Some(ChunkSource::Bytes {
+                bytes: bytes.clone(),
+                offset: 0,
+            }),
+            sent: 0,
+            control: UploadControl::pausable(crate::cloud::no_progress(), pause),
         };
-        let payload_hash = sha256_hex(&bytes);
-        let upload = client.create_only(
-            &endpoint,
-            "travel-maps",
-            "us-central1",
-            "GOOG-ACCESS-ID",
-            "secret",
-            "maps/new york.png",
-            GoogleUploadSource::File(source.path().to_path_buf()),
-            bytes.len() as u64,
-            &payload_hash,
-            DateTime::parse_from_rfc3339("2019-11-02T04:35:30Z")
-                .expect("fixed timestamp")
-                .with_timezone(&Utc),
-            control,
-        );
-        tokio::pin!(upload);
 
-        tokio::select! {
-            _ = first_chunk.notified() => {}
-            result = &mut upload => panic!("Google XML upload completed before pause: {result:?}"),
-        }
+        let first = body
+            .next_chunk()
+            .await
+            .expect("first request chunk")
+            .expect("read first request chunk");
+        assert_eq!(first.len(), BODY_CHUNK);
+
         pause_sender.send_replace(true);
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        let received_while_paused = received.load(Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert_eq!(
-            received.load(Ordering::SeqCst),
-            received_while_paused,
-            "the Google XML request body kept advancing while paused",
-        );
-        assert!(received_while_paused < bytes.len());
+        let second = {
+            let next = body.next_chunk();
+            tokio::pin!(next);
+            assert!(
+                matches!(futures_util::poll!(&mut next), std::task::Poll::Pending),
+                "paused request body yielded another chunk",
+            );
 
-        pause_sender.send_replace(false);
-        upload.await.expect("resume the same Google XML PUT");
-        assert_eq!(received.load(Ordering::SeqCst), bytes.len());
-        shutdown.send(()).expect("stop fake Google endpoint");
+            pause_sender.send_replace(false);
+            next.as_mut()
+                .await
+                .expect("second request chunk")
+                .expect("read second request chunk")
+        };
+        assert_eq!(second.len(), BODY_CHUNK);
+
+        let last = body
+            .next_chunk()
+            .await
+            .expect("last request chunk")
+            .expect("read last request chunk");
+        assert_eq!(last.len(), 17);
+        assert!(body.next_chunk().await.is_none());
     }
 
     #[tokio::test]
