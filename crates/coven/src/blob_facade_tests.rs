@@ -883,7 +883,7 @@ async fn queued_upload_fixture(
 }
 
 #[tokio::test]
-async fn a_make_remote_batch_admits_every_root_or_none() {
+async fn source_validation_during_preparation_is_isolated_per_root() {
     let (handle, _tmp, user_dir) = queued_upload_fixture("note-1", "photo-1").await;
     let missing_path = user_dir.path().join("missing.jpg");
     let bytes = b"another user-owned photo";
@@ -904,23 +904,88 @@ async fn a_make_remote_batch_admits_every_root_or_none() {
             false,
         )
         .await
-        .expect_err("one invalid root refuses the whole batch");
+        .expect("admission records both roots without rereading their bytes");
 
-    assert!(
-        handle
-            .queued_uploads()
-            .await
-            .expect("read the queue")
-            .is_empty(),
-        "the valid root was not admitted before the invalid root failed",
-    );
+    let queued = handle.queued_uploads().await.expect("read the queue");
+    assert_eq!(queued.len(), 2, "both roots reached durable preparation");
+
+    let uploaded = handle.drain_uploads().await.expect("drain the intact root");
+    assert_eq!(uploaded.uploaded(), 1, "the intact root uploaded first");
+    let failed = handle.drain_uploads().await.expect("prepare the next root");
     assert_eq!(
-        handle
-            .make_remote_progress("notes", "note-1")
-            .await
-            .expect("read the first root's transition"),
-        None,
+        failed.failures().failures().len(),
+        1,
+        "the missing source failed without blocking the intact root",
     );
+    let remaining = handle.queued_uploads().await.expect("read both outcomes");
+    assert_eq!(remaining.len(), 2, "publication still owns both roots");
+    let failed_root = remaining
+        .iter()
+        .find(|upload| upload.root_id == "note-2")
+        .expect("failed root");
+    assert_eq!(
+        failed_root.phase,
+        crate::QueuedUploadPhase::Pending,
+        "the missing source remains retryable on its own root",
+    );
+    assert!(failed_root.last_failure.is_some());
+    let intact_root = remaining
+        .iter()
+        .find(|upload| upload.root_id == "note-1")
+        .expect("intact root");
+    assert_eq!(intact_root.phase, crate::QueuedUploadPhase::Created);
+    assert_eq!(intact_root.last_failure, None);
+
+    std::fs::write(&missing_path, bytes).expect("restore the refused root's source");
+    let retried = handle
+        .retry_uploads_now()
+        .await
+        .expect("retry the repaired root without waiting for backoff");
+    assert_eq!(
+        retried.uploaded(),
+        1,
+        "only the repaired root needed upload"
+    );
+    let ready_to_publish = handle
+        .queued_uploads()
+        .await
+        .expect("read the upload drain's result");
+    assert_eq!(ready_to_publish.len(), 2);
+    assert!(
+        ready_to_publish.iter().all(|upload| {
+            upload.phase == crate::QueuedUploadPhase::Created && upload.last_failure.is_none()
+        }),
+        "the repaired root and its already-created sibling are ready to publish: {ready_to_publish:?}",
+    );
+}
+
+#[tokio::test]
+async fn preparation_rejects_same_length_source_changes_by_hash() {
+    let (handle, _tmp, user_dir) = queued_upload_fixture("note-1", "photo-1").await;
+    let source_path = user_dir.path().join("photo.jpg");
+    std::fs::write(&source_path, b"z photo the user owns")
+        .expect("replace the source without changing its length");
+
+    handle
+        .make_remote_with_discovered_order_for_test("notes", "note-1", "Changed source", false)
+        .await
+        .expect("admission does not reread the source");
+
+    let prepared = handle
+        .drain_uploads()
+        .await
+        .expect("preparation records the source failure");
+    assert_eq!(prepared.uploaded(), 0);
+    assert_eq!(prepared.failures().failures().len(), 1);
+    let queued = handle.queued_uploads().await.expect("read the failed root");
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].phase, crate::QueuedUploadPhase::Pending);
+    assert!(queued[0]
+        .last_failure
+        .as_ref()
+        .expect("the failed root carries its reason")
+        .message
+        .contains("expected"));
 }
 
 #[tokio::test]

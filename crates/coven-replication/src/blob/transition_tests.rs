@@ -2176,24 +2176,15 @@ async fn make_remote_rejects_already_remote_root() {
     );
 }
 
-/// make_remote verifies every user-provided source before enqueuing a single
-/// upload: if a source file's on-disk length no longer matches the size recorded
-/// on its blob row (truncated after registration — an interrupted copy, a partial
-/// write), the whole transition aborts with `MakeRemoteError::Source` and queues
-/// nothing. Without this up-front check the drain would upload a short, corrupt
-/// blob and flip the gate over it. Proves the abort is atomic: no upload is
-/// enqueued, no intent is recorded, the gate stays Local (row and causal stamp
-/// untouched), and the user's source file is left in place — neither consumed nor
-/// deleted. coven's own-layer counterpart to bae's
-/// `test_manage_truncated_source_aborts_before_enqueue`.
+/// make_remote journals a user-provided source without reading it. If the file's
+/// on-disk length no longer matches its blob row, upload preparation records the
+/// failure and leaves the transition durable and Local. The user's source and
+/// external ownership remain untouched so retry can use the same intent after the
+/// source is restored.
 #[tokio::test]
-async fn make_remote_aborts_when_source_size_no_longer_matches() {
-    let db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let db = crate::sync::test_helpers::open_test_db_with_blob(db_store_dir.clone(), photo_decl());
+async fn make_remote_records_source_size_drift_during_preparation() {
+    let (db, storage, _cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db);
-    let tmp = tempfile::tempdir().unwrap();
-    let lib = db_store_dir.clone();
-    let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"PHOTO-BYTES-full-length".to_vec();
 
     let src = owners
@@ -2207,7 +2198,7 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
         .await;
 
     // Truncate the source on disk so its length no longer matches the size the
-    // blob row recorded at registration — the drift the pre-enqueue check catches.
+    // blob row recorded at registration — the drift preparation must catch.
     let truncated_len = 5u64;
     let f = std::fs::OpenOptions::new().write(true).open(&src).unwrap();
     f.set_len(truncated_len).unwrap();
@@ -2216,45 +2207,53 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
 
     let stamp_before = gate_stamp(&db, "n1").await;
 
-    let err = owners
+    owners
         .make_remote("notes", "n1", "Notes Root", true)
         .await
-        .expect_err("a source whose length drifted from its blob row aborts make_remote");
-    assert!(
-        matches!(
-            &err,
-            crate::blob::transition::MakeRemoteError::SourceFile { blob_id, .. }
-                if blob_id.as_str() == "photoaaa"
-        ),
-        "make_remote aborts on the source-verification check for the drifted blob: {err:?}"
-    );
-
-    // The abort is atomic: nothing was enqueued and the gate never flipped.
+        .expect("admission records the source without rereading it");
     assert_eq!(
         pending_uploads(&db).await,
-        0,
-        "the source check aborts before a single upload is enqueued",
+        1,
+        "the exact upload is durable before preparation",
     );
     assert!(
-        !db.make_remote_intent_exists_for_test("notes", "n1")
+        db.make_remote_intent_exists_for_test("notes", "n1")
             .await
             .expect("inspect make_remote intent"),
-        "an aborted make_remote records no intent",
+        "the transition is durable before preparation",
     );
     assert_eq!(shared_flag(&db, "n1").await, 0, "the release stays Local");
     assert_eq!(
         gate_stamp(&db, "n1").await,
         stamp_before,
-        "the gate row and its causal stamp are untouched",
+        "admission does not publish the gate",
     );
 
-    // The failed transition neither consumed nor deleted the user's source, and
-    // left its external ref registered — the release is exactly as it was.
+    let outcome = storage
+        .drain_uploads(&store_database, &lib, &SystemClock, None, None)
+        .await
+        .expect("preparation records the source mismatch");
+    assert_eq!(outcome.uploaded(), 0);
+    assert_eq!(outcome.failures().failures().len(), 1);
+    assert_eq!(
+        pending_uploads(&db).await,
+        1,
+        "the failed root remains retryable"
+    );
+    assert!(
+        db.make_remote_intent_exists_for_test("notes", "n1")
+            .await
+            .expect("inspect make_remote intent after preparation"),
+        "a preparation failure does not discard the requested transition",
+    );
+
+    // Preparation neither consumes nor deletes the user's source and leaves its
+    // external ownership registered.
     assert!(src.exists(), "the source file is left in place");
     assert_eq!(
         src.metadata().unwrap().len(),
         truncated_len,
-        "the source file is untouched by the aborted transition",
+        "preparation leaves the source file untouched",
     );
     assert!(
         store_database
@@ -2262,7 +2261,7 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
             .await
             .expect("load exact external blob ownership")
             .is_some(),
-        "the external blob ref survives the aborted transition",
+        "the external blob ref survives failed preparation",
     );
 }
 

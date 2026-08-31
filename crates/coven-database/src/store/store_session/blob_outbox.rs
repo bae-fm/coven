@@ -464,7 +464,7 @@ impl StoreSession<'_> {
         let updated = self
             .conn
             .execute(
-                "UPDATE cloud_outbox SET upload_state = ?1
+                "UPDATE cloud_outbox SET upload_state = ?1, last_error = NULL
                  WHERE id = ?2 AND operation = 'upload' AND table_name = ?3
                    AND row_id = ?4 AND column_name = ?5 AND row_stamp = ?6
                    AND upload_state = ?7",

@@ -7,10 +7,10 @@
 //! coven's cache, and the gate is on). coven owns moving between the two, with the
 //! durable-copy-before-delete ordering and a single atomic commit point each way:
 //!
-//! - `LocalBlobTransitions::make_remote` verifies and journals every
-//!   blob-bearing row beneath the root,
-//!   then returns. The upload drain creates
-//!   each exact cloud object. Once every row has a created object, one Store write
+//! - `LocalBlobTransitions::make_remote` journals every blob-bearing row beneath
+//!   the root, then returns. The upload drain verifies each source while sealing
+//!   it into its upload spool and creates each exact cloud object. Once every row
+//!   has a created object, one Store write
 //!   flips the gate true and drops external-file ownership. The intent and exact
 //!   upload journals remain authoritative until that Store write activates, when
 //!   activation consumes them atomically. Before publication starts,
@@ -80,13 +80,6 @@ pub enum MakeRemoteError {
         path: String,
         #[source]
         source: coven_foundation::store_dir::PathTokenError,
-    },
-    #[error("external source for blob {blob_id:?} at {path}: {source}")]
-    SourceFile {
-        blob_id: String,
-        path: String,
-        #[source]
-        source: ExactPlaintextFileError,
     },
     #[error("database error: {0}")]
     Db(#[from] DbError),
@@ -341,19 +334,19 @@ impl LocalBlobTransitions {
         }
     }
 
-    /// Start making `(root_table, root_id)` Remote: refuse a root already Remote, then
-    /// verify each supplied user-provided blob's external source file, enqueue an upload per blob
-    /// in the supplied order,
-    /// and record the make_remote intent in one transaction. Returns once enqueued — the
-    /// sync cycle uploads all needed blobs, prepares the gate change only after they
-    /// land, and publishes that change before the durable intent completes. The caller
-    /// triggers a sync cycle to start that work.
+    /// Start making `(root_table, root_id)` Remote: refuse a root already Remote,
+    /// enqueue an upload per supplied blob in order, and record the make_remote
+    /// intent in one transaction. Returns once enqueued — the sync cycle verifies
+    /// each source's exact size/hash while sealing its spool, uploads every valid
+    /// blob, prepares the gate change only after they all land, and publishes that
+    /// change before the durable intent completes. The caller triggers a sync cycle
+    /// to start that work.
     ///
-    /// The supplied rows must be exactly the root's current blob set. Verifying every source up front
-    /// (exists + length matches the registered size)
-    /// means a missing file aborts with nothing enqueued, rather than leaving a
-    /// half-queued make_remote. `pin` becomes each upload's `retain_pinned`, so the
-    /// blob is kept in coven's cache as a pinned (offline) copy.
+    /// The supplied rows must be exactly the root's current blob set. A missing or
+    /// changed source is a durable preparation failure on that root: its Local gate
+    /// stays closed, its successful siblings remain reusable for retry, and other
+    /// roots continue independently. `pin` becomes each upload's `retain_pinned`,
+    /// so the blob is kept in coven's cache as a pinned (offline) copy.
     pub(crate) async fn make_remote(
         &self,
         root_table: &str,
@@ -448,19 +441,6 @@ impl LocalBlobTransitions {
                         source,
                     })?,
             };
-            let source = ExactPlaintextFile::new(
-                source_path.clone(),
-                reference.plaintext_size(),
-                reference.plaintext_hash(),
-            );
-            source
-                .verify()
-                .await
-                .map_err(|source| MakeRemoteError::SourceFile {
-                    blob_id: blob.id.clone(),
-                    path: source_path.display().to_string(),
-                    source,
-                })?;
             uploads.push((reference, source_path));
         }
         Ok(coven_database::MakeRemoteAdmission {

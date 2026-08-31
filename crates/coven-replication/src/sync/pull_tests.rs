@@ -7795,11 +7795,12 @@ mod blob_path_traversal {
         ));
     }
 
-    /// A short blob id does not panic while make_remote verifies its local source.
-    /// Partitioned remote-path rejection belongs to the connected storage scheme;
-    /// this local transition reports the absent source as the typed file failure.
+    /// A short blob id does not panic while make_remote resolves and journals its
+    /// local source. Partitioned remote-path rejection belongs to the connected
+    /// storage scheme; the absent source becomes a preparation failure after
+    /// admission.
     #[tokio::test]
-    async fn short_id_missing_source_is_typed_not_panicked() {
+    async fn short_id_missing_source_is_admitted_without_panicking() {
         let db1_store_dir = crate::sync::test_helpers::test_store_dir();
         let db1 =
             crate::sync::test_helpers::open_test_db_with_blob(db1_store_dir.clone(), photo_decl());
@@ -7816,15 +7817,19 @@ mod blob_path_traversal {
         ])
         .await;
         let store_dir = db1_store_dir.clone();
-        let error =
-            crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(&db1), store_dir)
-                .make_remote("notes", "n1", "Notes Root", false)
-                .await
-                .expect_err("a missing short-id source cannot enter the upload journal");
+        crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(&db1), store_dir)
+            .make_remote("notes", "n1", "Notes Root", false)
+            .await
+            .expect("a short id enters the upload journal without path-partition panics");
+        let uploads = store_database(&db1)
+            .pending_blob_uploads()
+            .await
+            .expect("read the pending short-id source");
+        assert_eq!(uploads.len(), 1);
         assert!(matches!(
-            error,
-            crate::blob::transition::MakeRemoteError::SourceFile { ref blob_id, .. }
-                if blob_id == "a"
+            &uploads[0].operation,
+            coven_database::OutboxOperation::Upload { row, .. }
+                if row.blob().id == "a"
         ));
     }
 
