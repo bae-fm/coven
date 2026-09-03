@@ -290,6 +290,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build",
     ),
     (
+        "crates/coven-replication/src/sync/store/reclaim/audience_blob_order_tests.rs",
+        "AudienceBlobPackageFixture",
+        "build",
+    ),
+    (
         "crates/coven-replication/src/sync/store/reclaim/tests.rs",
         "UnanimityFixture",
         "build",

@@ -730,6 +730,7 @@ impl AuthorizedSyncCycle<'_, '_> {
             %coverage,
             considered = store.targets_considered,
             retained_for_replay = store.retained_for_replay,
+            retained_for_blob_reclaim = store.retained_for_blob_reclaim,
             already_authorized = store.already_authorized,
             authorized = store.authorized,
             packages = result.packages_deleted,

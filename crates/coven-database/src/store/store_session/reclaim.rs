@@ -323,6 +323,31 @@ impl StoreSession<'_> {
         Ok(false)
     }
 
+    /// Whether a pending audience-blob reclaim still names this package as the
+    /// one that published its blob.
+    ///
+    /// Executing a blob reclaim re-reads that package from the provider to
+    /// confirm the binding, so the package has to outlive the blob operation:
+    /// a package reclaim that deleted it first would strand the blob operation
+    /// at a read that can never succeed. Completed operations hold nothing.
+    fn package_is_retained_by_pending_blob_reclaim(
+        &self,
+        package: &coven_protocol::objects::ExactObjectRef,
+    ) -> Result<bool, DbError> {
+        let package_id = remote_object_id(package);
+        Ok(self.store_reclaim_operations()?.iter().any(|operation| {
+            if matches!(operation, DurableStoreReclaimOperation::Completed { .. }) {
+                return false;
+            }
+            match operation.authorization().target() {
+                coven_protocol::reclaim::ReclaimTarget::AudienceBlob(target) => {
+                    remote_object_id(target.package.object()) == package_id
+                }
+                _ => false,
+            }
+        }))
+    }
+
     fn store_reclaim_operations(&self) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
         let mut statement = self
             .conn
@@ -729,6 +754,18 @@ impl StoreDatabase {
     ) -> Result<bool, DbError> {
         self.call_store(move |session| session.audience_blob_is_retained_for_replay(&stored))
             .await
+    }
+
+    /// Whether a pending audience-blob reclaim still names this package as the
+    /// one that published its blob. See the session method.
+    pub async fn package_is_retained_by_pending_blob_reclaim(
+        &self,
+        package: coven_protocol::objects::ExactObjectRef,
+    ) -> Result<bool, DbError> {
+        self.call_store(move |session| {
+            session.package_is_retained_by_pending_blob_reclaim(&package)
+        })
+        .await
     }
 
     pub async fn store_reclaim_operations(

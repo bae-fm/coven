@@ -175,6 +175,10 @@ pub struct StorePackageReclaimReport {
     /// for replay. A run where this equals `targets_considered` is one whose
     /// retained set has not been narrowed by a snapshot image projection.
     pub retained_for_replay: u64,
+    /// Targets left alone because a pending blob reclaim still has to re-read
+    /// them to prove its binding. They come back into reach once that blob is
+    /// gone.
+    pub retained_for_blob_reclaim: u64,
     /// Targets that already have a journalled operation, which blocks
     /// re-authorizing them.
     pub already_authorized: u64,
@@ -196,6 +200,7 @@ impl StorePackageReclaimReport {
             coverage,
             targets_considered: 0,
             retained_for_replay: 0,
+            retained_for_blob_reclaim: 0,
             already_authorized: 0,
             authorized: 0,
         }
@@ -343,7 +348,16 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
     ) -> Result<StoreReclaimResult, StoreReclaimError> {
         let database = self.database.clone();
         let membership = self.membership.clone();
-        // Journalled work first, always. An operation this device authorized and
+        // Blob reclaims are authorized before anything executes. Executing a
+        // blob reclaim re-reads the package that published the blob, so a
+        // package operation must defer to every blob operation that names it —
+        // including one for a blob that only became free since the package
+        // was authorized. Journalling the blob operations first is what lets
+        // the resume below see them.
+        if self.writer.is_current_owner(&membership) {
+            Box::pin(self.prepare_audience_blob_authorizations()).await?;
+        }
+        // Journalled work next, always. An operation this device authorized and
         // did not finish is durable state waiting on its author, and gating that
         // behind "did anything change" would leave it waiting on an unrelated
         // event.
@@ -425,6 +439,13 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 store_packages.retained_for_replay += 1;
                 continue;
             }
+            if database
+                .package_is_retained_by_pending_blob_reclaim(package.object.clone())
+                .await?
+            {
+                store_packages.retained_for_blob_reclaim += 1;
+                continue;
+            }
             let authorized = Box::pin(self.prepare_authorization(ReclaimClaim::StorePackage(
                 StorePackageReclaimClaim {
                     target: StorePackageReclaimTarget {
@@ -448,7 +469,6 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             Box::pin(self.prepare_authorization(claim)).await?;
         }
         Box::pin(self.prepare_circle_authorizations(&registrations)).await?;
-        Box::pin(self.prepare_audience_blob_authorizations()).await?;
         packages_deleted = packages_deleted
             .checked_add(Box::pin(self.resume_operations()).await?)
             .ok_or_else(|| {
@@ -513,6 +533,9 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                     commit.clone(),
                 )
                 .await?
+                || database
+                    .package_is_retained_by_pending_blob_reclaim(package.package.object.clone())
+                    .await?
             {
                 continue;
             }
@@ -732,6 +755,9 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                         commit.clone(),
                     )
                     .await?
+                    || database
+                        .package_is_retained_by_pending_blob_reclaim(package.package.object.clone())
+                        .await?
                 {
                     continue;
                 }
@@ -953,6 +979,14 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                         progressed = true;
                     }
                     DurableStoreReclaimOperation::Authorized { .. } => {
+                        // A package a pending blob reclaim still has to re-read
+                        // waits its turn: the blob operation runs in this same
+                        // pass or a later one, and the package goes after it.
+                        // Not an error — the journal holds both, and the order
+                        // between them is the only thing being decided.
+                        if self.deferred_to_blob_reclaim(&operation).await? {
+                            continue;
+                        }
                         Box::pin(self.execute_delete(operation)).await?;
                         completed = completed.checked_add(1).ok_or_else(|| {
                             StoreReclaimError::Authorization(
@@ -972,6 +1006,23 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 return Ok(completed);
             }
         }
+    }
+
+    /// Whether `operation` deletes a package that a pending blob reclaim still
+    /// names as the one that published its blob.
+    async fn deferred_to_blob_reclaim(
+        &self,
+        operation: &DurableStoreReclaimOperation,
+    ) -> Result<bool, StoreReclaimError> {
+        let package = match operation.authorization().target() {
+            ReclaimTarget::StorePackage(target) => target.package.object.clone(),
+            ReclaimTarget::CirclePackage(target) => target.package.package.object.clone(),
+            _ => return Ok(false),
+        };
+        Ok(self
+            .database
+            .package_is_retained_by_pending_blob_reclaim(package)
+            .await?)
     }
 
     async fn execute_delete(
@@ -1012,6 +1063,8 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
     }
 }
 
+#[cfg(test)]
+mod audience_blob_order_tests;
 #[cfg(test)]
 mod tests;
 
