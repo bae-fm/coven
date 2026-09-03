@@ -50,7 +50,8 @@ pub use coven_database::prepare_external_blob;
 pub use coven_database::{
     BlobFileFailure, BlobFileFailures, CloudOutboxSnapshot, DbError, ExternalBlob,
     MakeRemoteProgress, OutboxFailure, OutboxFailureKind, PreparedExternalBlob, QueuedDelete,
-    QueuedMakeRemote, QueuedUpload, QueuedUploadPhase, SqlContext, SqlReadContext, WriteBatch,
+    QueuedMakeRemote, QueuedUpload, QueuedUploadPhase, SqlContext, SqlReadContext,
+    StuckReclaimOperation, WriteBatch,
 };
 pub use coven_database::{CovenMigrationError, CovenMigrationPolicy};
 pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};
@@ -126,17 +127,18 @@ pub use coven_replication::blob::{
 };
 pub use coven_replication::blob::{MakeLocalError, MakeRemoteError, MakeRemoteRoot};
 pub use coven_replication::sync::{
-    AdmittingDeviceJoinProgress, BlobCacheError, BlobStream, DeviceActivity, DeviceJoinAbandonment,
-    DeviceJoinAction, DeviceJoinActivation, DeviceJoinApproval, DeviceJoinApprovalPolicy,
-    DeviceJoinDriveOutcome, DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
-    DeviceJoinOffer, DeviceJoinOfferBundle, DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus,
-    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
-    DeviceJoinTransportTiming, DeviceProviderAccessAdministrator, DeviceProviderAccessRequest,
+    AdmittingDeviceJoinProgress, BlobCacheError, BlobStream, BlockedOperation, BlockedOperationId,
+    DeviceActivity, DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation,
+    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinDriveOutcome, DeviceJoinError,
+    DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinOfferBundle,
+    DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus, DeviceJoinTransportError,
+    DeviceJoinTransportKind, DeviceJoinTransportParams, DeviceJoinTransportTiming,
+    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest,
     DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
     DeviceRegistrationRequest, EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus,
     JoinedStore, JoiningDeviceJoinProgress, JoiningDeviceJoinProgressObserver,
-    ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap, SyncError, SyncLoopAlerts,
-    SyncLoopStatus, SyncLoopSuccess,
+    ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap, RetryStuckReclaimError, SyncError,
+    SyncLoopAlerts, SyncLoopStatus, SyncLoopSuccess,
 };
 #[cfg(feature = "oauth-providers")]
 pub use coven_storage::fetch_account_email;
@@ -160,7 +162,7 @@ pub use coven_storage::{
     ExactUploadSource, PartSink, S3CloudHome, UploadControl, UploadProgress,
 };
 pub use device_pairing::{ApproveDevicePairingError, StartDevicePairingError};
-pub use handle::CovenHandle;
+pub use handle::{CovenHandle, RetryBlockedOperationError};
 pub use live_query::{
     LiveQuery, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, ReconfigurableLiveQuery,
     ReconfigurableLiveQueryCause, ReconfigurableLiveQueryEvent,

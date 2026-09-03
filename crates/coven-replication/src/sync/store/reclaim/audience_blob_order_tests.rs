@@ -243,6 +243,62 @@ impl AudienceBlobPackageFixture {
         )
     }
 
+    /// Publish a document whose file blob is then stranded, and cover the
+    /// commit that published it with an acknowledged snapshot. The blob and the
+    /// package that bound it are both in reach of the next reclaim run.
+    async fn strand_a_published_blob(
+        &self,
+    ) -> (
+        coven_protocol::blob::locator::StoredBlobRef,
+        coven_protocol::reclaim::StorePackageReclaimTarget,
+    ) {
+        // Snapshot the empty store first. A published image is read by devices
+        // that restore from it, so every blob one lists is pinned against
+        // reclaim for good — and the cadence publishes an image on the first
+        // cycle whatever is in it. Spending that first image on an empty store
+        // keeps the blob below out of every image, which is what leaves it
+        // reclaimable once its rows let go of it.
+        self.run_cycle().await;
+
+        let document = "00000000-0000-4000-8000-0000000000e6";
+        self.capture_document_with_file(
+            document,
+            "00000000-0000-4000-8000-0000000000f6",
+            b"store attachment whose package is snapshot-covered",
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
+        self.run_cycle().await;
+        let (source, binding) = self.published_blob_and_its_package().await;
+        assert!(
+            self.store
+                .contains_stored_blob_object(&source)
+                .await
+                .expect("read the exact stored blob"),
+            "the published ciphertext is uploaded"
+        );
+        assert!(
+            self.package_is_present(&binding).await,
+            "the package that bound the blob is at the provider"
+        );
+
+        // Strand the ciphertext first, then snapshot: the image lists no blob a
+        // live row does not bind, while the coverage takes in the commit whose
+        // package bound it. Both are then reclaim targets of one run.
+        self.make_document_local(document, "2026-07-23T00:20:00Z")
+            .await;
+        self.run_cycle().await;
+        self.device
+            .publish_snapshot_generation_for_test()
+            .await
+            .expect("publish and acknowledge a covering snapshot");
+        self.db
+            .release_retained_replay_ownership_for_test()
+            .await
+            .expect("release retained replay ownership");
+        (source, binding)
+    }
+
     async fn package_is_present(
         &self,
         target: &coven_protocol::reclaim::StorePackageReclaimTarget,
@@ -277,55 +333,7 @@ impl AudienceBlobPackageFixture {
 #[tokio::test]
 async fn a_package_a_pending_blob_reclaim_names_is_deleted_only_after_the_blob() {
     let fixture = AudienceBlobPackageFixture::build("blob-reclaim-package-order").await;
-    // Snapshot the empty store first. A published image is read by devices that
-    // restore from it, so every blob one lists is pinned against reclaim for
-    // good — and the cadence publishes an image on the first cycle whatever is
-    // in it. Spending that first image on an empty store keeps the blob below
-    // out of every image, which is what leaves it reclaimable once its rows let
-    // go of it.
-    fixture.run_cycle().await;
-
-    let document = "00000000-0000-4000-8000-0000000000e6";
-    fixture
-        .capture_document_with_file(
-            document,
-            "00000000-0000-4000-8000-0000000000f6",
-            b"store attachment whose package is snapshot-covered",
-            "2026-07-23T00:10:00Z",
-        )
-        .await;
-    fixture.run_cycle().await;
-    let (source, binding) = fixture.published_blob_and_its_package().await;
-    assert!(
-        fixture
-            .store
-            .contains_stored_blob_object(&source)
-            .await
-            .expect("read the exact stored blob"),
-        "the published ciphertext is uploaded"
-    );
-    assert!(
-        fixture.package_is_present(&binding).await,
-        "the package that bound the blob is at the provider"
-    );
-
-    // Strand the ciphertext first, then snapshot: the image lists no blob a
-    // live row does not bind, while the coverage takes in the commit whose
-    // package bound it. Both are then reclaim targets of one run.
-    fixture
-        .make_document_local(document, "2026-07-23T00:20:00Z")
-        .await;
-    fixture.run_cycle().await;
-    fixture
-        .device
-        .publish_snapshot_generation_for_test()
-        .await
-        .expect("publish and acknowledge a covering snapshot");
-    fixture
-        .db
-        .release_retained_replay_ownership_for_test()
-        .await
-        .expect("release retained replay ownership");
+    let (source, binding) = fixture.strand_a_published_blob().await;
 
     let run = fixture
         .device
@@ -369,4 +377,118 @@ async fn a_package_a_pending_blob_reclaim_names_is_deleted_only_after_the_blob()
         .await
         .expect("a further run finds nothing left to reclaim");
     assert_eq!(again.packages_deleted, 0, "{:?}", again.store_packages);
+}
+
+/// A blob reclaim the provider refuses for good is stuck, not finished: the
+/// package that published the blob stays retained behind it.
+///
+/// Executing the blob operation re-reads that package to prove the binding, so
+/// a package reclaim that deleted it first would strand the blob operation at a
+/// read that can never succeed. Being stuck means waiting on a person, which is
+/// exactly the state in which the package must not go.
+#[tokio::test]
+async fn a_stuck_blob_reclaim_keeps_its_package_retained() {
+    let fixture = AudienceBlobPackageFixture::build("blob-reclaim-stuck-retention").await;
+    let (source, binding) = fixture.strand_a_published_blob().await;
+    fixture
+        .home
+        .fail_nth_exact_delete_of_permanently(&[source.object().slot()], 1);
+
+    let run = fixture
+        .device
+        .reclaim_packages()
+        .await
+        .expect("a refused blob delete does not fail the run");
+    assert_eq!(run.stuck, 1, "the refused blob operation is stuck");
+    assert!(
+        fixture
+            .store
+            .contains_stored_blob_object(&source)
+            .await
+            .expect("read the exact stored blob"),
+        "the refused ciphertext is still at the provider"
+    );
+    assert_eq!(
+        run.store_packages.retained_for_blob_reclaim, 1,
+        "the package is held for the stuck blob operation: {:?}",
+        run.store_packages
+    );
+    assert!(
+        fixture.package_is_present(&binding).await,
+        "so the package that bound the blob is not deleted"
+    );
+
+    let again = fixture
+        .device
+        .reclaim_packages()
+        .await
+        .expect("a later run finds the operation still stuck");
+    assert_eq!((again.packages_deleted, again.stuck), (0, 1));
+    assert!(
+        fixture.package_is_present(&binding).await,
+        "and it stays retained for as long as the blob operation waits"
+    );
+}
+
+/// A cycle that reached storage and left a reclaim operation stuck reports
+/// `Blocked` with that operation — never `Synchronized`. A stuck operation is
+/// waiting on a person, so the host has to be told every cycle, not once.
+#[tokio::test]
+async fn a_cycle_that_leaves_a_reclaim_stuck_reports_it_as_blocked() {
+    let fixture = AudienceBlobPackageFixture::build("blob-reclaim-stuck-status").await;
+    let (source, _) = fixture.strand_a_published_blob().await;
+    fixture
+        .home
+        .fail_nth_exact_delete_of_permanently(&[source.object().slot()], 1);
+
+    fixture.run_cycle().await;
+
+    let blocked = fixture
+        .components
+        .blocked_operations()
+        .await
+        .expect("read the blocked operations after the cycle");
+    let [crate::sync::sync_loop::BlockedOperation::Reclaim(stuck)] = blocked.as_slice() else {
+        panic!("the cycle leaves exactly one blocked operation, the stuck reclaim: {blocked:?}");
+    };
+    let operation = stuck.clone();
+    assert_eq!(
+        operation.target.object(),
+        source.object(),
+        "the reported operation names the blob the provider refused to delete"
+    );
+    assert!(
+        operation.error.contains("refused to delete"),
+        "and carries the refusal the host shows: {}",
+        operation.error
+    );
+
+    let status = crate::sync::sync_loop::current_success_status(blocked, success());
+    assert!(
+        matches!(
+            &status,
+            crate::sync::SyncLoopStatus::Blocked { operations, .. }
+                if operations.len() == 1
+                    && operations[0].id()
+                        == crate::sync::BlockedOperationId::Reclaim(operation.operation_id)
+        ),
+        "a successful cycle with a stuck operation is Blocked, not Synchronized: {status:?}"
+    );
+}
+
+/// A cycle outcome with nothing else on it, so the status assertion above turns
+/// only on the blocked operations.
+fn success() -> crate::sync::loop_policy::SyncLoopSuccess {
+    crate::sync::loop_policy::SyncLoopSuccess {
+        last_sync_time: "2026-07-23T00:30:00Z".to_string(),
+        device_count: 1,
+        device_activity: Vec::new(),
+        data_changed: false,
+        row_changes: None,
+        alerts: crate::sync::SyncLoopAlerts {
+            rotation_pending: None,
+            held_positions: Vec::new(),
+            local_blob_cleanup_pending: false,
+        },
+    }
 }

@@ -36,6 +36,8 @@ pub enum SyncError {
     Membership(#[source] Box<crate::sync::store::MembershipOpsError>),
     #[error("circle operation: {0}")]
     Circle(#[source] Box<crate::sync::store::CircleOperationError>),
+    #[error("stuck reclaim operation: {0}")]
+    StuckReclaim(#[from] super::sync_loop::RetryStuckReclaimError),
     #[error("device join: {0}")]
     DeviceJoin(#[source] Box<crate::sync::DeviceJoinError>),
     #[error("device join transport: {0}")]

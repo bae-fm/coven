@@ -253,6 +253,16 @@ impl StoreSync {
             .map_err(Into::into)
     }
 
+    pub(crate) async fn retry_stuck_reclaim(
+        &self,
+        operation_id: crate::ObjectHash,
+    ) -> Result<(), SyncError> {
+        Ok(active_sync!(self)
+            .ok_or(SyncError::LoopNotRunning)?
+            .retry_stuck_reclaim(operation_id)
+            .await?)
+    }
+
     pub(crate) async fn discard_circle_operation(
         &self,
         operation_id: crate::CircleOperationId,

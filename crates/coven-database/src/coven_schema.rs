@@ -458,7 +458,8 @@ macro_rules! coven_tables {
             store_reclaim_operations,
             "
     authorization_hash TEXT PRIMARY KEY CHECK (length(authorization_hash) = 64),
-    state TEXT NOT NULL CHECK (json_valid(state))
+    state TEXT NOT NULL CHECK (json_valid(state)),
+    stuck_error TEXT CHECK (stuck_error IS NULL OR length(stuck_error) > 0)
 "
         );
         $visit!(

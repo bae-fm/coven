@@ -20,6 +20,7 @@ fn proof_object(path: &str) -> ExactObjectRef {
 /// An owner Store whose founder stream carries two acknowledged, snapshot-covered
 /// Store packages, released from replay retention so both are reclaim-eligible.
 struct ReclaimJourneyFixture {
+    db: coven_database::Database,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
@@ -102,12 +103,26 @@ impl ReclaimJourneyFixture {
         }
 
         Self {
+            db,
             store,
             storage,
             home,
             device,
             packages,
         }
+    }
+
+    async fn stuck_operations(&self) -> Vec<coven_database::StuckReclaimOperation> {
+        coven_database::StoreDatabase::new(&self.db)
+            .stuck_reclaim_operations()
+            .await
+            .expect("read the stuck reclaim operations")
+    }
+
+    async fn retry_stuck(&self, operation_id: ObjectHash) -> Result<(), coven_database::DbError> {
+        coven_database::StoreDatabase::new(&self.db)
+            .retry_stuck_reclaim_operation(operation_id)
+            .await
     }
 
     async fn reclaim(&self) -> Result<StoreReclaimResult, StoreReclaimError> {
@@ -675,6 +690,10 @@ async fn interrupted_reclaim_deletes_only_the_remaining_package_on_restart() {
         interrupted.is_err(),
         "the delete failure fails the reclaim to its initiator: {interrupted:?}",
     );
+    assert!(
+        fixture.stuck_operations().await.is_empty(),
+        "a transport failure says nothing about the operation, so it stays runnable",
+    );
 
     let present: Vec<&StorePackageReclaimTarget> = {
         let mut present = Vec::new();
@@ -717,6 +736,99 @@ async fn interrupted_reclaim_deletes_only_the_remaining_package_on_restart() {
             fixture.package_deletes(target),
             1,
             "each package is deleted exactly once across the interrupted and resumed runs",
+        );
+    }
+}
+
+/// A reclaim operation whose delete the provider refuses for good is stuck
+/// after that one failure: the pass finishes the operations behind it, later
+/// passes spend nothing on it, and it runs again only when the host asks.
+///
+/// The old shape failed the whole cycle on that refusal, so one operation the
+/// provider would never accept held every operation behind it — and the loop
+/// paid for the same refusal every cycle, forever.
+#[tokio::test]
+async fn a_refused_reclaim_delete_leaves_one_operation_stuck_and_finishes_the_rest() {
+    let fixture = ReclaimJourneyFixture::build("reclaim-stuck-operation").await;
+    let package_slots: Vec<&ObjectSlot> = fixture
+        .packages
+        .iter()
+        .map(|target| target.package.object.slot())
+        .collect();
+    // Refuse the first package delete permanently, whichever of the two it is.
+    fixture
+        .home
+        .fail_nth_exact_delete_of_permanently(&package_slots, 1);
+
+    let refused = fixture
+        .reclaim()
+        .await
+        .expect("a deterministic refusal does not fail the pass");
+    assert_eq!(
+        (refused.packages_deleted, refused.stuck),
+        (1, 1),
+        "the pass deletes the package behind the refused one and reports what it left stuck",
+    );
+    let stuck = fixture.stuck_operations().await;
+    let [stuck_operation] = stuck.as_slice() else {
+        panic!("exactly one operation is stuck: {stuck:?}");
+    };
+    assert!(
+        stuck_operation.error.contains("refused to delete"),
+        "the mark carries the provider's refusal: {}",
+        stuck_operation.error,
+    );
+    let refused_target = fixture
+        .packages
+        .iter()
+        .find(|target| target.package.object == *stuck_operation.target.object())
+        .expect("the stuck operation names one of the covered packages");
+    assert!(
+        fixture.package_is_present(refused_target).await,
+        "the refused package is still at the provider",
+    );
+
+    let deletes_before = fixture.home.exact_delete_count();
+    let skipped = fixture
+        .reclaim()
+        .await
+        .expect("a later pass runs with the operation still stuck");
+    assert_eq!(
+        (skipped.packages_deleted, skipped.stuck),
+        (0, 1),
+        "a later pass reports the operation as still waiting on a person",
+    );
+    assert_eq!(
+        fixture.home.exact_delete_count(),
+        deletes_before,
+        "a stuck operation costs the provider nothing",
+    );
+
+    fixture
+        .retry_stuck(stuck_operation.operation_id)
+        .await
+        .expect("the host asks for the operation back");
+    assert!(
+        fixture
+            .retry_stuck(stuck_operation.operation_id)
+            .await
+            .is_err(),
+        "an operation that is not stuck has no retry to accept",
+    );
+
+    let retried = fixture
+        .reclaim()
+        .await
+        .expect("the cleared operation runs again");
+    assert_eq!(
+        (retried.packages_deleted, retried.stuck),
+        (1, 0),
+        "the retry deletes the package the refusal left behind",
+    );
+    for target in &fixture.packages {
+        assert!(
+            !fixture.package_is_present(target).await,
+            "every covered package is deleted once the refusal is cleared",
         );
     }
 }

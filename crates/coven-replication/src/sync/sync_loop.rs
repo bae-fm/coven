@@ -27,9 +27,11 @@ use super::loop_policy::SyncLoopSuccess;
 use coven_storage::BlobPathScheme;
 
 mod thread;
-pub use thread::PreparedSyncLoopRuntime;
 #[cfg(test)]
-use thread::{current_success_status, storage_check_failure_status};
+pub(crate) use thread::current_success_status;
+#[cfg(test)]
+use thread::storage_check_failure_status;
+pub use thread::PreparedSyncLoopRuntime;
 
 /// Why preparing the background sync loop failed.
 #[derive(Debug, thiserror::Error)]
@@ -51,8 +53,8 @@ pub enum SyncLoopFailure {
     Storage(Arc<coven_protocol::objects::StorageError>),
     #[error("sync cycle: {0}")]
     Cycle(Arc<crate::sync::cycle::SyncCycleFailure>),
-    #[error("read pending writes after sync: {0}")]
-    PendingWrites(Arc<coven_database::DbError>),
+    #[error("read blocked operations after sync: {0}")]
+    BlockedOperations(Arc<coven_database::DbError>),
     #[error("sync loop panicked")]
     Panicked,
 }
@@ -74,7 +76,7 @@ impl SyncLoopRuntimeFactory for SystemSyncLoopRuntimeFactory {
 
 /// A sync-loop status the host renders. The loop reports provider reachability,
 /// publication, and one terminal status. [`Blocked`](Self::Blocked) is a
-/// successful storage cycle with unresolved durable writes;
+/// successful storage cycle with durable operations waiting on a person;
 /// [`Synchronized`](Self::Synchronized) has none, while
 /// [`Failed`](Self::Failed) means the cycle itself failed. The in-progress marker
 /// is the variant itself, so there is no separate "syncing" flag.
@@ -98,14 +100,63 @@ pub enum SyncLoopStatus {
     /// The cycle completed. Warnings, if any, ride in the success's `alerts`;
     /// the observed device activity and applied row changes are on it too.
     Synchronized(SyncLoopSuccess),
-    /// The cycle reached storage, but one or more writes cannot publish until
-    /// their named prerequisite is supplied or repaired.
+    /// The cycle reached storage, but one or more durable operations cannot
+    /// proceed until their named prerequisite is supplied or repaired.
     Blocked {
         success: SyncLoopSuccess,
-        writes: Vec<coven_protocol::write::PendingWrite>,
+        operations: Vec<BlockedOperation>,
     },
     /// The cycle failed as a whole — no outcome to report, only the fault.
     Failed { error: SyncLoopFailure },
+}
+
+/// One durable operation a successful cycle left waiting on a person.
+///
+/// Each kind is stopped for its own reason and returns to work through its own
+/// path, but the host shows them as one list with one button, so they travel as
+/// one value.
+#[derive(Debug, Clone)]
+pub enum BlockedOperation {
+    /// A write stopped by a semantic publication fault.
+    Write(coven_protocol::write::PendingWrite),
+    /// A Circle operation whose author lost the write authority or the stream
+    /// position it was prepared against.
+    CircleOperation(coven_protocol::circle::CircleOperationInfo),
+    /// A reclaim operation that failed with an error running it again cannot
+    /// change.
+    Reclaim(coven_database::StuckReclaimOperation),
+}
+
+impl BlockedOperation {
+    /// Which operation a retry names.
+    pub fn id(&self) -> BlockedOperationId {
+        match self {
+            Self::Write(write) => BlockedOperationId::Write(write.write_id.clone()),
+            Self::CircleOperation(operation) => {
+                BlockedOperationId::CircleOperation(operation.operation_id.clone())
+            }
+            Self::Reclaim(operation) => BlockedOperationId::Reclaim(operation.operation_id),
+        }
+    }
+}
+
+/// Names one blocked operation for a retry, whichever kind it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockedOperationId {
+    Write(coven_protocol::write::WriteId),
+    CircleOperation(coven_protocol::circle::CircleOperationId),
+    Reclaim(coven_protocol::store_commit::ObjectHash),
+}
+
+/// Why the sync loop could not return a stuck reclaim operation to its journal.
+#[derive(Debug, thiserror::Error)]
+pub enum RetryStuckReclaimError {
+    #[error("the sync loop is not accepting commands")]
+    CommandChannelClosed,
+    #[error("the sync loop dropped its reply")]
+    ReplyChannelClosed,
+    #[error("{0}")]
+    Database(#[source] Box<coven_database::DbError>),
 }
 
 /// Manages the background sync loop and provides access to sync components.
@@ -187,6 +238,10 @@ enum SyncCommand {
     DiscardCircleOperation {
         operation_id: coven_protocol::CircleOperationId,
         reply: CircleReply<()>,
+    },
+    RetryStuckReclaim {
+        operation_id: coven_protocol::store_commit::ObjectHash,
+        reply: tokio::sync::oneshot::Sender<Result<(), RetryStuckReclaimError>>,
     },
 }
 
@@ -742,6 +797,28 @@ impl SyncLoopHandle {
         .await
     }
 
+    /// Clear one reclaim operation's stuck mark, so the journal runs it again.
+    ///
+    /// Runs on the loop thread, so it never lands in the middle of a pass that
+    /// has already read the journal; delivering it also ends the loop's wait,
+    /// so the cycle that re-runs the operation begins straight after.
+    pub async fn retry_stuck_reclaim(
+        &self,
+        operation_id: coven_protocol::store_commit::ObjectHash,
+    ) -> Result<(), RetryStuckReclaimError> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.command_tx
+            .send(SyncCommand::RetryStuckReclaim {
+                operation_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RetryStuckReclaimError::CommandChannelClosed)?;
+        response
+            .await
+            .map_err(|_| RetryStuckReclaimError::ReplyChannelClosed)?
+    }
+
     /// Inspect a Circle's in-flight epoch close. A read, so it runs directly on the
     /// components rather than serializing behind the write-command channel.
     pub async fn circle_close_status(
@@ -882,6 +959,19 @@ impl SyncLoopHandleInner {
                         .discard_circle_operation(&operation_id)
                         .await,
                 );
+            }
+            SyncCommand::RetryStuckReclaim {
+                operation_id,
+                reply,
+            } => {
+                let result = self
+                    .components
+                    .retry_stuck_reclaim(operation_id)
+                    .await
+                    .map_err(|error| RetryStuckReclaimError::Database(Box::new(error)));
+                if reply.send(result).is_err() {
+                    debug!("stuck reclaim retry caller dropped its reply receiver");
+                }
             }
         }
     }

@@ -58,12 +58,17 @@ async fn successful_cycle_projects_durable_blocked_state() {
     let writes = database
         .pending_writes()
         .await
-        .expect("load blocked writes");
+        .expect("load blocked writes")
+        .into_iter()
+        .map(crate::sync::sync_loop::BlockedOperation::Write)
+        .collect();
     let blocked = current_success_status(writes, success());
     assert!(matches!(
-        blocked,
-        SyncLoopStatus::Blocked { writes, .. }
-            if writes.len() == 1 && writes[0].write_id == write_id
+        &blocked,
+        SyncLoopStatus::Blocked { operations, .. }
+            if operations.len() == 1
+                && operations[0].id()
+                    == crate::sync::sync_loop::BlockedOperationId::Write(write_id.clone())
     ));
     database
         .delete_write_for_test(write_id.clone())
@@ -83,7 +88,10 @@ async fn successful_cycle_projects_durable_blocked_state() {
             database
                 .pending_writes()
                 .await
-                .expect("load synchronized writes"),
+                .expect("load synchronized writes")
+                .into_iter()
+                .map(crate::sync::sync_loop::BlockedOperation::Write)
+                .collect(),
             success(),
         ),
         SyncLoopStatus::Synchronized(_)

@@ -59,7 +59,8 @@ pub(crate) use crate::store_ack_records::{
 };
 pub(crate) use crate::store_authority_records::install_store_founder_state_on;
 pub(crate) use crate::store_reclaim_records::{
-    insert_store_reclaim_operation_on, load_store_reclaim_operation_on,
+    clear_store_reclaim_operation_stuck_on, insert_store_reclaim_operation_on,
+    load_store_reclaim_operation_on, mark_store_reclaim_operation_stuck_on,
     update_store_reclaim_operation_on,
 };
 pub use crate::store_reclaim_records::{
@@ -278,9 +279,9 @@ pub use store::{
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
     SnapshotBlobAudience, SnapshotBlobFact, SnapshotDatabaseImage, SnapshotImageError,
     SnapshotImageOperationError, SnapshotPublicationPermit, StoreDatabase,
-    StoreReclaimJournalError, StoreRowWrites, StoreWritePreparation, TableSchema,
-    ValidatedChangeset, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow,
-    GENERATION_ZERO,
+    StoreReclaimJournalError, StoreRowWrites, StoreWritePreparation, StuckReclaimOperation,
+    TableSchema, ValidatedChangeset, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
+    WinningRow, GENERATION_ZERO,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use store::{resolve_and_apply_changeset, ApplyResult};

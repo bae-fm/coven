@@ -735,6 +735,7 @@ impl AuthorizedSyncCycle<'_, '_> {
             authorized = store.authorized,
             packages = result.packages_deleted,
             copies = result.physical_copies_deleted,
+            stuck = result.stuck,
             "Reclaimed snapshot-covered Store packages"
         );
         Ok(())
@@ -1001,7 +1002,7 @@ impl SyncComponents {
         self.storage.probe_provider().await
     }
 
-    pub(crate) async fn pending_blocked_writes(
+    async fn pending_blocked_writes(
         &self,
     ) -> Result<Vec<coven_protocol::write::PendingWrite>, coven_database::DbError> {
         Ok(self
@@ -1011,6 +1012,55 @@ impl SyncComponents {
             .into_iter()
             .filter(|write| matches!(write.status, coven_protocol::write::WriteStatus::Blocked(_)))
             .collect())
+    }
+
+    /// Every durable operation a successful cycle leaves waiting on a person: a
+    /// write stopped by a semantic fault, a Circle operation whose authority or
+    /// stream position was lost, and a reclaim operation that failed with an
+    /// error running it again cannot change. All local reads.
+    pub(crate) async fn blocked_operations(
+        &self,
+    ) -> Result<Vec<super::sync_loop::BlockedOperation>, coven_database::DbError> {
+        use super::sync_loop::BlockedOperation;
+
+        let mut blocked: Vec<BlockedOperation> = self
+            .pending_blocked_writes()
+            .await?
+            .into_iter()
+            .map(BlockedOperation::Write)
+            .collect();
+        blocked.extend(
+            self.database
+                .get_circle_operations()
+                .await?
+                .into_iter()
+                .filter(|operation| {
+                    matches!(
+                        operation.state,
+                        coven_protocol::circle::CircleOperationState::Blocked { .. }
+                    )
+                })
+                .map(BlockedOperation::CircleOperation),
+        );
+        blocked.extend(
+            self.database
+                .stuck_reclaim_operations()
+                .await?
+                .into_iter()
+                .map(BlockedOperation::Reclaim),
+        );
+        Ok(blocked)
+    }
+
+    /// Clear one reclaim operation's stuck mark. Refused when the operation is
+    /// not stuck, so a stale retry cannot pass as a fresh decision.
+    pub(crate) async fn retry_stuck_reclaim(
+        &self,
+        operation_id: coven_protocol::store_commit::ObjectHash,
+    ) -> Result<(), coven_database::DbError> {
+        self.database
+            .retry_stuck_reclaim_operation(operation_id)
+            .await
     }
 
     pub(crate) async fn discard_blocked_write(

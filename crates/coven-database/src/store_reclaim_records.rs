@@ -54,6 +54,55 @@ pub(crate) fn insert_store_reclaim_operation_on(
     .map_err(DbError::from)
 }
 
+/// Record why an operation cannot proceed, so every later cycle skips it.
+pub(crate) fn mark_store_reclaim_operation_stuck_on(
+    conn: &Connection,
+    operation_id: ObjectHash,
+    error: &str,
+) -> Result<(), DbError> {
+    // A stuck operation is one a person has to read about, so the mark carries
+    // a message even when the error's own display is empty.
+    let error = if error.trim().is_empty() {
+        format!("Store reclaim operation {operation_id} failed without a message")
+    } else {
+        error.to_string()
+    };
+    let updated = conn
+        .execute(
+            "UPDATE store_reclaim_operations SET stuck_error = ?2 WHERE authorization_hash = ?1",
+            (operation_id.to_string(), error),
+        )
+        .map_err(DbError::from)?;
+    if updated != 1 {
+        return Err(DbError::Message(format!(
+            "Store reclaim operation {operation_id} is absent and cannot be marked stuck"
+        )));
+    }
+    Ok(())
+}
+
+/// Clear a stuck mark so the next cycle runs the operation again. Refuses an
+/// operation that is not stuck, so a retry the host sends twice cannot pass as
+/// a second decision.
+pub(crate) fn clear_store_reclaim_operation_stuck_on(
+    conn: &Connection,
+    operation_id: ObjectHash,
+) -> Result<(), DbError> {
+    let updated = conn
+        .execute(
+            "UPDATE store_reclaim_operations SET stuck_error = NULL
+             WHERE authorization_hash = ?1 AND stuck_error IS NOT NULL",
+            [operation_id.to_string()],
+        )
+        .map_err(DbError::from)?;
+    if updated != 1 {
+        return Err(DbError::Message(format!(
+            "Store reclaim operation {operation_id} is not stuck"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn update_store_reclaim_operation_on(
     conn: &Connection,
     expected: &DurableStoreReclaimOperation,

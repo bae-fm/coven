@@ -60,6 +60,21 @@ use coven_storage::cloud::ExactCloudHome;
 use coven_storage::CloudCipher;
 use tokio::sync::watch;
 
+/// Why one blocked operation could not be handed back to the sync loop.
+///
+/// The three kinds keep their own refusal vocabularies — a write's, a Circle
+/// operation's, a reclaim operation's — because a host that shows the operation
+/// shows its error too, and flattening them would lose what it says.
+#[derive(Debug, thiserror::Error)]
+pub enum RetryBlockedOperationError {
+    #[error("retry blocked write: {0}")]
+    Write(#[from] crate::CovenError),
+    #[error("retry circle operation: {0}")]
+    Circle(#[from] crate::CircleError),
+    #[error("retry stuck reclaim operation: {0}")]
+    Reclaim(#[from] crate::SyncError),
+}
+
 /// The cipher a store's app-data sealing runs under, resolved from `custody`.
 ///
 /// A store whose custody unlocks `None` has no key to seal under or open with,
@@ -356,6 +371,30 @@ impl CovenHandle {
         write_id: &crate::WriteId,
     ) -> Result<Vec<crate::WriteId>, crate::CovenError> {
         self.rows.retry_blocked_write(write_id).await
+    }
+
+    /// Hand one blocked operation back to the sync loop, whichever kind it is.
+    ///
+    /// The host renders [`SyncLoopStatus::Blocked`]'s operations as one list
+    /// with one button, so it retries them through one call; the id says which
+    /// path the retry takes. Each kind revalidates from scratch, so an
+    /// operation whose cause still stands simply blocks again.
+    pub async fn retry_blocked_operation(
+        &self,
+        operation: crate::BlockedOperationId,
+    ) -> Result<(), crate::RetryBlockedOperationError> {
+        match operation {
+            crate::BlockedOperationId::Write(write_id) => {
+                self.rows.retry_blocked_write(&write_id).await?;
+                Ok(())
+            }
+            crate::BlockedOperationId::CircleOperation(operation_id) => {
+                Ok(self.circles.retry(operation_id).await?)
+            }
+            crate::BlockedOperationId::Reclaim(operation_id) => {
+                Ok(self.sync.retry_stuck_reclaim(operation_id).await?)
+            }
+        }
     }
 
     /// Atomically discard a blocked write and reverse every later unpublished

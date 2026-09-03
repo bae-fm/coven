@@ -341,6 +341,19 @@ pub enum DurableStoreReclaimOperation {
     },
 }
 
+/// A journalled reclaim operation whose last run failed with an error that
+/// running it again cannot change.
+///
+/// Every later cycle skips it, so it spends no provider requests and holds
+/// nothing else up; it runs again only when the host asks. The target and the
+/// error are what the host shows the person who has to decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StuckReclaimOperation {
+    pub operation_id: ObjectHash,
+    pub target: ReclaimTarget,
+    pub error: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreReclaimCandidateLoss {

@@ -112,6 +112,14 @@ pub struct InMemoryCloudHome {
 struct TargetedDeleteFailure {
     keys: std::collections::HashSet<String>,
     countdown: usize,
+    failure: TargetedDeleteFailureKind,
+}
+
+/// What the armed delete returns: a transport fault a later attempt may clear,
+/// or a provider refusal no attempt can.
+enum TargetedDeleteFailureKind {
+    Transport,
+    Permanent,
 }
 
 impl InMemoryCloudHome {
@@ -399,6 +407,24 @@ impl InMemoryCloudHome {
     /// deterministically however many unrelated deletes interleave and whatever
     /// order the two package deletes arrive in.
     pub fn fail_nth_exact_delete_of(&self, slots: &[&ObjectSlot], nth: usize) {
+        self.arm_targeted_delete_failure(slots, nth, TargetedDeleteFailureKind::Transport);
+    }
+
+    /// Fail the `nth` (1-based) delete of an object among `slots` with a
+    /// configuration error — a provider refusal retrying cannot clear — then
+    /// disarm. The permanent counterpart to [`Self::fail_nth_exact_delete_of`],
+    /// and what drives the deterministic-failure paths that treat an operation
+    /// as decided rather than as worth another cycle.
+    pub fn fail_nth_exact_delete_of_permanently(&self, slots: &[&ObjectSlot], nth: usize) {
+        self.arm_targeted_delete_failure(slots, nth, TargetedDeleteFailureKind::Permanent);
+    }
+
+    fn arm_targeted_delete_failure(
+        &self,
+        slots: &[&ObjectSlot],
+        nth: usize,
+        failure: TargetedDeleteFailureKind,
+    ) {
         assert!(nth > 0, "targeted delete ordinals are 1-based");
         let keys = slots
             .iter()
@@ -407,6 +433,7 @@ impl InMemoryCloudHome {
         *self.fail_exact_delete_of.lock().unwrap() = Some(TargetedDeleteFailure {
             keys,
             countdown: nth,
+            failure,
         });
     }
 
@@ -737,10 +764,16 @@ impl InMemoryCloudHome {
                 if failure.keys.contains(&key) {
                     failure.countdown -= 1;
                     if failure.countdown == 0 {
+                        let error = match failure.failure {
+                            TargetedDeleteFailureKind::Transport => CloudHomeError::Transport(
+                                format!("InMemoryCloudHome: forced exact delete failure of {key}"),
+                            ),
+                            TargetedDeleteFailureKind::Permanent => CloudHomeError::Configuration(
+                                format!("InMemoryCloudHome: refused to delete {key}"),
+                            ),
+                        };
                         *targeted = None;
-                        return Err(CloudHomeError::Transport(format!(
-                            "InMemoryCloudHome: forced exact delete failure of {key}"
-                        )));
+                        return Err(error);
                     }
                 }
             }

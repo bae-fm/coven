@@ -11,7 +11,7 @@ use crate::{
     update_store_reclaim_operation_on,
 };
 use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
-use coven_protocol::store_commit::{StoreBatchCommitRef, StorePackageRef};
+use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StorePackageRef};
 
 pub mod journal;
 
@@ -329,7 +329,9 @@ impl StoreSession<'_> {
     /// Executing a blob reclaim re-reads that package from the provider to
     /// confirm the binding, so the package has to outlive the blob operation:
     /// a package reclaim that deleted it first would strand the blob operation
-    /// at a read that can never succeed. Completed operations hold nothing.
+    /// at a read that can never succeed. Completed operations hold nothing; a
+    /// stuck one holds its package like any other unfinished operation,
+    /// because stuck means waiting on a person, not gone.
     fn package_is_retained_by_pending_blob_reclaim(
         &self,
         package: &coven_protocol::objects::ExactObjectRef,
@@ -348,29 +350,83 @@ impl StoreSession<'_> {
         }))
     }
 
-    fn store_reclaim_operations(&self) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
+    /// Every journalled reclaim operation paired with the error that made it
+    /// stuck, if any. The three questions the journal answers — what exists,
+    /// what a cycle may still run, and what is waiting on a person — all come
+    /// off this one read.
+    fn store_reclaim_journal(
+        &self,
+    ) -> Result<Vec<(DurableStoreReclaimOperation, Option<String>)>, DbError> {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT authorization_hash, state FROM store_reclaim_operations
+                "SELECT authorization_hash, state, stuck_error FROM store_reclaim_operations
                  ORDER BY authorization_hash",
             )
             .map_err(DbError::from)?;
         let rows = statement
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             })
             .map_err(DbError::from)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(DbError::from)?;
         rows.into_iter()
-            .map(|(raw_id, raw)| {
+            .map(|(raw_id, raw, stuck_error)| {
                 let id = raw_id
                     .parse()
                     .map_err(|error| DbError::context("Store reclaim operation id", error))?;
-                parse_store_reclaim_operation(id, &raw)
+                Ok((parse_store_reclaim_operation(id, &raw)?, stuck_error))
             })
             .collect()
+    }
+
+    fn store_reclaim_operations(&self) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
+        Ok(self
+            .store_reclaim_journal()?
+            .into_iter()
+            .map(|(operation, _)| operation)
+            .collect())
+    }
+
+    fn runnable_store_reclaim_operations(
+        &self,
+    ) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
+        Ok(self
+            .store_reclaim_journal()?
+            .into_iter()
+            .filter_map(|(operation, stuck_error)| stuck_error.is_none().then_some(operation))
+            .collect())
+    }
+
+    fn stuck_reclaim_operations(&self) -> Result<Vec<StuckReclaimOperation>, DbError> {
+        Ok(self
+            .store_reclaim_journal()?
+            .into_iter()
+            .filter_map(|(operation, stuck_error)| {
+                stuck_error.map(|error| StuckReclaimOperation {
+                    operation_id: operation.operation_id(),
+                    target: operation.authorization().target().clone(),
+                    error,
+                })
+            })
+            .collect())
+    }
+
+    fn mark_store_reclaim_operation_stuck(
+        &mut self,
+        operation_id: ObjectHash,
+        error: String,
+    ) -> Result<(), DbError> {
+        crate::mark_store_reclaim_operation_stuck_on(self.conn, operation_id, &error)
+    }
+
+    fn retry_stuck_reclaim_operation(&mut self, operation_id: ObjectHash) -> Result<(), DbError> {
+        crate::clear_store_reclaim_operation_stuck_on(self.conn, operation_id)
     }
 
     fn begin_store_reclaim_receipt(
@@ -768,10 +824,52 @@ impl StoreDatabase {
         .await
     }
 
+    /// Every operation the reclaim journal holds, stuck ones included. An
+    /// existing operation for a target is what blocks re-authorizing it, and a
+    /// stuck operation blocks it exactly as a running one does.
     pub async fn store_reclaim_operations(
         &self,
     ) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
         self.call_store(|session| session.store_reclaim_operations())
+            .await
+    }
+
+    /// The operations a cycle may still run: everything the journal holds
+    /// except the ones waiting on a person.
+    pub async fn runnable_store_reclaim_operations(
+        &self,
+    ) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
+        self.call_store(|session| session.runnable_store_reclaim_operations())
+            .await
+    }
+
+    /// The operations that failed with an error retrying cannot change, with
+    /// the target and message the host shows.
+    pub async fn stuck_reclaim_operations(&self) -> Result<Vec<StuckReclaimOperation>, DbError> {
+        self.call_store(|session| session.stuck_reclaim_operations())
+            .await
+    }
+
+    /// Mark one operation stuck, so every later cycle skips it until the host
+    /// asks for it again.
+    pub async fn mark_store_reclaim_operation_stuck(
+        &self,
+        operation_id: ObjectHash,
+        error: String,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| {
+            session.mark_store_reclaim_operation_stuck(operation_id, error)
+        })
+        .await
+    }
+
+    /// Clear one operation's stuck mark so the next cycle runs it again.
+    /// Refused when the operation is not stuck.
+    pub async fn retry_stuck_reclaim_operation(
+        &self,
+        operation_id: ObjectHash,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| session.retry_stuck_reclaim_operation(operation_id))
             .await
     }
 

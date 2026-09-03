@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tracing::{debug, error, info};
 
-use super::{SyncCommand, SyncLoopFailure, SyncLoopHandleInner, SyncLoopStatus};
+use super::{BlockedOperation, SyncCommand, SyncLoopFailure, SyncLoopHandleInner, SyncLoopStatus};
 use crate::sync::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
 use coven_foundation::stage_timing::StageTimings;
 
@@ -367,14 +367,14 @@ impl SyncLoopThread {
             SyncLoopReport::Success(success) => {
                 match timings
                     .stage(
-                        "read blocked writes",
-                        self.inner.components.pending_blocked_writes(),
+                        "read blocked operations",
+                        self.inner.components.blocked_operations(),
                     )
                     .await
                 {
-                    Ok(writes) => current_success_status(writes, success.clone()),
+                    Ok(operations) => current_success_status(operations, success.clone()),
                     Err(error) => SyncLoopStatus::Failed {
-                        error: SyncLoopFailure::PendingWrites(Arc::new(error)),
+                        error: SyncLoopFailure::BlockedOperations(Arc::new(error)),
                     },
                 }
             }
@@ -437,14 +437,19 @@ pub(super) fn storage_check_failure_status(
     }
 }
 
-pub(super) fn current_success_status(
-    writes: Vec<coven_protocol::write::PendingWrite>,
+/// The terminal status of a cycle that reached storage: `Blocked` whenever any
+/// durable operation is waiting on a person, `Synchronized` only when none is.
+pub(crate) fn current_success_status(
+    operations: Vec<BlockedOperation>,
     success: SyncLoopSuccess,
 ) -> SyncLoopStatus {
-    if writes.is_empty() {
+    if operations.is_empty() {
         SyncLoopStatus::Synchronized(success)
     } else {
-        SyncLoopStatus::Blocked { success, writes }
+        SyncLoopStatus::Blocked {
+            success,
+            operations,
+        }
     }
 }
 

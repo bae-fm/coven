@@ -152,6 +152,10 @@ pub(crate) use history::{CircleSnapshotStream, ReclaimHistory, SelectedCircleSna
 pub struct StoreReclaimResult {
     pub packages_deleted: u64,
     pub physical_copies_deleted: u64,
+    /// Operations the journal is left holding for a person: they failed with an
+    /// error running them again cannot change, so every later cycle skips them
+    /// until the host asks for one back.
+    pub stuck: u64,
     /// What the Store-package leg did, so a run that deleted nothing says which
     /// step declined instead of reporting a bare zero. The leg is the one whose
     /// outcome was previously unobservable: its two commonest declines are
@@ -215,6 +219,25 @@ impl StorePackageReclaimReport {
 enum AuthorizationOutcome {
     Signed,
     AlreadyJournalled,
+}
+
+/// What one pass over the journal did.
+struct ReclaimPass {
+    packages_deleted: u64,
+    /// Operations the journal holds stuck when the pass ended — the ones it
+    /// marked plus the ones an earlier pass did.
+    stuck: u64,
+}
+
+/// What advancing one journalled operation by one step did.
+enum ReclaimStep {
+    /// The operation moved to its next durable state.
+    Advanced,
+    /// The operation deleted its target.
+    Deleted,
+    /// Nothing to do this pass: the operation is finished, or it waits behind
+    /// a blob reclaim that still has to re-read the package it deletes.
+    Idle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,11 +384,13 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         // did not finish is durable state waiting on its author, and gating that
         // behind "did anything change" would leave it waiting on an unrelated
         // event.
-        let mut packages_deleted = Box::pin(self.resume_operations()).await?;
+        let journal = Box::pin(self.resume_operations()).await?;
+        let mut packages_deleted = journal.packages_deleted;
         if !self.writer.is_current_owner(&membership) {
             return Ok(StoreReclaimResult {
                 packages_deleted,
                 physical_copies_deleted: packages_deleted,
+                stuck: journal.stuck,
                 store_packages: StorePackageReclaimReport::declined(
                     StorePackageReclaimCoverage::NotOwner,
                 ),
@@ -382,6 +407,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             return Ok(StoreReclaimResult {
                 packages_deleted,
                 physical_copies_deleted: packages_deleted,
+                stuck: journal.stuck,
                 store_packages: StorePackageReclaimReport::declined(
                     StorePackageReclaimCoverage::InputsUnchanged,
                 ),
@@ -469,8 +495,9 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             Box::pin(self.prepare_authorization(claim)).await?;
         }
         Box::pin(self.prepare_circle_authorizations(&registrations)).await?;
+        let authorized = Box::pin(self.resume_operations()).await?;
         packages_deleted = packages_deleted
-            .checked_add(Box::pin(self.resume_operations()).await?)
+            .checked_add(authorized.packages_deleted)
             .ok_or_else(|| {
                 StoreReclaimError::Authorization("reclaimed package count exceeded u64".to_string())
             })?;
@@ -480,6 +507,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         Ok(StoreReclaimResult {
             packages_deleted,
             physical_copies_deleted: packages_deleted,
+            stuck: authorized.stuck,
             store_packages,
         })
     }
@@ -960,51 +988,90 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         Ok(AuthorizationOutcome::Signed)
     }
 
-    async fn resume_operations(&mut self) -> Result<u64, StoreReclaimError> {
+    /// Run every operation the journal holds that a cycle may still run.
+    ///
+    /// A deterministic failure — anything whose error chain carries no
+    /// transport fault — is final for that one operation: running it again
+    /// reaches the same refusal, so it is marked stuck and the pass carries on
+    /// with the operations behind it. A transport failure is the opposite: it
+    /// says nothing about the operation, so the pass ends and the loop's
+    /// backoff brings the whole thing round again.
+    async fn resume_operations(&mut self) -> Result<ReclaimPass, StoreReclaimError> {
         let database = self.database.clone();
-        let mut completed = 0_u64;
+        let mut packages_deleted = 0_u64;
         loop {
-            let operations = database.store_reclaim_operations().await?;
+            let operations = database.runnable_store_reclaim_operations().await?;
             let mut progressed = false;
             for operation in operations {
-                match &operation {
-                    DurableStoreReclaimOperation::AuthorizationCandidate { .. }
-                    | DurableStoreReclaimOperation::ReceiptCandidate { .. } => {
-                        Box::pin(self.drive_candidate(operation)).await?;
-                        progressed = true;
-                    }
-                    DurableStoreReclaimOperation::AuthorizationReplacing { .. }
-                    | DurableStoreReclaimOperation::ReceiptReplacing { .. } => {
-                        Box::pin(self.finish_candidate_replacement(operation)).await?;
-                        progressed = true;
-                    }
-                    DurableStoreReclaimOperation::Authorized { .. } => {
-                        // A package a pending blob reclaim still has to re-read
-                        // waits its turn: the blob operation runs in this same
-                        // pass or a later one, and the package goes after it.
-                        // Not an error — the journal holds both, and the order
-                        // between them is the only thing being decided.
-                        if self.deferred_to_blob_reclaim(&operation).await? {
-                            continue;
-                        }
-                        Box::pin(self.execute_delete(operation)).await?;
-                        completed = completed.checked_add(1).ok_or_else(|| {
+                let operation_id = operation.operation_id();
+                match Box::pin(self.run_operation(operation)).await {
+                    Ok(ReclaimStep::Deleted) => {
+                        packages_deleted = packages_deleted.checked_add(1).ok_or_else(|| {
                             StoreReclaimError::Authorization(
                                 "reclaimed package count exceeded u64".to_string(),
                             )
                         })?;
                         progressed = true;
                     }
-                    DurableStoreReclaimOperation::AbsentVerified { .. } => {
-                        Box::pin(self.prepare_receipt(operation)).await?;
-                        progressed = true;
+                    Ok(ReclaimStep::Advanced) => progressed = true,
+                    Ok(ReclaimStep::Idle) => {}
+                    Err(error) if crate::sync::error::error_chain_contains_transport(&error) => {
+                        return Err(error)
                     }
-                    DurableStoreReclaimOperation::Completed { .. } => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            operation = %operation_id,
+                            "Store reclaim operation is stuck until the host asks for it: {error}"
+                        );
+                        database
+                            .mark_store_reclaim_operation_stuck(operation_id, error.to_string())
+                            .await?;
+                    }
                 }
             }
             if !progressed {
-                return Ok(completed);
+                let stuck = database.stuck_reclaim_operations().await?.len() as u64;
+                return Ok(ReclaimPass {
+                    packages_deleted,
+                    stuck,
+                });
             }
+        }
+    }
+
+    /// Advance one journalled operation by one durable step.
+    async fn run_operation(
+        &mut self,
+        operation: DurableStoreReclaimOperation,
+    ) -> Result<ReclaimStep, StoreReclaimError> {
+        match &operation {
+            DurableStoreReclaimOperation::AuthorizationCandidate { .. }
+            | DurableStoreReclaimOperation::ReceiptCandidate { .. } => {
+                Box::pin(self.drive_candidate(operation)).await?;
+                Ok(ReclaimStep::Advanced)
+            }
+            DurableStoreReclaimOperation::AuthorizationReplacing { .. }
+            | DurableStoreReclaimOperation::ReceiptReplacing { .. } => {
+                Box::pin(self.finish_candidate_replacement(operation)).await?;
+                Ok(ReclaimStep::Advanced)
+            }
+            DurableStoreReclaimOperation::Authorized { .. } => {
+                // A package a pending blob reclaim still has to re-read waits
+                // its turn: the blob operation runs in this same pass or a
+                // later one, and the package goes after it. Not an error — the
+                // journal holds both, and the order between them is the only
+                // thing being decided.
+                if self.deferred_to_blob_reclaim(&operation).await? {
+                    return Ok(ReclaimStep::Idle);
+                }
+                Box::pin(self.execute_delete(operation)).await?;
+                Ok(ReclaimStep::Deleted)
+            }
+            DurableStoreReclaimOperation::AbsentVerified { .. } => {
+                Box::pin(self.prepare_receipt(operation)).await?;
+                Ok(ReclaimStep::Advanced)
+            }
+            DurableStoreReclaimOperation::Completed { .. } => Ok(ReclaimStep::Idle),
         }
     }
 

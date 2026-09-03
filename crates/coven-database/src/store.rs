@@ -113,6 +113,7 @@ pub(crate) use pull_replay::{
 pub use reclaim::journal::{
     DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,
     ReclaimedStorePackage, StoreReclaimCandidateLoss, StoreReclaimJournalError,
+    StuckReclaimOperation,
 };
 pub(crate) use retained_replay::copy_table_with_conflicts;
 pub(crate) use retained_replay::migrate_retained_replay_schema_on;
