@@ -52,4 +52,6 @@ pub use store::{
 pub use store::{
     BlobCacheError, BlobStream, EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus,
 };
-pub use sync_loop::{BlockedOperation, BlockedOperationId, RetryStuckReclaimError, SyncLoopStatus};
+pub use sync_loop::{
+    BlockedOperation, BlockedOperationId, RetryStuckReclaimError, SyncLoopFailure, SyncLoopStatus,
+};

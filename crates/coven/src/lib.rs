@@ -103,6 +103,7 @@ pub use coven_protocol::hlc::Timestamp;
 pub use coven_protocol::objects::{
     ExactObjectRef, ObjectSlot, PhysicalObjectLocator, StorageError,
 };
+pub use coven_protocol::reclaim::ReclaimTarget;
 pub use coven_protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
 pub use coven_protocol::write::{
     AffectedRow, PendingWrite, PublishedPosition, WriteBlock, WriteId, WriteReceipt,
@@ -138,7 +139,7 @@ pub use coven_replication::sync::{
     DeviceRegistrationRequest, EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus,
     JoinedStore, JoiningDeviceJoinProgress, JoiningDeviceJoinProgressObserver,
     ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap, RetryStuckReclaimError, SyncError,
-    SyncLoopAlerts, SyncLoopStatus, SyncLoopSuccess,
+    SyncLoopAlerts, SyncLoopFailure, SyncLoopStatus, SyncLoopSuccess,
 };
 #[cfg(feature = "oauth-providers")]
 pub use coven_storage::fetch_account_email;
