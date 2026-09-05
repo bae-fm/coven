@@ -7,6 +7,9 @@ use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::ObjectHash;
 use coven_storage::CloudSyncObjectStorage;
 
+#[path = "snapshot_device_history_tests.rs"]
+mod snapshot_device_history_tests;
+
 fn store_database(db: &coven_database::Database) -> coven_database::StoreDatabase {
     coven_database::StoreDatabase::new(db)
 }

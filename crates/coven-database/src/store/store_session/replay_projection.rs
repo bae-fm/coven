@@ -11,6 +11,11 @@ impl ReplayProjection {
     pub(super) fn from_image(
         image: &[u8],
         store_dir: coven_foundation::store_dir::StoreDir,
+        cut: &coven_protocol::store_commit::CommitFrontier,
+        accepted: std::collections::BTreeMap<
+            coven_protocol::store_commit::StoreBatchCommitRef,
+            coven_protocol::store_commit::ResolvedStoreDeviceState,
+        >,
     ) -> Result<Self, DbError> {
         let mut connection = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
         crate::connection_io::deserialize_database_image_into(&mut connection, image)
@@ -18,6 +23,30 @@ impl ReplayProjection {
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
+        let image_states =
+            crate::store::store_device_state::load_covered_store_device_snapshots_on(
+                &connection,
+                cut,
+            )?;
+        for (reference, state) in accepted {
+            match image_states.get(&reference) {
+                Some(existing) if existing != &state => {
+                    return Err(DbError::Message(format!(
+                        "replay image device state disagrees with accepted history at {reference:?}"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    connection.execute(
+                        "INSERT INTO store_device_state_snapshots (commit_ref, state) VALUES (?1, ?2)",
+                        (
+                            serde_json::to_string(&reference).map_err(|error| DbError::context("encode accepted device-state reference", error))?,
+                            serde_json::to_string(&state).map_err(|error| DbError::context("encode accepted device state", error))?,
+                        ),
+                    ).map_err(DbError::from)?;
+                }
+            }
+        }
         Ok(Self {
             connection,
             store_dir,

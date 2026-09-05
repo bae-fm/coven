@@ -557,13 +557,6 @@ impl StoreTransaction<'_, '_> {
         )
     }
 
-    pub(crate) fn replay_baseline_image_bytes(
-        self,
-        baseline: &crate::RetainedReplayBaseline,
-    ) -> Result<Vec<u8>, DbError> {
-        baseline.image_bytes(self.transaction, self.store_dir)
-    }
-
     pub(crate) fn claimed_circle_bootstrap_coverage_refs(
         self,
     ) -> Result<Vec<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
@@ -700,9 +693,20 @@ impl StoreTransaction<'_, '_> {
 
     pub(crate) fn open_replay_projection(
         self,
-        image: &[u8],
+        baseline: &crate::RetainedReplayBaseline,
     ) -> Result<crate::store::ReplayProjection, DbError> {
-        crate::store::ReplayProjection::from_image(image, self.store_dir.clone())
+        // Accepted history belongs to this transaction. Only positions under
+        // the rewind cut may seed the projection; later states must be replayed.
+        let covered = crate::store::store_device_state::load_covered_store_device_snapshots_on(
+            self.transaction,
+            &baseline.exact_cut,
+        )?;
+        crate::store::ReplayProjection::from_image(
+            &baseline.image_bytes(self.transaction, self.store_dir)?,
+            self.store_dir.clone(),
+            &baseline.exact_cut,
+            covered,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -965,7 +969,14 @@ impl StoreTransaction<'_, '_> {
         coverage: BTreeMap<String, coven_protocol::store_commit::StoreBatchCommitRef>,
     ) -> Result<(), DbError> {
         let conn = self.transaction;
-        let mut required = coverage.into_values().collect::<BTreeSet<_>>();
+        let cut = coven_protocol::store_commit::CommitFrontier::from_refs(coverage.clone())
+            .map_err(DbError::from)?;
+        // A peer can still publish against any accepted position below this
+        // cut. Its dependencies are not limited to the snapshot's current tips.
+        let covered =
+            crate::store::store_device_state::load_covered_store_device_snapshots_on(conn, &cut)?;
+        let mut required = covered.into_keys().collect::<BTreeSet<_>>();
+        required.extend(coverage.into_values());
         let retained = crate::query_mapped_rows(
             conn,
             "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",

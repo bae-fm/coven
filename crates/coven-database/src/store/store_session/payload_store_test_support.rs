@@ -1,4 +1,6 @@
 use super::*;
+use crate::store::store_session::StoreRecords;
+use coven_protocol::store_commit::StoreBatchCommitRef;
 
 impl StoreDatabase {
     /// The payloads still owed a deletion. Empty once every obligation this
@@ -67,6 +69,17 @@ impl StoreDatabase {
     pub async fn remove_payload_bytes_for_test(&self, hash: ObjectHash) -> Result<(), DbError> {
         self.call_store(move |session| session.remove_payload_bytes_for_test(hash))
             .await
+    }
+
+    pub async fn replace_replay_baseline_device_state_for_test(
+        &self,
+        reference: StoreBatchCommitRef,
+        state: Option<coven_protocol::store_commit::ResolvedStoreDeviceState>,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| {
+            session.replace_replay_baseline_device_state_for_test(reference, state)
+        })
+        .await
     }
 
     pub async fn downgrade_replay_baseline_coven_schema_to_v0_for_test(
@@ -194,6 +207,55 @@ impl StoreSession<'_> {
         Ok(())
     }
 
+    fn replace_replay_baseline_device_state_for_test(
+        &mut self,
+        reference: StoreBatchCommitRef,
+        state: Option<coven_protocol::store_commit::ResolvedStoreDeviceState>,
+    ) -> Result<(), DbError> {
+        let records = StoreRecords::new(self.conn, self.store_dir);
+        let baseline = crate::store::retained_replay::load_replay_baseline_metadata_on(records)?
+            .ok_or_else(|| DbError::Message("retained replay baseline is absent".to_string()))?;
+        let mut image = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
+        crate::connection_io::deserialize_database_image_into(
+            &mut image,
+            &baseline.image_bytes(self.conn, self.store_dir)?,
+        )
+        .map_err(|error| DbError::context("open test replay image", error))?;
+        let reference = serde_json::to_string(&reference)
+            .map_err(|error| DbError::context("encode test device-state reference", error))?;
+        let changed = match state {
+            Some(state) => image.execute(
+                "UPDATE store_device_state_snapshots SET state = ?2 WHERE commit_ref = ?1",
+                rusqlite::params![
+                    reference,
+                    serde_json::to_string(&state)
+                        .map_err(|error| DbError::context("encode test device state", error))?
+                ],
+            ),
+            None => image.execute(
+                "DELETE FROM store_device_state_snapshots WHERE commit_ref = ?1",
+                [reference],
+            ),
+        }
+        .map_err(DbError::from)?;
+        if changed != 1 {
+            return Err(DbError::Message(format!(
+                "test replay image mutation changed {changed} rows"
+            )));
+        }
+        let bytes = crate::connection_io::serialize_database_image(&image)?;
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        StoreRecords::new(&transaction, self.store_dir).replace_retained_replay_image(
+            &baseline,
+            baseline.schema_version,
+            &bytes,
+        )?;
+        transaction.commit().map_err(DbError::from)?;
+        self.verified_store_authority
+            .forget_superseded_replay_baseline();
+        Ok(())
+    }
+
     fn downgrade_replay_baseline_coven_schema_to_v0_for_test(
         &self,
         include_routing: bool,
@@ -240,5 +302,18 @@ impl StoreSession<'_> {
         transaction.commit().map_err(DbError::from)?;
         pay_owed_payload_deletions_on(self.conn, self.store_dir)?;
         Ok(image_hash)
+    }
+}
+
+impl crate::CreatedSnapshot {
+    pub async fn device_state_for_test(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
+        let bytes = self.read_image().await.map_err(DbError::from)?;
+        let mut image = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
+        crate::connection_io::deserialize_database_image_into(&mut image, &bytes)
+            .map_err(|error| DbError::context("open captured test snapshot", error))?;
+        crate::store::store_device_state::load_store_device_snapshot_on(&image, reference)
     }
 }
