@@ -132,9 +132,9 @@ pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
 pub use model::LoadedCirclePackage;
 pub(crate) use model::{
-    commit_stream_id, ApplyOutcome, Candidate, HeldStoreCoordinate, HeldStorePosition,
-    HeldStorePositionReason, StorePullMembershipError, VerifiedStoreDeviceHead,
+    commit_stream_id, ApplyOutcome, Candidate, StorePullMembershipError, VerifiedStoreDeviceHead,
 };
+pub use model::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
 pub use model::{StorePullError, StorePullResult};
 pub(crate) use snapshot_evidence::*;
 pub use support::PullError;

@@ -111,9 +111,8 @@ pub use commit_publication::{AuthorizedWriterOperation, StoreWriterAuthorization
 pub use founder_creation::{
     FounderObjectDeleteError, FounderPublicationRollback, FounderRollbackError,
 };
-#[cfg(test)]
-pub(crate) use pull::HeldStoreCoordinate;
-pub(crate) use pull::{HeldStorePosition, VerifiedStoreDeviceHead};
+pub(crate) use pull::VerifiedStoreDeviceHead;
+pub use pull::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
 pub use pull::{LoadedCirclePackage, Readiness};
 pub use pull::{PullError, StorePullError, StorePullResult};
 pub(crate) use restore::RestoringStore;

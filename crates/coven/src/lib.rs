@@ -137,9 +137,10 @@ pub use coven_replication::sync::{
     DeviceProviderAccessAdministrator, DeviceProviderAccessRequest,
     DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
     DeviceRegistrationRequest, EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus,
-    JoinedStore, JoiningDeviceJoinProgress, JoiningDeviceJoinProgressObserver,
-    ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap, RetryStuckReclaimError, SyncError,
-    SyncLoopAlerts, SyncLoopFailure, SyncLoopStatus, SyncLoopSuccess,
+    HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, JoinedStore,
+    JoiningDeviceJoinProgress, JoiningDeviceJoinProgressObserver, ProviderReadyDeviceBootstrap,
+    ProvisionalDeviceBootstrap, RetryStuckReclaimError, SyncError, SyncLoopAlerts, SyncLoopFailure,
+    SyncLoopStatus, SyncLoopSuccess,
 };
 #[cfg(feature = "oauth-providers")]
 pub use coven_storage::fetch_account_email;

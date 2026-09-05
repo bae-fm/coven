@@ -52,6 +52,7 @@ pub use store::{
 pub use store::{
     BlobCacheError, BlobStream, EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus,
 };
+pub use store::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
 pub use sync_loop::{
     BlockedOperation, BlockedOperationId, RetryStuckReclaimError, SyncLoopFailure, SyncLoopStatus,
 };
