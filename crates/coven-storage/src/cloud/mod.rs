@@ -173,6 +173,12 @@ pub struct CloudVersionedObject {
     pub version: CloudObjectVersion,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConditionalWriteOutcome {
+    Replaced(CloudObjectVersion),
+    VersionChanged,
+}
+
 pub type CloudObjectStream =
     Pin<Box<dyn Stream<Item = Result<Bytes, CloudHomeError>> + Send + 'static>>;
 
@@ -555,7 +561,41 @@ pub trait ExactSlotStorage: Send + Sync {
         control: &UploadControl,
     ) -> Result<ExactCreateOutcome, CloudHomeError>;
 
+    /// Create one bounded mutable record without an immutable-object wrapper.
+    /// The returned object revision is obtained through [`Self::read_versioned_at`].
+    async fn create_versioned_at(
+        &self,
+        upload: &ExactUpload<'_>,
+        control: &UploadControl,
+    ) -> Result<ExactCreateOutcome, CloudHomeError> {
+        self.create_at(upload, control).await
+    }
+
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError>;
+
+    /// Read one mutable record and the provider revision that a conditional
+    /// replacement must present. The token is meaningful only to this provider
+    /// and this exact slot.
+    async fn read_versioned_at(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<CloudVersionedObject, CloudHomeError>;
+
+    /// Replace one mutable record only while the provider still reports
+    /// `expected`. A changed revision is an ordinary competing-writer outcome;
+    /// an unavailable or ambiguous provider result is an error.
+    async fn replace_at_if_version(
+        &self,
+        slot: &ObjectSlot,
+        expected: &CloudObjectVersion,
+        bytes: Vec<u8>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError>;
+
+    /// Delete one direct versioned record. This is used only for capability
+    /// probe cleanup; Store publication never deletes its current record.
+    async fn delete_versioned_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        self.delete_at(slot).await
+    }
 
     async fn observe_at(
         &self,

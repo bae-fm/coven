@@ -37,6 +37,9 @@ impl FounderProviderAdminGrant {
             lost_payload.len() as u64,
             ObjectHash::digest(&lost_payload),
         );
+        let conditional_slot =
+            ObjectSlot::logical(format!("store-v1/test/{label}/provider-probe/conditional"))
+                .expect("valid conditional-update test slot");
         let device = ProviderDeviceBinding {
             principal: crate::objects::ProviderPrincipalId::CustomS3Credential {
                 access_key_id_hash: ObjectHash::digest(format!("{label} access key").as_bytes()),
@@ -73,6 +76,10 @@ impl FounderProviderAdminGrant {
                     &first[PROBE_RANGE_START as usize..PROBE_RANGE_END as usize],
                 ),
             },
+            conditional: crate::provider::test_fixtures::test_conditional_receipt(
+                probe_id,
+                conditional_slot,
+            ),
             lost_response: LostResponseProbeReceipt {
                 logical_key: lost_slot.logical_key().to_string(),
                 slot: lost_slot,

@@ -117,6 +117,24 @@ impl ExactSlotStorage for CountingCloudHome {
         self.counted().read_at(slot).await
     }
 
+    async fn read_versioned_at(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<CloudVersionedObject, CloudHomeError> {
+        self.counted().read_versioned_at(slot).await
+    }
+
+    async fn replace_at_if_version(
+        &self,
+        slot: &ObjectSlot,
+        expected: &CloudObjectVersion,
+        bytes: Vec<u8>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError> {
+        self.counted()
+            .replace_at_if_version(slot, expected, bytes)
+            .await
+    }
+
     async fn observe_at(
         &self,
         slot: &ObjectSlot,

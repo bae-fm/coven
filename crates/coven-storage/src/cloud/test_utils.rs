@@ -15,7 +15,8 @@ use bytes::Bytes;
 
 use super::{
     BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError, CloudHome,
-    CloudHomeError, ExactSlotStorage, PartSink,
+    CloudHomeError, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
+    ExactSlotStorage, PartSink,
 };
 use coven_protocol::objects::ObjectSlot;
 
@@ -38,6 +39,44 @@ struct InflightGuard {
 struct ProbePause {
     reached: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Clone)]
+struct MemoryObject {
+    bytes: Vec<u8>,
+    version: u64,
+}
+
+struct MemoryObjects {
+    values: HashMap<String, MemoryObject>,
+    next_version: u64,
+}
+
+impl MemoryObjects {
+    fn new() -> Self {
+        Self {
+            values: HashMap::new(),
+            next_version: 0,
+        }
+    }
+
+    fn insert(&mut self, key: String, bytes: Vec<u8>) -> Option<MemoryObject> {
+        self.next_version = self
+            .next_version
+            .checked_add(1)
+            .expect("in-memory cloud object version overflow");
+        self.values.insert(
+            key,
+            MemoryObject {
+                bytes,
+                version: self.next_version,
+            },
+        )
+    }
+
+    fn bytes(&self, key: &str) -> Option<Vec<u8>> {
+        self.values.get(key).map(|object| object.bytes.clone())
+    }
 }
 
 impl Drop for ExactStreamReadGuard {
@@ -66,7 +105,7 @@ impl Drop for InflightGuard {
 #[derive(Clone)]
 pub struct InMemoryCloudHome {
     provider_binding: coven_protocol::objects::ResolvedProviderBinding,
-    writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    writes: Arc<Mutex<MemoryObjects>>,
     exact_slot_allocations: Arc<AtomicUsize>,
     exact_slot_allocation_delay_millis: Arc<AtomicU64>,
     exact_slot_allocation_inflight: Arc<AtomicUsize>,
@@ -80,6 +119,7 @@ pub struct InMemoryCloudHome {
     exact_creates: Arc<Mutex<Vec<ObjectSlot>>>,
     fail_exact_create_before: Arc<AtomicUsize>,
     fail_exact_create_after: Arc<AtomicUsize>,
+    lose_next_conditional_replace_response: Arc<AtomicBool>,
     exact_create_pause: Arc<Mutex<Option<AppendPause>>>,
     probe_pause: Arc<Mutex<Option<ProbePause>>>,
     probe_failure: Arc<Mutex<Option<coven_protocol::objects::StorageBackendFailure>>>,
@@ -142,7 +182,7 @@ impl InMemoryCloudHome {
                     },
                 },
             },
-            writes: Arc::new(Mutex::new(HashMap::new())),
+            writes: Arc::new(Mutex::new(MemoryObjects::new())),
             exact_slot_allocations: Arc::new(AtomicUsize::new(0)),
             exact_slot_allocation_delay_millis: Arc::new(AtomicU64::new(0)),
             exact_slot_allocation_inflight: Arc::new(AtomicUsize::new(0)),
@@ -156,6 +196,7 @@ impl InMemoryCloudHome {
             exact_creates: Arc::new(Mutex::new(Vec::new())),
             fail_exact_create_before: Arc::new(AtomicUsize::new(0)),
             fail_exact_create_after: Arc::new(AtomicUsize::new(0)),
+            lose_next_conditional_replace_response: Arc::new(AtomicBool::new(false)),
             exact_create_pause: Arc::new(Mutex::new(None)),
             probe_pause: Arc::new(Mutex::new(None)),
             probe_failure: Arc::new(Mutex::new(None)),
@@ -253,6 +294,13 @@ impl InMemoryCloudHome {
         assert!(call > 0, "create call numbers are 1-based");
         self.exact_create_count.store(0, Ordering::SeqCst);
         self.fail_exact_create_after.store(call, Ordering::SeqCst);
+    }
+
+    /// Commit the next conditional replacement but return a transport error,
+    /// reproducing a response lost after the provider accepted the write.
+    pub fn lose_next_conditional_replace_response(&self) {
+        self.lose_next_conditional_replace_response
+            .store(true, Ordering::SeqCst);
     }
 
     /// Pause after the selected exact create is physically visible.
@@ -441,30 +489,30 @@ impl InMemoryCloudHome {
     /// bucket on its own, without a `delete` (which `deletes_seen` would
     /// record). Drives missing-blob read failures.
     pub fn remove(&self, key: &str) {
-        self.writes.lock().unwrap().remove(key);
+        self.writes.lock().unwrap().values.remove(key);
     }
 
     /// Snapshot of every key currently in the cloud. Useful for assertions
     /// that don't want to hold the lock across an await.
     pub fn keys(&self) -> Vec<String> {
-        self.writes.lock().unwrap().keys().cloned().collect()
+        self.writes.lock().unwrap().values.keys().cloned().collect()
     }
 
     /// Snapshot of the bytes at `key`, or `None` if absent. Cloned so the
     /// caller can hold the result across `await` points without retaining
     /// the internal lock.
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        self.writes.lock().unwrap().get(key).cloned()
+        self.writes.lock().unwrap().bytes(key)
     }
 
     /// Number of objects stored. Cheap snapshot.
     pub fn len(&self) -> usize {
-        self.writes.lock().unwrap().len()
+        self.writes.lock().unwrap().values.len()
     }
 
     /// Returns true if the store is empty.
     pub fn is_empty(&self) -> bool {
-        self.writes.lock().unwrap().is_empty()
+        self.writes.lock().unwrap().values.is_empty()
     }
 
     /// Snapshot of every delete that's been requested, in arrival order.
@@ -487,13 +535,13 @@ impl InMemoryCloudHome {
     /// Snapshot the bytes stored at one exact slot, or `None` if absent.
     pub fn stored_exact_bytes(&self, slot: &ObjectSlot) -> Option<Vec<u8>> {
         let key = Self::exact_storage_key(slot).expect("test exact slot is valid");
-        self.writes.lock().unwrap().get(&key).cloned()
+        self.writes.lock().unwrap().bytes(&key)
     }
 
     /// Whether one exact protocol object is currently stored.
     pub fn contains_exact_object(&self, object: &coven_protocol::objects::ExactObjectRef) -> bool {
         let key = Self::exact_storage_key(object.slot()).expect("test exact slot is valid");
-        self.writes.lock().unwrap().contains_key(&key)
+        self.writes.lock().unwrap().values.contains_key(&key)
     }
 
     /// Re-insert bytes at one exact slot, restoring an object dropped by
@@ -506,7 +554,7 @@ impl InMemoryCloudHome {
     /// Remove one exact object without recording a protocol delete.
     pub fn remove_exact_object(&self, slot: &ObjectSlot) {
         let key = Self::exact_storage_key(slot).expect("test exact slot is valid");
-        self.writes.lock().unwrap().remove(&key);
+        self.writes.lock().unwrap().values.remove(&key);
     }
 
     /// The bytes currently stored at one exact slot, without counting a read.
@@ -514,8 +562,7 @@ impl InMemoryCloudHome {
         self.writes
             .lock()
             .unwrap()
-            .get(&Self::exact_storage_key(slot).expect("test exact slot is valid"))
-            .cloned()
+            .bytes(&Self::exact_storage_key(slot).expect("test exact slot is valid"))
             .expect("exact slot exists")
     }
 
@@ -616,8 +663,8 @@ impl InMemoryCloudHome {
         control.report(bytes.len() as u64);
         {
             let mut writes = self.writes.lock().unwrap();
-            if let Some(existing) = writes.get(&key) {
-                return if upload.object().verify(existing).is_ok() {
+            if let Some(existing) = writes.values.get(&key) {
+                return if upload.object().verify(&existing.bytes).is_ok() {
                     Ok(super::ExactCreateOutcome::AlreadyPresent)
                 } else {
                     Err(CloudHomeError::SlotCollision(key))
@@ -642,8 +689,9 @@ impl InMemoryCloudHome {
                 .writes
                 .lock()
                 .unwrap()
+                .values
                 .get(&key)
-                .is_some_and(|stored| upload.object().verify(stored).is_ok());
+                .is_some_and(|stored| upload.object().verify(&stored.bytes).is_ok());
             if !stored_matches {
                 return Err(CloudHomeError::Transport(format!(
                     "InMemoryCloudHome: forced failure after exact create call {call}"
@@ -654,8 +702,9 @@ impl InMemoryCloudHome {
             .writes
             .lock()
             .unwrap()
+            .values
             .get(&key)
-            .is_some_and(|stored| upload.object().verify(stored).is_ok());
+            .is_some_and(|stored| upload.object().verify(&stored.bytes).is_ok());
         if !stored_matches {
             return Err(CloudHomeError::SlotCollision(key));
         }
@@ -679,8 +728,7 @@ impl InMemoryCloudHome {
         self.writes
             .lock()
             .unwrap()
-            .get(&key)
-            .cloned()
+            .bytes(&key)
             .ok_or_else(|| CloudHomeError::NotFound(slot.logical_key().to_string()))
     }
 
@@ -720,8 +768,7 @@ impl InMemoryCloudHome {
             .writes
             .lock()
             .unwrap()
-            .get(&key)
-            .cloned()
+            .bytes(&key)
             .ok_or_else(|| CloudHomeError::NotFound(slot.logical_key().to_string()))?;
         let chunk_bytes = self.exact_stream_read_chunk_bytes.load(Ordering::SeqCst);
         let chunk_delay = std::time::Duration::from_millis(
@@ -778,7 +825,7 @@ impl InMemoryCloudHome {
                 }
             }
         }
-        self.writes.lock().unwrap().remove(&key);
+        self.writes.lock().unwrap().values.remove(&key);
         self.deletes.lock().unwrap().push(key);
         Ok(())
     }
@@ -786,8 +833,7 @@ impl InMemoryCloudHome {
         self.writes
             .lock()
             .unwrap()
-            .get(key)
-            .cloned()
+            .bytes(key)
             .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))
     }
 
@@ -818,6 +864,7 @@ impl InMemoryCloudHome {
             .writes
             .lock()
             .unwrap()
+            .values
             .keys()
             .filter(|k| k.starts_with(prefix))
             .cloned()
@@ -829,13 +876,13 @@ impl InMemoryCloudHome {
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        self.writes.lock().unwrap().remove(key);
+        self.writes.lock().unwrap().values.remove(key);
         self.deletes.lock().unwrap().push(key.to_string());
         Ok(())
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        Ok(self.writes.lock().unwrap().contains_key(key))
+        Ok(self.writes.lock().unwrap().values.contains_key(key))
     }
 
     async fn set_access(
@@ -870,7 +917,7 @@ impl Default for InMemoryCloudHome {
 /// order and store the assembled object on `finish`, so a multipart upload
 /// round-trips exactly like a single `put_object`.
 struct InMemoryPartSink {
-    writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    writes: Arc<Mutex<MemoryObjects>>,
     key: String,
     buf: Vec<u8>,
 }
@@ -982,6 +1029,7 @@ impl ExactSlotStorage for InMemoryCloudHome {
             .writes
             .lock()
             .unwrap()
+            .values
             .keys()
             .filter(|key| key.starts_with(prefix))
             .cloned()
@@ -1035,6 +1083,60 @@ impl ExactSlotStorage for InMemoryCloudHome {
         InMemoryCloudHome::read_exact(self, slot).await
     }
 
+    async fn read_versioned_at(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<CloudVersionedObject, CloudHomeError> {
+        let key = Self::exact_storage_key(slot)?;
+        let writes = self.writes.lock().unwrap();
+        let object = writes
+            .values
+            .get(&key)
+            .ok_or_else(|| CloudHomeError::NotFound(slot.logical_key().to_string()))?;
+        Ok(CloudVersionedObject {
+            bytes: object.bytes.clone(),
+            version: CloudObjectVersion::from_provider(object.version.to_string())?,
+        })
+    }
+
+    async fn replace_at_if_version(
+        &self,
+        slot: &ObjectSlot,
+        expected: &CloudObjectVersion,
+        bytes: Vec<u8>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(CloudHomeError::Transport(
+                "InMemoryCloudHome: armed write failure".into(),
+            ));
+        }
+        let key = Self::exact_storage_key(slot)?;
+        let mut writes = self.writes.lock().unwrap();
+        let Some(current) = writes.values.get(&key) else {
+            return Err(CloudHomeError::NotFound(slot.logical_key().to_string()));
+        };
+        if current.version.to_string() != expected.as_provider() {
+            return Ok(ConditionalWriteOutcome::VersionChanged);
+        }
+        writes.insert(key, bytes);
+        let version = writes
+            .values
+            .get(&Self::exact_storage_key(slot)?)
+            .expect("conditional replacement inserted the record")
+            .version;
+        if self
+            .lose_next_conditional_replace_response
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(CloudHomeError::Transport(
+                "InMemoryCloudHome: conditional replacement response lost".to_string(),
+            ));
+        }
+        Ok(ConditionalWriteOutcome::Replaced(
+            CloudObjectVersion::from_provider(version.to_string())?,
+        ))
+    }
+
     async fn read_range_at(
         &self,
         slot: &ObjectSlot,
@@ -1049,8 +1151,7 @@ impl ExactSlotStorage for InMemoryCloudHome {
             .writes
             .lock()
             .unwrap()
-            .get(&key)
-            .cloned()
+            .bytes(&key)
             .ok_or_else(|| CloudHomeError::NotFound(slot.logical_key().to_string()))?;
         // A range past the object's end is refused, not clamped: a short answer
         // to a range request is the provider ignoring it, which a caller must

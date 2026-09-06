@@ -5,7 +5,10 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 use super::s3_backend_failure;
-use crate::cloud::{CloudHomeError, UploadControl};
+use crate::cloud::{
+    CloudHomeError, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
+    UploadControl,
+};
 use coven_protocol::objects::StorageBackendFailure;
 
 /// How much of the request body is read, and reported, at a time.
@@ -148,6 +151,7 @@ impl GoogleCloudStorageXml {
             secret_key,
             key,
             payload_hash,
+            "0",
             now,
         )?;
         let response = self
@@ -194,6 +198,179 @@ impl GoogleCloudStorageXml {
             error,
         ))
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn read_versioned(
+        &self,
+        endpoint: &str,
+        bucket: &str,
+        region: &str,
+        access_key: &str,
+        secret_key: &str,
+        key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<CloudVersionedObject, CloudHomeError> {
+        let payload_hash = sha256_hex(b"");
+        let signed = SignedGoogleGet::new(
+            endpoint,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+            key,
+            &payload_hash,
+            now,
+        )?;
+        let response = self
+            .client
+            .get(signed.url)
+            .header(reqwest::header::AUTHORIZATION, signed.authorization)
+            .header(reqwest::header::HOST, signed.host)
+            .header("x-goog-content-sha256", payload_hash)
+            .header("x-goog-date", signed.timestamp)
+            .send()
+            .await
+            .map_err(|error| {
+                CloudHomeError::backend(
+                    StorageBackendFailure::Transport,
+                    format!("read versioned {key}"),
+                    error,
+                )
+            })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(CloudHomeError::NotFound(key.to_string()));
+        }
+        if !status.is_success() {
+            return Err(google_response_error(response, "read versioned", key).await);
+        }
+        let version = response
+            .headers()
+            .get("x-goog-generation")
+            .ok_or_else(|| {
+                CloudHomeError::Transport(format!(
+                    "read versioned {key}: Google Cloud Storage returned no generation"
+                ))
+            })?
+            .to_str()
+            .map_err(|error| {
+                CloudHomeError::transport(
+                    format!("read versioned {key}: invalid generation"),
+                    error,
+                )
+            })?
+            .to_string();
+        let bytes = response.bytes().await.map_err(|error| {
+            CloudHomeError::backend(
+                StorageBackendFailure::Transport,
+                format!("read versioned body {key}"),
+                error,
+            )
+        })?;
+        Ok(CloudVersionedObject {
+            bytes: bytes.to_vec(),
+            version: CloudObjectVersion::from_provider(version)?,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn replace_if_generation(
+        &self,
+        endpoint: &str,
+        bucket: &str,
+        region: &str,
+        access_key: &str,
+        secret_key: &str,
+        key: &str,
+        expected: &CloudObjectVersion,
+        data: Vec<u8>,
+        now: DateTime<Utc>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError> {
+        let payload_hash = sha256_hex(&data);
+        let signed = SignedGooglePut::new(
+            endpoint,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+            key,
+            &payload_hash,
+            expected.as_provider(),
+            now,
+        )?;
+        let response = self
+            .client
+            .put(signed.url)
+            .header(reqwest::header::AUTHORIZATION, signed.authorization)
+            .header(reqwest::header::HOST, signed.host)
+            .header("x-goog-content-sha256", payload_hash)
+            .header("x-goog-date", signed.timestamp)
+            .header("x-goog-if-generation-match", expected.as_provider())
+            .header(reqwest::header::CONTENT_LENGTH, data.len())
+            .body(data)
+            .send()
+            .await
+            .map_err(|error| {
+                CloudHomeError::backend(
+                    StorageBackendFailure::Transport,
+                    format!("replace versioned {key}"),
+                    error,
+                )
+            })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::PRECONDITION_FAILED {
+            return Ok(ConditionalWriteOutcome::VersionChanged);
+        }
+        if !status.is_success() {
+            return Err(google_response_error(response, "replace versioned", key).await);
+        }
+        let version = response
+            .headers()
+            .get("x-goog-generation")
+            .ok_or_else(|| {
+                CloudHomeError::Transport(format!(
+                    "replace versioned {key}: Google Cloud Storage returned no generation"
+                ))
+            })?
+            .to_str()
+            .map_err(|error| {
+                CloudHomeError::transport(
+                    format!("replace versioned {key}: invalid generation"),
+                    error,
+                )
+            })?;
+        Ok(ConditionalWriteOutcome::Replaced(
+            CloudObjectVersion::from_provider(version.to_string())?,
+        ))
+    }
+}
+
+async fn google_response_error(
+    response: reqwest::Response,
+    operation: &str,
+    key: &str,
+) -> CloudHomeError {
+    let status = response.status();
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(error) => {
+            return CloudHomeError::backend(
+                StorageBackendFailure::Transport,
+                format!("read failed Google Cloud Storage response for {operation} {key}"),
+                error,
+            )
+        }
+    };
+    let error = GoogleXmlResponseError {
+        status: status.as_u16(),
+        code: xml_value(&body, "Code").map(str::to_string),
+        message: xml_value(&body, "Message").map(str::to_string),
+    };
+    CloudHomeError::backend(
+        s3_backend_failure(error.code.as_deref(), Some(error.status)),
+        format!("{operation} {key}"),
+        error,
+    )
 }
 
 fn is_google_cloud_storage_endpoint(endpoint: &str) -> bool {
@@ -235,34 +412,15 @@ impl SignedGooglePut {
         secret_key: &str,
         key: &str,
         payload_hash: &str,
+        generation: &str,
         now: DateTime<Utc>,
     ) -> Result<Self, CloudHomeError> {
-        let mut url = url::Url::parse(endpoint).map_err(|error| {
-            CloudHomeError::configuration("parse Google Cloud Storage endpoint", error)
-        })?;
-        {
-            let mut segments = url.path_segments_mut().map_err(|()| {
-                CloudHomeError::Configuration(
-                    "Google Cloud Storage endpoint cannot carry object paths".to_string(),
-                )
-            })?;
-            segments.pop_if_empty().push(bucket);
-            for segment in key.split('/') {
-                segments.push(segment);
-            }
-        }
-        let host_name = url.host_str().ok_or_else(|| {
-            CloudHomeError::Configuration("Google Cloud Storage endpoint has no host".to_string())
-        })?;
-        let host = match url.port() {
-            Some(port) => format!("{host_name}:{port}"),
-            None => host_name.to_string(),
-        };
+        let (url, host) = google_object_url(endpoint, bucket, key)?;
         let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date = now.format("%Y%m%d").to_string();
         let signed_headers = "host;x-goog-content-sha256;x-goog-date;x-goog-if-generation-match";
         let canonical_headers = format!(
-            "host:{host}\nx-goog-content-sha256:{payload_hash}\nx-goog-date:{timestamp}\nx-goog-if-generation-match:0\n"
+            "host:{host}\nx-goog-content-sha256:{payload_hash}\nx-goog-date:{timestamp}\nx-goog-if-generation-match:{generation}\n"
         );
         let canonical_request = format!(
             "PUT\n{}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
@@ -288,6 +446,86 @@ impl SignedGooglePut {
             authorization,
         })
     }
+}
+
+struct SignedGoogleGet {
+    url: url::Url,
+    host: String,
+    timestamp: String,
+    authorization: String,
+}
+
+impl SignedGoogleGet {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        endpoint: &str,
+        bucket: &str,
+        region: &str,
+        access_key: &str,
+        secret_key: &str,
+        key: &str,
+        payload_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Self, CloudHomeError> {
+        let (url, host) = google_object_url(endpoint, bucket, key)?;
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date = now.format("%Y%m%d").to_string();
+        let signed_headers = "host;x-goog-content-sha256;x-goog-date";
+        let canonical_headers =
+            format!("host:{host}\nx-goog-content-sha256:{payload_hash}\nx-goog-date:{timestamp}\n");
+        let canonical_request = format!(
+            "GET\n{}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
+            url.path()
+        );
+        let scope = format!("{date}/{region}/storage/goog4_request");
+        let string_to_sign = format!(
+            "GOOG4-HMAC-SHA256\n{timestamp}\n{scope}\n{}",
+            sha256_hex(canonical_request.as_bytes())
+        );
+        let date_key = hmac_sha256(format!("GOOG4{secret_key}").as_bytes(), date.as_bytes());
+        let region_key = hmac_sha256(&date_key, region.as_bytes());
+        let service_key = hmac_sha256(&region_key, b"storage");
+        let signing_key = hmac_sha256(&service_key, b"goog4_request");
+        let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+        let authorization = format!(
+            "GOOG4-HMAC-SHA256 Credential={access_key}/{scope},SignedHeaders={signed_headers},Signature={signature}"
+        );
+        Ok(Self {
+            url,
+            host,
+            timestamp,
+            authorization,
+        })
+    }
+}
+
+fn google_object_url(
+    endpoint: &str,
+    bucket: &str,
+    key: &str,
+) -> Result<(url::Url, String), CloudHomeError> {
+    let mut url = url::Url::parse(endpoint).map_err(|error| {
+        CloudHomeError::configuration("parse Google Cloud Storage endpoint", error)
+    })?;
+    {
+        let mut segments = url.path_segments_mut().map_err(|()| {
+            CloudHomeError::Configuration(
+                "Google Cloud Storage endpoint cannot carry object paths".to_string(),
+            )
+        })?;
+        segments.pop_if_empty().push(bucket);
+        for segment in key.split('/') {
+            segments.push(segment);
+        }
+    }
+    let host_name = url.host_str().ok_or_else(|| {
+        CloudHomeError::Configuration("Google Cloud Storage endpoint has no host".to_string())
+    })?;
+    let host = match url.port() {
+        Some(port) => format!("{host_name}:{port}"),
+        None => host_name.to_string(),
+    };
+    Ok((url, host))
 }
 
 fn hmac_sha256(key: &[u8], bytes: &[u8]) -> Vec<u8> {
@@ -364,6 +602,51 @@ mod tests {
             .expect("build success response")
     }
 
+    #[derive(Clone)]
+    struct ConditionalState {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        generation: Arc<Mutex<String>>,
+    }
+
+    async fn conditional_endpoint(
+        State(state): State<ConditionalState>,
+        uri: Uri,
+        headers: HeaderMap,
+        method: axum::http::Method,
+        body: Bytes,
+    ) -> Response<Body> {
+        assert_eq!(uri.path(), "/publication-store/protocol/current.json");
+        if method == axum::http::Method::GET {
+            let generation = state.generation.lock().expect("lock generation").clone();
+            let bytes = state.bytes.lock().expect("lock bytes").clone();
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("x-goog-generation", generation)
+                .body(Body::from(bytes))
+                .expect("build generation read response");
+        }
+        assert_eq!(method, axum::http::Method::PUT);
+        let supplied = headers
+            .get("x-goog-if-generation-match")
+            .and_then(|value| value.to_str().ok());
+        let mut generation = state.generation.lock().expect("lock generation");
+        if supplied != Some(generation.as_str()) {
+            return Response::builder()
+                .status(StatusCode::PRECONDITION_FAILED)
+                .body(Body::from(
+                    "<Error><Code>PreconditionFailed</Code><Message>generation changed</Message></Error>",
+                ))
+                .expect("build generation conflict response");
+        }
+        *state.bytes.lock().expect("lock bytes") = body.to_vec();
+        *generation = "22".to_string();
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("x-goog-generation", generation.as_str())
+            .body(Body::empty())
+            .expect("build generation replacement response")
+    }
+
     #[test]
     fn recognizes_only_google_cloud_storage_xml_endpoints() {
         assert!(is_google_cloud_storage_endpoint(
@@ -396,6 +679,7 @@ mod tests {
             "secret",
             "maps/new york.png",
             &sha256_hex(b"map"),
+            "0",
             now,
         )
         .expect("sign PUT");
@@ -411,6 +695,74 @@ mod tests {
         assert!(signed
             .authorization
             .contains("SignedHeaders=host;x-goog-content-sha256;x-goog-date;x-goog-if-generation-match,Signature="));
+    }
+
+    #[tokio::test]
+    async fn conditional_replacement_uses_generation_from_the_exact_read() {
+        let state = ConditionalState {
+            bytes: Arc::new(Mutex::new(b"first".to_vec())),
+            generation: Arc::new(Mutex::new("21".to_string())),
+        };
+        let (endpoint, shutdown) = crate::cloud::test_server::spawn_test_server(
+            Router::new()
+                .fallback(conditional_endpoint)
+                .with_state(state),
+        )
+        .await;
+        let storage = GoogleCloudStorageXml {
+            client: reqwest::Client::new(),
+        };
+        let now = DateTime::parse_from_rfc3339("2019-11-02T04:35:30Z")
+            .expect("fixed timestamp")
+            .with_timezone(&Utc);
+        let observed = storage
+            .read_versioned(
+                &endpoint,
+                "publication-store",
+                "us-central1",
+                "GOOG-ACCESS-ID",
+                "secret",
+                "protocol/current.json",
+                now,
+            )
+            .await
+            .expect("read generation");
+        assert_eq!(observed.bytes, b"first");
+        assert_eq!(observed.version.as_provider(), "21");
+
+        let replaced = storage
+            .replace_if_generation(
+                &endpoint,
+                "publication-store",
+                "us-central1",
+                "GOOG-ACCESS-ID",
+                "secret",
+                "protocol/current.json",
+                &observed.version,
+                b"second".to_vec(),
+                now,
+            )
+            .await
+            .expect("replace matching generation");
+        assert!(matches!(replaced, ConditionalWriteOutcome::Replaced(_)));
+        let stale = storage
+            .replace_if_generation(
+                &endpoint,
+                "publication-store",
+                "us-central1",
+                "GOOG-ACCESS-ID",
+                "secret",
+                "protocol/current.json",
+                &observed.version,
+                b"third".to_vec(),
+                now,
+            )
+            .await
+            .expect("settle stale generation");
+        assert_eq!(stale, ConditionalWriteOutcome::VersionChanged);
+        shutdown
+            .send(())
+            .expect("shut down Google Cloud Storage endpoint");
     }
 
     /// A file body large enough to span several chunks reports as it streams,

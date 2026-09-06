@@ -31,9 +31,9 @@ pub use cloud::test_utils::InMemoryCloudHome;
 pub use cloud::{
     no_progress, write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome,
     CloudAccessState, CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    CloudObjectStream, CloudObjectVersion, CloudVersionedObject, DownloadProgress, ExactCloudHome,
-    ExactCreateOutcome, ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink, UploadControl,
-    UploadProgress,
+    CloudObjectStream, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
+    DownloadProgress, ExactCloudHome, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
+    ExactUploadSource, PartSink, UploadControl, UploadProgress,
 };
 
 #[cfg(feature = "oauth-providers")]

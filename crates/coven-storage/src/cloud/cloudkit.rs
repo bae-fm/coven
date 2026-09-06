@@ -17,7 +17,8 @@ use coven_foundation::id_provider::{IdRef, UuidProvider};
 
 use super::{
     combine_cleanup_failure, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject, ExactSlotStorage, RevokeOutcome,
+    CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
+    ExactSlotStorage, RevokeOutcome,
 };
 use coven_protocol::objects::ObjectSlot;
 
@@ -68,6 +69,16 @@ pub trait CloudKitOps: Send + Sync {
         scope: &CloudKitScope,
         key: &str,
     ) -> Result<CloudVersionedObject, CloudHomeError>;
+    /// Replace one record only while its CloudKit `recordChangeTag` equals
+    /// `expected`. The implementation must use CloudKit's server-side
+    /// unchanged-record save policy; a local fetch-and-check is insufficient.
+    fn replace_record_if_version(
+        &self,
+        scope: &CloudKitScope,
+        key: &str,
+        expected: &CloudObjectVersion,
+        data: Vec<u8>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError>;
     /// Open a host-owned local staging batch. Staging never creates CloudKit
     /// records; the host keeps payloads in temporary CKAsset files until commit.
     fn begin_atomic_create(

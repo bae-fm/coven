@@ -88,6 +88,16 @@ impl CloudKitOps for ScopeRecordingOps {
         unimplemented!("not exercised by these tests")
     }
 
+    fn replace_record_if_version(
+        &self,
+        _scope: &CloudKitScope,
+        _key: &str,
+        _expected: &crate::cloud::CloudObjectVersion,
+        _data: Vec<u8>,
+    ) -> Result<crate::cloud::ConditionalWriteOutcome, CloudHomeError> {
+        unimplemented!("not exercised by these tests")
+    }
+
     fn begin_atomic_create(
         &self,
         _scope: &CloudKitScope,

@@ -399,6 +399,30 @@ impl CloudKitOps for TestCloudKitOps {
         })
     }
 
+    fn replace_record_if_version(
+        &self,
+        scope: &CloudKitScope,
+        key: &str,
+        expected: &coven_storage::cloud::CloudObjectVersion,
+        data: Vec<u8>,
+    ) -> Result<coven_storage::cloud::ConditionalWriteOutcome, CloudHomeError> {
+        let mut store = self.store.lock().unwrap();
+        let coordinate = (scope.clone(), key.to_string());
+        let (_, current) = store
+            .get(&coordinate)
+            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
+        if current.to_string() != expected.as_provider() {
+            return Ok(coven_storage::cloud::ConditionalWriteOutcome::VersionChanged);
+        }
+        let next = current
+            .checked_add(1)
+            .expect("handle record version overflow");
+        store.insert(coordinate, (data, next));
+        Ok(coven_storage::cloud::ConditionalWriteOutcome::Replaced(
+            coven_storage::cloud::CloudObjectVersion::from_provider(next.to_string())?,
+        ))
+    }
+
     fn begin_atomic_create(
         &self,
         _scope: &CloudKitScope,

@@ -43,6 +43,7 @@ fn home() -> OneDriveCloudHome {
 struct RecordedRequest {
     method: String,
     path: String,
+    if_match: Option<String>,
     body: Vec<u8>,
 }
 
@@ -58,6 +59,10 @@ async fn exact_create_endpoint(
 ) -> Response<Body> {
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
+    let if_match = request
+        .headers()
+        .get(reqwest::header::IF_MATCH)
+        .map(|value| value.to_str().expect("If-Match is text").to_string());
     let body = to_bytes(request.into_body(), usize::MAX)
         .await
         .expect("read request body")
@@ -69,6 +74,7 @@ async fn exact_create_endpoint(
         .push(RecordedRequest {
             method: method.clone(),
             path: path.clone(),
+            if_match,
             body,
         });
 
@@ -103,6 +109,7 @@ async fn exact_create_endpoint(
             .body(Body::from(
                 serde_json::json!({
                     "id": "item-1",
+                    "eTag": "\"revision-1\"",
                     "name": encode_key("protocol/copy"),
                     "parentReference": { "id": "folder456" },
                     "file": {
@@ -153,6 +160,189 @@ async fn exact_create_test_home() -> (
         .expect("OneDrive endpoint failed");
     });
     (home().with_graph_api(endpoint), requests, shutdown_tx)
+}
+
+#[derive(Clone)]
+struct ConditionalState {
+    endpoint: String,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    object: Arc<Mutex<(String, Vec<u8>)>>,
+}
+
+fn conditional_metadata(revision: &str, bytes: &[u8]) -> serde_json::Value {
+    serde_json::json!({
+        "id": "item-conditional",
+        "eTag": revision,
+        "name": encode_key("protocol/current"),
+        "parentReference": { "id": "folder456" },
+        "file": {
+            "hashes": {
+                "sha1Hash": content_hash::sha1_bytes(bytes),
+            },
+        },
+        "size": bytes.len(),
+    })
+}
+
+async fn conditional_endpoint(
+    State(state): State<ConditionalState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let if_match = request
+        .headers()
+        .get(reqwest::header::IF_MATCH)
+        .map(|value| value.to_str().expect("If-Match is text").to_string());
+    let body = to_bytes(request.into_body(), usize::MAX)
+        .await
+        .expect("read conditional request body")
+        .to_vec();
+    state
+        .requests
+        .lock()
+        .expect("lock conditional requests")
+        .push(RecordedRequest {
+            method: method.clone(),
+            path: path.clone(),
+            if_match: if_match.clone(),
+            body: body.clone(),
+        });
+
+    if method == "POST" && path.ends_with("/createUploadSession") {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"uploadUrl":"{}/upload/session"}}"#,
+                state.endpoint
+            )))
+            .expect("build upload session response");
+    }
+    if method == "PUT" && path == "/upload/session" {
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"nextExpectedRanges":[]}"#))
+            .expect("build deferred upload response");
+    }
+    if method == "DELETE" && path == "/upload/session" {
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .expect("build upload cancellation response");
+    }
+    if method == "PUT" && path.contains("/items/folder456:/") {
+        let mut object = state.object.lock().expect("lock conditional object");
+        if if_match.as_deref() != Some(object.0.as_str()) {
+            return Response::builder()
+                .status(StatusCode::PRECONDITION_FAILED)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"error":{"code":"preconditionFailed"}}"#))
+                .expect("build stale revision response");
+        }
+        object.0 = "\"revision-2\"".to_string();
+        object.1 = b"second".to_vec();
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                conditional_metadata(&object.0, &object.1).to_string(),
+            ))
+            .expect("build replacement response");
+    }
+    if method == "GET" && path.ends_with("/content") {
+        let object = state.object.lock().expect("lock conditional object");
+        return Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(object.1.clone()))
+            .expect("build content response");
+    }
+    if method == "GET" && path.contains("/items/folder456:/") {
+        let object = state.object.lock().expect("lock conditional object");
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                conditional_metadata(&object.0, &object.1).to_string(),
+            ))
+            .expect("build metadata response");
+    }
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Body::from(format!("unexpected request: {method} {path}")))
+        .expect("build unexpected response")
+}
+
+async fn conditional_test_home() -> (
+    OneDriveCloudHome,
+    Arc<Mutex<Vec<RecordedRequest>>>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind OneDrive conditional endpoint");
+    let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let state = ConditionalState {
+        endpoint: endpoint.clone(),
+        requests: requests.clone(),
+        object: Arc::new(Mutex::new((
+            "\"revision-1\"".to_string(),
+            b"first".to_vec(),
+        ))),
+    };
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .fallback(conditional_endpoint)
+                .with_state(state),
+        )
+        .with_graceful_shutdown(async {
+            shutdown_rx
+                .await
+                .expect("receive OneDrive endpoint shutdown");
+        })
+        .await
+        .expect("OneDrive conditional endpoint failed");
+    });
+    (home().with_graph_api(endpoint), requests, shutdown_tx)
+}
+
+#[tokio::test]
+async fn conditional_replacement_commits_with_if_match_and_settles_conflict() {
+    let (home, requests, shutdown) = conditional_test_home().await;
+    let slot = ObjectSlot::logical("protocol/current".to_string()).expect("logical slot");
+    let observed = home
+        .read_versioned_at(&slot)
+        .await
+        .expect("read OneDrive revision");
+    assert_eq!(observed.bytes, b"first");
+    assert_eq!(observed.version.as_provider(), "\"revision-1\"");
+
+    let replaced = home
+        .replace_at_if_version(&slot, &observed.version, b"second".to_vec())
+        .await
+        .expect("replace OneDrive revision");
+    assert!(matches!(replaced, ConditionalWriteOutcome::Replaced(_)));
+    let stale = home
+        .replace_at_if_version(&slot, &observed.version, b"third".to_vec())
+        .await
+        .expect("settle stale OneDrive revision");
+    assert_eq!(stale, ConditionalWriteOutcome::VersionChanged);
+
+    let requests = requests.lock().expect("lock conditional requests");
+    let commits = requests
+        .iter()
+        .filter(|request| request.method == "PUT" && request.path.contains("/items/folder456:/"))
+        .collect::<Vec<_>>();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[0].if_match.as_deref(), Some("\"revision-1\""));
+    assert_eq!(commits[1].if_match.as_deref(), Some("\"revision-1\""));
+    drop(requests);
+    shutdown.send(()).expect("shut down OneDrive endpoint");
 }
 
 #[tokio::test]
@@ -257,6 +447,7 @@ async fn ambiguous_commit_endpoint(
             .body(Body::from(
                 serde_json::json!({
                     "id": "pre-existing-item",
+                    "eTag": "\"pre-existing-revision\"",
                     "name": encode_key("protocol/copy"),
                     "parentReference": { "id": "folder456" },
                     "file": {

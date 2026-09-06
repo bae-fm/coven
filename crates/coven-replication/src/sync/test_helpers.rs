@@ -5679,6 +5679,29 @@ where
         self.inner.create_protocol_object(prepared).await
     }
 
+    async fn create_versioned_protocol_record(
+        &self,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        prepared: &coven_protocol::objects::PreparedExactObject,
+        semantic_prefix: &str,
+        expected: &[u8],
+    ) -> Result<coven_storage::CloudObjectVersion, coven_protocol::objects::StorageError> {
+        self.inner
+            .create_versioned_protocol_record(context, prepared, semantic_prefix, expected)
+            .await
+    }
+
+    async fn delete_versioned_protocol_record(
+        &self,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        prepared: &coven_protocol::objects::PreparedExactObject,
+        semantic_prefix: &str,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
+        self.inner
+            .delete_versioned_protocol_record(context, prepared, semantic_prefix)
+            .await
+    }
+
     async fn read_protocol_object(
         &self,
         context: &coven_protocol::objects::ProtocolObjectContext,
@@ -5705,6 +5728,38 @@ where
             .await?;
         self.inner
             .read_protocol_object_with_progress(context, object, semantic_prefix, progress)
+            .await
+    }
+
+    async fn read_versioned_protocol_record(
+        &self,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        slot: &coven_protocol::objects::ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, coven_storage::CloudObjectVersion), coven_protocol::objects::StorageError>
+    {
+        self.interceptor
+            .before_provider_object_read(slot.logical_key())
+            .await?;
+        self.inner
+            .read_versioned_protocol_record(context, slot, semantic_prefix)
+            .await
+    }
+
+    async fn replace_protocol_record_if_version(
+        &self,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        slot: &coven_protocol::objects::ObjectSlot,
+        semantic_prefix: &str,
+        expected: &coven_storage::CloudObjectVersion,
+        data: Vec<u8>,
+    ) -> Result<coven_storage::cloud::ConditionalWriteOutcome, coven_protocol::objects::StorageError>
+    {
+        self.interceptor
+            .before_provider_object_write(slot.logical_key())
+            .await?;
+        self.inner
+            .replace_protocol_record_if_version(context, slot, semantic_prefix, expected, data)
             .await
     }
 

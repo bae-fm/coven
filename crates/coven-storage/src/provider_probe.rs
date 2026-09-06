@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use crate::cloud::{
-    CloudHomeError, ExactCloudHome, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
+    CloudHomeError, ConditionalWriteOutcome, ExactCloudHome, ExactCreateOutcome, ExactSlotStorage,
+    ExactUpload,
 };
 use coven_keys::keys::UserKeypair;
 use coven_protocol::objects::{ExactObjectRef, ObjectSlot, StorageError};
@@ -395,6 +396,7 @@ impl ProviderProbeStorage {
         }
         let id = hex::encode(probe_id.as_bytes());
         let logical_key = format!("__coven_probe__/exact/{id}");
+        let conditional_logical_key = format!("__coven_probe__/conditional/{id}");
         let lost_logical_key = format!("__coven_probe__/lost-response/{id}");
         let mut durable = match journal.load(probe_id).await? {
             Some(existing) => existing,
@@ -407,11 +409,16 @@ impl ProviderProbeStorage {
                     .allocate_slot(&lost_logical_key)
                     .await
                     .map_err(StorageError::from)?;
+                let allocated_conditional_slot = first
+                    .allocate_slot(&conditional_logical_key)
+                    .await
+                    .map_err(StorageError::from)?;
                 journal
                     .begin(ProviderProbeJournalRecord::Exact(ExactProbeJournal {
                         probe_id,
                         binding: binding.clone(),
                         slot: allocated_slot,
+                        conditional_slot: allocated_conditional_slot,
                         lost_response_slot: allocated_lost_slot,
                         progress: ExactProbeProgress::Prepared,
                     }))
@@ -425,8 +432,12 @@ impl ProviderProbeStorage {
             return invalid("durable exact probe differs from its requested binding or id");
         }
         let slot = record.slot.clone();
+        let conditional_slot = record.conditional_slot.clone();
         let lost_slot = record.lost_response_slot.clone();
-        if slot.logical_key() != logical_key || lost_slot.logical_key() != lost_logical_key {
+        if slot.logical_key() != logical_key
+            || conditional_slot.logical_key() != conditional_logical_key
+            || lost_slot.logical_key() != lost_logical_key
+        {
             return invalid("exact-slot allocator changed the probe logical key");
         }
         let payloads = [
@@ -509,15 +520,104 @@ impl ProviderProbeStorage {
         let accepted =
             ExactObjectRef::new(slot.clone(), full.len() as u64, ObjectHash::digest(&full));
         if matches!(record.progress, ExactProbeProgress::ReadsVerified { .. }) {
-            first
-                .delete_and_verify_absent(&slot)
+            let initial = probe_payload(&probe_id, ProbePayloadLabel::ConditionalInitial);
+            let conditional_payloads = [
+                probe_payload(&probe_id, ProbePayloadLabel::ConditionalFirst),
+                probe_payload(&probe_id, ProbePayloadLabel::ConditionalSecond),
+            ];
+            let mut current = match first.read_versioned_at(&conditional_slot).await {
+                Ok(current) => current,
+                Err(CloudHomeError::NotFound(_)) => {
+                    create_versioned_bytes(first, &conditional_slot, &initial).await?;
+                    first
+                        .read_versioned_at(&conditional_slot)
+                        .await
+                        .map_err(StorageError::from)?
+                }
+                Err(error) => return Err(ProviderProbeError::Storage(StorageError::from(error))),
+            };
+            if current.bytes != initial
+                && current.bytes != conditional_payloads[0]
+                && current.bytes != conditional_payloads[1]
+            {
+                return invalid("conditional-update probe slot contains unknown bytes");
+            }
+            let starting_payload_hash = ObjectHash::digest(&current.bytes);
+            let expected = current.version.clone();
+            let (left, right) = tokio::join!(
+                first.replace_at_if_version(
+                    &conditional_slot,
+                    &expected,
+                    conditional_payloads[0].clone(),
+                ),
+                second.replace_at_if_version(
+                    &conditional_slot,
+                    &expected,
+                    conditional_payloads[1].clone(),
+                ),
+            );
+            let (conditional_outcomes, conditional_winner) =
+                classify_conditional_update_race(left, right)?;
+            current = first
+                .read_versioned_at(&conditional_slot)
                 .await
                 .map_err(StorageError::from)?;
+            if current.bytes != conditional_payloads[conditional_winner] {
+                return invalid("conditional-update readback does not match its winning write");
+            }
+            let conditional = ConditionalUpdateProbeReceipt {
+                logical_key: conditional_logical_key.clone(),
+                slot: conditional_slot.clone(),
+                starting_payload_hash,
+                contenders: [
+                    ProbeConditionalAttempt {
+                        payload_hash: ObjectHash::digest(&conditional_payloads[0]),
+                        outcome: conditional_outcomes[0],
+                    },
+                    ProbeConditionalAttempt {
+                        payload_hash: ObjectHash::digest(&conditional_payloads[1]),
+                        outcome: conditional_outcomes[1],
+                    },
+                ],
+                accepted_payload_hash: ObjectHash::digest(&current.bytes),
+            };
             advance_exact(
                 journal,
                 &mut durable,
                 &mut record,
-                ExactProbeProgress::PrimaryAbsent { outcomes },
+                ExactProbeProgress::ConditionalVerified {
+                    outcomes,
+                    conditional,
+                },
+            )
+            .await?;
+        }
+        let conditional = exact_conditional_evidence(&record.progress)?.clone();
+        if matches!(
+            record.progress,
+            ExactProbeProgress::ConditionalVerified { .. }
+        ) {
+            first
+                .delete_and_verify_absent(&slot)
+                .await
+                .map_err(StorageError::from)?;
+            first
+                .delete_versioned_at(&conditional_slot)
+                .await
+                .map_err(StorageError::from)?;
+            match first.read_versioned_at(&conditional_slot).await {
+                Err(CloudHomeError::NotFound(_)) => {}
+                Ok(_) => return invalid("conditional-update probe record remains after deletion"),
+                Err(error) => return Err(ProviderProbeError::Storage(StorageError::from(error))),
+            }
+            advance_exact(
+                journal,
+                &mut durable,
+                &mut record,
+                ExactProbeProgress::PrimaryAbsent {
+                    outcomes,
+                    conditional: conditional.clone(),
+                },
             )
             .await?;
         }
@@ -537,7 +637,10 @@ impl ProviderProbeStorage {
                 journal,
                 &mut durable,
                 &mut record,
-                ExactProbeProgress::LostResponseCreated { outcomes },
+                ExactProbeProgress::LostResponseCreated {
+                    outcomes,
+                    conditional: conditional.clone(),
+                },
             )
             .await?;
         }
@@ -571,7 +674,10 @@ impl ProviderProbeStorage {
                 journal,
                 &mut durable,
                 &mut record,
-                ExactProbeProgress::LostResponseReadVerified { outcomes },
+                ExactProbeProgress::LostResponseReadVerified {
+                    outcomes,
+                    conditional: conditional.clone(),
+                },
             )
             .await?;
         }
@@ -587,7 +693,10 @@ impl ProviderProbeStorage {
                 journal,
                 &mut durable,
                 &mut record,
-                ExactProbeProgress::Absent { outcomes },
+                ExactProbeProgress::Absent {
+                    outcomes,
+                    conditional: conditional.clone(),
+                },
             )
             .await?;
         }
@@ -617,6 +726,7 @@ impl ProviderProbeStorage {
                 end: PROBE_RANGE_END,
                 bytes_hash: ObjectHash::digest(&range),
             },
+            conditional,
             lost_response: LostResponseProbeReceipt {
                 logical_key: lost_logical_key,
                 slot: lost_slot,
@@ -668,10 +778,11 @@ fn exact_race_state(
         ExactProbeProgress::Prepared => return invalid("exact probe has no durable create result"),
         ExactProbeProgress::Created { outcomes }
         | ExactProbeProgress::ReadsVerified { outcomes }
-        | ExactProbeProgress::PrimaryAbsent { outcomes }
-        | ExactProbeProgress::LostResponseCreated { outcomes }
-        | ExactProbeProgress::LostResponseReadVerified { outcomes }
-        | ExactProbeProgress::Absent { outcomes } => {
+        | ExactProbeProgress::ConditionalVerified { outcomes, .. }
+        | ExactProbeProgress::PrimaryAbsent { outcomes, .. }
+        | ExactProbeProgress::LostResponseCreated { outcomes, .. }
+        | ExactProbeProgress::LostResponseReadVerified { outcomes, .. }
+        | ExactProbeProgress::Absent { outcomes, .. } => {
             let winner = outcomes
                 .iter()
                 .position(|outcome| *outcome == ProbeCreateOutcome::Created)
@@ -706,6 +817,55 @@ fn exact_race_state(
         return invalid("durable exact probe has an invalid winner");
     }
     Ok((outcomes, winner))
+}
+
+fn exact_conditional_evidence(
+    progress: &ExactProbeProgress,
+) -> Result<&ConditionalUpdateProbeReceipt, ProviderProbeError> {
+    match progress {
+        ExactProbeProgress::ConditionalVerified { conditional, .. }
+        | ExactProbeProgress::PrimaryAbsent { conditional, .. }
+        | ExactProbeProgress::LostResponseCreated { conditional, .. }
+        | ExactProbeProgress::LostResponseReadVerified { conditional, .. }
+        | ExactProbeProgress::Absent { conditional, .. } => Ok(conditional),
+        ExactProbeProgress::ReceiptReady { receipt } => Ok(&receipt.transcript.conditional),
+        ExactProbeProgress::Prepared
+        | ExactProbeProgress::Created { .. }
+        | ExactProbeProgress::ReadsVerified { .. } => {
+            invalid("exact probe has no conditional-update evidence")
+        }
+    }
+}
+
+fn classify_conditional_update_race(
+    left: Result<ConditionalWriteOutcome, CloudHomeError>,
+    right: Result<ConditionalWriteOutcome, CloudHomeError>,
+) -> Result<([ProbeConditionalOutcome; 2], usize), ProviderProbeError> {
+    match (left, right) {
+        (
+            Ok(ConditionalWriteOutcome::Replaced(_)),
+            Ok(ConditionalWriteOutcome::VersionChanged),
+        ) => Ok((
+            [
+                ProbeConditionalOutcome::Replaced,
+                ProbeConditionalOutcome::RejectedRevision,
+            ],
+            0,
+        )),
+        (
+            Ok(ConditionalWriteOutcome::VersionChanged),
+            Ok(ConditionalWriteOutcome::Replaced(_)),
+        ) => Ok((
+            [
+                ProbeConditionalOutcome::RejectedRevision,
+                ProbeConditionalOutcome::Replaced,
+            ],
+            1,
+        )),
+        (left, right) => invalid(&format!(
+            "conditional-update race did not produce one replacement and one revision rejection: left={left:?}, right={right:?}"
+        )),
+    }
 }
 
 fn classify_exact_create_race(
@@ -766,4 +926,22 @@ async fn create_exact_bytes(
             &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
         )
         .await
+}
+
+async fn create_versioned_bytes(
+    storage: &dyn ExactSlotStorage,
+    slot: &ObjectSlot,
+    bytes: &[u8],
+) -> Result<(), ProviderProbeError> {
+    let object = ExactObjectRef::new(slot.clone(), bytes.len() as u64, ObjectHash::digest(bytes));
+    let upload = ExactUpload::from_bytes(&object, bytes)?;
+    storage
+        .create_versioned_at(
+            &upload,
+            &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
+        )
+        .await
+        .map(drop)
+        .map_err(StorageError::from)
+        .map_err(ProviderProbeError::Storage)
 }

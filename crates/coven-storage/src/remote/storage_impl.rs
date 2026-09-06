@@ -444,6 +444,79 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             .map_err(Into::into)
     }
 
+    async fn create_versioned_protocol_record(
+        &self,
+        context: &ProtocolObjectContext,
+        prepared: &PreparedExactObject,
+        semantic_prefix: &str,
+        expected: &[u8],
+    ) -> Result<crate::cloud::CloudObjectVersion, StorageError> {
+        self.verify_prepared_protocol_object(context, prepared, semantic_prefix, expected)
+            .await?;
+        let upload =
+            crate::cloud::ExactUpload::from_bytes(prepared.reference(), prepared.stored_bytes())?;
+        self.home
+            .create_versioned_at(
+                &upload,
+                &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
+            )
+            .await?;
+        let versioned = self
+            .home
+            .read_versioned_at(prepared.reference().slot())
+            .await?;
+        prepared.reference().verify(&versioned.bytes)?;
+        let aad = protocol_object_aad_context(context, semantic_prefix);
+        let opened = self
+            .verify_and_open_protocol_data(
+                "verify and open created versioned protocol record",
+                context,
+                prepared.reference().clone(),
+                versioned.bytes,
+                aad,
+            )
+            .await?;
+        if opened != expected {
+            return Err(StorageError::PreparedObjectMismatch(
+                prepared.reference().slot().logical_key().to_string(),
+            ));
+        }
+        Ok(versioned.version)
+    }
+
+    async fn delete_versioned_protocol_record(
+        &self,
+        context: &ProtocolObjectContext,
+        prepared: &PreparedExactObject,
+        semantic_prefix: &str,
+    ) -> Result<(), StorageError> {
+        context.validate_reference(prepared.reference(), semantic_prefix)?;
+        match self
+            .home
+            .read_versioned_at(prepared.reference().slot())
+            .await
+        {
+            Ok(versioned) => prepared.reference().verify(&versioned.bytes)?,
+            Err(crate::cloud::CloudHomeError::NotFound(_)) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        self.home
+            .delete_versioned_at(prepared.reference().slot())
+            .await?;
+        match self
+            .home
+            .read_versioned_at(prepared.reference().slot())
+            .await
+        {
+            Err(crate::cloud::CloudHomeError::NotFound(_)) => Ok(()),
+            Ok(_) => Err(StorageError::InvalidContent(format!(
+                "versioned protocol record {} remains after deletion",
+                prepared.reference().slot().logical_key()
+            ))),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn read_protocol_object(
         &self,
         context: &ProtocolObjectContext,
@@ -490,6 +563,49 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             aad,
         )
         .await
+    }
+
+    async fn read_versioned_protocol_record(
+        &self,
+        context: &ProtocolObjectContext,
+        slot: &ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, crate::cloud::CloudObjectVersion), StorageError> {
+        context.validate_slot(slot, semantic_prefix)?;
+        let versioned = self.home.read_versioned_at(slot).await?;
+        let aad = protocol_object_aad_context(context, semantic_prefix);
+        let object = ExactObjectRef::new(
+            slot.clone(),
+            versioned.bytes.len() as u64,
+            coven_protocol::store_commit::ObjectHash::digest(&versioned.bytes),
+        );
+        let opened = self
+            .verify_and_open_protocol_data(
+                "verify and open versioned protocol record",
+                context,
+                object,
+                versioned.bytes,
+                aad,
+            )
+            .await?;
+        Ok((opened, versioned.version))
+    }
+
+    async fn replace_protocol_record_if_version(
+        &self,
+        context: &ProtocolObjectContext,
+        slot: &ObjectSlot,
+        semantic_prefix: &str,
+        expected: &crate::cloud::CloudObjectVersion,
+        data: Vec<u8>,
+    ) -> Result<crate::cloud::ConditionalWriteOutcome, StorageError> {
+        context.validate_slot(slot, semantic_prefix)?;
+        let aad = protocol_object_aad_context(context, semantic_prefix);
+        let stored = self.seal_protocol_data(context, data, &aad)?;
+        self.home
+            .replace_at_if_version(slot, expected, stored)
+            .await
+            .map_err(Into::into)
     }
 
     async fn list_protocol_slots(

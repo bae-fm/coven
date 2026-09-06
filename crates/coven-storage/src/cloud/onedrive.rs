@@ -17,7 +17,8 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::{
     combine_cleanup_failure, sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome,
+    CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject,
+    ConditionalWriteOutcome, ExactSlotStorage, RevokeOutcome,
 };
 use crate::oauth::OAuthConfig;
 use coven_protocol::objects::ObjectSlot;
@@ -29,6 +30,7 @@ mod content_hash;
 struct OneDriveExactMetadata {
     size: u64,
     sha1_hash: String,
+    version: CloudObjectVersion,
 }
 
 const GRAPH_API: &str = "https://graph.microsoft.com/v1.0";
@@ -176,6 +178,55 @@ impl OneDriveCloudHome {
         Ok(())
     }
 
+    async fn commit_deferred_replacement(
+        &self,
+        slot: &ObjectSlot,
+        upload_url: &str,
+        expected: &CloudObjectVersion,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError> {
+        let key = slot.logical_key();
+        let body = serde_json::json!({
+            "name": encode_key(key),
+            "@microsoft.graph.conflictBehavior": "replace",
+            "@microsoft.graph.sourceUrl": upload_url,
+        });
+        let response = self
+            .session
+            .api_call_no_transient_retry(|oauth| {
+                oauth
+                    .put(self.item_path_url(key))
+                    .header(reqwest::header::IF_MATCH, expected.as_provider())
+                    .json(&body)
+            })
+            .await?;
+        let status = response.status();
+        let response_body = http::body_text(response).await;
+        if status == reqwest::StatusCode::PRECONDITION_FAILED {
+            return Ok(ConditionalWriteOutcome::VersionChanged);
+        }
+        if !status.is_success() {
+            return Err(classify_write_error(status, &response_body, key));
+        }
+        let metadata: serde_json::Value =
+            serde_json::from_str(&response_body).map_err(|error| {
+                CloudHomeError::transport(
+                    format!("commit conditional OneDrive replacement {key}: parse response"),
+                    error,
+                )
+            })?;
+        let version = metadata["eTag"]
+            .as_str()
+            .filter(|etag| !etag.is_empty())
+            .ok_or_else(|| {
+                CloudHomeError::Transport(format!(
+                    "commit conditional OneDrive replacement {key}: response omitted eTag"
+                ))
+            })?;
+        Ok(ConditionalWriteOutcome::Replaced(
+            CloudObjectVersion::from_provider(version.to_string())?,
+        ))
+    }
+
     async fn exact_metadata(
         &self,
         slot: &ObjectSlot,
@@ -186,7 +237,7 @@ impl OneDriveCloudHome {
             .api_call(|oauth| {
                 oauth
                     .get(self.item_path_url(slot.logical_key()))
-                    .query(&[("$select", "id,name,parentReference,deleted,file,size")])
+                    .query(&[("$select", "id,name,parentReference,deleted,file,size,eTag")])
             })
             .await?;
         let response = ensure_ok(response, "verify exact OneDrive item", NotFound::Status).await?;
@@ -221,7 +272,20 @@ impl OneDriveCloudHome {
                 ))
             })?
             .to_string();
-        Ok(OneDriveExactMetadata { size, sha1_hash })
+        let version = metadata["eTag"]
+            .as_str()
+            .filter(|etag| !etag.is_empty())
+            .ok_or_else(|| {
+                CloudHomeError::Transport(format!(
+                    "exact OneDrive metadata for {} omitted eTag",
+                    slot.logical_key()
+                ))
+            })?;
+        Ok(OneDriveExactMetadata {
+            size,
+            sha1_hash,
+            version: CloudObjectVersion::from_provider(version.to_string())?,
+        })
     }
 
     async fn verify_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
@@ -744,6 +808,102 @@ impl ExactSlotStorage for OneDriveCloudHome {
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         self.verify_slot(slot).await?;
         OneDriveCloudHome::read(self, slot.logical_key()).await
+    }
+    async fn read_versioned_at(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<CloudVersionedObject, CloudHomeError> {
+        let before = self.exact_metadata(slot).await?;
+        let bytes = OneDriveCloudHome::read(self, slot.logical_key()).await?;
+        let after = self.exact_metadata(slot).await?;
+        if before.version != after.version {
+            return Err(CloudHomeError::Transport(format!(
+                "OneDrive item {} changed while its versioned body was read",
+                slot.logical_key()
+            )));
+        }
+        if bytes.len() as u64 != after.size
+            || !content_hash::sha1_bytes(&bytes).eq_ignore_ascii_case(&after.sha1_hash)
+        {
+            return Err(CloudHomeError::Transport(format!(
+                "OneDrive item {} body differs from its versioned metadata",
+                slot.logical_key()
+            )));
+        }
+        Ok(CloudVersionedObject {
+            bytes,
+            version: after.version,
+        })
+    }
+    async fn replace_at_if_version(
+        &self,
+        slot: &ObjectSlot,
+        expected: &CloudObjectVersion,
+        bytes: Vec<u8>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError> {
+        slot.require_logical_key_for("OneDrive")?;
+        let key = slot.logical_key();
+        let upload_url = self
+            .create_upload_session(key, "replace", UploadSessionCompletion::DeferredPersonal)
+            .await?;
+        let total = bytes.len() as u64;
+        let key_owned = key.to_string();
+        let classify =
+            Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned));
+        let mut uploader = self.session.range_put_uploader(
+            upload_url.clone(),
+            202,
+            total,
+            ONEDRIVE_CHUNK_SIZE,
+            key.to_string(),
+            classify,
+            onedrive_upload_cancellation_succeeded,
+        );
+        let control = super::UploadControl::running(super::no_progress());
+        let mut offset = 0_u64;
+        for part in bytes.chunks(uploader.part_size()) {
+            let length = part.len() as u64;
+            let completion = uploader
+                .send_deferred_part(
+                    Bytes::copy_from_slice(part),
+                    offset,
+                    offset + length == total,
+                    &control,
+                )
+                .await?;
+            offset += length;
+            if completion.is_some() {
+                let operation = CloudHomeError::Transport(format!(
+                    "conditional upload {key}: deferred upload published before explicit commit"
+                ));
+                let cleanup = self.delete_at_slot(slot).await;
+                return Err(combine_cleanup_failure(operation, cleanup));
+            }
+        }
+        if offset != total {
+            let operation = CloudHomeError::Transport(format!(
+                "conditional upload {key}: uploaded {offset} of {total} bytes"
+            ));
+            let cleanup = uploader.abort().await;
+            return Err(combine_cleanup_failure(operation, cleanup));
+        }
+        match self
+            .commit_deferred_replacement(slot, &upload_url, expected)
+            .await
+        {
+            Ok(ConditionalWriteOutcome::Replaced(version)) => {
+                uploader.mark_completed();
+                Ok(ConditionalWriteOutcome::Replaced(version))
+            }
+            Ok(ConditionalWriteOutcome::VersionChanged) => {
+                uploader.abort().await?;
+                Ok(ConditionalWriteOutcome::VersionChanged)
+            }
+            Err(operation) => {
+                let cleanup = uploader.abort().await;
+                Err(combine_cleanup_failure(operation, cleanup))
+            }
+        }
     }
     async fn read_range_at(
         &self,

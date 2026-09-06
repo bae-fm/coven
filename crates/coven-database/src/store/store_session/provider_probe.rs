@@ -135,6 +135,10 @@ mod tests {
             probe_id,
             binding,
             slot: ObjectSlot::logical("__coven_probe__/exact/journal".to_string()).unwrap(),
+            conditional_slot: ObjectSlot::logical(
+                "__coven_probe__/conditional/journal".to_string(),
+            )
+            .unwrap(),
             lost_response_slot: ObjectSlot::logical(
                 "__coven_probe__/lost-response/journal".to_string(),
             )

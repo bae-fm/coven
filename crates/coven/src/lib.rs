@@ -160,8 +160,9 @@ pub use coven_storage::{
     CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity, CloudKitRecordCreate,
     CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudKitShareAcceptance,
     CloudKitSharePermission, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
-    DownloadProgress, ExactCloudHome, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
-    ExactUploadSource, PartSink, S3CloudHome, UploadControl, UploadProgress,
+    ConditionalWriteOutcome, DownloadProgress, ExactCloudHome, ExactCreateOutcome,
+    ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink, S3CloudHome, UploadControl,
+    UploadProgress,
 };
 pub use device_pairing::{ApproveDevicePairingError, StartDevicePairingError};
 pub use handle::{CovenHandle, RetryBlockedOperationError};

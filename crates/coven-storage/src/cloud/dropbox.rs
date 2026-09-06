@@ -22,7 +22,8 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::{
     combine_cleanup_failure, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome,
-    CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome,
+    CloudHomeError, CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject,
+    ConditionalWriteOutcome, ExactSlotStorage, RevokeOutcome,
 };
 use crate::oauth::OAuthConfig;
 use coven_protocol::objects::ObjectSlot;
@@ -32,6 +33,7 @@ use tracing::warn;
 struct DropboxExactMetadata {
     size: u64,
     content_hash: String,
+    version: CloudObjectVersion,
 }
 
 const API_BASE: &str = "https://api.dropboxapi.com/2";
@@ -232,7 +234,7 @@ impl DropboxCloudHome {
     async fn send_exact_read(
         &self,
         slot: &ObjectSlot,
-    ) -> Result<reqwest::Response, CloudHomeError> {
+    ) -> Result<(reqwest::Response, DropboxExactMetadata), CloudHomeError> {
         slot.require_logical_key_for("Dropbox")?;
         let namespace_id = self.get_or_create_shared_folder_id().await?;
         let path_root = Self::path_root_header(&namespace_id);
@@ -271,8 +273,8 @@ impl DropboxCloudHome {
                 error,
             )
         })?;
-        self.exact_metadata_from_json(slot, &metadata)?;
-        Ok(response)
+        let metadata = self.exact_metadata_from_json(slot, &metadata)?;
+        Ok((response, metadata))
     }
 
     fn exact_metadata_from_json(
@@ -307,7 +309,20 @@ impl DropboxCloudHome {
                 ))
             })?
             .to_string();
-        Ok(DropboxExactMetadata { size, content_hash })
+        let version = metadata["rev"]
+            .as_str()
+            .filter(|revision| !revision.is_empty())
+            .ok_or_else(|| {
+                CloudHomeError::Transport(format!(
+                    "exact Dropbox metadata for {} omitted rev",
+                    slot.logical_key()
+                ))
+            })?;
+        Ok(DropboxExactMetadata {
+            size,
+            content_hash,
+            version: CloudObjectVersion::from_provider(version.to_string())?,
+        })
     }
 
     async fn exact_metadata(
@@ -1303,8 +1318,79 @@ impl ExactSlotStorage for DropboxCloudHome {
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
-        let response = self.send_exact_read(slot).await?;
+        let (response, _) = self.send_exact_read(slot).await?;
         http::ok_bytes(response, "read exact Dropbox body").await
+    }
+
+    async fn read_versioned_at(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<CloudVersionedObject, CloudHomeError> {
+        let (response, metadata) = self.send_exact_read(slot).await?;
+        let bytes = http::ok_bytes(response, "read versioned Dropbox body").await?;
+        Ok(CloudVersionedObject {
+            bytes,
+            version: metadata.version,
+        })
+    }
+
+    async fn replace_at_if_version(
+        &self,
+        slot: &ObjectSlot,
+        expected: &CloudObjectVersion,
+        bytes: Vec<u8>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError> {
+        slot.require_logical_key_for("Dropbox")?;
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
+        let api_arg = dropbox_api_arg(&serde_json::json!({
+            "path": Self::namespace_path(slot.logical_key()),
+            "mode": { ".tag": "update", "update": expected.as_provider() },
+            "autorename": false,
+            "strict_conflict": true,
+            "mute": true,
+        }));
+        let body = Bytes::from(bytes);
+        let response = self
+            .session
+            .api_call_no_transient_retry(|oauth| {
+                Self::scoped_request(
+                    oauth.post(format!("{}/files/upload", self.content_base)),
+                    &path_root,
+                )
+                .header("Dropbox-API-Arg", &api_arg)
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", body.len())
+                .body(body.clone())
+            })
+            .await?;
+        let status = response.status();
+        let response_body = http::body_text(response).await;
+        if status == StatusCode::CONFLICT
+            && parse_dropbox_error_summary(&response_body)
+                .is_some_and(|summary| summary.starts_with("path/conflict/file"))
+        {
+            return Ok(ConditionalWriteOutcome::VersionChanged);
+        }
+        if !status.is_success() {
+            return Err(classify_write_error(
+                status,
+                &response_body,
+                slot.logical_key(),
+            ));
+        }
+        let metadata: serde_json::Value =
+            serde_json::from_str(&response_body).map_err(|error| {
+                CloudHomeError::transport(
+                    format!(
+                        "parse conditional Dropbox response for {}",
+                        slot.logical_key()
+                    ),
+                    error,
+                )
+            })?;
+        let metadata = self.exact_metadata_from_json(slot, &metadata)?;
+        Ok(ConditionalWriteOutcome::Replaced(metadata.version))
     }
 
     async fn read_range_at(
@@ -1332,7 +1418,7 @@ impl ExactSlotStorage for DropboxCloudHome {
         destination: &std::path::Path,
         progress: super::DownloadProgress,
     ) -> Result<(), super::CloudFileReadError> {
-        let response = self.send_exact_read(slot).await?;
+        let (response, _) = self.send_exact_read(slot).await?;
         super::oauth_rest::response_to_file(
             response,
             destination,

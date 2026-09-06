@@ -278,6 +278,25 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         prepared: &PreparedExactObject,
     ) -> Result<(), StorageError>;
 
+    /// Create one bounded mutable protocol record at its permanent slot and
+    /// return the provider revision observed with the exact stored bytes.
+    async fn create_versioned_protocol_record(
+        &self,
+        context: &ProtocolObjectContext,
+        prepared: &PreparedExactObject,
+        semantic_prefix: &str,
+        expected: &[u8],
+    ) -> Result<crate::cloud::CloudObjectVersion, StorageError>;
+
+    /// Delete the exact direct record retained by an abandoned Store creation.
+    /// Active Store current records never use this operation.
+    async fn delete_versioned_protocol_record(
+        &self,
+        context: &ProtocolObjectContext,
+        prepared: &PreparedExactObject,
+        semantic_prefix: &str,
+    ) -> Result<(), StorageError>;
+
     /// Read and open one exact Store protocol object using the signed
     /// semantic prefix as encryption AAD.
     async fn read_protocol_object(
@@ -296,6 +315,26 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         semantic_prefix: &str,
         progress: crate::cloud::DownloadProgress,
     ) -> Result<Vec<u8>, StorageError>;
+
+    /// Read and open the mutable Store record at `slot`, retaining the opaque
+    /// provider revision required for its next conditional replacement.
+    async fn read_versioned_protocol_record(
+        &self,
+        context: &ProtocolObjectContext,
+        slot: &ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, crate::cloud::CloudObjectVersion), StorageError>;
+
+    /// Seal and replace the mutable Store record only if its provider revision
+    /// still equals `expected`.
+    async fn replace_protocol_record_if_version(
+        &self,
+        context: &ProtocolObjectContext,
+        slot: &ObjectSlot,
+        semantic_prefix: &str,
+        expected: &crate::cloud::CloudObjectVersion,
+        data: Vec<u8>,
+    ) -> Result<crate::cloud::ConditionalWriteOutcome, StorageError>;
 
     /// Name every slot under `listing_prefix` that holds a `context` object.
     ///

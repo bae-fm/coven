@@ -21,7 +21,8 @@ use super::oauth_session::OAuthSession;
 use super::resumable::RangePutSink;
 use super::{
     sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome,
-    CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome,
+    CloudHomeError, CloudHomeJoinInfo, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
+    RevokeOutcome, UploadControl,
 };
 use crate::oauth::OAuthConfig;
 use coven_foundation::id_provider::{IdRef, UuidProvider};

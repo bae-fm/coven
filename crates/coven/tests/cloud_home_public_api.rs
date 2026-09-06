@@ -5,9 +5,10 @@ use coven::{
     CloudFileReadError, CloudHome, CloudHomeError, CloudKitAcceptedShareRecord,
     CloudKitAtomicCreateBatch, CloudKitEnvironment, CloudKitOps, CloudKitProviderIdentity,
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudObjectStream,
-    CloudVersionedObject, CovenHandle, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
-    ObjectSlot, PhysicalObjectLocator, ProviderDeviceBinding, ProviderPrincipalId,
-    ResolvedProviderBinding, StoreProviderBinding, UploadControl,
+    CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome, CovenHandle,
+    ExactCreateOutcome, ExactSlotStorage, ExactUpload, ObjectSlot, PhysicalObjectLocator,
+    ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
+    UploadControl,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -134,6 +135,15 @@ impl CloudKitOps for ExternalCloudKitBridge {
         _: &CloudKitScope,
         _: &str,
     ) -> Result<CloudVersionedObject, CloudHomeError> {
+        unimplemented!()
+    }
+    fn replace_record_if_version(
+        &self,
+        _: &CloudKitScope,
+        _: &str,
+        _: &CloudObjectVersion,
+        _: Vec<u8>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError> {
         unimplemented!()
     }
 
@@ -316,6 +326,27 @@ impl ExactSlotStorage for ExternalProvider {
             &PhysicalObjectLocator::Opaque("provider:copy".to_string())
         );
         Ok(b"external provider bytes".to_vec())
+    }
+
+    async fn read_versioned_at(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<CloudVersionedObject, CloudHomeError> {
+        Ok(CloudVersionedObject {
+            bytes: self.read_at(slot).await?,
+            version: CloudObjectVersion::from_provider("external-revision".to_string())?,
+        })
+    }
+
+    async fn replace_at_if_version(
+        &self,
+        _slot: &ObjectSlot,
+        _expected: &CloudObjectVersion,
+        _bytes: Vec<u8>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError> {
+        Ok(ConditionalWriteOutcome::Replaced(
+            CloudObjectVersion::from_provider("external-next-revision".to_string())?,
+        ))
     }
 
     async fn read_range_at(

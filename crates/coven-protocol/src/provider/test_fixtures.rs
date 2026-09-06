@@ -42,6 +42,8 @@ pub fn test_exact_receipt() -> ExactSlotProbeReceipt {
         lost_payload.len() as u64,
         ObjectHash::digest(&lost_payload),
     );
+    let conditional_slot =
+        crate::objects::ObjectSlot::logical("store-v1/probes/conditional".to_string()).unwrap();
     let transcript = ExactSlotProbeTranscript {
         probe_id,
         logical_key: slot.logical_key().to_string(),
@@ -65,6 +67,7 @@ pub fn test_exact_receipt() -> ExactSlotProbeReceipt {
                 &first[PROBE_RANGE_START as usize..PROBE_RANGE_END as usize],
             ),
         },
+        conditional: test_conditional_receipt(probe_id, conditional_slot),
         lost_response: LostResponseProbeReceipt {
             logical_key: "store-v1/probes/lost".to_string(),
             slot: lost_slot,
@@ -78,4 +81,29 @@ pub fn test_exact_receipt() -> ExactSlotProbeReceipt {
         &test_store_binding(),
         &test_device_binding(),
     )
+}
+
+pub fn test_conditional_receipt(
+    probe_id: ProviderProbeId,
+    slot: crate::objects::ObjectSlot,
+) -> ConditionalUpdateProbeReceipt {
+    let initial = probe_payload(&probe_id, ProbePayloadLabel::ConditionalInitial);
+    let first = probe_payload(&probe_id, ProbePayloadLabel::ConditionalFirst);
+    let second = probe_payload(&probe_id, ProbePayloadLabel::ConditionalSecond);
+    ConditionalUpdateProbeReceipt {
+        logical_key: slot.logical_key().to_string(),
+        slot,
+        starting_payload_hash: ObjectHash::digest(&initial),
+        contenders: [
+            ProbeConditionalAttempt {
+                payload_hash: ObjectHash::digest(&first),
+                outcome: ProbeConditionalOutcome::Replaced,
+            },
+            ProbeConditionalAttempt {
+                payload_hash: ObjectHash::digest(&second),
+                outcome: ProbeConditionalOutcome::RejectedRevision,
+            },
+        ],
+        accepted_payload_hash: ObjectHash::digest(&first),
+    }
 }

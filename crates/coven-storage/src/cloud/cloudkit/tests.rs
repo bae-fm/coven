@@ -2,6 +2,7 @@ use super::chunking::*;
 use super::exact::*;
 use super::*;
 use crate::cloud::{no_progress, BlobBody};
+use crate::cloud::{ExactUpload, UploadControl};
 use coven_foundation::id_provider::SequentialIdProvider;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -334,6 +335,33 @@ impl CloudKitOps for MockCloudKitOps {
                     .to_string(),
             )?,
         })
+    }
+
+    fn replace_record_if_version(
+        &self,
+        scope: &CloudKitScope,
+        key: &str,
+        expected: &CloudObjectVersion,
+        data: Vec<u8>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError> {
+        let record = (scope.clone(), key.to_string());
+        let mut store = self.store.lock().unwrap();
+        let mut versions = self.versions.lock().unwrap();
+        let current = versions
+            .get(&record)
+            .copied()
+            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
+        if current.to_string() != expected.as_provider() {
+            return Ok(ConditionalWriteOutcome::VersionChanged);
+        }
+        let next = current
+            .checked_add(1)
+            .expect("mock CloudKit record version overflow");
+        store.insert(record.clone(), data);
+        versions.insert(record, next);
+        Ok(ConditionalWriteOutcome::Replaced(
+            CloudObjectVersion::from_provider(next.to_string())?,
+        ))
     }
 
     fn begin_atomic_create(
@@ -1448,6 +1476,44 @@ async fn exact_bounded_records_are_create_only() {
         .await
         .expect_err("an exact read must reject a replaced manifest");
     assert!(changed.to_string().contains("invalid manifest"));
+}
+
+#[tokio::test]
+async fn versioned_record_creation_and_replacement_operate_on_the_direct_body() {
+    let (home, _) = make_cloud_home_with_ops();
+    let slot = exact_slot("publication/current");
+    let object = coven_protocol::objects::ExactObjectRef::new(
+        slot.clone(),
+        5,
+        coven_protocol::store_commit::ObjectHash::digest(b"first"),
+    );
+    let upload = ExactUpload::from_bytes(&object, b"first").expect("build direct record upload");
+
+    ExactSlotStorage::create_versioned_at(&home, &upload, &UploadControl::running(no_progress()))
+        .await
+        .expect("create direct versioned record");
+    let first = ExactSlotStorage::read_versioned_at(&home, &slot)
+        .await
+        .expect("read initial direct record");
+    assert_eq!(first.bytes, b"first");
+
+    let replaced =
+        ExactSlotStorage::replace_at_if_version(&home, &slot, &first.version, b"second".to_vec())
+            .await
+            .expect("replace direct record");
+    assert!(matches!(replaced, ConditionalWriteOutcome::Replaced(_)));
+    let stale =
+        ExactSlotStorage::replace_at_if_version(&home, &slot, &first.version, b"third".to_vec())
+            .await
+            .expect("settle stale direct record revision");
+    assert_eq!(stale, ConditionalWriteOutcome::VersionChanged);
+    assert_eq!(
+        ExactSlotStorage::read_versioned_at(&home, &slot)
+            .await
+            .expect("read replaced direct record")
+            .bytes,
+        b"second"
+    );
 }
 
 #[tokio::test]

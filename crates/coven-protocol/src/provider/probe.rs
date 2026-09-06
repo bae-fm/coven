@@ -56,6 +56,9 @@ impl<'de> Deserialize<'de> for ProviderProbeId {
 pub enum ProbePayloadLabel {
     ExactCreateFirst,
     ExactCreateSecond,
+    ConditionalInitial,
+    ConditionalFirst,
+    ConditionalSecond,
     LostResponse,
     CrossAdministrator,
     CrossPeer,
@@ -66,6 +69,9 @@ impl ProbePayloadLabel {
         match self {
             Self::ExactCreateFirst => b"exact-create-first",
             Self::ExactCreateSecond => b"exact-create-second",
+            Self::ConditionalInitial => b"conditional-initial",
+            Self::ConditionalFirst => b"conditional-first",
+            Self::ConditionalSecond => b"conditional-second",
             Self::LostResponse => b"lost-response",
             Self::CrossAdministrator => b"cross-administrator",
             Self::CrossPeer => b"cross-peer",
@@ -165,6 +171,7 @@ impl ExactSlotProbeReceipt {
         {
             return invalid("exact-slot read, range, reference, or deletion evidence is invalid");
         }
+        t.conditional.verify(&t.probe_id)?;
         let lost = probe_payload(&t.probe_id, ProbePayloadLabel::LostResponse);
         let lost_hash = ObjectHash::digest(&lost);
         if t.lost_response.logical_key != t.lost_response.slot.logical_key()
@@ -190,7 +197,78 @@ pub struct ExactSlotProbeTranscript {
     pub accepted: ExactObjectRef,
     pub full_read_hash: ObjectHash,
     pub range: ProbeRangeReceipt,
+    pub conditional: ConditionalUpdateProbeReceipt,
     pub lost_response: LostResponseProbeReceipt,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConditionalUpdateProbeReceipt {
+    pub logical_key: String,
+    pub slot: ObjectSlot,
+    pub starting_payload_hash: ObjectHash,
+    pub contenders: [ProbeConditionalAttempt; 2],
+    pub accepted_payload_hash: ObjectHash,
+}
+
+impl ConditionalUpdateProbeReceipt {
+    fn verify(&self, probe_id: &ProviderProbeId) -> Result<(), ProviderProbeError> {
+        if self.logical_key != self.slot.logical_key() {
+            return invalid("conditional-update transcript disagrees with its allocated slot");
+        }
+        let initial = probe_payload(probe_id, ProbePayloadLabel::ConditionalInitial);
+        let payloads = [
+            probe_payload(probe_id, ProbePayloadLabel::ConditionalFirst),
+            probe_payload(probe_id, ProbePayloadLabel::ConditionalSecond),
+        ];
+        let allowed_starting_hashes = [
+            ObjectHash::digest(&initial),
+            ObjectHash::digest(&payloads[0]),
+            ObjectHash::digest(&payloads[1]),
+        ];
+        if !allowed_starting_hashes.contains(&self.starting_payload_hash)
+            || self.contenders[0].payload_hash != ObjectHash::digest(&payloads[0])
+            || self.contenders[1].payload_hash != ObjectHash::digest(&payloads[1])
+        {
+            return invalid("conditional-update payload hashes are not deterministic");
+        }
+        let winners = self
+            .contenders
+            .iter()
+            .enumerate()
+            .filter_map(|(index, attempt)| {
+                (attempt.outcome == ProbeConditionalOutcome::Replaced).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let rejected = self
+            .contenders
+            .iter()
+            .filter(|attempt| attempt.outcome == ProbeConditionalOutcome::RejectedRevision)
+            .count();
+        if winners.len() != 1
+            || rejected != 1
+            || self.accepted_payload_hash != ObjectHash::digest(&payloads[winners[0]])
+        {
+            return invalid(
+                "conditional-update race must contain one replacement and one revision rejection",
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeConditionalAttempt {
+    pub payload_hash: ObjectHash,
+    pub outcome: ProbeConditionalOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeConditionalOutcome {
+    Replaced,
+    RejectedRevision,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,6 +355,7 @@ impl ProviderProbeJournalRecord {
                 if previous.probe_id != next.probe_id
                     || previous.binding != next.binding
                     || previous.slot != next.slot
+                    || previous.conditional_slot != next.conditional_slot
                     || previous.lost_response_slot != next.lost_response_slot
                 {
                     return Err(ProviderProbeJournalError::ImmutableFactsChanged);
@@ -328,6 +407,7 @@ pub struct ExactProbeJournal {
     pub probe_id: ProviderProbeId,
     pub binding: crate::objects::ResolvedProviderBinding,
     pub slot: ObjectSlot,
+    pub conditional_slot: ObjectSlot,
     pub lost_response_slot: ObjectSlot,
     pub progress: ExactProbeProgress,
 }
@@ -336,13 +416,35 @@ pub struct ExactProbeJournal {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExactProbeProgress {
     Prepared,
-    Created { outcomes: [ProbeCreateOutcome; 2] },
-    ReadsVerified { outcomes: [ProbeCreateOutcome; 2] },
-    PrimaryAbsent { outcomes: [ProbeCreateOutcome; 2] },
-    LostResponseCreated { outcomes: [ProbeCreateOutcome; 2] },
-    LostResponseReadVerified { outcomes: [ProbeCreateOutcome; 2] },
-    Absent { outcomes: [ProbeCreateOutcome; 2] },
-    ReceiptReady { receipt: ExactSlotProbeReceipt },
+    Created {
+        outcomes: [ProbeCreateOutcome; 2],
+    },
+    ReadsVerified {
+        outcomes: [ProbeCreateOutcome; 2],
+    },
+    ConditionalVerified {
+        outcomes: [ProbeCreateOutcome; 2],
+        conditional: ConditionalUpdateProbeReceipt,
+    },
+    PrimaryAbsent {
+        outcomes: [ProbeCreateOutcome; 2],
+        conditional: ConditionalUpdateProbeReceipt,
+    },
+    LostResponseCreated {
+        outcomes: [ProbeCreateOutcome; 2],
+        conditional: ConditionalUpdateProbeReceipt,
+    },
+    LostResponseReadVerified {
+        outcomes: [ProbeCreateOutcome; 2],
+        conditional: ConditionalUpdateProbeReceipt,
+    },
+    Absent {
+        outcomes: [ProbeCreateOutcome; 2],
+        conditional: ConditionalUpdateProbeReceipt,
+    },
+    ReceiptReady {
+        receipt: ExactSlotProbeReceipt,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,30 +485,65 @@ pub(super) fn validate_exact_progress_transition(
         (
             ExactProbeProgress::Created { outcomes: previous },
             ExactProbeProgress::ReadsVerified { outcomes: next },
-        )
-        | (
-            ExactProbeProgress::ReadsVerified { outcomes: previous },
-            ExactProbeProgress::PrimaryAbsent { outcomes: next },
-        )
-        | (
-            ExactProbeProgress::PrimaryAbsent { outcomes: previous },
-            ExactProbeProgress::LostResponseCreated { outcomes: next },
-        )
-        | (
-            ExactProbeProgress::LostResponseCreated { outcomes: previous },
-            ExactProbeProgress::LostResponseReadVerified { outcomes: next },
-        )
-        | (
-            ExactProbeProgress::LostResponseReadVerified { outcomes: previous },
-            ExactProbeProgress::Absent { outcomes: next },
         ) => previous == next,
-        (ExactProbeProgress::Absent { outcomes }, ExactProbeProgress::ReceiptReady { receipt }) => {
+        (
+            ExactProbeProgress::ReadsVerified { outcomes: previous },
+            ExactProbeProgress::ConditionalVerified { outcomes: next, .. },
+        ) => previous == next,
+        (
+            ExactProbeProgress::ConditionalVerified {
+                outcomes: previous_outcomes,
+                conditional: previous_conditional,
+            },
+            ExactProbeProgress::PrimaryAbsent {
+                outcomes: next_outcomes,
+                conditional: next_conditional,
+            },
+        )
+        | (
+            ExactProbeProgress::PrimaryAbsent {
+                outcomes: previous_outcomes,
+                conditional: previous_conditional,
+            },
+            ExactProbeProgress::LostResponseCreated {
+                outcomes: next_outcomes,
+                conditional: next_conditional,
+            },
+        )
+        | (
+            ExactProbeProgress::LostResponseCreated {
+                outcomes: previous_outcomes,
+                conditional: previous_conditional,
+            },
+            ExactProbeProgress::LostResponseReadVerified {
+                outcomes: next_outcomes,
+                conditional: next_conditional,
+            },
+        )
+        | (
+            ExactProbeProgress::LostResponseReadVerified {
+                outcomes: previous_outcomes,
+                conditional: previous_conditional,
+            },
+            ExactProbeProgress::Absent {
+                outcomes: next_outcomes,
+                conditional: next_conditional,
+            },
+        ) => previous_outcomes == next_outcomes && previous_conditional == next_conditional,
+        (
+            ExactProbeProgress::Absent {
+                outcomes,
+                conditional,
+            },
+            ExactProbeProgress::ReceiptReady { receipt },
+        ) => {
             receipt
                 .transcript
                 .contenders
                 .iter()
                 .map(|attempt| attempt.outcome)
                 .eq(outcomes.iter().copied())
+                && receipt.transcript.conditional == *conditional
         }
         _ => return Err(ProviderProbeJournalError::NonAdjacentProgress),
     };

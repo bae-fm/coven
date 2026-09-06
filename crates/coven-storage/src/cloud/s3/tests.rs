@@ -1,7 +1,7 @@
 use super::*;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::header::{CONTENT_LENGTH, CONTENT_RANGE, IF_NONE_MATCH, RANGE};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_MATCH, IF_NONE_MATCH, RANGE};
 use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
 use axum::Router;
 use bytes::Bytes;
@@ -9,6 +9,7 @@ use futures_util::StreamExt as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::cloud::ConditionalWriteOutcome;
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::config::ExactUploadVerification;
 
@@ -159,6 +160,105 @@ async fn spawn_fake_s3(app: Router) -> (String, tokio::sync::oneshot::Sender<()>
         app.layer(axum::extract::DefaultBodyLimit::disable()),
     )
     .await
+}
+
+#[derive(Clone)]
+struct ConditionalObjectState {
+    bucket: String,
+    bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    etag: Arc<std::sync::Mutex<String>>,
+}
+
+async fn conditional_object_endpoint(
+    State(state): State<ConditionalObjectState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let expected_path = format!("/{}/protocol/current.json", state.bucket);
+    if uri.path() != expected_path {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::empty())
+            .expect("build missing response");
+    }
+    if method == Method::GET {
+        let bytes = state.bytes.lock().expect("lock conditional bytes").clone();
+        let etag = state.etag.lock().expect("lock conditional etag").clone();
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_LENGTH, bytes.len().to_string())
+            .header(ETAG, etag)
+            .body(Body::from(bytes))
+            .expect("build versioned read response");
+    }
+    if method == Method::PUT {
+        let supplied = headers.get(IF_MATCH).and_then(|value| value.to_str().ok());
+        let mut etag = state.etag.lock().expect("lock conditional etag");
+        if supplied != Some(etag.as_str()) {
+            return Response::builder()
+                .status(StatusCode::PRECONDITION_FAILED)
+                .header("content-type", "application/xml")
+                .body(Body::from(
+                    "<Error><Code>PreconditionFailed</Code><Message>revision changed</Message></Error>",
+                ))
+                .expect("build stale revision response");
+        }
+        *state.bytes.lock().expect("lock conditional bytes") = body.to_vec();
+        *etag = format!("\"revision-{}\"", body.len());
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(ETAG, etag.as_str())
+            .body(Body::empty())
+            .expect("build replacement response");
+    }
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .body(Body::empty())
+        .expect("build method response")
+}
+
+#[tokio::test]
+async fn conditional_replacement_uses_the_etag_from_the_exact_read() {
+    let bucket = "conditional-bucket".to_string();
+    let state = ConditionalObjectState {
+        bucket: bucket.clone(),
+        bytes: Arc::new(std::sync::Mutex::new(b"first".to_vec())),
+        etag: Arc::new(std::sync::Mutex::new("\"revision-1\"".to_string())),
+    };
+    let (endpoint, shutdown) = spawn_fake_s3(
+        Router::new()
+            .fallback(conditional_object_endpoint)
+            .with_state(state),
+    )
+    .await;
+    let home = standard_test_home(bucket, endpoint).await;
+    let slot = ObjectSlot::logical("protocol/current.json".to_string()).expect("logical slot");
+    let observed = home
+        .read_versioned_at(&slot)
+        .await
+        .expect("read versioned object");
+    assert_eq!(observed.bytes, b"first");
+
+    let replacement = home
+        .replace_at_if_version(&slot, &observed.version, b"second".to_vec())
+        .await
+        .expect("replace current revision");
+    assert!(matches!(replacement, ConditionalWriteOutcome::Replaced(_)));
+    let stale = home
+        .replace_at_if_version(&slot, &observed.version, b"third".to_vec())
+        .await
+        .expect("settle stale revision");
+    assert_eq!(stale, ConditionalWriteOutcome::VersionChanged);
+    assert_eq!(
+        home.read_versioned_at(&slot)
+            .await
+            .expect("read replacement")
+            .bytes,
+        b"second"
+    );
+    shutdown.send(()).expect("shut down conditional S3");
 }
 
 #[derive(Clone)]

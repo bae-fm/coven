@@ -2734,6 +2734,24 @@ impl ExactSlotStorage for GateCloudHome {
         ExactSlotStorage::read_at(&self.inner, slot).await
     }
 
+    async fn read_versioned_at(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<coven_storage::CloudVersionedObject, CloudHomeError> {
+        self.gate().await;
+        ExactSlotStorage::read_versioned_at(&self.inner, slot).await
+    }
+
+    async fn replace_at_if_version(
+        &self,
+        slot: &ObjectSlot,
+        expected: &coven_storage::CloudObjectVersion,
+        bytes: Vec<u8>,
+    ) -> Result<coven_storage::cloud::ConditionalWriteOutcome, CloudHomeError> {
+        self.gate().await;
+        ExactSlotStorage::replace_at_if_version(&self.inner, slot, expected, bytes).await
+    }
+
     async fn read_range_at(
         &self,
         slot: &ObjectSlot,

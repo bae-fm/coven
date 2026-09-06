@@ -539,6 +539,17 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
         })
         .await
     }
+
+    async fn create_versioned_at(
+        &self,
+        _upload: &ExactUpload<'_>,
+        _control: &UploadControl,
+    ) -> Result<ExactCreateOutcome, CloudHomeError> {
+        Err(CloudHomeError::Configuration(
+            "Google Drive v3 does not expose provider-enforced conditional file replacement"
+                .to_string(),
+        ))
+    }
     /// Drive mints its own file ids, so the listing reports the id it saw
     /// beside the name rather than deriving a locator from the key.
     async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
@@ -547,6 +558,25 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         GoogleDriveCloudHome::read_at_slot(self, slot).await
+    }
+    async fn read_versioned_at(
+        &self,
+        _slot: &ObjectSlot,
+    ) -> Result<crate::cloud::CloudVersionedObject, CloudHomeError> {
+        Err(CloudHomeError::Configuration(
+            "Google Drive v3 does not expose a conditional file-replacement revision".to_string(),
+        ))
+    }
+    async fn replace_at_if_version(
+        &self,
+        _slot: &ObjectSlot,
+        _expected: &crate::cloud::CloudObjectVersion,
+        _bytes: Vec<u8>,
+    ) -> Result<crate::cloud::ConditionalWriteOutcome, CloudHomeError> {
+        Err(CloudHomeError::Configuration(
+            "Google Drive v3 does not support provider-enforced conditional file replacement"
+                .to_string(),
+        ))
     }
     async fn read_range_at(
         &self,

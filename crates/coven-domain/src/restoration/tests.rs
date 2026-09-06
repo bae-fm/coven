@@ -37,7 +37,9 @@ use coven_storage::cloud::cloudkit::{
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
 };
 use coven_storage::cloud::{CloudHome, CloudHomeJoinInfo};
-use coven_storage::cloud::{CloudHomeError, CloudObjectVersion, CloudVersionedObject};
+use coven_storage::cloud::{
+    CloudHomeError, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
+};
 use coven_storage::CloudSyncObjectStorage;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
@@ -181,6 +183,33 @@ impl CloudKitOps for RestoreCloudKitOps {
             bytes,
             version: CloudObjectVersion::from_provider(version.to_string())?,
         })
+    }
+
+    fn replace_record_if_version(
+        &self,
+        scope: &CloudKitScope,
+        key: &str,
+        expected: &CloudObjectVersion,
+        data: Vec<u8>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError> {
+        let record = (scope.clone(), key.to_string());
+        let mut records = self.records.lock().unwrap();
+        let mut versions = self.versions.lock().unwrap();
+        let current = versions
+            .get(&record)
+            .copied()
+            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
+        if current.to_string() != expected.as_provider() {
+            return Ok(ConditionalWriteOutcome::VersionChanged);
+        }
+        let next = current
+            .checked_add(1)
+            .expect("restore record version overflow");
+        records.insert(record.clone(), data);
+        versions.insert(record, next);
+        Ok(ConditionalWriteOutcome::Replaced(
+            CloudObjectVersion::from_provider(next.to_string())?,
+        ))
     }
 
     fn begin_atomic_create(

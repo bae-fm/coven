@@ -1,7 +1,7 @@
 use super::*;
 use crate::cloud::{
-    create_exact_bytes, no_progress, BlobBody, CloudHomeJoinInfo, RevokeOutcome,
-    PROGRESS_CHUNK_SIZE,
+    create_exact_bytes, no_progress, BlobBody, CloudHomeJoinInfo, ConditionalWriteOutcome,
+    RevokeOutcome, PROGRESS_CHUNK_SIZE,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -177,6 +177,60 @@ async fn exact_create_never_overwrites() {
         Err(CloudHomeError::SlotCollision(_))
     ));
     assert_eq!(h.read_at(&slot).await.unwrap(), b"winner");
+}
+
+#[tokio::test]
+async fn conditional_replace_accepts_one_writer_from_a_shared_revision() {
+    let h = InMemoryCloudHome::new();
+    let slot = h
+        .allocate_slot("store-v1/test/current-publication.json")
+        .await
+        .unwrap();
+    create_exact_bytes(&h, &slot, b"initial", &no_progress())
+        .await
+        .unwrap();
+
+    let first_observation = h.read_versioned_at(&slot).await.unwrap();
+    let second_observation = h.read_versioned_at(&slot).await.unwrap();
+    assert_eq!(first_observation, second_observation);
+
+    assert!(matches!(
+        h.replace_at_if_version(&slot, &first_observation.version, b"first".to_vec())
+            .await
+            .unwrap(),
+        ConditionalWriteOutcome::Replaced(_)
+    ));
+    assert_eq!(
+        h.replace_at_if_version(&slot, &second_observation.version, b"second".to_vec())
+            .await
+            .unwrap(),
+        ConditionalWriteOutcome::VersionChanged
+    );
+    assert_eq!(h.read_at(&slot).await.unwrap(), b"first");
+}
+
+#[tokio::test]
+async fn lost_conditional_response_leaves_the_replacement_authoritative() {
+    let h = InMemoryCloudHome::new();
+    let slot = h
+        .allocate_slot("store-v1/test/current-publication.json")
+        .await
+        .unwrap();
+    create_exact_bytes(&h, &slot, b"initial", &no_progress())
+        .await
+        .unwrap();
+    let observed = h.read_versioned_at(&slot).await.unwrap();
+    h.lose_next_conditional_replace_response();
+
+    let error = h
+        .replace_at_if_version(&slot, &observed.version, b"accepted".to_vec())
+        .await
+        .expect_err("armed replacement loses its response");
+
+    assert!(error.is_retryable(), "{error}");
+    let settled = h.read_versioned_at(&slot).await.unwrap();
+    assert_eq!(settled.bytes, b"accepted");
+    assert_ne!(settled.version, observed.version);
 }
 
 #[tokio::test]

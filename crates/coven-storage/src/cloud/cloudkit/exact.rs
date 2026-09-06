@@ -448,6 +448,87 @@ impl ExactSlotStorage for CloudKitCloudHome {
         crate::cloud::logical_slots(CloudHome::list(self, prefix).await?)
     }
 
+    async fn create_versioned_at(
+        &self,
+        upload: &crate::cloud::ExactUpload<'_>,
+        control: &crate::cloud::UploadControl,
+    ) -> Result<crate::cloud::ExactCreateOutcome, CloudHomeError> {
+        let slot = upload.object().slot();
+        slot.require_logical_key_for("CloudKit")?;
+        let bytes = upload.body().await?.collect().await?;
+        if bytes.len() > CHUNK_SIZE {
+            return Err(CloudHomeError::Configuration(format!(
+                "CloudKit versioned record {:?} has {} bytes, above the {CHUNK_SIZE}-byte record bound",
+                slot.logical_key(),
+                bytes.len()
+            )));
+        }
+        let staging = self.begin_atomic_create().await?;
+        if let Err(error) = staging
+            .clone()
+            .stage_record(CloudKitRecordCreate {
+                key: slot.logical_key().to_string(),
+                data: bytes.clone(),
+            })
+            .await
+        {
+            return Err(staging.cleanup_failure(error));
+        }
+        let outcome = match staging.clone().commit().await {
+            Ok(created) if created.len() == 1 && created[0].key == slot.logical_key() => {
+                crate::cloud::ExactCreateOutcome::Created
+            }
+            Ok(_) => {
+                let observed = self.read_versioned_at(slot).await?;
+                if observed.bytes != bytes {
+                    return Err(CloudHomeError::SlotCollision(
+                        slot.logical_key().to_string(),
+                    ));
+                }
+                crate::cloud::ExactCreateOutcome::Created
+            }
+            Err(CloudHomeError::AlreadyExists(_)) => {
+                let collision = staging.cleanup_failure(CloudHomeError::AlreadyExists(
+                    slot.logical_key().to_string(),
+                ));
+                if !matches!(collision, CloudHomeError::AlreadyExists(_)) {
+                    return Err(collision);
+                }
+                let observed = self.read_versioned_at(slot).await?;
+                if observed.bytes != bytes {
+                    return Err(CloudHomeError::SlotCollision(
+                        slot.logical_key().to_string(),
+                    ));
+                }
+                crate::cloud::ExactCreateOutcome::AlreadyPresent
+            }
+            Err(operation) => match self.read_versioned_at(slot).await {
+                Ok(observed) if observed.bytes == bytes => {
+                    staging.disarm();
+                    crate::cloud::ExactCreateOutcome::AlreadyPresent
+                }
+                Ok(_) => {
+                    staging.disarm();
+                    return Err(CloudHomeError::SlotCollision(
+                        slot.logical_key().to_string(),
+                    ));
+                }
+                Err(CloudHomeError::NotFound(_)) => {
+                    return Err(staging.cleanup_failure(operation));
+                }
+                Err(settlement) => {
+                    staging.disarm();
+                    return Err(CloudHomeError::UnresolvedOutcome {
+                        operation: Box::new(operation),
+                        settlement: Box::new(settlement),
+                    });
+                }
+            },
+        };
+        control.report(bytes.len() as u64);
+        Ok(outcome)
+    }
+
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         slot.require_logical_key_for("CloudKit")?;
         let ops = self.ops.clone();
@@ -457,6 +538,54 @@ impl ExactSlotStorage for CloudKitCloudHome {
             read_exact_cloudkit_object(&*ops, &scope, &logical_key).map(|value| value.0)
         })
         .await
+    }
+
+    async fn read_versioned_at(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<crate::cloud::CloudVersionedObject, CloudHomeError> {
+        slot.require_logical_key_for("CloudKit")?;
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let logical_key = slot.logical_key().to_string();
+        blocking(move || ops.read_versioned_record(&scope, &logical_key)).await
+    }
+
+    async fn replace_at_if_version(
+        &self,
+        slot: &ObjectSlot,
+        expected: &crate::cloud::CloudObjectVersion,
+        bytes: Vec<u8>,
+    ) -> Result<crate::cloud::ConditionalWriteOutcome, CloudHomeError> {
+        slot.require_logical_key_for("CloudKit")?;
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let logical_key = slot.logical_key().to_string();
+        let expected = expected.clone();
+        cancellation_safe_blocking(move || {
+            ops.replace_record_if_version(&scope, &logical_key, &expected, bytes)
+        })
+        .await?
+    }
+
+    async fn delete_versioned_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        slot.require_logical_key_for("CloudKit")?;
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let logical_key = slot.logical_key().to_string();
+        cancellation_safe_blocking(move || {
+            match ops.delete_record(&scope, &logical_key) {
+                Ok(()) | Err(CloudHomeError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+            if ops.record_exists(&scope, &logical_key)? {
+                return Err(CloudHomeError::Transport(format!(
+                    "CloudKit versioned record {logical_key:?} remains after deletion"
+                )));
+            }
+            Ok(())
+        })
+        .await?
     }
 
     async fn read_range_at(

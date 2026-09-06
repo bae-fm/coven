@@ -21,3 +21,8 @@ pub(super) async fn sha1(upload: &ExactUpload<'_>) -> Result<String, CloudHomeEr
     }
     Ok(hex::encode(digest.finalize()))
 }
+
+pub(super) fn sha1_bytes(bytes: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    hex::encode(Sha1::digest(bytes))
+}
