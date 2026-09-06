@@ -10,6 +10,7 @@ use crate::{
     StoreDatabase,
 };
 use coven_protocol::store_commit::RetainedStoreDeviceRegistrationActivations;
+use coven_protocol::write::WriteStatus;
 
 pub(crate) struct RetainedReplayBaselineRow {
     pub(crate) generation: i64,
@@ -29,6 +30,7 @@ pub(crate) struct SnapshotRetentionRows {
 pub(super) struct PreparedRetainedReplayBaseline {
     baseline: crate::RetainedReplayBaseline,
     image_bytes: Vec<u8>,
+    local_blob_leases: BTreeSet<(String, String)>,
 }
 
 impl PreparedRetainedReplayBaseline {
@@ -49,6 +51,7 @@ impl PreparedRetainedReplayBaseline {
                 authority,
             },
             image_bytes,
+            local_blob_leases: BTreeSet::new(),
         }
     }
 
@@ -57,14 +60,38 @@ impl PreparedRetainedReplayBaseline {
     /// The installed-baseline check reads its image back out of the payload
     /// store, which a baseline that has not been written yet cannot do.
     pub(super) fn validate_image(
-        &self,
+        mut self,
         store_dir: &coven_foundation::store_dir::StoreDir,
-    ) -> Result<(), DbError> {
+        blob_decls: &crate::BlobDecls,
+    ) -> Result<Self, DbError> {
         let mut image = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
         crate::connection_io::deserialize_database_image_into(&mut image, &self.image_bytes)
             .map_err(|error| DbError::context("open advanced replay database image", error))?;
-        self.baseline.validate_open_image(&image, store_dir)
+        self.baseline.validate_open_image(&image, store_dir)?;
+        self.local_blob_leases = retained_replay_blob_leases(&image, blob_decls)?;
+        Ok(self)
     }
+}
+
+fn retained_replay_blob_leases(
+    image: &rusqlite::Connection,
+    blob_decls: &crate::BlobDecls,
+) -> Result<BTreeSet<(String, String)>, DbError> {
+    let mut leases = BTreeSet::new();
+    for publication in blob_decls
+        .publication_blobs_in_db(image)
+        .map_err(DbError::from)?
+    {
+        if publication.blob.provenance != coven_protocol::blob::Provenance::HostProvided
+            || !blob_decls
+                .local_copy_is_referenced(image, &publication.blob.namespace, &publication.blob.id)
+                .map_err(DbError::from)?
+        {
+            continue;
+        }
+        leases.insert((publication.blob.namespace, publication.blob.id));
+    }
+    Ok(leases)
 }
 
 impl StoreRecords<'_> {
@@ -233,13 +260,143 @@ impl StoreRecords<'_> {
         crate::store::store_device_state::load_store_device_snapshot_on(self.conn, reference)
     }
 
-    pub(crate) fn store_write_status_rows(self) -> Result<Vec<(String, String)>, DbError> {
-        Ok(crate::query_mapped_rows(
+    pub(crate) fn store_write_replay_rows(
+        self,
+    ) -> Result<Vec<crate::write_models::RetainedStoreWriteManifest>, DbError> {
+        #[derive(serde::Serialize)]
+        struct ManifestInput<'a> {
+            ordinal: i64,
+            write_id: &'a str,
+            status: &'a str,
+            affected_rows: &'a Option<String>,
+            changeset_hash: &'a Option<String>,
+            base: &'a Option<String>,
+            blob_facts: &'a Option<String>,
+            prepared: &'a Option<String>,
+            partitions: &'a [(String, Option<String>, String)],
+            packages: &'a [(String, String)],
+            blobs: &'a [(String, String, String, Option<String>)],
+            leases: &'a [(String, String)],
+        }
+
+        let writes = crate::query_mapped_rows(
             self.conn,
-            "SELECT write_id, status FROM store_writes ORDER BY ordinal",
+            "SELECT ordinal, write_id, status, affected_rows, changeset_hash,
+                    base, blob_facts, prepared
+             FROM store_writes
+             ORDER BY ordinal",
             [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?)
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
+        )?;
+        let mut manifests = Vec::new();
+        for (
+            ordinal,
+            write_id,
+            raw_status,
+            affected_rows,
+            changeset_hash,
+            base,
+            blob_facts,
+            prepared,
+        ) in writes
+        {
+            let partitions = crate::query_mapped_rows(
+                self.conn,
+                "SELECT audience, control_coord, changeset_hash
+                 FROM store_write_partitions WHERE write_id = ?1
+                 ORDER BY audience, control_coord",
+                [&write_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            let packages = crate::query_mapped_rows(
+                self.conn,
+                "SELECT audience, remote_object_id FROM store_write_packages
+                 WHERE write_id = ?1 ORDER BY audience, remote_object_id",
+                [&write_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let blobs = crate::query_mapped_rows(
+                self.conn,
+                "SELECT audience, locator_hash, remote_object_id, spool_path
+                 FROM store_write_blobs WHERE write_id = ?1
+                 ORDER BY audience, locator_hash, remote_object_id",
+                [&write_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            let leases = crate::query_mapped_rows(
+                self.conn,
+                "SELECT namespace, blob_id FROM store_write_blob_leases
+                 WHERE write_id = ?1 ORDER BY namespace, blob_id",
+                [&write_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
+                DbError::context(format!("Store write receipt {write_id} status"), error)
+            })?;
+            let manifest_input = ManifestInput {
+                ordinal,
+                write_id: &write_id,
+                status: &raw_status,
+                affected_rows: &affected_rows,
+                changeset_hash: &changeset_hash,
+                base: &base,
+                blob_facts: &blob_facts,
+                prepared: &prepared,
+                partitions: &partitions,
+                packages: &packages,
+                blobs: &blobs,
+                leases: &leases,
+            };
+            let input_hash = ObjectHash::digest(
+                &serde_json::to_vec(&manifest_input)
+                    .map_err(|error| DbError::context("Store write manifest", error))?,
+            );
+            match changeset_hash {
+                None => {
+                    if affected_rows.is_some()
+                        || base.is_some()
+                        || blob_facts.is_some()
+                        || prepared.is_some()
+                        || !partitions.is_empty()
+                        || !packages.is_empty()
+                        || !blobs.is_empty()
+                        || !leases.is_empty()
+                        || !matches!(status, WriteStatus::Published(_) | WriteStatus::Resolved(_))
+                    {
+                        return Err(DbError::Message(format!(
+                            "payload-free Store write {write_id} is not a complete receipt"
+                        )));
+                    }
+                }
+                Some(changeset_hash) => {
+                    manifests.push(crate::write_models::RetainedStoreWriteManifest {
+                        ordinal,
+                        write_id,
+                        status: raw_status,
+                        base: base.ok_or_else(|| {
+                            DbError::Message(
+                                "retained Store write has no observed frontier".to_string(),
+                            )
+                        })?,
+                        changeset_hash,
+                        prepared,
+                        input_hash,
+                    });
+                }
+            }
+        }
+        Ok(manifests)
     }
 
     pub(crate) fn merge_retraction_cleanup_objects(
@@ -335,6 +492,7 @@ impl StoreRecords<'_> {
         self,
         baseline: &crate::RetainedReplayBaseline,
         authority_hash: ObjectHash,
+        local_blob_leases: &BTreeSet<(String, String)>,
     ) -> Result<(), DbError> {
         self.conn
             .execute(
@@ -362,7 +520,27 @@ impl StoreRecords<'_> {
             self.conn,
             crate::payload_store::RETAINED_REPLAY_BASELINE_OWNER_KEY,
             &BTreeSet::from([baseline.image_payload_hash, authority_hash]),
-        )
+        )?;
+        self.replace_retained_replay_blob_leases(local_blob_leases)
+    }
+
+    fn replace_retained_replay_blob_leases(
+        self,
+        leases: &BTreeSet<(String, String)>,
+    ) -> Result<(), DbError> {
+        self.conn
+            .execute("DELETE FROM retained_replay_blob_leases", [])
+            .map_err(DbError::from)?;
+        for (namespace, blob_id) in leases {
+            self.conn
+                .execute(
+                    "INSERT INTO retained_replay_blob_leases (namespace, blob_id)
+                     VALUES (?1, ?2)",
+                    (namespace, blob_id),
+                )
+                .map_err(DbError::from)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn replace_retained_replay_image(
@@ -370,7 +548,12 @@ impl StoreRecords<'_> {
         baseline: &crate::RetainedReplayBaseline,
         schema_version: u32,
         image_bytes: &[u8],
+        blob_decls: &crate::BlobDecls,
     ) -> Result<(), DbError> {
+        let mut image = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
+        crate::connection_io::deserialize_database_image_into(&mut image, image_bytes)
+            .map_err(|error| DbError::context("open replacement replay database image", error))?;
+        let local_blob_leases = retained_replay_blob_leases(&image, blob_decls)?;
         let image_payload_hash = self
             .install_payload(image_bytes)
             .map_err(|error| DbError::context("install migrated retained replay image", error))?;
@@ -403,6 +586,7 @@ impl StoreRecords<'_> {
             crate::payload_store::RETAINED_REPLAY_BASELINE_OWNER_KEY,
             &BTreeSet::from([image_payload_hash, authority_hash]),
         )?;
+        self.replace_retained_replay_blob_leases(&local_blob_leases)?;
 
         let mut migrated = baseline.clone();
         migrated.schema_version = schema_version;
@@ -451,6 +635,7 @@ impl StoreRecords<'_> {
         schema_version: u32,
         routing_hash: ObjectHash,
         authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+        blob_decls: &crate::BlobDecls,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         // Capturing the baseline copies the whole store: the open database is
         // serialized, hashed, compressed and written as a payload, then read
@@ -468,10 +653,8 @@ impl StoreRecords<'_> {
             crate::RetainedReplayAuthority::InstalledSnapshot(authority),
             image_bytes,
         );
-        timings.mark("validate the image", || {
-            prepared
-                .baseline
-                .validate_open_image(self.conn, self.store_dir)
+        let prepared = timings.mark("validate the image", || {
+            prepared.validate_image(self.store_dir, blob_decls)
         })?;
         let outcome = self.install_prepared_replay_baseline(prepared, &mut timings);
         timings.report();
@@ -486,6 +669,7 @@ impl StoreRecords<'_> {
         let PreparedRetainedReplayBaseline {
             baseline,
             image_bytes,
+            local_blob_leases,
         } = prepared;
         // The baseline's authority is not checked here. Both callers validate
         // the image they are about to install immediately before calling this,
@@ -504,7 +688,7 @@ impl StoreRecords<'_> {
             let authority_hash = self
                 .install_payload(&baseline.canonical_authority_bytes()?)
                 .map_err(|error| DbError::context("install retained replay authority", error))?;
-            self.insert_retained_replay_baseline_row(&baseline, authority_hash)
+            self.insert_retained_replay_baseline_row(&baseline, authority_hash, &local_blob_leases)
         })?;
         // Read the image back at the address the row now names, after the row
         // exists, because this is the last moment the bad state is still
@@ -629,23 +813,43 @@ impl StoreTransaction<'_, '_> {
             .circle_activation_commit_ref(circle_id, control)
     }
 
-    pub(crate) fn folded_write_overlays(
+    pub(crate) fn folded_replay_journal(
         self,
         folded: &[crate::SettledStoreWrite],
-    ) -> Result<Vec<crate::MergeReplayWriteOverlay>, DbError> {
-        StoreDatabase::load_folded_write_overlays_on(
+    ) -> Result<Vec<crate::MergeReplayWrite>, DbError> {
+        StoreDatabase::load_folded_replay_journal_on(
             crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
             folded,
         )
     }
 
-    pub(crate) fn merge_replay_write_overlays(
+    pub(crate) fn merge_replay_journal(
         self,
         baseline_cut: &coven_protocol::store_commit::CommitFrontier,
-        active_accepted_writes: &BTreeSet<coven_protocol::write::WriteId>,
+        active_accepted_writes: &std::collections::BTreeMap<
+            coven_protocol::write::WriteId,
+            coven_protocol::store_commit::StoreBatchCommitRef,
+        >,
         retracted_writes: &BTreeSet<coven_protocol::write::WriteId>,
-    ) -> Result<Vec<crate::MergeReplayWriteOverlay>, DbError> {
-        StoreDatabase::load_merge_replay_write_overlays_on(
+    ) -> Result<Vec<crate::MergeReplayWrite>, DbError> {
+        StoreDatabase::load_merge_replay_journal_on(
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            baseline_cut,
+            active_accepted_writes,
+            retracted_writes,
+        )
+    }
+
+    pub(crate) fn merge_replay_associations(
+        self,
+        baseline_cut: &coven_protocol::store_commit::CommitFrontier,
+        active_accepted_writes: &std::collections::BTreeMap<
+            coven_protocol::write::WriteId,
+            coven_protocol::store_commit::StoreBatchCommitRef,
+        >,
+        retracted_writes: &BTreeSet<coven_protocol::write::WriteId>,
+    ) -> Result<Vec<crate::MergeReplayWrite>, DbError> {
+        StoreDatabase::load_merge_replay_associations_on(
             crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
             baseline_cut,
             active_accepted_writes,
@@ -720,9 +924,9 @@ impl StoreTransaction<'_, '_> {
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         retracted: &BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>,
         history_cut: Option<&coven_protocol::store_commit::CommitFrontier>,
-        overlays: crate::ReplayWriteOverlays<'_>,
+        journal: crate::ReplayJournal<'_>,
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
-    ) -> Result<crate::store::ReplayProjection, DbError> {
+    ) -> Result<crate::store::store_session::ReplayProjectionResult, DbError> {
         let root = authority.required_root_authority_on(
             crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
         )?;
@@ -740,7 +944,7 @@ impl StoreTransaction<'_, '_> {
             routing_key,
             retracted,
             history_cut,
-            overlays,
+            journal,
             local_store_membership,
         )
     }

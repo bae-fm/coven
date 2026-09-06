@@ -100,7 +100,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn drain_store_writes(&mut self) -> Result<u64, StoreError> {
-        self.drain_prepared_store_writes_timed("test Store write publication")
-            .await
+        let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+        self.drain_prepared_store_writes_timed(
+            "test Store write publication",
+            Some(&routing_encryption),
+        )
+        .await
     }
 }

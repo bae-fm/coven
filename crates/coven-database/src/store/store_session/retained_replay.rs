@@ -24,6 +24,7 @@ pub(crate) fn migrate_retained_replay_schema_on(
     store_dir: &coven_foundation::store_dir::StoreDir,
     policy: crate::CovenMigrationPolicy,
     migrations: &[crate::Migration],
+    synced_tables: &[coven_protocol::synced_schema::SyncedTable],
 ) -> Result<(), crate::OpenError> {
     let records = StoreRecords::new(conn, store_dir);
     let Some(baseline) = load_replay_baseline_metadata_on(records)? else {
@@ -66,7 +67,13 @@ pub(crate) fn migrate_retained_replay_schema_on(
     }
     transaction.commit().map_err(DbError::from)?;
     let image_bytes = crate::connection_io::serialize_database_image(&image)?;
-    records.replace_retained_replay_image(&baseline, migrated_host_schema_version, &image_bytes)?;
+    let blob_decls = crate::BlobDecls::from_tables(&image, synced_tables).map_err(DbError::from)?;
+    records.replace_retained_replay_image(
+        &baseline,
+        migrated_host_schema_version,
+        &image_bytes,
+        &blob_decls,
+    )?;
     tracing::info!(
         previous_host_schema_version = baseline.schema_version,
         migrated_host_schema_version,
@@ -155,13 +162,14 @@ pub(crate) fn install_snapshot_replay_baseline_on(
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplaySnapshotAuthority,
+    blob_decls: &crate::BlobDecls,
 ) -> Result<RetainedReplayBaseline, DbError> {
     if load_generation_zero_replay_baseline_on(records)?.is_some() {
         return Err(DbError::Message(
             "retained replay baseline already exists before snapshot bootstrap".to_string(),
         ));
     }
-    records.install_snapshot_replay_baseline(schema_version, routing_hash, authority)
+    records.install_snapshot_replay_baseline(schema_version, routing_hash, authority, blob_decls)
 }
 
 pub(crate) fn ensure_founder_replay_baseline_on(
@@ -309,6 +317,10 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
     ),
     (
         "retained_replay_baselines",
+        ReplayTableDisposition::Preserve,
+    ),
+    (
+        "retained_replay_blob_leases",
         ReplayTableDisposition::Preserve,
     ),
     ("retained_replay_objects", ReplayTableDisposition::Preserve),

@@ -33,6 +33,7 @@ impl StoreDatabase {
 
     pub async fn seed_local_release_rows_for_test(
         &self,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         note_id: &str,
         photo_id: &str,
         cloud_path: &str,
@@ -43,8 +44,25 @@ impl StoreDatabase {
         let cloud_path = cloud_path.to_string();
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
         let hash = coven_protocol::blob::content_hash(bytes);
-        self.call_store(move |session| {
-            session.seed_local_release_rows_for_test(&note_id, &photo_id, &cloud_path, size, hash)
+        self.run_host_store_write_for_test(routing_encryption, None, move |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
+                     VALUES (?1, 'Release', NULL, 0,
+                             '0000000001000-0000-A', '2026-01-01')",
+                    [&note_id],
+                )
+                .map_err(DbError::from)?;
+            transaction
+                .execute(
+                    "INSERT INTO note_photos
+                     (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path)
+                     VALUES (?1, ?2, 'image', ?3, ?4,
+                             '0000000001000-0000-A', '2026-01-01', ?5)",
+                    rusqlite::params![photo_id, note_id, size, hash, cloud_path],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
         })
         .await
         .expect("seed exact release rows");

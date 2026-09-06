@@ -261,6 +261,7 @@ impl DatabaseCore {
                             &store_dir,
                             coven_migration_policy,
                             migrations,
+                            &synced_tables,
                         )
                     })?;
                 }

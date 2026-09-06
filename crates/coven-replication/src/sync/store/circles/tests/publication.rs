@@ -892,6 +892,17 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .pull(Some(&EncryptionService::from_key([42; 32])))
         .await
         .expect("install concurrent Circle writer bootstrap");
+    let member_store = store
+        .bind_device_in(&member_db, member_db_store_dir.clone(), &member)
+        .await
+        .expect("load Circle member Store");
+    member_store
+        .authorize_writer()
+        .await
+        .expect("authorize Store member before Circle access")
+        .pull(Some(&EncryptionService::from_key([42; 32])))
+        .await
+        .expect("recipient learns the concurrent Store writer");
     let late_id = "00000000-0000-4000-8000-000000000002";
     let late_bytes = b"late concurrent Circle attachment";
     let late_insert = format!(
@@ -952,7 +963,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .expect("publish late concurrent Circle blob");
     assert_eq!(
         concurrent_writer
-            .publish_pending_store_writes()
+            .publish_pending_store_writes(Some(&EncryptionService::from_key([42; 32])))
             .await
             .expect("publish late concurrent Circle package"),
         1
@@ -965,10 +976,6 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         coven_protocol::write::WriteStatus::Published(position) => position.commit,
         status => panic!("late concurrent Circle write was not published: {status:?}"),
     };
-    let member_store = store
-        .bind_device_in(&member_db, member_db_store_dir.clone(), &member)
-        .await
-        .expect("load Circle member Store");
     let target_control = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
@@ -1034,6 +1041,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     assert!(
         installed_ids.iter().any(|installed| installed == blob_id),
         "recipient rows after bootstrap replay: {installed_ids:?}"
+    );
+    assert!(
+        installed_ids.iter().any(|installed| installed == late_id),
+        "recipient rows after replaying the concurrent commit: {installed_ids:?}; pull: {member_pull:?}"
     );
     let installed_row = installed_document_row(&member_db, blob_id)
         .await
@@ -2387,7 +2398,7 @@ impl ClosingFounderCircle {
             .await?
             .authorize_writer()
             .await?
-            .publish_pending_store_writes()
+            .publish_pending_store_writes(Some(&EncryptionService::from_key([42; 32])))
             .await?)
     }
 
@@ -3389,7 +3400,7 @@ impl SilentParticipantCircle {
             .expect("authorize silent participant writer");
         assert_eq!(
             writer
-                .publish_pending_store_writes()
+                .publish_pending_store_writes(Some(&EncryptionService::from_key([42; 32])))
                 .await
                 .expect("publish silent participant Circle write"),
             1,

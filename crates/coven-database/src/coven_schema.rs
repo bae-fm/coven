@@ -37,6 +37,14 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            retained_replay_blob_leases,
+            "
+    namespace TEXT NOT NULL,
+    blob_id TEXT NOT NULL,
+    PRIMARY KEY (namespace, blob_id)
+"
+        );
+        $visit!(
             circle_bootstrap_coverage,
             "
     circle_id TEXT PRIMARY KEY,

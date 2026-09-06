@@ -234,6 +234,7 @@ impl StoreSession<'_> {
             &baseline,
             baseline.schema_version,
             &bytes,
+            self.blob_decls,
         )?;
         transaction.commit().map_err(DbError::from)?;
         self.verified_store_authority

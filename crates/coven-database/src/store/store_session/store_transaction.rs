@@ -307,19 +307,8 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         } else {
             WriteStatus::Pending
         };
-        // The base is the dependency frontier a commit for this write would be
-        // ordered against, so only a write that can still become a commit has
-        // one. A local-only write never publishes, and every reader of the
-        // column asks for a pending or publishing write — storing its frontier
-        // would journal several hundred bytes to forty kilobytes per write that
-        // nothing can ever read.
-        let base = match status {
-            WriteStatus::Pending => Some(
-                serde_json::to_string(base)
-                    .map_err(|error| DbError::context("serialize pending Store base", error))?,
-            ),
-            _ => None,
-        };
+        let base = serde_json::to_string(base)
+            .map_err(|error| DbError::context("serialize Store observed frontier", error))?;
         let status_json = serde_json::to_string(&status)
             .map_err(|error| DbError::context("serialize write status", error))?;
         let affected_rows = serde_json::to_string(&affected_rows)
@@ -335,7 +324,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
                 status_json,
                 affected_rows,
                 changeset_hash.to_string(),
-                base,
+                Some(base),
                 blob_facts_json,
             ],
         )
@@ -371,18 +360,16 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             &crate::payload_store::store_write_owner_key(write_id),
             &payloads,
         )?;
-        if status == WriteStatus::Pending {
-            for fact in &blob_facts.blobs {
-                if fact.blob.provenance != coven_protocol::blob::Provenance::HostProvided {
-                    continue;
-                }
-                tx.execute(
-                    "INSERT OR IGNORE INTO store_write_blob_leases
-                     (write_id, namespace, blob_id) VALUES (?1, ?2, ?3)",
-                    (write_id.as_str(), &fact.blob.namespace, &fact.blob.id),
-                )
-                .map_err(DbError::from)?;
+        for fact in &blob_facts.blobs {
+            if fact.blob.provenance != coven_protocol::blob::Provenance::HostProvided {
+                continue;
             }
+            tx.execute(
+                "INSERT OR IGNORE INTO store_write_blob_leases
+                 (write_id, namespace, blob_id) VALUES (?1, ?2, ?3)",
+                (write_id.as_str(), &fact.blob.namespace, &fact.blob.id),
+            )
+            .map_err(DbError::from)?;
         }
         Ok(status)
     }

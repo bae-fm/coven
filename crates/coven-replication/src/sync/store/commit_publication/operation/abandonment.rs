@@ -119,6 +119,7 @@ impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn abandon_merge_candidate(
         &mut self,
         write_id: coven_protocol::write::WriteId,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<MergeCandidateAbandonment, StoreError> {
         let root = self.store_root().clone();
         let database = self.database.clone();
@@ -205,7 +206,9 @@ impl AuthorizedWriterOperation<'_> {
                 if database.merge_candidate_cleanup_pending(&write_id).await? {
                     self.cleanup_merge_candidate(write_id.clone()).await?;
                 }
-                return self.finish_merge_abandonment(write_id).await;
+                return self
+                    .finish_merge_abandonment(write_id, routing_encryption)
+                    .await;
             }
             coven_database::MergeAbandonmentState::AuthorExcluded => {
                 if database.merge_candidate_cleanup_pending(&write_id).await? {
@@ -217,7 +220,7 @@ impl AuthorizedWriterOperation<'_> {
                 return Ok(MergeCandidateAbandonment::Abandoned);
             }
         }
-        self.drain_prepared_store_writes_timed("Merge abandonment publication")
+        self.drain_prepared_store_writes_timed("Merge abandonment publication", routing_encryption)
             .await?;
         if !database.merge_candidate_cleanup_pending(&write_id).await? {
             return Err(StoreError::InvalidOutbound(
@@ -225,12 +228,14 @@ impl AuthorizedWriterOperation<'_> {
             ));
         }
         self.cleanup_merge_candidate(write_id.clone()).await?;
-        self.finish_merge_abandonment(write_id).await
+        self.finish_merge_abandonment(write_id, routing_encryption)
+            .await
     }
 
     async fn finish_merge_abandonment(
         &mut self,
         write_id: coven_protocol::write::WriteId,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<MergeCandidateAbandonment, StoreError> {
         let database = self.database.clone();
         match database.merge_abandonment_state(&write_id).await? {
@@ -244,8 +249,11 @@ impl AuthorizedWriterOperation<'_> {
             }
             coven_database::MergeAbandonmentState::CandidateWon => {
                 database.resume_winning_merge_candidate(write_id).await?;
-                self.drain_prepared_store_writes_timed("Merge abandonment publication")
-                    .await?;
+                self.drain_prepared_store_writes_timed(
+                    "Merge abandonment publication",
+                    routing_encryption,
+                )
+                .await?;
                 Ok(MergeCandidateAbandonment::CandidateActivated)
             }
             coven_database::MergeAbandonmentState::Prepared => Err(StoreError::InvalidOutbound(

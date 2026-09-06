@@ -87,182 +87,178 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         let gates = self.gates;
         let synced_tables = self.synced_tables;
         let root = materialization.root.clone();
-        let activates_circle_epoch_cutoff = materialization
-            .circle_activations
-            .circles()
-            .iter()
-            .any(|activation| {
-                activation
-                    .control
-                    .value
-                    .active_epoch()
-                    .is_some_and(|epoch| {
-                        matches!(
-                            &epoch.common.origin,
-                            coven_protocol::circle::CircleEpochOrigin::Closed { .. }
-                        )
-                    })
-            });
-        let installs_circle_bootstrap = !materialization.circle_activations.bootstraps().is_empty();
+        let candidate = materialization.verified_commit.reference().clone();
         let local_exclusions = materialization
             .circle_activations
             .local_exclusions()
             .to_vec();
+        if !materialization.packages.is_empty()
+            && materialization.package_application
+                != Some(crate::RetainedPackageApplication::Received { receiver_wall_ms })
+        {
+            return Err(DbError::Message(
+                "received Merge packages carry another application timestamp".to_string(),
+            ));
+        }
         let tx = self.store.transaction;
-        let materialized_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
-            crate::store::materialized_commit_index::materialized_frontier_on(tx, None)?,
-        )
-        .map_err(DbError::from)?;
-        let candidate_predecessors = materialization
-            .verified_commit
-            .value()
-            .order
-            .predecessor_cut()
-            .map_err(DbError::from)?
-            .frontier();
-        let requires_canonical_replay = !candidate_predecessors.covers(&materialized_frontier);
         let merge_transaction = MergeMaterializationTransaction::from_store(self.store);
-        let mut applied = merge_transaction.apply_prepared_merge_materialization(
-            authority,
+        merge_transaction.record_prepared_materialization_authority(&materialization)?;
+        let retained =
+            merge_transaction.retain_prepared_merge_materialization(authority, &materialization)?;
+        authority.insert_verified(retained)?;
+        #[cfg(any(test, feature = "test-utils"))]
+        if reach_materialization_failure(
+            materialization_failure,
+            crate::MergeMaterializationFailurePoint::SummaryMaterialization,
+        )? {
+            return Err(DbError::Message(
+                "injected failure after Merge summary materialization".to_string(),
+            ));
+        }
+        for exclusion in &local_exclusions {
+            super::circle_operations::record_circle_close_exclusion_on(tx, exclusion)?;
+        }
+        let retracted = retractions
+            .iter()
+            .map(|retraction| retraction.candidate_reference().map_err(DbError::from))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut write_status_notifications = Vec::new();
+        if !retractions.is_empty() {
+            write_status_notifications =
+                super::merge_materialization_transaction::retract_verified_merge_materializations(
+                    &merge_transaction,
+                    &root,
+                    authority,
+                    retractions,
+                )?;
+            #[cfg(any(test, feature = "test-utils"))]
+            if reach_materialization_failure(
+                materialization_failure,
+                crate::MergeMaterializationFailurePoint::RetractionDeletion,
+            )? {
+                return Err(DbError::Message(
+                    "injected failure after Merge retraction deletion".to_string(),
+                ));
+            }
+        }
+        let replayed = authority.replay_projection_watching_on(
+            crate::store::store_session::StoreTransaction::new(tx, self.store.store_dir),
             blob_decls,
             gates,
             synced_tables,
             routing_key.as_ref(),
+            &retracted,
+            crate::ReplayJournal::Owed,
             local_store_membership,
-            crate::IncomingTimestampPolicy::Received { receiver_wall_ms },
-            None,
-            materialization,
+            &candidate,
         )?;
-        if matches!(applied.outcome, crate::MaterializationOutcome::Applied(_)) {
-            let retained = applied.retained.take().ok_or_else(|| {
-                DbError::Message(
-                    "applied Merge materialization omitted its verified retained input".to_string(),
-                )
-            })?;
-            authority.insert_verified(retained)?;
-            #[cfg(any(test, feature = "test-utils"))]
-            if reach_materialization_failure(
-                materialization_failure,
-                crate::MergeMaterializationFailurePoint::SummaryMaterialization,
-            )? {
-                return Err(DbError::Message(
-                    "injected failure after Merge summary materialization".to_string(),
-                ));
+        let watched = replayed.watched_outcome().ok_or_else(|| {
+            DbError::Message("incoming Merge materialization was not replayed".to_string())
+        })?;
+        let max_updated_at = match watched {
+            super::WatchedReplayOutcome::Applied { max_updated_at } => max_updated_at,
+            super::WatchedReplayOutcome::Held(reason) => {
+                return Ok(
+                    super::merge_materialization_transaction::AppliedMergeMaterialization {
+                        outcome: crate::MaterializationOutcome::Held(reason),
+                        max_updated_at: None,
+                        write_status_notifications: Vec::new(),
+                    },
+                );
             }
-            for exclusion in &local_exclusions {
-                super::circle_operations::record_circle_close_exclusion_on(tx, exclusion)?;
-            }
-            let retracted = retractions
-                .iter()
-                .map(|retraction| retraction.candidate_reference().map_err(DbError::from))
-                .collect::<Result<BTreeSet<_>, _>>()?;
-            if !retractions.is_empty() {
-                applied.write_status_notifications =
-                    super::merge_materialization_transaction::retract_verified_merge_materializations(
-                        &merge_transaction,
-                        &root,
-                        authority,
-                        retractions,
-                    )?;
-                #[cfg(any(test, feature = "test-utils"))]
-                if reach_materialization_failure(
-                    materialization_failure,
-                    crate::MergeMaterializationFailurePoint::RetractionDeletion,
-                )? {
-                    return Err(DbError::Message(
-                        "injected failure after Merge retraction deletion".to_string(),
-                    ));
-                }
-            }
-            if requires_canonical_replay
-                || activates_circle_epoch_cutoff
-                || installs_circle_bootstrap
-                || !retracted.is_empty()
-            {
-                let replay = authority.replay_projection_on(
-                    crate::store::store_session::StoreTransaction::new(tx, self.store.store_dir),
-                    blob_decls,
-                    gates,
-                    synced_tables,
-                    routing_key.as_ref(),
-                    &retracted,
-                    None,
-                    crate::ReplayWriteOverlays::Owed,
-                    local_store_membership,
-                )?;
-                let mut host_changes =
-                    rusqlite::session::Session::new(tx).map_err(DbError::from)?;
-                for table in synced_tables {
-                    host_changes
-                        .attach(Some(table.name()))
-                        .map_err(DbError::from)?;
-                }
-                let mut tables = crate::projection_table_names(gates.has_scoped_graph());
-                tables.extend(synced_tables.iter().map(|table| table.name().to_string()));
-                tables.sort();
-                tables.dedup();
-                tx.pragma_update(None, "defer_foreign_keys", "ON")
-                    .map_err(DbError::from)?;
-                for table in tables.iter().rev() {
-                    tx.execute_batch(&format!("DELETE FROM {}", crate::quote_ident(table)))
-                        .map_err(DbError::from)?;
-                }
-                crate::store::store_session::StoreTransaction::new(tx, self.store.store_dir)
-                    .replace_tables_from_projection(&replay, &tables)?;
-                let violations: bool = tx
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                if violations {
-                    let violation: (String, Option<i64>, String, i64) = tx
-                        .query_row(
-                            "SELECT * FROM pragma_foreign_key_check LIMIT 1",
-                            [],
-                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                        )
-                        .map_err(DbError::from)?;
-                    return Err(DbError::Message(format!(
-                        "retained replay projection violates foreign keys: {violation:?}"
-                    )));
-                }
-                let mut projection_changeset = Vec::new();
-                host_changes
-                    .changeset_strm(&mut projection_changeset)
-                    .map_err(DbError::from)?;
-                #[cfg(any(test, feature = "test-utils"))]
-                if reach_materialization_failure(
-                    materialization_failure,
-                    crate::MergeMaterializationFailurePoint::ProjectionReplacement,
-                )? {
-                    return Err(DbError::Message(
-                        "injected failure after Merge projection replacement".to_string(),
-                    ));
-                }
-                merge_transaction.replace_store_device_exclusion_freezes_from_replay(&root)?;
-                let old_projection =
-                    crate::walk_old_changeset(&projection_changeset).map_err(DbError::Changeset)?;
-                let new_projection =
-                    crate::walk_changeset(&projection_changeset).map_err(DbError::Changeset)?;
-                for intent in crate::local_blob_cleanup_intents::intents_from_changes(
-                    blob_decls,
-                    &old_projection,
-                    &new_projection,
-                )
-                .map_err(DbError::from)?
-                {
-                    super::local_blob_cleanup::record_obsolete_copy_intents_on(
-                        tx, blob_decls, &intent,
-                    )?;
-                }
-                if let crate::MaterializationOutcome::Applied(rows) = &mut applied.outcome {
-                    rows.extend(new_projection);
-                }
-            }
+        };
+        let rows = replayed.install_on(self, &root)?;
+        Ok(
+            super::merge_materialization_transaction::AppliedMergeMaterialization {
+                outcome: crate::MaterializationOutcome::Applied(rows),
+                max_updated_at,
+                write_status_notifications,
+            },
+        )
+    }
+
+    pub(super) fn install_replay_projection(
+        &self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        replay: &super::ReplayProjection,
+    ) -> Result<Vec<coven_foundation::changeset::RowChange>, DbError> {
+        let tx = self.store.transaction;
+        let mut host_changes = rusqlite::session::Session::new(tx).map_err(DbError::from)?;
+        for table in self.synced_tables {
+            host_changes
+                .attach(Some(table.name()))
+                .map_err(DbError::from)?;
         }
-        Ok(applied)
+        let mut tables = crate::projection_table_names(self.gates.has_scoped_graph());
+        tables.extend(
+            self.synced_tables
+                .iter()
+                .map(|table| table.name().to_string()),
+        );
+        tables.sort();
+        tables.dedup();
+        let old_exact_bindings = super::local_blob_cleanup::exact_blob_bindings_on(tx)?;
+        tx.pragma_update(None, "defer_foreign_keys", "ON")
+            .map_err(DbError::from)?;
+        crate::store::store_session::StoreTransaction::new(tx, self.store.store_dir)
+            .replace_tables_from_projection(replay, &tables)?;
+        let violations: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if violations {
+            let violation: (String, Option<i64>, String, i64) = tx
+                .query_row(
+                    "SELECT * FROM pragma_foreign_key_check LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .map_err(DbError::from)?;
+            return Err(DbError::Message(format!(
+                "retained replay projection violates foreign keys: {violation:?}"
+            )));
+        }
+        let mut projection_changeset = Vec::new();
+        host_changes
+            .changeset_strm(&mut projection_changeset)
+            .map_err(DbError::from)?;
+        #[cfg(any(test, feature = "test-utils"))]
+        if reach_materialization_failure(
+            self.merge_materialization_failure,
+            crate::MergeMaterializationFailurePoint::ProjectionReplacement,
+        )? {
+            return Err(DbError::Message(
+                "injected failure after Merge projection replacement".to_string(),
+            ));
+        }
+        MergeMaterializationTransaction::from_store(self.store)
+            .replace_store_device_exclusion_freezes_from_replay(root)?;
+        let old_projection =
+            crate::walk_old_changeset(&projection_changeset).map_err(DbError::Changeset)?;
+        let new_projection =
+            crate::walk_changeset(&projection_changeset).map_err(DbError::Changeset)?;
+        for intent in crate::local_blob_cleanup_intents::intents_from_changes(
+            self.blob_decls,
+            &old_projection,
+            &new_projection,
+        )
+        .map_err(DbError::from)?
+        {
+            super::local_blob_cleanup::record_obsolete_copy_intents_from_bindings_on(
+                tx,
+                self.blob_decls,
+                &intent,
+                &old_exact_bindings,
+            )?;
+        }
+        crate::Database::cancel_transitions_for_deleted_roots_on(
+            tx,
+            &super::merge_materialization_transaction::deleted_rows(&new_projection),
+        )?;
+        Ok(new_projection)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -446,7 +442,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             }
         }
 
-        let mut max_updated_at: Option<coven_protocol::hlc::Timestamp> = None;
+        let mut retained_any = false;
         for prepared in plan.commits {
             if represented.contains(&prepared.reference) {
                 continue;
@@ -489,55 +485,32 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 device_operations: prepared.device_operations,
                 circle_activations: data.circle_activations,
             };
-            let mut applied = MergeMaterializationTransaction::from_store(self.store)
-                .apply_prepared_merge_materialization(
-                    authority,
-                    blob_decls,
-                    gates,
-                    synced_tables,
-                    routing_key.as_ref(),
-                    local_store_membership,
-                    crate::IncomingTimestampPolicy::Received { receiver_wall_ms },
-                    None,
-                    materialization,
-                )?;
-            match &applied.outcome {
-                crate::MaterializationOutcome::Applied(_) => {}
-                crate::MaterializationOutcome::Held(
-                    crate::MaterializationHold::ForeignKeyDependency,
-                ) => {
-                    return Err(DbError::Message(format!(
-                        "device join bootstrap at {stream_id}/{} depends on rows outside its history",
-                        prepared.reference.coord.sequence()
-                    )));
-                }
-                crate::MaterializationOutcome::Held(
-                    crate::MaterializationHold::ConstraintConflict(tables),
-                ) => {
-                    return Err(DbError::Message(format!(
-                        "device join bootstrap at {stream_id}/{} conflicts on {}",
-                        prepared.reference.coord.sequence(),
-                        tables.join(", ")
-                    )));
-                }
-            }
-            let retained = applied.retained.take().ok_or_else(|| {
-                DbError::Message(
-                    "device join bootstrap materialization omitted its verified retained input"
-                        .to_string(),
-                )
-            })?;
+            let merge_transaction = MergeMaterializationTransaction::from_store(self.store);
+            merge_transaction.record_prepared_materialization_authority(&materialization)?;
+            let retained = merge_transaction
+                .retain_prepared_merge_materialization(authority, &materialization)?;
             authority.insert_verified(retained)?;
-            if let Some(applied_max) = applied.max_updated_at {
-                if max_updated_at
-                    .as_ref()
-                    .is_none_or(|current| *current < applied_max)
-                {
-                    max_updated_at = Some(applied_max);
-                }
-            }
+            retained_any = true;
         }
-        Ok(max_updated_at)
+        if !row_data.is_empty() {
+            return Err(DbError::Message(
+                "device join bootstrap resolved row data outside its exact history".to_string(),
+            ));
+        }
+        if !retained_any {
+            return Ok(None);
+        }
+        let replayed = authority.replay_projection_result_on(
+            crate::store::store_session::StoreTransaction::new(tx, self.store.store_dir),
+            blob_decls,
+            gates,
+            synced_tables,
+            routing_key.as_ref(),
+            crate::ReplayJournal::Owed,
+            local_store_membership,
+        )?;
+        replayed.install_on(self, &root)?;
+        Ok(replayed.max_updated_at())
     }
 
     fn complete_owner_recovery(

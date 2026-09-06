@@ -239,6 +239,14 @@ pub use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};
 pub enum MaterializationHold {
     ForeignKeyDependency,
     ConstraintConflict(Vec<String>),
+    PrivateSharedConflict {
+        table: String,
+        row_id: String,
+        commit: coven_protocol::store_commit::StoreBatchCommitRef,
+    },
+    InvalidLocalCircleContext {
+        circle_id: coven_protocol::circle::CircleId,
+    },
 }
 
 pub type MaterializationOutcome = coven_protocol::membership::ApplyOutcome<MaterializationHold>;
@@ -256,7 +264,8 @@ pub use store::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
     DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, DeviceJoinBootstrapRowData,
     MembershipAuthorityBytes, PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
-    ResolvedDeviceJoinBootstrap, VerifiedAcknowledgedStoreSnapshot, VerifiedStoreSnapshotAuthority,
+    ResolvedDeviceJoinBootstrap, VerifiedAcknowledgedStoreSnapshot,
+    VerifiedReplayBaselineRetirementProof, VerifiedStoreSnapshotAuthority,
 };
 pub use store::{
     audience_moves_by_row, local_blob_cleanup_intents, AudienceBlobMoveStaging, PostUpload,
@@ -303,13 +312,15 @@ pub use store_authority_records::{
 pub use write_models::{
     ActivatedStoreAck, AuthorExclusionActivationLocator, BlockedMergeCandidate,
     CompletePreparedStoreWriteOutcome, InitialStoreMembershipAuthority, MergeAbandonmentState,
-    MergeReplayWriteOverlay, OutboundStoreAck, OutboundStoreAckActivation,
-    PreparedMergeAbandonmentCandidates, PreparedStoreWrite, PreparedStoreWriteCommit,
-    PreparedStoreWritePartitions, PublishedStoreAck, StoreWriteBase, StoreWriteBlobFact,
-    StoreWriteBlobFacts, StoreWriteBlobMoveDestination, StoreWriteRemoteBlob, StoreWriteRouting,
-    TerminalCandidateAuthority, TerminalCandidateCleanupVerification,
+    OutboundStoreAck, OutboundStoreAckActivation, PreparedMergeAbandonmentCandidates,
+    PreparedStoreWrite, PreparedStoreWriteCommit, PreparedStoreWritePartitions, PublishedStoreAck,
+    StoreWriteBase, StoreWriteBlobFact, StoreWriteBlobFacts, StoreWriteBlobMoveDestination,
+    StoreWriteRemoteBlob, StoreWriteRouting, TerminalCandidateAuthority,
+    TerminalCandidateCleanupVerification,
 };
-pub(crate) use write_models::{ReplayWriteOverlays, SettledStoreWrite, SettledWriteFold};
+pub(crate) use write_models::{
+    MergeReplayWrite, MergeReplayWriteEffect, ReplayJournal, SettledStoreWrite, SettledWriteFold,
+};
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
 const HOST_DEVICE_ID_STATE_KEY: &str = "host_device_id";
@@ -484,6 +495,10 @@ impl std::fmt::Display for StagedBlobRollbackFailures {
 pub enum DbError {
     #[error("database error: {0}")]
     Message(String),
+    #[error("Store writes depend on state being removed: {writes:?}")]
+    WriteDependencyConflict { writes: Vec<WriteId> },
+    #[error("replay retirement cut is not a canonical application prefix")]
+    ReplayRetirementCutNotPrefix,
     #[error(
         "write callback prepared no INSERT, UPDATE, or DELETE statement; pure reads belong on read"
     )]
@@ -711,14 +726,7 @@ boxed_db_error_from!(
 );
 
 #[cfg(test)]
-mod db_error_tests {
-    use super::DbError;
-
-    #[test]
-    fn db_error_fits_result_without_forcing_callers_to_box_it() {
-        assert!(std::mem::size_of::<DbError>() <= 104);
-    }
-}
+mod db_error_tests;
 
 /// Run `sql`, map every row through `mapper`, and collect the results.
 ///

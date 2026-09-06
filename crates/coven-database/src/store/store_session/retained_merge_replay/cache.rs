@@ -427,9 +427,41 @@ impl RetainedReplayCache {
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         retracted: &BTreeSet<StoreBatchCommitRef>,
         history_cut: Option<&CommitFrontier>,
-        overlays: crate::ReplayWriteOverlays<'_>,
+        journal: crate::ReplayJournal<'_>,
         local_store_membership: LocalStoreMembership,
-    ) -> Result<ReplayProjection, DbError> {
+    ) -> Result<crate::store::store_session::ReplayProjectionResult, DbError> {
+        self.replay_projection_watching_on(
+            transaction_records,
+            root,
+            registrations,
+            blob_decls,
+            gates,
+            synced_tables,
+            routing_key,
+            retracted,
+            history_cut,
+            journal,
+            local_store_membership,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn replay_projection_watching_on(
+        &mut self,
+        transaction_records: StoreTransaction<'_, '_>,
+        root: &StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
+        blob_decls: &BlobDecls,
+        gates: &crate::Gates,
+        synced_tables: &[SyncedTable],
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+        retracted: &BTreeSet<StoreBatchCommitRef>,
+        history_cut: Option<&CommitFrontier>,
+        journal: crate::ReplayJournal<'_>,
+        local_store_membership: LocalStoreMembership,
+        watched: Option<&StoreBatchCommitRef>,
+    ) -> Result<crate::store::store_session::ReplayProjectionResult, DbError> {
         if self.baseline.is_none() {
             self.baseline = Some(transaction_records.generation_zero_replay_baseline()?);
         }
@@ -440,6 +472,7 @@ impl RetainedReplayCache {
             .clone();
         let replay = transaction_records.open_replay_projection(&baseline)?;
         let schema = replay.table_schema(synced_tables, gates)?;
+        let mut private_rows = replay.private_rows(gates, &schema)?;
         let circle_bootstraps = transaction_records.claimed_circle_bootstrap_coverage_refs()?;
         let mut circle_bootstrap_cuts = BTreeMap::new();
         // Circles whose bootstrap stands above the horizon this projection
@@ -538,33 +571,70 @@ impl RetainedReplayCache {
                 }
             }
         }
-        let active_accepted_writes = retained
+        let mut active_accepted_writes = BTreeMap::new();
+        for materialization in retained
             .iter()
             .filter(|materialization| active_references.contains(materialization.commit_ref()))
-            .map(|materialization| materialization.commit().write_id.clone())
-            .collect::<BTreeSet<_>>();
+        {
+            let write_id = materialization.commit().write_id.clone();
+            if active_accepted_writes
+                .insert(write_id.clone(), materialization.commit_ref().clone())
+                .is_some()
+            {
+                return Err(DbError::Message(format!(
+                    "accepted replay history contains more than one commit for write {write_id}"
+                )));
+            }
+        }
         let retracted_writes = retained
             .iter()
             .filter(|materialization| retracted.contains(materialization.commit_ref()))
             .map(|materialization| materialization.commit().write_id.clone())
             .collect::<BTreeSet<_>>();
-        let write_overlays = match overlays {
-            crate::ReplayWriteOverlays::Omit => Vec::new(),
-            crate::ReplayWriteOverlays::Owed => transaction_records.merge_replay_write_overlays(
+        let replay_journal = match journal {
+            crate::ReplayJournal::Omit => transaction_records.merge_replay_associations(
                 &baseline.exact_cut,
                 &active_accepted_writes,
                 &retracted_writes,
             )?,
-            crate::ReplayWriteOverlays::Folded(folded) => {
-                transaction_records.folded_write_overlays(folded)?
+            crate::ReplayJournal::Owed => transaction_records.merge_replay_journal(
+                &baseline.exact_cut,
+                &active_accepted_writes,
+                &retracted_writes,
+            )?,
+            crate::ReplayJournal::Folded(folded) => {
+                transaction_records.folded_replay_journal(folded)?
             }
         };
+        let mut replay_journal = std::collections::VecDeque::from(replay_journal);
         let mut pending = retained
             .into_iter()
             .filter(|materialization| active_references.contains(materialization.commit_ref()))
             .map(|materialization| (materialization.commit_ref().clone(), materialization))
             .collect::<BTreeMap<_, _>>();
         let mut applied = BTreeSet::new();
+        let mut applied_order = Vec::new();
+        let mut max_updated_at = None;
+        let mut watched_outcome = None;
+        {
+            let mut authority = ReplayVerifiedStoreLookup {
+                cache: self,
+                registrations,
+                root,
+            };
+            drain_replay_journal(
+                &replay,
+                &mut authority,
+                root,
+                &schema,
+                gates,
+                &mut private_rows,
+                &mut replay_journal,
+                &applied,
+                &baseline.exact_cut,
+                false,
+            )?;
+        }
         while !pending.is_empty() {
             let ready = pending
                 .iter()
@@ -701,7 +771,43 @@ impl RetainedReplayCache {
                     circle_activations: materialization.circle_activations().clone(),
                     package_application,
                 };
-                let outcome = {
+                let associated_effect = match replay_journal.front() {
+                    Some(crate::MergeReplayWrite::Accepted {
+                        effect,
+                        observed,
+                        commit,
+                    }) if commit == &reference => {
+                        let predecessor_cut = materialization
+                            .commit()
+                            .order
+                            .predecessor_cut()
+                            .map_err(DbError::from)?
+                            .frontier();
+                        if !predecessor_cut.covers(observed) {
+                            return Err(DbError::Message(format!(
+                                "accepted Store commit {reference:?} does not cover write {} capture frontier",
+                                effect.write_id
+                            )));
+                        }
+                        Some(effect.clone())
+                    }
+                    _ => {
+                        if replay_journal.iter().any(|write| {
+                            matches!(
+                                write,
+                                crate::MergeReplayWrite::Accepted { commit, .. }
+                                    if commit == &reference
+                            )
+                        }) {
+                            return Err(DbError::Message(format!(
+                                "accepted Store commit {reference:?} crosses an earlier retained local write"
+                            )));
+                        }
+                        None
+                    }
+                };
+                let consumed_associated_write = associated_effect.is_some();
+                let applied_materialization = {
                     let mut authority = ReplayVerifiedStoreLookup {
                         cache: self,
                         registrations,
@@ -717,6 +823,9 @@ impl RetainedReplayCache {
                         timestamp_policy,
                         &circle_bootstrap_cuts,
                         replay_materialization,
+                        associated_effect,
+                        schema.clone(),
+                        &mut private_rows,
                     )
                 }
                 .map_err(|error| {
@@ -727,16 +836,92 @@ impl RetainedReplayCache {
                         error,
                     )
                 })?;
-                match outcome {
+                let applied_max_updated_at = applied_materialization.max_updated_at.clone();
+                match applied_materialization.outcome {
                     crate::MaterializationOutcome::Applied(_) => {
+                        if let Some(applied_max) = &applied_max_updated_at {
+                            if max_updated_at
+                                .as_ref()
+                                .is_none_or(|current| current < applied_max)
+                            {
+                                max_updated_at = Some(applied_max.clone());
+                            }
+                        }
+                        if watched == Some(&reference) {
+                            watched_outcome =
+                                Some(crate::store::store_session::WatchedReplayOutcome::Applied {
+                                    max_updated_at: applied_max_updated_at,
+                                });
+                        }
+                        if consumed_associated_write {
+                            replay_journal
+                                .pop_front()
+                                .expect("associated replay write remains at journal head");
+                        }
                         pending.remove(&reference);
-                        applied.insert(reference);
+                        applied.insert(reference.clone());
+                        applied_order.push(reference);
                         made_progress = true;
+                        let reason = {
+                            let mut authority = ReplayVerifiedStoreLookup {
+                                cache: self,
+                                registrations,
+                                root,
+                            };
+                            drain_replay_journal(
+                                &replay,
+                                &mut authority,
+                                root,
+                                &schema,
+                                gates,
+                                &mut private_rows,
+                                &mut replay_journal,
+                                &applied,
+                                &baseline.exact_cut,
+                                false,
+                            )?
+                        };
+                        if let Some(reason) = reason {
+                            if watched.is_some() {
+                                return Ok(
+                                    crate::store::store_session::ReplayProjectionResult::new(
+                                        replay,
+                                        Some(
+                                            crate::store::store_session::WatchedReplayOutcome::Held(
+                                                reason,
+                                            ),
+                                        ),
+                                        applied_order,
+                                        max_updated_at,
+                                    ),
+                                );
+                            }
+                            return Err(DbError::Message(format!(
+                                "retained local replay conflicts with accepted Store history: {reason:?}"
+                            )));
+                        }
                     }
                     crate::MaterializationOutcome::Held(
                         crate::MaterializationHold::ForeignKeyDependency,
-                    ) => {}
+                    ) => {
+                        if watched == Some(&reference) {
+                            watched_outcome =
+                                Some(crate::store::store_session::WatchedReplayOutcome::Held(
+                                    crate::MaterializationHold::ForeignKeyDependency,
+                                ));
+                        }
+                    }
                     crate::MaterializationOutcome::Held(reason) => {
+                        if watched.is_some() {
+                            return Ok(crate::store::store_session::ReplayProjectionResult::new(
+                                replay,
+                                Some(crate::store::store_session::WatchedReplayOutcome::Held(
+                                    reason,
+                                )),
+                                applied_order,
+                                max_updated_at,
+                            ));
+                        }
                         return Err(DbError::Message(format!(
                             "retained Merge replay held accepted commit {reference:?}: {reason:?}"
                         )));
@@ -744,16 +929,135 @@ impl RetainedReplayCache {
                 }
             }
             if !made_progress {
+                if watched.is_some() {
+                    return Ok(crate::store::store_session::ReplayProjectionResult::new(
+                        replay,
+                        Some(crate::store::store_session::WatchedReplayOutcome::Held(
+                            crate::MaterializationHold::ForeignKeyDependency,
+                        )),
+                        applied_order,
+                        max_updated_at,
+                    ));
+                }
                 return Err(DbError::Message(
                     "retained Merge replay has an unresolved foreign-key dependency".to_string(),
                 ));
             }
         }
-        for overlay in write_overlays {
-            replay.apply_write_overlay(overlay, schema.clone())?;
+        let reason = {
+            let mut authority = ReplayVerifiedStoreLookup {
+                cache: self,
+                registrations,
+                root,
+            };
+            drain_replay_journal(
+                &replay,
+                &mut authority,
+                root,
+                &schema,
+                gates,
+                &mut private_rows,
+                &mut replay_journal,
+                &applied,
+                &baseline.exact_cut,
+                true,
+            )?
+        };
+        if let Some(reason) = reason {
+            if watched.is_some() {
+                return Ok(crate::store::store_session::ReplayProjectionResult::new(
+                    replay,
+                    Some(crate::store::store_session::WatchedReplayOutcome::Held(
+                        reason,
+                    )),
+                    applied_order,
+                    max_updated_at,
+                ));
+            }
+            return Err(DbError::Message(format!(
+                "retained local replay conflicts with accepted Store history: {reason:?}"
+            )));
         }
-        Ok(replay)
+        if let Some(write) = replay_journal.front() {
+            return Err(DbError::Message(format!(
+                "retained local write {} cannot be placed in available Store history",
+                write.write_id()
+            )));
+        }
+        if watched.is_some() && watched_outcome.is_none() {
+            return Err(DbError::Message(
+                "watched Merge materialization was absent from retained replay".to_string(),
+            ));
+        }
+        Ok(crate::store::store_session::ReplayProjectionResult::new(
+            replay,
+            watched_outcome,
+            applied_order,
+            max_updated_at,
+        ))
     }
+}
+
+fn drain_replay_journal(
+    replay: &ReplayProjection,
+    authority: &mut dyn VerifiedStoreLookup,
+    root: &StoreRootRef,
+    schema: &std::sync::Arc<TableSchema>,
+    gates: &crate::Gates,
+    private_rows: &mut crate::store::store_session::merge_materialization_transaction::ReplayRows,
+    journal: &mut std::collections::VecDeque<crate::MergeReplayWrite>,
+    applied: &BTreeSet<StoreBatchCommitRef>,
+    baseline: &CommitFrontier,
+    include_unaccepted: bool,
+) -> Result<Option<crate::MaterializationHold>, DbError> {
+    loop {
+        let effect = match journal.front() {
+            Some(crate::MergeReplayWrite::Consumed { .. }) => {
+                journal.pop_front();
+                continue;
+            }
+            Some(crate::MergeReplayWrite::LocalOnly { effect, observed })
+                if replay_frontier_is_settled(observed, applied, baseline) =>
+            {
+                Some(effect.clone())
+            }
+            Some(crate::MergeReplayWrite::Unaccepted { effect, observed })
+                if include_unaccepted
+                    && replay_frontier_is_settled(observed, applied, baseline) =>
+            {
+                Some(effect.clone())
+            }
+            Some(crate::MergeReplayWrite::Accepted { .. })
+            | Some(crate::MergeReplayWrite::LocalOnly { .. })
+            | Some(crate::MergeReplayWrite::Unaccepted { .. }) => None,
+            None => return Ok(None),
+        };
+        let Some(effect) = effect else {
+            return Ok(None);
+        };
+        if let Some(hold) = replay.apply_write_effect(
+            authority,
+            root,
+            effect,
+            schema.clone(),
+            gates,
+            private_rows,
+        )? {
+            return Ok(Some(hold));
+        }
+        journal.pop_front();
+    }
+}
+
+fn replay_frontier_is_settled(
+    observed: &CommitFrontier,
+    applied: &BTreeSet<StoreBatchCommitRef>,
+    baseline: &CommitFrontier,
+) -> bool {
+    observed
+        .commits()
+        .values()
+        .all(|reference| replay_dependency_is_settled(reference, applied, baseline))
 }
 
 fn replay_dependency_is_settled(

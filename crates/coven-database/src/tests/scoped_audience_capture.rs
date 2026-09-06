@@ -890,6 +890,11 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
                  WHERE id = 'local-move-account'",
             [sql.stamp()],
         )?;
+        sql.execute(
+            "UPDATE transactions SET memo = 'Retained edit', _updated_at = ?1
+                 WHERE id = 'local-move-transaction'",
+            [sql.stamp()],
+        )?;
         Ok(())
     })
     .await
@@ -917,7 +922,7 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         Ok((routes, mirror_count))
     })
     .expect("read Circle-to-Local transition");
-    assert_eq!(local_partitions.len(), 1);
+    assert_eq!(local_partitions.len(), 2);
     let local_partition = |audience: &str| {
         local_partitions
             .iter()
@@ -930,12 +935,33 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
             .all(|(audience, _)| audience != &circle_id),
         "a move must not publish deletes to its old Circle"
     );
-    assert!(
-        local_partitions
-            .iter()
-            .all(|(audience, _)| audience != "local"),
-        "the host database is already the Local materialization"
-    );
+    let local_retention =
+        crate::walk_changeset(&local_partition("local").1).expect("walk Local retention image");
+    for (table, id) in [
+        ("accounts", "local-move-account"),
+        ("transactions", "local-move-transaction"),
+    ] {
+        assert!(has_change(
+            &local_retention,
+            table,
+            coven_foundation::changeset::ChangeOp::Insert,
+            id,
+        ));
+        assert!(!has_change(
+            &local_retention,
+            table,
+            coven_foundation::changeset::ChangeOp::Update,
+            id,
+        ));
+    }
+    for route in [&local_move_account_route, &local_move_transaction_route] {
+        assert!(has_change(
+            &local_retention,
+            "_coven_row_routes",
+            coven_foundation::changeset::ChangeOp::Insert,
+            route,
+        ));
+    }
     let store_mirror_retract =
         crate::walk_changeset(&local_partition("store").1).expect("walk Store mirror");
     for route in [&local_move_account_route, &local_move_transaction_route] {
@@ -1622,12 +1648,24 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
             .all(|(audience, _)| audience != &circle_id),
         "a reparent must not publish deletes to its old Circle"
     );
-    assert!(
-        local_partitions
-            .iter()
-            .all(|(audience, _)| audience != "local"),
-        "the host database is already the Local materialization"
-    );
+    let local_retention = local_partitions
+        .iter()
+        .find(|(audience, _)| audience == "local")
+        .map(|(_, changeset)| crate::walk_changeset(changeset))
+        .transpose()
+        .expect("walk inherited Local retention image")
+        .expect("missing inherited Local retention image");
+    for (table, id) in [
+        ("transactions", "to-local-transaction"),
+        ("line_items", "to-local-transaction-line"),
+    ] {
+        assert!(has_change(
+            &local_retention,
+            table,
+            coven_foundation::changeset::ChangeOp::Insert,
+            id,
+        ));
+    }
 
     let to_store = capture(&writes, |sql| {
         sql.execute(
@@ -1958,12 +1996,24 @@ async fn scoped_descendant_keeps_store_ancestor() {
             .all(|(audience, _)| audience != &circle_id),
         "a move must not publish deletes to its old Circle"
     );
-    assert!(
-        local_partitions
-            .iter()
-            .all(|(audience, _)| audience != "local"),
-        "the host database is already the Local materialization"
-    );
+    let local_retention = local_partitions
+        .iter()
+        .find(|(audience, _)| audience == "local")
+        .map(|(_, changeset)| crate::walk_changeset(changeset))
+        .transpose()
+        .expect("walk descendant Local retention image")
+        .expect("missing descendant Local retention image");
+    for (table, id) in [
+        ("documents", "moving-document"),
+        ("details", "moving-detail"),
+    ] {
+        assert!(has_change(
+            &local_retention,
+            table,
+            coven_foundation::changeset::ChangeOp::Insert,
+            id,
+        ));
+    }
     for (_, changeset) in &local_partitions {
         let changes = crate::walk_changeset(changeset).expect("walk Circle-to-Local partition");
         assert!(!has_change(
@@ -2046,12 +2096,24 @@ async fn scoped_descendant_keeps_store_ancestor() {
             .all(|(audience, _)| audience != &circle_b),
         "a move must not publish deletes to its old Circle"
     );
-    assert!(
-        sibling_local_partitions
-            .iter()
-            .all(|(audience, _)| audience != "local"),
-        "the host database is already the Local materialization"
-    );
+    let local_retention = sibling_local_partitions
+        .iter()
+        .find(|(audience, _)| audience == "local")
+        .map(|(_, changeset)| crate::walk_changeset(changeset))
+        .transpose()
+        .expect("walk final descendant Local retention image")
+        .expect("missing final descendant Local retention image");
+    for (table, id) in [
+        ("documents", "sibling-document"),
+        ("details", "sibling-detail"),
+    ] {
+        assert!(has_change(
+            &local_retention,
+            table,
+            coven_foundation::changeset::ChangeOp::Insert,
+            id,
+        ));
+    }
 
     let moved_store = capture(&writes, |sql| {
         sql.execute(

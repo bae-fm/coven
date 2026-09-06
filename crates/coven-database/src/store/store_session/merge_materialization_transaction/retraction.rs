@@ -166,6 +166,57 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             })
             .collect::<BTreeMap<_, _>>();
         require_exact_merge_retraction_closure(&direct_dependencies, required, &provided)?;
+        let retracted_write_ids = retained
+            .iter()
+            .filter(|materialization| provided.contains(materialization.commit_ref()))
+            .map(|materialization| materialization.commit().write_id.clone())
+            .collect::<BTreeSet<_>>();
+        let replay_rows =
+            crate::store::store_session::StoreRecords::new(conn, self.store.store_dir)
+                .store_write_replay_rows()?;
+        let retracted_ordinals = replay_rows
+            .iter()
+            .filter_map(|row| {
+                retracted_write_ids
+                    .contains(&WriteId::from_generated(row.write_id.clone()))
+                    .then_some(row.ordinal)
+            })
+            .collect::<BTreeSet<_>>();
+        let mut dependent_writes = BTreeSet::new();
+        for row in replay_rows {
+            let write_id = WriteId::from_generated(row.write_id);
+            if retracted_write_ids.contains(&write_id) {
+                continue;
+            }
+            let status: WriteStatus = serde_json::from_str(&row.status)
+                .map_err(|error| DbError::context("dependent Store write status", error))?;
+            if matches!(status, WriteStatus::Resolved(_)) {
+                continue;
+            }
+            if retracted_ordinals
+                .iter()
+                .any(|retracted| row.ordinal > *retracted)
+            {
+                dependent_writes.insert(write_id);
+                continue;
+            }
+            let base: crate::StoreWriteBase = serde_json::from_str(&row.base)
+                .map_err(|error| DbError::context("dependent Store write frontier", error))?;
+            let observed =
+                coven_protocol::store_commit::CommitFrontier::from_refs(base.dependencies)
+                    .map_err(DbError::from)?;
+            if provided
+                .iter()
+                .any(|reference| observed.covers_commit(reference))
+            {
+                dependent_writes.insert(write_id);
+            }
+        }
+        if !dependent_writes.is_empty() {
+            return Err(DbError::WriteDependencyConflict {
+                writes: dependent_writes.into_iter().collect(),
+            });
+        }
         let mut notifications = Vec::new();
         for verified in retractions {
             let (nonactivation, head_nonactivation) = verified

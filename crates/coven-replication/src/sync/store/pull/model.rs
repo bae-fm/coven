@@ -37,6 +37,14 @@ pub enum HeldStorePositionReason {
     InvalidRowIdentity(std::sync::Arc<coven_protocol::synced_schema::RowIdentityError>),
     ForeignKeyDependency,
     ConstraintConflict(Vec<String>),
+    PrivateSharedConflict {
+        table: String,
+        row_id: String,
+        commit: StoreBatchCommitRef,
+    },
+    InvalidLocalCircleContext {
+        circle_id: coven_protocol::circle::CircleId,
+    },
     HashMismatch {
         referenced_device_id: String,
         referenced_commit: StoreBatchCommitRef,
@@ -73,6 +81,10 @@ impl PartialEq for HeldStorePositionReason {
             | (Reason::CirclePackageMismatch, Reason::CirclePackageMismatch)
             | (Reason::ForeignKeyDependency, Reason::ForeignKeyDependency)
             | (Reason::InvalidSignature, Reason::InvalidSignature) => true,
+            (
+                Reason::InvalidLocalCircleContext { circle_id: left },
+                Reason::InvalidLocalCircleContext { circle_id: right },
+            ) => left == right,
             (Reason::MissingPredecessor(left), Reason::MissingPredecessor(right)) => left == right,
             (
                 Reason::MissingDependency {
@@ -128,6 +140,18 @@ impl PartialEq for HeldStorePositionReason {
             }
             (Reason::InvalidRowIdentity(left), Reason::InvalidRowIdentity(right)) => left == right,
             (Reason::ConstraintConflict(left), Reason::ConstraintConflict(right)) => left == right,
+            (
+                Reason::PrivateSharedConflict {
+                    table: lt,
+                    row_id: lr,
+                    commit: lc,
+                },
+                Reason::PrivateSharedConflict {
+                    table: rt,
+                    row_id: rr,
+                    commit: rc,
+                },
+            ) => lt == rt && lr == rr && lc == rc,
             (
                 Reason::HashMismatch {
                     referenced_device_id: ld,
@@ -372,6 +396,8 @@ pub enum StorePullError {
     /// baseline already restates at least as much.
     #[error("Store snapshot is behind this device's installed replay baseline")]
     SnapshotBehindReplayBaseline,
+    #[error("current membership is not named by accepted Store history")]
+    ReplayRetirementMembershipUnwitnessed,
     #[error("membership: {0}")]
     Membership(#[source] StorePullMembershipError),
     #[error("storage: {0}")]

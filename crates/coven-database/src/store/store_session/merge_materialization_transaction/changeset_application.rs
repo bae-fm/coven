@@ -15,12 +15,14 @@
 //! always in earlier changesets than children).
 //!
 //! If a FK violation remains after applying a changeset, the conflict handler
-//! reports it via `FOREIGN_KEY` and the returned flag notes it for the caller,
-//! which retries the changeset once its parents have landed. A non-FK constraint
-//! conflict marks the whole changeset rejected; the caller rolls its transaction
-//! back instead of committing the rows that happened not to conflict.
+//! reports it via `FOREIGN_KEY`. The production materializer validates the
+//! deferred foreign keys after its whole atomic replay step; the test wrapper
+//! also returns a flag so isolated changeset tests can roll back. A non-FK
+//! constraint conflict marks the whole changeset rejected; the caller rolls its
+//! transaction back instead of committing the rows that happened not to conflict.
 
 use std::collections::HashSet;
+#[cfg(any(test, feature = "test-utils"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -53,6 +55,7 @@ pub struct ApplyResult {
     /// True if any FK violations were reported. The caller may retry this
     /// changeset after applying other changesets that contain the missing parent
     /// rows.
+    #[cfg(any(test, feature = "test-utils"))]
     pub had_fk_violations: bool,
     /// Tables that hit non-retryable SQLite constraint conflicts. The caller must
     /// roll back the transaction when this is non-empty.
@@ -181,11 +184,13 @@ impl MergeMaterializationTransaction<'_, '_> {
         #[cfg(any(test, feature = "test-utils"))]
         let incoming_rows = incoming_rows(bytes, &schema)?;
 
+        #[cfg(any(test, feature = "test-utils"))]
         let fk_flag = Arc::new(AtomicBool::new(false));
         let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
         let premerged_updates =
             premerge_losing_update_columns(conn, bytes, &schema, timestamp_policy)?;
 
+        #[cfg(any(test, feature = "test-utils"))]
         let closure_flag = fk_flag.clone();
         let closure_constraint_conflict_tables = constraint_conflict_tables.clone();
         let closure_schema = schema.clone();
@@ -197,6 +202,7 @@ impl MergeMaterializationTransaction<'_, '_> {
                 // calling `op()`/`new_value()`/`conflict()` on it is undefined (it
                 // crashes the process). Resolve it first, without touching the row.
                 if conflict_type == ConflictType::SQLITE_CHANGESET_FOREIGN_KEY {
+                    #[cfg(any(test, feature = "test-utils"))]
                     closure_flag.store(true, Ordering::Relaxed);
                     return ConflictAction::SQLITE_CHANGESET_OMIT;
                 }
@@ -250,6 +256,7 @@ impl MergeMaterializationTransaction<'_, '_> {
             },
         )
         .map_err(DbError::from)?;
+        #[cfg(any(test, feature = "test-utils"))]
         let had_fk_violations = fk_flag.load(Ordering::Relaxed);
         let constraint_conflict_tables = constraint_conflict_tables
             .lock()
@@ -261,6 +268,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         let winning_rows = resolve_winning_rows(conn, &schema, incoming_rows)?;
 
         Ok(ApplyResult {
+            #[cfg(any(test, feature = "test-utils"))]
             had_fk_violations,
             constraint_conflict_tables,
             #[cfg(any(test, feature = "test-utils"))]

@@ -17,6 +17,38 @@ fn stored_semantic_payload(
     records.payload(hash).map_err(DbError::from)
 }
 
+fn prepared_state_contains_commit(
+    encoded: &str,
+    reference: &StoreBatchCommitRef,
+) -> Result<bool, DbError> {
+    let prepared: crate::store::publication_state::PreparedStoreWriteState =
+        serde_json::from_str(encoded)
+            .map_err(|error| DbError::context("retained replay prepared Store write", error))?;
+    let candidates = match &prepared {
+        crate::store::publication_state::PreparedStoreWriteState::Publication {
+            commit, ..
+        } => {
+            vec![commit]
+        }
+        crate::store::publication_state::PreparedStoreWriteState::MergeAbandonment {
+            candidate_commit,
+            authority_commit,
+            ..
+        } => vec![candidate_commit, authority_commit],
+    };
+    for candidate in candidates {
+        let value: StoreBatchCommit = serde_json::from_slice(candidate.semantic_bytes())
+            .map_err(|error| DbError::context("retained replay prepared Store commit", error))?;
+        if reference.coord.sequence() == value.seq()
+            && reference.commit_hash == value.commit_hash()
+            && &reference.object == candidate.prepared().reference()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl crate::store::store_session::StoreTransaction<'_, '_> {
     pub(crate) fn load_merge_retraction_cleanup(
         self,
@@ -591,26 +623,26 @@ impl StoreDatabase {
     /// local-only write the moment it commits, a resolved write once its
     /// candidate is cleaned up, a published write once `cut` covers the commit
     /// that carries it. Everything a settled write said is therefore restated
-    /// by an image captured at `cut` — its shared partition through the commit
-    /// the cut covers, its local partition through the overlay the capture
-    /// applies — so what the journal still holds for it is dead weight, and the
-    /// advance strips the row to its receipt or drops it.
+    /// by an image captured at `cut`: the baseline replay schedules each write
+    /// at its observed Store frontier, with its shared commit when one exists.
+    /// What the journal still holds for the settled prefix is therefore dead
+    /// weight, and the advance strips each row to its receipt or drops it.
     ///
     /// It is a *prefix* rather than a set because the journal is ordered and
-    /// its local partitions are the only record of the local rows. Baking one
-    /// write into the image while a lower-ordinal write stays an overlay would
-    /// replay the older partition on top of the newer one, so the walk stops at
-    /// the first write that is not settled and everything after it stays.
+    /// its local partitions are the only record of the local rows. Folding a
+    /// later write while retaining an earlier one would reverse their journal
+    /// order on the next replay, so the walk stops at the first write that is
+    /// not settled and everything after it stays.
     pub(crate) fn settled_store_write_prefix_on(
         records: StoreRecords<'_>,
         cut: &CommitFrontier,
     ) -> Result<Vec<crate::SettledStoreWrite>, DbError> {
         let mut settled = Vec::new();
-        for (encoded_write_id, raw_status) in records.store_write_status_rows()? {
-            let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                DbError::context(format!("settled write {encoded_write_id} status"), error)
+        for row in records.store_write_replay_rows()? {
+            let status: WriteStatus = serde_json::from_str(&row.status).map_err(|error| {
+                DbError::context(format!("settled write {} status", row.write_id), error)
             })?;
-            let fold = match status {
+            let fold = match status.clone() {
                 WriteStatus::LocalOnly => crate::SettledWriteFold::LocalOnly,
                 WriteStatus::Published(position) => {
                     if !cut.covers_commit(position.commit()) {
@@ -621,152 +653,317 @@ impl StoreDatabase {
                 WriteStatus::Resolved(_) => crate::SettledWriteFold::Reversed,
                 WriteStatus::Pending | WriteStatus::Publishing | WriteStatus::Blocked(_) => break,
             };
+            let base: StoreWriteBase = serde_json::from_str(&row.base).map_err(|error| {
+                DbError::context(
+                    format!("settled write {} observed frontier", row.write_id),
+                    error,
+                )
+            })?;
+            let observed = CommitFrontier::from_refs(base.dependencies.clone())
+                .map_err(|error| DbError::context("settled write observed frontier", error))?;
+            if fold.states_local_rows() && !cut.covers(&observed) {
+                break;
+            }
+            let changeset_hash = row.changeset_hash.parse::<ObjectHash>().map_err(|error| {
+                DbError::context(
+                    format!("settled write {} changeset hash", row.write_id),
+                    error,
+                )
+            })?;
+            records.payload(changeset_hash)?;
             settled.push(crate::SettledStoreWrite {
-                write_id: WriteId::from_generated(encoded_write_id),
+                ordinal: row.ordinal,
+                write_id: WriteId::from_generated(row.write_id),
                 fold,
+                status,
+                observed: base,
+                changeset_hash,
+                input_hash: row.input_hash,
             });
         }
         Ok(settled)
     }
 
-    /// The local partitions of `folded`, in journal order.
-    ///
-    /// This is what a baseline capture applies so that the image it produces
-    /// states the local rows those writes made. Their shared partitions are
-    /// already in it — the cut covers the commits carrying them — and a settled
-    /// write has no partition still owed to the cloud, so nothing else of
-    /// theirs belongs in the image.
-    pub(crate) fn load_folded_write_overlays_on(
+    fn retained_write_effect_on(
         records: StoreRecords<'_>,
-        folded: &[crate::SettledStoreWrite],
-    ) -> Result<Vec<MergeReplayWriteOverlay>, DbError> {
-        let mut overlays = Vec::new();
-        for settled in folded {
-            if !settled.fold.states_local_rows() {
-                continue;
-            }
-            // A settled write's shared partition is restated by the commit the
-            // cut covers, so it is deliberately dropped here: applying it again
-            // would put the same rows in twice, under the overlay path's
-            // timestamp policy rather than the one its commit carried.
-            let Some(local) = records
-                .store_write_partitions(settled.write_id.as_str())?
-                .local
-            else {
-                continue;
-            };
-            overlays.push(MergeReplayWriteOverlay {
-                write_id: settled.write_id.clone(),
-                partitions: PreparedStoreWritePartitions {
-                    store: None,
-                    circles: Vec::new(),
-                    local: Some(local),
-                },
-            });
+        write_id: WriteId,
+        raw_base: Option<String>,
+        raw_changeset_hash: Option<String>,
+        local_only: bool,
+    ) -> Result<(MergeReplayWriteEffect, CommitFrontier), DbError> {
+        let base = raw_base.ok_or_else(|| {
+            DbError::Message(format!(
+                "retained write {write_id} has no observed frontier"
+            ))
+        })?;
+        let changeset_hash = raw_changeset_hash.ok_or_else(|| {
+            DbError::Message(format!(
+                "retained write {write_id} has no original changeset"
+            ))
+        })?;
+        let changeset_hash = changeset_hash.parse::<ObjectHash>()?;
+        records.payload(changeset_hash)?;
+        let base: StoreWriteBase = serde_json::from_str(&base).map_err(|error| {
+            DbError::context(
+                format!("retained write {write_id} observed frontier"),
+                error,
+            )
+        })?;
+        let observed = CommitFrontier::from_refs(base.dependencies)
+            .map_err(|error| DbError::context("retained write observed frontier", error))?;
+        let mut partitions = records.store_write_partitions(write_id.as_str())?;
+        if local_only {
+            partitions.store = None;
+            partitions.circles.clear();
         }
-        Ok(overlays)
+        Ok((
+            MergeReplayWriteEffect {
+                write_id,
+                partitions,
+            },
+            observed,
+        ))
     }
 
-    /// The local write partitions replay overlays on top of the baseline image.
-    ///
-    /// `baseline_cut` is what the image already states. A published write whose
-    /// commit the cut covers has had its shared partition folded into the image
-    /// and its commit retired, so it is settled in exactly the way a write
-    /// replayed from a retained row above the cut is — only its local partition
-    /// is still owed. Without that, a device that advanced its baseline would
-    /// find every write it had ever published stranded: not replayed from a
-    /// retained row, not retracted, and so reported as a write with no input.
-    pub(crate) fn load_merge_replay_write_overlays_on(
+    pub(crate) fn load_folded_replay_journal_on(
+        records: StoreRecords<'_>,
+        folded: &[crate::SettledStoreWrite],
+    ) -> Result<Vec<MergeReplayWrite>, DbError> {
+        let rows = records.store_write_replay_rows()?;
+        if rows.len() < folded.len() {
+            return Err(DbError::Message(
+                "folded write prefix extends past the retained journal".to_string(),
+            ));
+        }
+        let mut journal = Vec::with_capacity(folded.len());
+        for (settled, row) in folded.iter().zip(rows) {
+            if row.ordinal != settled.ordinal
+                || row.write_id != settled.write_id.as_str()
+                || row.input_hash != settled.input_hash
+                || row.changeset_hash != settled.changeset_hash.to_string()
+            {
+                return Err(DbError::Message(
+                    "folded write prefix differs from retained journal input".to_string(),
+                ));
+            }
+            let status: WriteStatus = serde_json::from_str(&row.status).map_err(|error| {
+                DbError::context(format!("folded write {} status", row.write_id), error)
+            })?;
+            let base: StoreWriteBase = serde_json::from_str(&row.base).map_err(|error| {
+                DbError::context(
+                    format!("folded write {} observed frontier", row.write_id),
+                    error,
+                )
+            })?;
+            if status != settled.status || base != settled.observed {
+                return Err(DbError::Message(format!(
+                    "folded write {} changed during baseline capture",
+                    row.write_id
+                )));
+            }
+            let write = match (settled.fold, status) {
+                (crate::SettledWriteFold::LocalOnly, WriteStatus::LocalOnly) => {
+                    let (effect, observed) = Self::retained_write_effect_on(
+                        records,
+                        settled.write_id.clone(),
+                        Some(row.base),
+                        Some(row.changeset_hash),
+                        true,
+                    )?;
+                    MergeReplayWrite::LocalOnly { effect, observed }
+                }
+                (crate::SettledWriteFold::Published, WriteStatus::Published(position)) => {
+                    let commit = position.commit().clone();
+                    let (effect, observed) = Self::retained_write_effect_on(
+                        records,
+                        settled.write_id.clone(),
+                        Some(row.base),
+                        Some(row.changeset_hash),
+                        false,
+                    )?;
+                    MergeReplayWrite::Accepted {
+                        effect,
+                        observed,
+                        commit,
+                    }
+                }
+                (crate::SettledWriteFold::Reversed, WriteStatus::Resolved(_)) => {
+                    MergeReplayWrite::Consumed {
+                        write_id: settled.write_id.clone(),
+                    }
+                }
+                _ => {
+                    return Err(DbError::Message(format!(
+                        "folded write {} changed status during baseline capture",
+                        row.write_id
+                    )))
+                }
+            };
+            journal.push(write);
+        }
+        Ok(journal)
+    }
+
+    pub(crate) fn load_merge_replay_journal_on(
         records: StoreRecords<'_>,
         baseline_cut: &CommitFrontier,
-        active_accepted_writes: &BTreeSet<WriteId>,
+        active_accepted_writes: &std::collections::BTreeMap<WriteId, StoreBatchCommitRef>,
         retracted_writes: &BTreeSet<WriteId>,
-    ) -> Result<Vec<MergeReplayWriteOverlay>, DbError> {
-        if !active_accepted_writes.is_disjoint(retracted_writes) {
+    ) -> Result<Vec<MergeReplayWrite>, DbError> {
+        if active_accepted_writes
+            .keys()
+            .any(|write_id| retracted_writes.contains(write_id))
+        {
             return Err(DbError::Message(
                 "retained replay classifies one write as active and retracted".to_string(),
             ));
         }
-        let rows = records.store_write_status_rows()?;
-        let mut overlays = Vec::new();
-        for (encoded_write_id, raw_status) in rows {
-            let write_id = WriteId::from_generated(encoded_write_id.clone());
-            let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                DbError::context(
-                    format!("retained replay write {encoded_write_id} status"),
-                    error,
-                )
+        let mut journal = Vec::new();
+        for row in records.store_write_replay_rows()? {
+            let encoded_id = row.write_id;
+            let write_id = WriteId::from_generated(encoded_id.clone());
+            let status: WriteStatus = serde_json::from_str(&row.status).map_err(|error| {
+                DbError::context(format!("retained replay write {encoded_id} status"), error)
             })?;
-            let partitions = records.store_write_partitions(&encoded_write_id)?;
-            let active = active_accepted_writes.contains(&write_id);
+            let active = active_accepted_writes.get(&write_id);
             let retracted = retracted_writes.contains(&write_id);
-            let partitions = match status {
+            let write = match status {
                 WriteStatus::LocalOnly => {
-                    if partitions.store.is_some() || !partitions.circles.is_empty() {
+                    let (effect, observed) = Self::retained_write_effect_on(
+                        records,
+                        write_id,
+                        Some(row.base),
+                        Some(row.changeset_hash),
+                        true,
+                    )?;
+                    if effect.partitions.store.is_some() || !effect.partitions.circles.is_empty() {
                         return Err(DbError::Message(format!(
-                            "Local-only write {encoded_write_id} carries a shared partition"
+                            "Local-only write {encoded_id} carries a shared partition"
                         )));
                     }
-                    PreparedStoreWritePartitions {
-                        store: None,
-                        circles: Vec::new(),
-                        local: partitions.local,
-                    }
+                    MergeReplayWrite::LocalOnly { effect, observed }
                 }
-                WriteStatus::Pending => partitions,
+                WriteStatus::Pending => {
+                    let (effect, observed) = Self::retained_write_effect_on(
+                        records,
+                        write_id,
+                        Some(row.base),
+                        Some(row.changeset_hash),
+                        false,
+                    )?;
+                    MergeReplayWrite::Unaccepted { effect, observed }
+                }
                 WriteStatus::Publishing | WriteStatus::Blocked(_) => {
                     if retracted {
                         return Err(DbError::Message(format!(
-                            "unresolved write {encoded_write_id} is already terminally retracted"
+                            "unresolved write {encoded_id} is already terminally retracted"
                         )));
                     }
-                    if active {
-                        PreparedStoreWritePartitions {
-                            store: None,
-                            circles: Vec::new(),
-                            local: partitions.local,
+                    let accepted = match (active, row.prepared.as_deref()) {
+                        (Some(reference), Some(prepared))
+                            if prepared_state_contains_commit(prepared, reference)? =>
+                        {
+                            Some(reference.clone())
                         }
-                    } else {
-                        partitions
+                        (Some(_), None) => {
+                            return Err(DbError::Message(format!(
+                                "unresolved write {encoded_id} has no prepared candidate"
+                            )))
+                        }
+                        _ => None,
+                    };
+                    let (effect, observed) = Self::retained_write_effect_on(
+                        records,
+                        write_id,
+                        Some(row.base),
+                        Some(row.changeset_hash),
+                        false,
+                    )?;
+                    match accepted {
+                        Some(commit) => MergeReplayWrite::Accepted {
+                            effect,
+                            observed,
+                            commit,
+                        },
+                        None => MergeReplayWrite::Unaccepted { effect, observed },
                     }
                 }
                 WriteStatus::Published(position) => {
-                    let active = active || baseline_cut.covers_commit(position.commit());
                     if retracted {
-                        PreparedStoreWritePartitions {
-                            store: None,
-                            circles: Vec::new(),
-                            local: None,
-                        }
-                    } else if active {
-                        PreparedStoreWritePartitions {
-                            store: None,
-                            circles: Vec::new(),
-                            local: partitions.local,
-                        }
+                        MergeReplayWrite::Consumed { write_id }
+                    } else if baseline_cut.covers_commit(position.commit()) {
+                        let (effect, observed) = Self::retained_write_effect_on(
+                            records,
+                            write_id,
+                            Some(row.base),
+                            Some(row.changeset_hash),
+                            false,
+                        )?;
+                        MergeReplayWrite::LocalOnly { effect, observed }
                     } else {
-                        return Err(DbError::Message(format!(
-                            "published write {encoded_write_id} has no retained replay input"
-                        )));
+                        let active = active.ok_or_else(|| {
+                            DbError::Message(format!(
+                                "published write {encoded_id} has no retained replay input"
+                            ))
+                        })?;
+                        if active != position.commit() {
+                            return Err(DbError::Message(format!(
+                                "published write {encoded_id} is associated with another accepted commit"
+                            )));
+                        }
+                        let (effect, observed) = Self::retained_write_effect_on(
+                            records,
+                            write_id,
+                            Some(row.base),
+                            Some(row.changeset_hash),
+                            false,
+                        )?;
+                        MergeReplayWrite::Accepted {
+                            effect,
+                            observed,
+                            commit: active.clone(),
+                        }
                     }
                 }
-                WriteStatus::Resolved(_) => PreparedStoreWritePartitions {
-                    store: None,
-                    circles: Vec::new(),
-                    local: None,
-                },
+                WriteStatus::Resolved(_) => MergeReplayWrite::Consumed { write_id },
             };
-            if partitions.store.is_some()
-                || !partitions.circles.is_empty()
-                || partitions.local.is_some()
-            {
-                overlays.push(MergeReplayWriteOverlay {
-                    write_id,
-                    partitions,
-                });
-            }
+            journal.push(write);
         }
-        Ok(overlays)
+        Ok(journal)
+    }
+
+    pub(crate) fn load_merge_replay_associations_on(
+        records: StoreRecords<'_>,
+        baseline_cut: &CommitFrontier,
+        active_accepted_writes: &std::collections::BTreeMap<WriteId, StoreBatchCommitRef>,
+        retracted_writes: &BTreeSet<WriteId>,
+    ) -> Result<Vec<MergeReplayWrite>, DbError> {
+        let associations = Self::load_merge_replay_journal_on(
+            records,
+            baseline_cut,
+            active_accepted_writes,
+            retracted_writes,
+        )?
+        .into_iter()
+        .filter_map(|write| match write {
+            MergeReplayWrite::Accepted {
+                mut effect,
+                observed,
+                commit,
+            } => {
+                effect.partitions.local = None;
+                Some(MergeReplayWrite::Accepted {
+                    effect,
+                    observed,
+                    commit,
+                })
+            }
+            MergeReplayWrite::LocalOnly { .. }
+            | MergeReplayWrite::Unaccepted { .. }
+            | MergeReplayWrite::Consumed { .. } => None,
+        })
+        .collect::<Vec<_>>();
+        Ok(associations)
     }
 
     pub(crate) fn generation_zero_replay_baseline_on(

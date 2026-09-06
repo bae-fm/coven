@@ -1,29 +1,32 @@
 use super::membership;
 use super::*;
 
+pub(super) struct CurrentMergeAuthority {
+    pub(super) cut: StoreHistoryCut,
+    pub(super) state: ResolvedStoreDeviceState,
+    pub(super) registrations: BTreeMap<StoreDeviceId, ReferencedStoreDeviceRegistration>,
+}
+
 pub(crate) fn verify_merge_membership_state_ref(
     state: &StoreMembershipStateRef,
     membership: &MembershipChain,
     device_state: &ResolvedStoreDeviceState,
 ) -> Result<(), StorePullError> {
-    let MembershipStatus::Resolved(resolved) = membership.status() else {
-        return Err(StorePullError::InvalidState(
-            "Store history membership state is conflicted".to_string(),
-        ));
-    };
-    let expected = StoreMembershipStateRef::from_parts(
-        membership.head_refs().to_vec(),
-        membership.resolution_refs().to_vec(),
-        device_state.recovery.clone(),
-        resolved.state_hash,
-    )
-    .map_err(StorePullError::Protocol)?;
+    let expected = merge_membership_state_ref(membership, device_state)?;
     if &expected != state {
         return Err(StorePullError::InvalidState(
             "Store history membership reference differs from its exact resolved state".to_string(),
         ));
     }
     Ok(())
+}
+
+pub(crate) fn merge_membership_state_ref(
+    membership: &MembershipChain,
+    device_state: &ResolvedStoreDeviceState,
+) -> Result<StoreMembershipStateRef, StorePullError> {
+    StoreMembershipStateRef::from_membership(membership, device_state.recovery.clone())
+        .map_err(StorePullError::Protocol)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -612,7 +615,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         expected: &StoreBatchCommitRef,
     ) -> Result<bool, StorePullError> {
         self.verify_refs([expected.clone()]).await?;
-        let mut state = self
+        let state = self
             .history
             .commits
             .get(expected)
@@ -624,6 +627,27 @@ impl<'a> MergeHistoryVerifier<'a> {
             })?
             .state_after
             .clone();
+        let authority = self.current_merge_authority_from(membership, state).await?;
+        let accepted_closure = verified_merge_commit_closure(
+            &self.history,
+            authority.cut.commits().values().cloned(),
+        )?;
+        Ok(accepted_closure.contains(expected))
+    }
+
+    pub(super) async fn current_merge_authority(
+        &mut self,
+        membership: &MembershipChain,
+    ) -> Result<CurrentMergeAuthority, StorePullError> {
+        self.current_merge_authority_from(membership, self.history.genesis.clone())
+            .await
+    }
+
+    async fn current_merge_authority_from(
+        &mut self,
+        membership: &MembershipChain,
+        mut state: ResolvedStoreDeviceState,
+    ) -> Result<CurrentMergeAuthority, StorePullError> {
         let mut registrations = BTreeMap::new();
         let founder = self.commit_verifier.load_founder_registration().await?;
         let founder_ref =
@@ -696,9 +720,11 @@ impl<'a> MergeHistoryVerifier<'a> {
                 && next_state == state
                 && registrations.len() == registration_count;
             if stable {
-                let accepted_closure =
-                    verified_merge_commit_closure(&self.history, next.values().cloned())?;
-                return Ok(accepted_closure.contains(expected));
+                return Ok(CurrentMergeAuthority {
+                    cut: StoreHistoryCut(next),
+                    state: next_state,
+                    registrations,
+                });
             }
             let state_fingerprint = ObjectHash::digest(
                 &serde_json::to_vec(&(&next, &next_state))

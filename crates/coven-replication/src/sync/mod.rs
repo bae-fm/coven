@@ -14,6 +14,10 @@ mod error;
 mod exact_founder_graph_tests;
 #[cfg(test)]
 mod hlc_register_tests;
+#[cfg(test)]
+mod local_replay_causality_tests;
+#[cfg(test)]
+mod local_replay_invariant_tests;
 pub(crate) mod loop_policy;
 #[cfg(test)]
 mod pull_tests;

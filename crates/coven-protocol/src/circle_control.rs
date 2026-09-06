@@ -152,6 +152,23 @@ pub struct StoreMembershipStateRef {
 }
 
 impl StoreMembershipStateRef {
+    pub fn from_membership(
+        membership: &crate::membership::MembershipChain,
+        recovery: Vec<OwnerRecoveryCursor>,
+    ) -> Result<Self, super::store_commit::StoreProtocolError> {
+        let crate::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
+            return Err(super::store_commit::StoreProtocolError::Malformed(
+                "Store membership state is conflicted".to_string(),
+            ));
+        };
+        Self::from_parts(
+            membership.head_refs().to_vec(),
+            membership.resolution_refs().to_vec(),
+            recovery,
+            resolved.state_hash,
+        )
+    }
+
     pub fn from_parts(
         mut heads: Vec<MembershipHeadRef>,
         mut resolutions: Vec<StoreMembershipConflictResolutionRef>,

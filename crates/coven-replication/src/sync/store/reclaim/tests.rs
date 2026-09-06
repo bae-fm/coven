@@ -1022,18 +1022,15 @@ async fn a_standing_acknowledgement_advances_a_baseline_that_never_moved() {
     );
 }
 
-/// The live shape: the licence is in history, not in the latest word.
+/// A writer activated after a snapshot must cross its cut before another device
+/// can retire local replay inputs behind it.
 ///
-/// An acknowledgement names a snapshot only while that snapshot still describes
-/// the Store's devices. Register a device and every acknowledgement after it
-/// names nothing — the standing one included — because there is no published
-/// snapshot left to name. The device has still said it holds the older one, in
-/// an acknowledgement its own retained history carries, and that statement is
-/// what licenses the advance. A store in this state sat on a genesis baseline
-/// with two hundred retained rows, reporting every reclaim target as retained
-/// for replay, cycle after cycle.
+/// The founder's earlier acknowledgement remains enough for cloud reclaim, but
+/// it cannot establish where the new writer's future commits belong relative to
+/// local private work. A later founder acknowledgement that names no snapshot
+/// does not supply the missing writer acknowledgement either.
 #[tokio::test]
-async fn a_baseline_advances_over_a_snapshot_only_history_remembers_acknowledging() {
+async fn a_new_writer_without_a_crossing_acknowledgement_blocks_baseline_retirement() {
     let fixture = StandingAcknowledgementFixture::build("standing-ack-overtaken").await;
     fixture.overtake_the_acknowledged_device_state().await;
     fixture.acknowledge_naming_no_snapshot().await;
@@ -1043,12 +1040,20 @@ async fn a_baseline_advances_over_a_snapshot_only_history_remembers_acknowledgin
         "the fixture reproduces the live shape: the latest word names no snapshot",
     );
 
-    let advanced = fixture.stand_on_acknowledged_snapshot().await;
+    let outcome = fixture
+        .device
+        .stand_on_acknowledged_snapshot()
+        .await
+        .expect("evaluate the acknowledged snapshot");
 
     assert!(
-        advanced.retired_commits > 0,
-        "the acknowledgement history carries licenses the advance, retired {}",
-        advanced.retired_commits,
+        matches!(
+            outcome,
+            crate::sync::store::ReplayBaselineAdvance::Declined(
+                crate::sync::store::ReplayBaselineDecline::MissingWriterAcknowledgement { .. }
+            )
+        ),
+        "a writer activated after the snapshot has not crossed its cut: {outcome:?}",
     );
 }
 
@@ -1969,6 +1974,153 @@ async fn a_removed_members_device_does_not_block_reclaim() {
              generation {} against {}",
             after.generation,
             fixture.covering.generation,
+        );
+    })
+    .await;
+}
+
+/// A membership change does not alter the writer set used for local retirement
+/// until accepted Store history names that exact membership state. Otherwise a
+/// direct member removal could excuse a writer from the acknowledgement rule
+/// while the retirement cut still precedes the removal.
+#[tokio::test]
+async fn replay_retirement_rejects_membership_beyond_the_current_store_cut() {
+    Box::pin(async {
+        let fixture = UnanimityFixture::build(
+            "retirement-membership-cut",
+            PeerJoin::BeforeCoverage,
+            PeerPrincipal::SeparateMember,
+        )
+        .await;
+        let database = coven_database::StoreDatabase::new(&fixture.owner_db);
+        let frontier_before_removal = coven_protocol::store_commit::CommitFrontier::from_refs(
+            database
+                .materialized_frontier()
+                .await
+                .expect("read the Store frontier before member removal"),
+        )
+        .expect("shape the Store frontier before member removal");
+        let baseline_before_decline = database
+            .installed_replay_baseline()
+            .await
+            .expect("read the replay baseline before member removal");
+
+        fixture.remove_peer_member().await;
+
+        let frontier_after_removal = coven_protocol::store_commit::CommitFrontier::from_refs(
+            database
+                .materialized_frontier()
+                .await
+                .expect("read the Store frontier after member removal"),
+        )
+        .expect("shape the Store frontier after member removal");
+        assert_eq!(
+            frontier_after_removal, frontier_before_removal,
+            "member removal changes Circle history, not accepted Store history",
+        );
+        let membership = fixture
+            .owner_device
+            .membership_for_test()
+            .await
+            .expect("read membership after member removal");
+        assert!(
+            !membership.is_member_now(&crate::sync::test_helpers::pubkey_hex(
+                fixture.member.as_ref().expect("the peer is a member"),
+            )),
+            "the peer must already be absent from current membership",
+        );
+
+        let declined = fixture
+            .owner_device
+            .stand_on_acknowledged_snapshot()
+            .await
+            .expect("evaluate retirement before Store history names the removal");
+
+        assert_eq!(
+            declined,
+            crate::sync::store::ReplayBaselineAdvance::Declined(
+                crate::sync::store::ReplayBaselineDecline::MembershipNotAccepted {
+                    generation: fixture.covering.generation,
+                },
+            ),
+            "membership beyond the accepted Store cut must decline retirement",
+        );
+        let baseline_after_decline = database
+            .installed_replay_baseline()
+            .await
+            .expect("read the replay baseline after retirement declines");
+        assert_eq!(
+            baseline_after_decline.coverage(),
+            baseline_before_decline.coverage(),
+            "declining retirement must preserve the installed baseline",
+        );
+
+        fixture
+            .owner_device
+            .publish_acknowledgement_without_advancing(frontier_after_removal.clone())
+            .await
+            .expect("publish the current membership into Store history");
+        let witness = fixture
+            .owner_device
+            .latest_local_store_position()
+            .await
+            .expect("read the membership witness position")
+            .expect("the acknowledgement published a Store commit");
+        let witness_commit = fixture
+            .owner_device
+            .load_commit_for_test(&witness)
+            .await
+            .expect("load the membership witness commit");
+        let expected_membership =
+            coven_protocol::circle_control::StoreMembershipStateRef::from_membership(
+                &membership,
+                witness_commit.value().membership_state.recovery().to_vec(),
+            )
+            .expect("shape current membership");
+        assert_eq!(
+            witness_commit.value().membership_state,
+            expected_membership,
+            "the acknowledgement commit must name the member removal",
+        );
+
+        let advanced = fixture
+            .owner_device
+            .stand_on_acknowledged_snapshot()
+            .await
+            .expect("retire after accepted Store history names current membership");
+        assert!(
+            matches!(
+                advanced,
+                crate::sync::store::ReplayBaselineAdvance::Advanced(_)
+            ),
+            "the membership witness must license retirement: {advanced:?}",
+        );
+
+        let current_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
+            database
+                .materialized_frontier()
+                .await
+                .expect("read the Store frontier after retirement"),
+        )
+        .expect("shape the Store frontier after retirement");
+        let mut writer = fixture
+            .owner_device
+            .authorize_writer()
+            .await
+            .expect("authorize the acknowledgement check");
+        writer
+            .seed_retained_history()
+            .await
+            .expect("seed accepted Store history as the sync pull does");
+        let redundant = writer
+            .acknowledgements()
+            .stage_acknowledgement(current_frontier, "2026-07-18T00:00:01Z".to_string())
+            .await
+            .expect("stage a redundant acknowledgement")
+            .acknowledgement;
+        assert!(
+            redundant.is_none(),
+            "the standing acknowledgement already covers current history and membership",
         );
     })
     .await;

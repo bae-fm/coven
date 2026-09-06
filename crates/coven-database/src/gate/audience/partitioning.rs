@@ -48,32 +48,42 @@ pub(crate) fn partition_outbound(
         let shared = gates.shared_rows(conn)?;
         let mut groups = AudiencePartitionGroups::new(conn, gates);
         let audience_moves = audience_moves(conn, changeset, gates)?;
-        let destination_materialized_rows = audience_moves
-            .iter()
-            .filter(|audience_move| audience_move.destination != Audience::Local)
-            .flat_map(|audience_move| audience_move.rows.iter().cloned())
-            .collect::<HashSet<_>>();
-        let mut ancestor_inserts = HashSet::new();
+        let mut local_retained_rows = HashSet::new();
         let mut ancestor_deletes = HashSet::new();
+        let mut ancestor_inserts = HashSet::new();
+        for audience_move in &audience_moves {
+            let component = audience_move.rows.iter().cloned().collect::<HashSet<_>>();
+            let ancestors = required_store_ancestors(conn, gates, &component)?;
+            if audience_move.source == Audience::Local
+                && audience_move.destination != Audience::Local
+            {
+                ancestor_inserts.extend(ancestors);
+            } else if audience_move.source != Audience::Local
+                && audience_move.destination == Audience::Local
+            {
+                local_retained_rows.extend(component);
+                for (table, id) in ancestors {
+                    if !shared.contains(&table, &id)? {
+                        ancestor_deletes.insert((table, id));
+                    }
+                }
+            }
+        }
         let captured_deletes = collect_deletes(changeset)?;
         let mut non_local_deletes = HashSet::new();
         let deleted_audiences =
             captured_deleted_audiences(conn, &captured_deletes, gates, &shared)?;
         let store_changeset = gate_store_outbound(conn, changeset, gates)?;
         let mut store_rows = HashSet::new();
-        for_each_change(&store_changeset, |iter, row| {
+        for_each_change(&store_changeset, |_iter, row| {
             let row_id = row
                 .pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-            let row_key = (row.table.clone(), row_id.to_string());
-            if destination_materialized_rows.contains(&row_key) {
-                return Ok(());
-            }
-            store_rows.insert(row_key);
-            groups.group(Audience::Store)?.group.add_change(iter)?;
+            store_rows.insert((row.table.clone(), row_id.to_string()));
             Ok(())
         })?;
-        for_each_change(changeset, |iter, row| {
+        let mut change_audiences = HashMap::new();
+        for_each_change(changeset, |_iter, row| {
             if !gates.tables.contains_key(&row.table) {
                 return Ok(());
             }
@@ -81,11 +91,6 @@ pub(crate) fn partition_outbound(
                 .pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
             let row_key = (row.table.clone(), row_id.to_string());
-            if row_audience_move(conn, gates, &row)?.is_some()
-                || destination_materialized_rows.contains(&row_key)
-            {
-                return Ok(());
-            }
             let audience = if !gates.table_is_scoped(&row.table) {
                 if store_rows.contains(&row_key) {
                     Audience::Store
@@ -108,13 +113,10 @@ pub(crate) fn partition_outbound(
                     let component = scoped_materialization_rows(conn, gates, row_key.clone())?;
                     ancestor_inserts.extend(required_store_ancestors(conn, gates, &component)?);
                 } else if row.op == ffi::SQLITE_DELETE {
-                    non_local_deletes.insert(row_key);
+                    non_local_deletes.insert(row_key.clone());
                 }
             }
-            if gates.table_is_scoped(&row.table) || audience == Audience::Local {
-                let partition = groups.group(audience)?;
-                partition.group.add_change(iter)?;
-            }
+            change_audiences.insert(row_key, audience);
             Ok(())
         })?;
         for (table, id) in required_store_ancestors_for_deleted_rows(
@@ -127,28 +129,121 @@ pub(crate) fn partition_outbound(
                 ancestor_deletes.insert((table, id));
             }
         }
-        for audience_move in &audience_moves {
-            let component = audience_move.rows.iter().cloned().collect::<HashSet<_>>();
-            let ancestors = required_store_ancestors(conn, gates, &component)?;
-            if audience_move.source == Audience::Local
-                && audience_move.destination != Audience::Local
-            {
-                ancestor_inserts.extend(ancestors.iter().cloned());
-            } else if audience_move.source != Audience::Local
-                && audience_move.destination == Audience::Local
-            {
-                for (table, id) in ancestors {
-                    if !shared.contains(&table, &id)? {
-                        ancestor_deletes.insert((table, id));
+        local_retained_rows.extend(ancestor_deletes.iter().cloned());
+        loop {
+            let prior_len = local_retained_rows.len();
+            let ancestors = required_store_ancestors(conn, gates, &local_retained_rows)?;
+            for ancestor in ancestors {
+                if !shared.contains(&ancestor.0, &ancestor.1)? {
+                    local_retained_rows.insert(ancestor);
+                }
+            }
+            let retained_ancestors = local_retained_rows
+                .iter()
+                .filter(|(table, _)| {
+                    matches!(gates.tables.get(table), Some(TableGate::Parent { .. }))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for ancestor in retained_ancestors {
+                for row in scoped_materialization_rows(conn, gates, ancestor)? {
+                    if !shared.contains(&row.0, &row.1)? {
+                        local_retained_rows.insert(row);
                     }
                 }
             }
+            if local_retained_rows.len() == prior_len {
+                break;
+            }
+        }
+        let destination_materialized_rows = audience_moves
+            .iter()
+            .filter(|audience_move| audience_move.destination != Audience::Local)
+            .flat_map(|audience_move| audience_move.rows.iter().cloned())
+            .collect::<HashSet<_>>();
+        for_each_change(&store_changeset, |iter, row| {
+            let row_id = row
+                .pk()
+                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+            if !destination_materialized_rows.contains(&(row.table.clone(), row_id.to_string())) {
+                groups.group(Audience::Store)?.group.add_change(iter)?;
+            }
+            Ok(())
+        })?;
+        for_each_change(changeset, |iter, row| {
+            if !gates.tables.contains_key(&row.table) {
+                return Ok(());
+            }
+            let row_id = row
+                .pk()
+                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+            let row_key = (row.table.clone(), row_id.to_string());
+            if row_audience_move(conn, gates, &row)?.is_some()
+                || destination_materialized_rows.contains(&row_key)
+                || local_retained_rows.contains(&row_key)
+            {
+                return Ok(());
+            }
+            let audience =
+                change_audiences
+                    .get(&row_key)
+                    .ok_or_else(|| GateError::MissingAudienceRow {
+                        table: row.table.clone(),
+                        row_id: row_id.to_string(),
+                    })?;
+            if gates.table_is_scoped(&row.table) || *audience == Audience::Local {
+                let partition = groups.group(audience.clone())?;
+                partition.group.add_change(iter)?;
+            }
+            Ok(())
+        })?;
+        for audience_move in &audience_moves {
+            let component = audience_move.rows.iter().cloned().collect::<HashSet<_>>();
             if audience_move.destination != Audience::Local {
                 groups.add_materialization(
                     &component,
                     FullStateDirection::Inserts,
                     audience_move.destination.clone(),
                 )?;
+            }
+        }
+        if !local_retained_rows.is_empty() {
+            groups.add_materialization(
+                &local_retained_rows,
+                FullStateDirection::Inserts,
+                Audience::Local,
+            )?;
+            let local_routes = local_retained_rows
+                .iter()
+                .filter(|(table, _)| gates.table_is_scoped(table))
+                .map(|(table, row_id)| {
+                    query_row_optional(
+                        conn,
+                        "SELECT routing_id, table_name, row_id, _updated_at
+                         FROM _coven_row_routes
+                         WHERE table_name = ?1 AND row_id = ?2",
+                        (table, row_id),
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                            ))
+                        },
+                    )?
+                    .ok_or_else(|| GateError::MissingAudienceRow {
+                        table: table.clone(),
+                        row_id: row_id.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, GateError>>()?;
+            if !local_routes.is_empty() {
+                let routes = private_route_insert_changeset(&local_routes)?;
+                for_each_change(&routes, |iter, _row| {
+                    groups.group(Audience::Local)?.group.add_change(iter)?;
+                    Ok(())
+                })?;
             }
         }
         if !ancestor_inserts.is_empty() {
@@ -159,9 +254,11 @@ pub(crate) fn partition_outbound(
             )?;
         }
         if !ancestor_deletes.is_empty() {
-            groups.add_materialization(
+            let materialization =
+                pre_write_full_state_diff(conn, gates, changeset, FullStateDirection::Deletes)?;
+            groups.add_materialization_changeset(
+                &materialization,
                 &ancestor_deletes,
-                FullStateDirection::Deletes,
                 Audience::Store,
             )?;
         }
@@ -329,6 +426,63 @@ pub(crate) fn validate_scoped_foreign_key_audiences(
     Ok(())
 }
 
+/// Refuse an accepted row whose foreign key can only be satisfied by private
+/// state. The private-row set carries provenance across the temporary state in
+/// which an accepted parent deletion can leave its accepted child dangling;
+/// deriving sharing from that state would misclassify the child as private.
+pub(crate) fn validate_accepted_foreign_key_closure(
+    conn: &Connection,
+    gates: &Gates,
+    private_rows: &std::collections::BTreeSet<(String, String)>,
+) -> Result<(), GateError> {
+    for table in gates.sorted_synced_table_names() {
+        for row_id in all_row_ids(conn, &table)? {
+            if private_rows.contains(&(table.clone(), row_id.clone())) {
+                continue;
+            }
+            for (fk_column, parent, parent_column) in foreign_keys(conn, &table)? {
+                if !gates.is_synced_table(&parent) {
+                    continue;
+                }
+                let parent_id = match fk_parent_row(
+                    conn,
+                    &table,
+                    &row_id,
+                    &fk_column,
+                    &parent,
+                    &parent_column,
+                )? {
+                    FkParentRow::Found(parent_id) => parent_id,
+                    FkParentRow::NullForeignKey => continue,
+                    FkParentRow::RowAbsent | FkParentRow::ParentAbsent => {
+                        return Err(GateError::UnsharedForeignKeyParent(Box::new(
+                            UnsharedForeignKeyParent {
+                                table,
+                                row_id,
+                                column: fk_column,
+                                parent,
+                                parent_id: None,
+                            },
+                        )))
+                    }
+                };
+                if private_rows.contains(&(parent.clone(), parent_id.clone())) {
+                    return Err(GateError::UnsharedForeignKeyParent(Box::new(
+                        UnsharedForeignKeyParent {
+                            table,
+                            row_id,
+                            column: fk_column,
+                            parent,
+                            parent_id: Some(parent_id),
+                        },
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) struct AudiencePartitionGroups<'connection> {
     connection: &'connection Connection,
     gates: &'connection Gates,
@@ -351,8 +505,17 @@ impl<'connection> AudiencePartitionGroups<'connection> {
         audience: Audience,
     ) -> Result<(), GateError> {
         let materialization = full_state_diff(self.connection, self.gates, direction)?;
+        self.add_materialization_changeset(&materialization, component, audience)
+    }
+
+    unsafe fn add_materialization_changeset(
+        &mut self,
+        materialization: &[u8],
+        component: &HashSet<(String, String)>,
+        audience: Audience,
+    ) -> Result<(), GateError> {
         let partition = self.group(audience)?;
-        for_each_change(&materialization, |iter, row| {
+        for_each_change(materialization, |iter, row| {
             if row
                 .pk()
                 .is_some_and(|id| component.contains(&(row.table.clone(), id.to_string())))

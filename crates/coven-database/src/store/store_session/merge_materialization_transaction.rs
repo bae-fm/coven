@@ -1,8 +1,11 @@
 mod changeset_application;
 mod conflict;
+mod private_shared;
+mod replay_effect;
 
 mod activation_records;
 mod application;
+mod authority_install;
 mod commit_records;
 mod retraction;
 
@@ -34,6 +37,7 @@ use crate::blob_records::{
 };
 use crate::local_blob_cleanup_intents::intents_from_changes as local_blob_cleanup_intents;
 use crate::remote_object_records::validate_remote_object_on;
+use crate::PreparedMergeMaterialization;
 use crate::ReclaimCommitActivation;
 use crate::{
     candidate_graph_exact_objects, finish_remote_candidate_nonactivation_on,
@@ -43,7 +47,6 @@ use crate::{
     DurableStoreReclaimOperation, OwnedVerifiedMergeMaterialization, ReclaimedStorePackage,
     RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
 };
-use crate::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
 use coven_foundation::changeset::RowChange;
 use coven_protocol::audience_package::{AudiencePackage, PackageAudience};
 use coven_protocol::blob::locator::RemoteAudience;
@@ -69,7 +72,12 @@ pub(crate) struct AppliedMergeMaterialization {
         coven_protocol::write::WriteId,
         coven_protocol::write::WriteStatus,
     )>,
-    pub retained: Option<crate::OwnedVerifiedMergeMaterialization>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct ReplayRows {
+    private: BTreeMap<(String, String), private_shared::PrivateRowState>,
+    adopted_by: BTreeMap<(String, String), StoreBatchCommitRef>,
 }
 
 pub(super) fn retract_verified_merge_materializations(
@@ -81,19 +89,24 @@ pub(super) fn retract_verified_merge_materializations(
     transaction.retract_verified_merge_materializations(root, retained_replay, retractions)
 }
 
+pub(super) fn deleted_rows(changes: &[RowChange]) -> std::collections::HashSet<(String, String)> {
+    application::deleted_rows_inner(changes)
+}
+
 pub(crate) enum MergeSubsetOutcome {
     Applied(Vec<crate::WinningRow>),
     ConstraintConflict(Vec<String>),
+    Held(crate::MaterializationHold),
 }
 
 impl MergeSubsetOutcome {
-    fn append_winning_rows(self, winning_rows: &mut Vec<crate::WinningRow>) -> Option<Vec<String>> {
+    fn append_winning_rows(self, winning_rows: &mut Vec<crate::WinningRow>) -> Result<(), Self> {
         match self {
             Self::Applied(rows) => {
                 winning_rows.extend(rows);
-                None
+                Ok(())
             }
-            Self::ConstraintConflict(tables) => Some(tables),
+            outcome => Err(outcome),
         }
     }
 }
@@ -171,6 +184,77 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         store: crate::store::store_session::StoreTransaction<'transaction, 'connection>,
     ) -> Self {
         Self { store }
+    }
+
+    pub(super) fn capture_replay_rows(
+        &self,
+        gates: &crate::Gates,
+        schema: &TableSchema,
+    ) -> Result<ReplayRows, DbError> {
+        self.capture_replay_rows_inner(gates, schema)
+    }
+
+    pub(super) fn apply_unaccepted_replay_effect(
+        &self,
+        authority: &mut dyn VerifiedStoreLookup,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        effect: crate::MergeReplayWriteEffect,
+        schema: std::sync::Arc<TableSchema>,
+        gates: &crate::Gates,
+        replay_rows: &mut ReplayRows,
+    ) -> Result<Option<crate::MaterializationHold>, DbError> {
+        self.apply_unaccepted_replay_effect_inner(
+            authority,
+            root,
+            effect,
+            schema,
+            gates,
+            replay_rows,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn apply_prepared_merge_materialization(
+        &self,
+        registrations_lookup: &mut dyn VerifiedStoreLookup,
+        blob_decls: &BlobDecls,
+        gates: &crate::Gates,
+        synced_tables: &[SyncedTable],
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+        local_store_membership: LocalStoreMembership,
+        timestamp_policy: IncomingTimestampPolicy,
+        baseline_circle_cuts: Option<
+            &BTreeMap<
+                coven_protocol::circle::CircleId,
+                coven_protocol::store_commit::CommitFrontier,
+            >,
+        >,
+        materialization: PreparedMergeMaterialization,
+        local_effect: Option<crate::MergeReplayWriteEffect>,
+        schema: std::sync::Arc<TableSchema>,
+        replay_rows: &mut ReplayRows,
+    ) -> Result<AppliedMergeMaterialization, DbError> {
+        self.apply_prepared_merge_materialization_inner(
+            registrations_lookup,
+            blob_decls,
+            gates,
+            synced_tables,
+            routing_key,
+            local_store_membership,
+            timestamp_policy,
+            baseline_circle_cuts,
+            materialization,
+            local_effect,
+            schema,
+            replay_rows,
+        )
+    }
+
+    pub(super) fn replay_circle_current_state(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
+        super::circle_operations::circle_current_state_on(self.store.transaction, circle_id)
     }
 
     pub(crate) fn circle_current_state_is_deleted(

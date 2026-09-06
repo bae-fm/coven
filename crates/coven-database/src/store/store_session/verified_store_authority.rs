@@ -164,7 +164,7 @@ impl VerifiedStoreAuthorityTransaction {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn replay_projection_on(
+    pub(super) fn replay_projection_watching_on(
         &mut self,
         records: crate::store::store_session::StoreTransaction<'_, '_>,
         blob_decls: &BlobDecls,
@@ -172,12 +172,12 @@ impl VerifiedStoreAuthorityTransaction {
         synced_tables: &[coven_protocol::synced_schema::SyncedTable],
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         retracted: &std::collections::BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>,
-        history_cut: Option<&coven_protocol::store_commit::CommitFrontier>,
-        overlays: crate::ReplayWriteOverlays<'_>,
+        journal: crate::ReplayJournal<'_>,
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
-    ) -> Result<ReplayProjection, DbError> {
+        watched: &coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<super::ReplayProjectionResult, DbError> {
         let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
-        self.cache.replay_projection_on(
+        self.cache.replay_projection_watching_on(
             records,
             &self.root,
             &mut registrations,
@@ -186,9 +186,38 @@ impl VerifiedStoreAuthorityTransaction {
             synced_tables,
             routing_key,
             retracted,
-            history_cut,
-            overlays,
+            None,
+            journal,
             local_store_membership,
+            Some(watched),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn replay_projection_result_on(
+        &mut self,
+        records: crate::store::store_session::StoreTransaction<'_, '_>,
+        blob_decls: &BlobDecls,
+        gates: &crate::Gates,
+        synced_tables: &[coven_protocol::synced_schema::SyncedTable],
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+        journal: crate::ReplayJournal<'_>,
+        local_store_membership: coven_protocol::membership::LocalStoreMembership,
+    ) -> Result<super::ReplayProjectionResult, DbError> {
+        let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
+        self.cache.replay_projection_watching_on(
+            records,
+            &self.root,
+            &mut registrations,
+            blob_decls,
+            gates,
+            synced_tables,
+            routing_key,
+            &std::collections::BTreeSet::new(),
+            None,
+            journal,
+            local_store_membership,
+            None,
         )
     }
 }
@@ -450,24 +479,6 @@ impl VerifiedStoreAuthority {
         ReferencedStoreDeviceRegistration::verified(reference, registration).map_err(DbError::from)
     }
 
-    pub(super) fn local_merge_stream_id_on(
-        &mut self,
-        records: crate::store::store_session::StoreRecords<'_>,
-    ) -> Result<Option<String>, DbError> {
-        if !records.has_local_device()? {
-            return Ok(None);
-        }
-        let registration = self.local_store_authority_on(records)?;
-        Ok(Some(
-            coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
-                registration.value().store_root.store_root_hash,
-                registration.reference(),
-                coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
-            )
-            .to_string(),
-        ))
-    }
-
     /// Drop replay state derived from a baseline this session just advanced.
     ///
     /// Both halves of the cache — the baseline and the verified
@@ -585,9 +596,9 @@ impl VerifiedStoreAuthority {
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         retracted: &std::collections::BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>,
         history_cut: Option<&coven_protocol::store_commit::CommitFrontier>,
-        overlays: crate::ReplayWriteOverlays<'_>,
+        journal: crate::ReplayJournal<'_>,
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
-    ) -> Result<ReplayProjection, DbError> {
+    ) -> Result<super::ReplayProjectionResult, DbError> {
         let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
         self.retained_replay.replay_projection_on(
             records,
@@ -599,8 +610,36 @@ impl VerifiedStoreAuthority {
             routing_key,
             retracted,
             history_cut,
-            overlays,
+            journal,
             local_store_membership,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn replay_projection_result_for_root_on(
+        &mut self,
+        records: crate::store::store_session::StoreTransaction<'_, '_>,
+        root: &StoreRootRef,
+        blob_decls: &BlobDecls,
+        gates: &crate::Gates,
+        synced_tables: &[coven_protocol::synced_schema::SyncedTable],
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+        history_cut: &coven_protocol::store_commit::CommitFrontier,
+    ) -> Result<crate::store::store_session::ReplayProjectionResult, DbError> {
+        let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
+        self.retained_replay.replay_projection_watching_on(
+            records,
+            root,
+            &mut registrations,
+            blob_decls,
+            gates,
+            synced_tables,
+            routing_key,
+            &std::collections::BTreeSet::new(),
+            Some(history_cut),
+            crate::ReplayJournal::Omit,
+            coven_protocol::membership::LocalStoreMembership::Current,
+            None,
         )
     }
 }
@@ -668,16 +707,6 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
             root,
             reference,
         )
-    }
-
-    pub(super) fn local_merge_stream_id(
-        self,
-        authority: &mut VerifiedStoreAuthority,
-    ) -> Result<Option<String>, DbError> {
-        authority.local_merge_stream_id_on(crate::store::store_session::StoreRecords::new(
-            self.transaction,
-            self.store_dir,
-        ))
     }
 
     pub(super) fn retained_replay_baseline(

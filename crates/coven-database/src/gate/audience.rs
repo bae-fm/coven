@@ -11,8 +11,8 @@ use super::model::{
 };
 use super::outbound::{
     deleted_or_live_parent, fk_parent_row, full_state_diff, gate_store_outbound,
-    query_column_present, query_column_text, row_id_for_column_value, DeletedAudiences,
-    DeletedParent, FkParentRow, FullStateDirection, UnresolvedAudience,
+    pre_write_full_state_diff, query_column_present, query_column_text, row_id_for_column_value,
+    DeletedAudiences, DeletedParent, FkParentRow, FullStateDirection, UnresolvedAudience,
 };
 use super::{
     all_row_ids, query_mapped_rows, query_row_optional, CircleControlFailure, GateError,
@@ -35,7 +35,8 @@ pub(crate) use inbound::{
     filter_inbound_store_rows, normalize_inbound_store_changeset,
 };
 pub(crate) use partitioning::{
-    audience_moves, partition_outbound, validate_scoped_foreign_key_audiences,
+    audience_moves, partition_outbound, validate_accepted_foreign_key_closure,
+    validate_scoped_foreign_key_audiences,
 };
 pub(crate) use routing::{active_circle_control, capture_routing_changes, live_row_audience};
 pub(crate) use snapshot_pruning::{

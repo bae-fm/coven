@@ -124,8 +124,9 @@ impl StoreSession<'_> {
             .store_write_partitions(stage.write_id.as_str())?;
         let stored_base: StoreWriteBase = serde_json::from_str(&stored_base)
             .map_err(|error| DbError::context(format!("write {} base", stage.write_id), error))?;
-        let stored_dependencies = CommitFrontier::from_refs(stored_base.dependencies)
+        let mut stored_dependencies = CommitFrontier::from_refs(stored_base.dependencies)
             .map_err(|error| DbError::context("stored write dependencies", error))?;
+        let observed_predecessor = stored_dependencies.0.remove(&stream_id);
         if stored_dependencies.commits() != stage.commit.value.merge_dependencies() {
             return Err(DbError::Message(format!(
                 "prepared commit dependencies differ from write {}",
@@ -152,6 +153,17 @@ impl StoreSession<'_> {
                 &tx,
                 &stream_id.to_string(),
             )?;
+        if observed_predecessor.as_ref().is_some_and(|observed| {
+            durable_predecessor.as_ref().is_none_or(|current| {
+                current.coord.sequence() < observed.coord.sequence()
+                    || current.coord.sequence() == observed.coord.sequence() && current != observed
+            })
+        }) {
+            return Err(DbError::Message(format!(
+                "outbound Store commit predecessor does not cover write {} capture frontier",
+                stage.write_id
+            )));
+        }
         let expected_seq = durable_predecessor
             .as_ref()
             .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
@@ -498,13 +510,9 @@ impl StoreSession<'_> {
         changeset: Vec<u8>,
     ) -> Result<(), DbError> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let local_stream_id =
-            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
-                .local_merge_stream_id(self.verified_store_authority)?;
         let base = StoreWriteBase {
             dependencies: crate::store::materialized_commit_index::materialized_frontier_on(
-                &tx,
-                local_stream_id.as_deref(),
+                &tx, None,
             )?,
         };
         let partitions = vec![crate::AudiencePartition {

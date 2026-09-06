@@ -15,9 +15,41 @@ pub struct PreparedStoreWritePartitions {
     pub local: Option<gate::AudiencePartition>,
 }
 
-pub struct MergeReplayWriteOverlay {
+#[derive(Clone)]
+pub(crate) struct MergeReplayWriteEffect {
     pub write_id: WriteId,
     pub partitions: PreparedStoreWritePartitions,
+}
+
+#[derive(Clone)]
+pub(crate) enum MergeReplayWrite {
+    LocalOnly {
+        effect: MergeReplayWriteEffect,
+        observed: coven_protocol::store_commit::CommitFrontier,
+    },
+    Unaccepted {
+        effect: MergeReplayWriteEffect,
+        observed: coven_protocol::store_commit::CommitFrontier,
+    },
+    Accepted {
+        effect: MergeReplayWriteEffect,
+        observed: coven_protocol::store_commit::CommitFrontier,
+        commit: StoreBatchCommitRef,
+    },
+    Consumed {
+        write_id: WriteId,
+    },
+}
+
+impl MergeReplayWrite {
+    pub(crate) fn write_id(&self) -> &WriteId {
+        match self {
+            Self::LocalOnly { effect, .. }
+            | Self::Unaccepted { effect, .. }
+            | Self::Accepted { effect, .. } => &effect.write_id,
+            Self::Consumed { write_id } => write_id,
+        }
+    }
 }
 
 /// What a replay projection owes the write journal.
@@ -25,17 +57,14 @@ pub struct MergeReplayWriteOverlay {
 /// The journal is the only record of a local partition — no commit carries one
 /// and no image built for an audience may — so what a projection has to put
 /// back from it depends on what the projection is for.
-pub(crate) enum ReplayWriteOverlays<'a> {
+pub(crate) enum ReplayJournal<'a> {
     /// Nothing. An image projected for an audience carries no local rows at
     /// all, and a projection built only to count rows does not need them.
     Omit,
-    /// Everything the journal still owes: this projection is about to replace
-    /// the live database, so every unpublished partition and every local
-    /// partition has to land in it.
+    /// Everything the journal still owes to a projection that will replace the
+    /// live database.
     Owed,
-    /// Only the local partitions of `folded`, in journal order — the settled
-    /// prefix of the journal that a baseline at this cut absorbs, and that the
-    /// advance adopting it then strips down to its receipts.
+    /// The settled prefix a baseline at this cut absorbs.
     Folded(&'a [SettledStoreWrite]),
 }
 
@@ -43,8 +72,23 @@ pub(crate) enum ReplayWriteOverlays<'a> {
 /// fold owes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SettledStoreWrite {
+    pub ordinal: i64,
     pub write_id: WriteId,
     pub fold: SettledWriteFold,
+    pub status: coven_protocol::write::WriteStatus,
+    pub observed: StoreWriteBase,
+    pub changeset_hash: ObjectHash,
+    pub input_hash: ObjectHash,
+}
+
+pub(crate) struct RetainedStoreWriteManifest {
+    pub ordinal: i64,
+    pub write_id: String,
+    pub status: String,
+    pub base: String,
+    pub changeset_hash: String,
+    pub prepared: Option<String>,
+    pub input_hash: ObjectHash,
 }
 
 /// What a baseline at some cut has to do with one settled write.
@@ -98,6 +142,9 @@ impl PreparedStoreWritePartitions {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreWriteBase {
+    /// The complete accepted Store frontier visible to the host transaction.
+    /// Publication removes its own stream and represents that position through
+    /// the signed predecessor; replay uses every stream to place local effects.
     pub dependencies: BTreeMap<String, StoreBatchCommitRef>,
 }
 

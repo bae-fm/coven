@@ -670,7 +670,7 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
         b_hlc.clone(),
         |_conn| Ok(()),
     );
-    db_b.execute_test_sql(&format!(
+    db_b.execute_test_host_write(&format!(
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'B honest', NULL, '{b_local_stamp}', '2026-01-01')"
     ))

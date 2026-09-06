@@ -145,6 +145,10 @@ pub enum StoreError {
     MembershipPreparation(
         #[source] coven_protocol::membership_mutation::MembershipPreparationError,
     ),
+    #[error("Store keyring: {0}")]
+    Keyring(#[source] Box<crate::sync::store::MembershipMutationError>),
+    #[error("Store row routing key: {0}")]
+    RowRoutingKey(#[from] coven_protocol::circle::RowRoutingKeyError),
     #[error("Store Circle package: {0}")]
     CirclePackage(#[source] Box<crate::sync::store::CirclePackageReadError>),
     #[error("Store protocol state {key:?} is absent")]
@@ -275,6 +279,8 @@ impl StoreError {
             | Self::BlobLocator(_)
             | Self::PreparedCommit(_)
             | Self::MembershipPreparation(_)
+            | Self::Keyring(_)
+            | Self::RowRoutingKey(_)
             | Self::CirclePackage(_) => {
                 Some(coven_protocol::write::WriteBlock::InvalidPackage {
                     reason: self.to_string(),
@@ -321,6 +327,12 @@ impl From<coven_protocol::prepared_commit::PreparedCommitError> for StoreError {
 impl From<coven_protocol::membership_mutation::MembershipPreparationError> for StoreError {
     fn from(error: coven_protocol::membership_mutation::MembershipPreparationError) -> Self {
         StoreError::MembershipPreparation(error)
+    }
+}
+
+impl From<crate::sync::store::MembershipMutationError> for StoreError {
+    fn from(error: crate::sync::store::MembershipMutationError) -> Self {
+        Self::Keyring(Box::new(error))
     }
 }
 

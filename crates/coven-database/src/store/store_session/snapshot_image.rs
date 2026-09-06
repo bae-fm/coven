@@ -747,6 +747,7 @@ impl StoreSession<'_> {
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
         cut: &coven_protocol::store_commit::CommitFrontier,
+        current_cut: &coven_protocol::store_commit::CommitFrontier,
         snapshot_hash: crate::ObjectHash,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<(Vec<u8>, Vec<crate::SettledStoreWrite>), DbError> {
@@ -768,20 +769,46 @@ impl StoreSession<'_> {
             cut,
         )?;
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let replay =
-            crate::store::store_session::StoreTransaction::new(&transaction, self.store_dir)
-                .replay_projection_with_authority(
-                    self.verified_store_authority,
-                    root,
-                    self.blob_decls,
-                    self.gates,
-                    self.synced_tables,
-                    routing_key.as_ref(),
-                    &std::collections::BTreeSet::new(),
-                    Some(cut),
-                    crate::ReplayWriteOverlays::Folded(&folded),
-                    coven_protocol::membership::LocalStoreMembership::Current,
-                )?;
+        let records =
+            crate::store::store_session::StoreTransaction::new(&transaction, self.store_dir);
+        let current_replay = self
+            .verified_store_authority
+            .replay_projection_result_for_root_on(
+                records,
+                root,
+                self.blob_decls,
+                self.gates,
+                self.synced_tables,
+                routing_key.as_ref(),
+                current_cut,
+            )?;
+        if current_replay.materialized_frontier()? != *current_cut {
+            return Err(DbError::Message(
+                "replay retirement proof does not cover the current Store frontier".to_string(),
+            ));
+        }
+        let mut crossed_cut = false;
+        for reference in current_replay.applied_order() {
+            if cut.covers_commit(reference) {
+                if crossed_cut {
+                    return Err(DbError::ReplayRetirementCutNotPrefix);
+                }
+            } else {
+                crossed_cut = true;
+            }
+        }
+        let replay = records.replay_projection_with_authority(
+            self.verified_store_authority,
+            root,
+            self.blob_decls,
+            self.gates,
+            self.synced_tables,
+            routing_key.as_ref(),
+            &std::collections::BTreeSet::new(),
+            Some(cut),
+            crate::ReplayJournal::Folded(&folded),
+            coven_protocol::membership::LocalStoreMembership::Current,
+        )?;
         transaction.rollback().map_err(DbError::from)?;
         let replay_frontier = replay.materialized_frontier()?;
         if replay_frontier != *cut {
@@ -817,7 +844,7 @@ impl StoreSession<'_> {
                     Some(routing_key),
                     &std::collections::BTreeSet::new(),
                     Some(cutoff),
-                    crate::ReplayWriteOverlays::Omit,
+                    crate::ReplayJournal::Omit,
                     coven_protocol::membership::LocalStoreMembership::Current,
                 )?;
         transaction.rollback().map_err(DbError::from)?;

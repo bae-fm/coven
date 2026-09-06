@@ -570,6 +570,11 @@ mod test_device {
             self.device_id.clone()
         }
 
+        pub fn host_write_blob_staging(&self) -> crate::sync::store::HostWriteBlobStaging {
+            self.store
+                .host_write_blob_staging(tokio::runtime::Handle::current())
+        }
+
         pub async fn create(
             db: &Database,
             store_dir: StoreDir,
@@ -1035,7 +1040,10 @@ mod test_device {
             &self,
             write_id: coven_protocol::write::WriteId,
         ) -> Result<Vec<coven_protocol::write::WriteId>, crate::sync::store::StoreError> {
-            self.store.discard_blocked_write(write_id).await
+            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+            self.store
+                .discard_blocked_write(write_id, Some(&routing_encryption))
+                .await
         }
 
         pub async fn restore_membership(
@@ -1897,7 +1905,10 @@ mod test_device {
             }
             self.db.enqueue_store_changeset_for_test(changeset).await?;
             let mut writer = self.authorize_writer().await?;
-            let published = writer.publish_pending_store_writes().await?;
+            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+            let published = writer
+                .publish_pending_store_writes(Some(&routing_encryption))
+                .await?;
             if published == 0 {
                 return Err(TestError::invariant(
                     "test changeset did not prepare a Store commit".to_string(),
@@ -2343,7 +2354,10 @@ mod test_device {
             write_id: coven_protocol::write::WriteId,
         ) -> Result<crate::sync::store::MergeCandidateAbandonment, crate::sync::store::StoreError>
         {
-            self.store.abandon_merge_candidate(write_id).await
+            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+            self.store
+                .abandon_merge_candidate(write_id, Some(&routing_encryption))
+                .await
         }
 
         pub async fn prepare_merge_candidate_abandonment(
@@ -2655,14 +2669,13 @@ mod test_device {
                 .await
         }
 
-        /// Acknowledge `frontier`, and report what advancing this device's
-        /// replay baseline over the snapshot it named retired.
+        /// Publish an acknowledgement, then run the independent replay
+        /// baseline stage and report what it retired.
         pub async fn publish_acknowledgement(
             &self,
             frontier: coven_protocol::store_commit::CommitFrontier,
         ) -> Result<Option<coven_database::AdvancedReplayBaseline>, TestError> {
-            let staged = self
-                .store
+            self.store
                 .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:01Z".to_string())
                 .await?;
             let published = self.store.drain_acknowledgements_for_test().await?;
@@ -2671,7 +2684,10 @@ mod test_device {
                 "snapshot acknowledgement fixture published {published} acknowledgements instead of one"
             )));
             }
-            Ok(staged.baseline_advance)
+            match self.stand_on_acknowledged_snapshot().await? {
+                crate::sync::store::ReplayBaselineAdvance::Advanced(advanced) => Ok(Some(advanced)),
+                crate::sync::store::ReplayBaselineAdvance::Declined(_) => Ok(None),
+            }
         }
 
         pub async fn stage_acknowledgement(
@@ -2686,18 +2702,16 @@ mod test_device {
                 .map_err(TestError::from)
         }
 
-        /// Acknowledge `frontier` the way a device on a build without the
-        /// advance did: publish the statement, leave the baseline where it is.
+        /// Publish the statement and leave baseline retirement to its own
+        /// cycle stage.
         pub async fn publish_acknowledgement_without_advancing(
             &self,
             frontier: coven_protocol::store_commit::CommitFrontier,
         ) -> Result<(), TestError> {
             self.store
-                .stage_acknowledgement_without_advancing_for_test(
-                    frontier,
-                    "2026-07-16T00:00:03Z".to_string(),
-                )
+                .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:03Z".to_string())
                 .await?
+                .acknowledgement
                 .ok_or_else(|| {
                     TestError::invariant(
                         "the fixture acknowledgement asserted nothing new".to_string(),
@@ -2723,30 +2737,20 @@ mod test_device {
                 .map_err(TestError::from)
         }
 
-        /// Acknowledge `frontier` and report the whole pass: what it staged,
-        /// if anything, and what standing on the acknowledged snapshots
-        /// retired.
-        pub async fn stage_acknowledgement_reporting_advance(
-            &self,
-            frontier: coven_protocol::store_commit::CommitFrontier,
-        ) -> Result<crate::sync::store::StagedStoreAcknowledgement, TestError> {
-            self.store
-                .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:05Z".to_string())
-                .await
-                .map_err(TestError::from)
-        }
-
-        /// Stage an acknowledgement and report only what the baseline advance
-        /// it licensed retired.
+        /// Publish an acknowledgement and run the baseline stage that follows
+        /// it in a cycle.
         pub async fn advance_baseline_by_acknowledging(
             &self,
             frontier: coven_protocol::store_commit::CommitFrontier,
         ) -> Result<Option<coven_database::AdvancedReplayBaseline>, TestError> {
             self.store
                 .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:02Z".to_string())
-                .await
-                .map(|staged| staged.baseline_advance)
-                .map_err(TestError::from)
+                .await?;
+            self.store.drain_acknowledgements_for_test().await?;
+            match self.stand_on_acknowledged_snapshot().await? {
+                crate::sync::store::ReplayBaselineAdvance::Advanced(advanced) => Ok(Some(advanced)),
+                crate::sync::store::ReplayBaselineAdvance::Declined(_) => Ok(None),
+            }
         }
 
         pub async fn materialized_frontier(

@@ -18,6 +18,8 @@ pub(crate) type SelectedInstallableStoreSnapshot =
     SelectedStoreSnapshot<coven_database::VerifiedStoreSnapshotAuthority>;
 pub(crate) type SelectedAcknowledgedStoreSnapshot =
     SelectedStoreSnapshot<coven_database::VerifiedAcknowledgedStoreSnapshot>;
+pub(crate) type SelectedReplayBaselineRetirement =
+    SelectedStoreSnapshot<coven_database::VerifiedReplayBaselineRetirementProof>;
 
 /// Report a candidate that was passed over. A rejection here costs as much as
 /// the choice does: a store whose newest snapshot is rejected silently falls
@@ -382,28 +384,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         })
     }
 
-    /// Verify one snapshot this device has already acknowledged.
-    ///
-    /// `None` when it is not eligible for a reason particular to it — the same
-    /// rejections the selectors pass over. An acknowledgement this device
-    /// published is a statement it already stands behind, so it is not put
-    /// through the candidate filters: those decide what a device *may say
-    /// next*, and a snapshot whose device state has since moved on fails them
-    /// while remaining exactly what this device said it holds.
-    pub(crate) async fn verify_acknowledged_store_snapshot(
-        &mut self,
-        snapshot: &coven_database::PublishedStoreSnapshot,
-    ) -> Result<Option<coven_database::VerifiedStoreSnapshotAuthority>, StorePullError> {
-        match self.verify_installable_snapshot(snapshot).await {
-            Ok(verified) => Ok(Some(verified)),
-            Err(error) if disqualifies_one_candidate(&error) => {
-                report_rejected_snapshot(snapshot, &error, SnapshotSelector::Installable);
-                Ok(None)
-            }
-            Err(error) => Err(error),
-        }
-    }
-
     /// The newest snapshot every device active at its cut has acknowledged.
     /// Reclaim deletes history behind a snapshot only against this.
     pub(crate) async fn select_maximal_acknowledged_store_snapshot(
@@ -673,6 +653,67 @@ impl<'a> MergeHistoryVerifier<'a> {
             .map_err(StorePullError::Database)
     }
 
+    /// Verify that every writer active in the current authority has crossed a
+    /// snapshot cut. This licenses local replay retirement, whose ordering
+    /// requirement is stronger than cloud reclaim's snapshot promise.
+    pub(crate) async fn verify_replay_baseline_retirement(
+        &mut self,
+        snapshot: &coven_database::PublishedStoreSnapshot,
+        members: &MembershipChain,
+    ) -> Result<coven_database::VerifiedReplayBaselineRetirementProof, StorePullError> {
+        let authority = self.build_snapshot_authority(snapshot).await?;
+        let current = self.current_merge_authority(members).await?;
+        let current_membership =
+            super::membership_control::merge_membership_state_ref(members, &current.state)?;
+        let accepted_current = self
+            .verify_merge_history_authority(current.cut.commits(), &current_membership)
+            .await?;
+        if accepted_current.device_state != current.state {
+            return Err(StorePullError::InvalidState(
+                "current Store authority differs from its accepted history".to_string(),
+            ));
+        }
+        let membership_witness = if current_membership == authority.metadata.state.membership {
+            coven_protocol::store_commit::ReplayRetirementMembershipWitness::Snapshot
+        } else {
+            verified_merge_commit_closure(&self.history, current.cut.commits().values().cloned())?
+                .into_iter()
+                .filter(|reference| {
+                    self.history.commits.get(reference).is_some_and(|commit| {
+                        commit.verified.value().membership_state == current_membership
+                    })
+                })
+                .max()
+                .map(coven_protocol::store_commit::ReplayRetirementMembershipWitness::StoreCommit)
+                .ok_or(StorePullError::ReplayRetirementMembershipUnwitnessed)?
+        };
+        let required_writer_ids = coven_protocol::store_commit::replay_retirement_writer_ids(
+            authority.store_root.store_root_hash,
+            &current.state,
+            &current.registrations,
+            &accepted_current.membership,
+        )
+        .map_err(StorePullError::Protocol)?;
+        let acknowledgements = self
+            .activated_snapshot_acknowledgements(current.cut.commits())
+            .await?;
+        let proof = self
+            .build_replay_baseline_retirement(
+                authority,
+                acknowledgements,
+                &current,
+                &required_writer_ids,
+                &accepted_current.membership,
+                membership_witness,
+            )
+            .await?;
+        coven_database::VerifiedReplayBaselineRetirementProof::from_proof(
+            proof,
+            &accepted_current.membership,
+        )
+        .map_err(StorePullError::Database)
+    }
+
     async fn build_snapshot_authority(
         &mut self,
         snapshot: &coven_database::PublishedStoreSnapshot,
@@ -693,17 +734,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         )
     }
 
-    /// The device state the store stands in now, resolved at `cut`.
-    ///
-    /// The accepted cut is the snapshot's coverage extended to each device's
-    /// latest announcement, so this is the newest device state this verifier
-    /// can derive from history it has verified — which is what "active now" has
-    /// to mean for a device deciding what it may delete.
-    ///
-    /// Reads already-verified history and does not fetch: the caller passes a
-    /// cut that gathering the acknowledgements has just verified, so a commit
-    /// missing here is a caller that changed that order, not a commit that
-    /// needs loading.
     fn device_state_at_verified_cut(
         &self,
         cut: &StoreHistoryCut,
@@ -805,5 +835,74 @@ impl<'a> MergeHistoryVerifier<'a> {
             authority,
             acknowledgements: retained_acknowledgements,
         })
+    }
+
+    async fn build_replay_baseline_retirement(
+        &self,
+        authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+        acknowledgements: Vec<VerifiedActivatedStoreAck>,
+        current: &super::membership_control::CurrentMergeAuthority,
+        required_writer_ids: &BTreeSet<StoreDeviceId>,
+        accepted_membership: &MembershipChain,
+        membership_witness: coven_protocol::store_commit::ReplayRetirementMembershipWitness,
+    ) -> Result<coven_protocol::store_commit::ReplayBaselineRetirementProof, StorePullError> {
+        let mut retained_acknowledgements = BTreeMap::new();
+        for (device_id, registration) in &current.registrations {
+            if !required_writer_ids.contains(device_id) {
+                continue;
+            }
+            let registration_ref = registration.reference();
+            let matching = acknowledgements
+                .iter()
+                .filter(|ack| {
+                    ack.value.registration == *registration_ref
+                        && ack
+                            .value
+                            .store_cut
+                            .frontier()
+                            .covers(&authority.metadata.coverage)
+                })
+                .max_by_key(|ack| (ack.reference.sequence, ack.activating_commit.clone()))
+                .ok_or_else(|| StorePullError::SnapshotNotStable {
+                    member: registration.value().author_pubkey.clone(),
+                    device_id: device_id.to_string(),
+                })?;
+            let chain = self
+                .load_acknowledgement_proof_chain(
+                    matching.reference.clone(),
+                    matching.value.clone(),
+                    registration.value(),
+                )
+                .await
+                .map_err(StorePullError::from)?;
+            retained_acknowledgements.insert(
+                *device_id,
+                store_commit::RetainedAcknowledgementChain {
+                    chain,
+                    activating_commit: matching.activating_commit.clone(),
+                    activating_commit_value: matching.activating_commit_value.clone(),
+                },
+            );
+        }
+        let current_cut = current.cut.clone();
+        let current_state =
+            StoreDeviceStateRef::from_resolved(current_cut.frontier(), &current.state)
+                .map_err(StorePullError::Protocol)?;
+        let current_membership = super::membership_control::merge_membership_state_ref(
+            accepted_membership,
+            &current.state,
+        )?;
+        Ok(
+            coven_protocol::store_commit::ReplayBaselineRetirementProof {
+                authority,
+                current_cut,
+                current_state,
+                current_device_state: current.state.clone(),
+                current_membership,
+                membership_witness,
+                current_registrations: current.registrations.clone(),
+                acknowledgements: retained_acknowledgements,
+            },
+        )
     }
 }

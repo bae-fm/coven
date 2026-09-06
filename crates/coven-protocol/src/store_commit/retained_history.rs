@@ -152,6 +152,37 @@ pub struct AcknowledgedStoreSnapshot {
     pub acknowledgements: BTreeMap<StoreDeviceId, RetainedAcknowledgementChain>,
 }
 
+/// The evidence required to retire local replay inputs behind one snapshot.
+///
+/// Cloud reclaim asks whether the devices active at the snapshot have made the
+/// exact snapshot promise. Local retirement asks a stronger and different
+/// question: whether every writer active now has crossed that cut, including a
+/// writer activated after the snapshot. Keeping the proofs separate prevents
+/// the local ordering rule from changing which cloud objects may be reclaimed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayBaselineRetirementProof {
+    pub authority: RetainedReplaySnapshotAuthority,
+    pub current_cut: StoreHistoryCut,
+    pub current_state: StoreDeviceStateRef,
+    pub current_device_state: ResolvedStoreDeviceState,
+    pub current_membership: StoreMembershipStateRef,
+    pub membership_witness: ReplayRetirementMembershipWitness,
+    #[serde(with = "ordered_map_entries")]
+    pub current_registrations: BTreeMap<StoreDeviceId, ReferencedStoreDeviceRegistration>,
+    #[serde(with = "ordered_map_entries")]
+    pub acknowledgements: BTreeMap<StoreDeviceId, RetainedAcknowledgementChain>,
+}
+
+/// Accepted Store history that names the exact membership used to decide which
+/// writers must acknowledge a replay cut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReplayRetirementMembershipWitness {
+    Snapshot,
+    StoreCommit(StoreBatchCommitRef),
+}
+
 impl RetainedReplaySnapshotAuthority {
     pub fn validate(&self) -> Result<(), StoreProtocolError> {
         let metadata_bytes = self.metadata.to_bytes();
@@ -270,39 +301,19 @@ impl AcknowledgedStoreSnapshot {
                             .to_string(),
                     )
                 })?;
-            acknowledgement.validate_chain(&self.authority.store_root, registration)?;
-            let (acknowledgement_ref, acknowledgement_value) =
-                acknowledgement.latest().ok_or_else(|| {
-                    StoreProtocolError::Malformed(
-                        "retained snapshot acknowledgement proof chain is empty".to_string(),
-                    )
-                })?;
-            let commit_bytes = acknowledgement.activating_commit_value.to_bytes();
-            acknowledgement
-                .activating_commit
-                .object
-                .verify(&commit_bytes)?;
-            let parsed_commit = VerifiedStoreBatchCommit::parse(
-                &commit_bytes,
-                self.authority.store_root.store_root_hash,
-                &acknowledgement.activating_commit,
-                registration.value(),
+            let acknowledgement_value = validate_acknowledgement_activation(
+                &self.authority.store_root,
+                &self.authority.accepted_cut,
+                registration,
+                acknowledgement,
             )?;
-            if parsed_commit.value() != &acknowledgement.activating_commit_value
-                || parsed_commit.commit_hash() != acknowledgement.activating_commit.commit_hash
-                || parsed_commit.acknowledgement() != Some(acknowledgement_ref)
-                || !history_cut_covers_commit(
-                    &self.authority.accepted_cut,
-                    &acknowledgement.activating_commit,
-                )
-                || !acknowledgement_value
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|acknowledged| {
-                        acknowledged.author_registration
-                            == self.authority.metadata.author_registration
-                            && acknowledged.snapshot == self.authority.snapshot
-                    })
+            if !acknowledgement_value
+                .snapshot
+                .as_ref()
+                .is_some_and(|acknowledged| {
+                    acknowledged.author_registration == self.authority.metadata.author_registration
+                        && acknowledged.snapshot == self.authority.snapshot
+                })
                 || acknowledgement_value.device_state != self.authority.metadata.state.devices
                 || !acknowledgement_value
                     .store_cut
@@ -317,6 +328,169 @@ impl AcknowledgedStoreSnapshot {
         }
         Ok(())
     }
+}
+
+impl ReplayBaselineRetirementProof {
+    pub fn validate(
+        &self,
+        membership: &crate::membership::MembershipChain,
+    ) -> Result<BTreeSet<StoreDeviceId>, StoreProtocolError> {
+        self.authority.validate()?;
+        let crate::membership::MembershipStatus::Resolved(resolved_membership) =
+            membership.status()
+        else {
+            return Err(StoreProtocolError::Malformed(
+                "replay baseline retirement membership is conflicted".to_string(),
+            ));
+        };
+        let expected_membership = StoreMembershipStateRef::from_parts(
+            membership.head_refs().to_vec(),
+            membership.resolution_refs().to_vec(),
+            self.current_device_state.recovery.clone(),
+            resolved_membership.state_hash,
+        )?;
+        let required_writer_ids = replay_retirement_writer_ids(
+            self.authority.store_root.store_root_hash,
+            &self.current_device_state,
+            &self.current_registrations,
+            membership,
+        )?;
+        let membership_is_witnessed = match &self.membership_witness {
+            ReplayRetirementMembershipWitness::Snapshot => {
+                self.current_membership == self.authority.metadata.state.membership
+            }
+            ReplayRetirementMembershipWitness::StoreCommit(reference) => {
+                self.current_cut.frontier().covers_commit(reference)
+            }
+        };
+        if required_writer_ids.is_empty()
+            || self.current_membership != expected_membership
+            || !membership_is_witnessed
+            || self.acknowledgements.len() != required_writer_ids.len()
+            || !self
+                .current_cut
+                .frontier()
+                .covers(&self.authority.accepted_cut.frontier())
+            || StoreDeviceStateRef::from_resolved(
+                self.current_cut.frontier(),
+                &self.current_device_state,
+            )? != self.current_state
+        {
+            return Err(StoreProtocolError::Malformed(
+                "replay baseline retirement has inconsistent current authority".to_string(),
+            ));
+        }
+        for device_id in &required_writer_ids {
+            let registration = self
+                .current_registrations
+                .get(device_id)
+                .expect("current writer derivation validates registration coverage");
+            let acknowledgement = self.acknowledgements.get(device_id).ok_or_else(|| {
+                StoreProtocolError::Malformed(
+                    "replay baseline retirement omits a required writer".to_string(),
+                )
+            })?;
+            let acknowledgement_value = validate_acknowledgement_activation(
+                &self.authority.store_root,
+                &self.current_cut,
+                registration,
+                acknowledgement,
+            )?;
+            if !acknowledgement_value
+                .store_cut
+                .frontier()
+                .covers(&self.authority.metadata.coverage)
+            {
+                return Err(StoreProtocolError::Malformed(
+                    "replay baseline retirement acknowledgement does not cross its cut".to_string(),
+                ));
+            }
+        }
+        Ok(required_writer_ids)
+    }
+}
+
+pub fn replay_retirement_writer_ids(
+    store_root_hash: ObjectHash,
+    current_device_state: &ResolvedStoreDeviceState,
+    current_registrations: &BTreeMap<StoreDeviceId, ReferencedStoreDeviceRegistration>,
+    membership: &crate::membership::MembershipChain,
+) -> Result<BTreeSet<StoreDeviceId>, StoreProtocolError> {
+    current_device_state.validate_canonical()?;
+    if current_registrations.len() != current_device_state.devices.len() {
+        return Err(StoreProtocolError::Malformed(
+            "replay baseline retirement registrations do not exactly cover current devices"
+                .to_string(),
+        ));
+    }
+    let mut writers = BTreeSet::new();
+    for (device_id, record) in &current_device_state.devices {
+        let registration = current_registrations
+            .get(device_id)
+            .filter(|registration| registration.reference() == &record.registration)
+            .ok_or_else(|| {
+                StoreProtocolError::Malformed(
+                    "replay baseline retirement registration differs from current device state"
+                        .to_string(),
+                )
+            })?;
+        let bytes = registration.value().to_bytes();
+        registration.reference().object.verify(&bytes)?;
+        let parsed = StoreDeviceRegistration::parse_at(
+            &bytes,
+            &registration.value().store_root,
+            *device_id,
+        )?;
+        if parsed != *registration.value()
+            || registration.value().store_root.store_root_hash != store_root_hash
+        {
+            return Err(StoreProtocolError::Malformed(
+                "replay baseline retirement registration is not canonical".to_string(),
+            ));
+        }
+        if matches!(record.status, StoreDeviceStatus::Active)
+            && membership.is_member_now(&registration.value().author_pubkey)
+        {
+            writers.insert(*device_id);
+        }
+    }
+    Ok(writers)
+}
+
+fn validate_acknowledgement_activation<'a>(
+    root: &StoreRootRef,
+    cut: &StoreHistoryCut,
+    registration: &ReferencedStoreDeviceRegistration,
+    acknowledgement: &'a RetainedAcknowledgementChain,
+) -> Result<&'a StoreAck, StoreProtocolError> {
+    acknowledgement.validate_chain(root, registration)?;
+    let (acknowledgement_ref, acknowledgement_value) =
+        acknowledgement.latest().ok_or_else(|| {
+            StoreProtocolError::Malformed(
+                "retained snapshot acknowledgement proof chain is empty".to_string(),
+            )
+        })?;
+    let commit_bytes = acknowledgement.activating_commit_value.to_bytes();
+    acknowledgement
+        .activating_commit
+        .object
+        .verify(&commit_bytes)?;
+    let parsed_commit = VerifiedStoreBatchCommit::parse(
+        &commit_bytes,
+        root.store_root_hash,
+        &acknowledgement.activating_commit,
+        registration.value(),
+    )?;
+    if parsed_commit.value() != &acknowledgement.activating_commit_value
+        || parsed_commit.commit_hash() != acknowledgement.activating_commit.commit_hash
+        || parsed_commit.acknowledgement() != Some(acknowledgement_ref)
+        || !history_cut_covers_commit(cut, &acknowledgement.activating_commit)
+    {
+        return Err(StoreProtocolError::Malformed(
+            "retained snapshot acknowledgement differs from its activated commit".to_string(),
+        ));
+    }
+    Ok(acknowledgement_value)
 }
 
 fn history_cut_covers_commit(cut: &StoreHistoryCut, reference: &StoreBatchCommitRef) -> bool {

@@ -168,11 +168,24 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::context("verify prepared Store head", error))?;
             let base: StoreWriteBase = serde_json::from_str(&base)
                 .map_err(|error| DbError::context("prepared write base", error))?;
-            let dependencies = CommitFrontier::from_refs(base.dependencies)
+            let mut dependencies = CommitFrontier::from_refs(base.dependencies)
                 .map_err(|error| DbError::context("prepared dependency frontier", error))?;
+            let observed_predecessor = dependencies.0.remove(&stream_id);
             if dependencies.commits() != commit_value.merge_dependencies() {
                 return Err(DbError::Message(
                     "prepared commit differs from its write dependency frontier".to_string(),
+                ));
+            }
+            if observed_predecessor.as_ref().is_some_and(|captured| {
+                commit_value.order.predecessor().is_none_or(|current| {
+                    current.coord.sequence() < captured.coord.sequence()
+                        || current.coord.sequence() == captured.coord.sequence()
+                            && current != captured
+                })
+            }) {
+                return Err(DbError::Message(
+                    "prepared commit predecessor does not cover its write capture frontier"
+                        .to_string(),
                 ));
             }
             let partitions = records.store_write_partitions(write_id.as_str())?;

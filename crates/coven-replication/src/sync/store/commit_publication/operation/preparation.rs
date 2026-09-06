@@ -43,14 +43,28 @@ impl AuthorizedWriterOperation<'_> {
             blob_facts,
             partitions,
         } = pending;
-        let dependencies =
-            coven_protocol::store_commit::CommitFrontier::from_refs(base.dependencies)
-                .map(|frontier| frontier.commits().clone())
-                .map_err(StoreError::from)?;
         let preparation = async {
             let root = self.store_root().clone();
             let store_root_hash = root.store_root_hash;
             let previous = database.latest_local_store_position(stream_id).await?;
+            let mut observed =
+                coven_protocol::store_commit::CommitFrontier::from_refs(base.dependencies)
+                    .map_err(StoreError::from)?;
+            let observed_predecessor = observed.0.remove(&stream_id);
+            if observed_predecessor.as_ref().is_some_and(|captured| {
+                previous.as_ref().is_none_or(|current| {
+                    current.coord.sequence() < captured.coord.sequence()
+                        || current.coord.sequence() == captured.coord.sequence()
+                            && current != captured
+                })
+            }) {
+                return Err(StoreError::Database(coven_database::DbError::Message(
+                    format!(
+                        "local Store predecessor does not cover write {write_id} capture frontier"
+                    ),
+                )));
+            }
+            let dependencies = observed.commits().clone();
             let seq = next_store_sequence(previous.as_ref())?;
             let coord = StoreCommitCoord {
                 stream_id,
@@ -69,63 +83,6 @@ impl AuthorizedWriterOperation<'_> {
                 .await
                 .map_err(StoreError::from)?;
             let membership_authority = self.membership_authority(&authorization.membership)?;
-            let mut local_cleanup_by_blob = std::collections::BTreeMap::new();
-            for fact in &blob_facts.blobs {
-                if matches!(
-                    fact.audience_move,
-                    Some(coven_database::StoreWriteBlobMoveDestination::Local)
-                ) || fact.blob.provenance != coven_protocol::blob::Provenance::HostProvided
-                {
-                    continue;
-                }
-                // One filesystem stat per host-provided blob in the write, so a
-                // release carrying dozens of them pays for each.
-                let present = timings
-                    .stage(
-                        "scan local blobs",
-                        self.store_dir.local_blob_path_if_present(
-                            &fact.blob.namespace,
-                            &fact.blob.id,
-                            fact.plaintext_size,
-                        ),
-                    )
-                    .await
-                    .map_err(|error| {
-                        StoreError::Preparation(
-                            crate::sync::store::StorePreparationError::AssetScanFile(error),
-                        )
-                    })?;
-                if present.is_none() {
-                    continue;
-                }
-                let disposition = match fact.blob.fill {
-                    coven_protocol::blob::CacheFill::CacheEager => {
-                        coven_protocol::blob::DeferredLocalBlobDisposition::Cache
-                    }
-                    coven_protocol::blob::CacheFill::CacheLazy => {
-                        coven_protocol::blob::DeferredLocalBlobDisposition::Drop
-                    }
-                };
-                let drop = LocalBlobDropRequest {
-                    namespace: fact.blob.namespace.clone(),
-                    id: fact.blob.id.clone(),
-                    size: fact.plaintext_size,
-                    plaintext_hash: fact.plaintext_hash,
-                    disposition,
-                };
-                let key = (drop.namespace.clone(), drop.id.clone());
-                if let Some(prior) = local_cleanup_by_blob.insert(key, drop.clone()) {
-                    if prior != drop {
-                        return Err(StoreError::Preparation(
-                            crate::sync::store::StorePreparationError::AssetScan(format!(
-                            "captured Store write gives blob {}/{} conflicting local cleanup facts",
-                            drop.namespace, drop.id,
-                        )),
-                        ));
-                    }
-                }
-            }
-            let local_cleanup_requests = local_cleanup_by_blob.into_values().collect();
             let membership_state = authorization.membership_state;
             let device_state = authorization.device_state_ref;
             let active_store_members: std::collections::BTreeSet<String> = membership
@@ -317,6 +274,13 @@ impl AuthorizedWriterOperation<'_> {
                 .map_err(StoreObjectError::from)?;
             let (remote_objects, audience_objects) =
                 close_prepared_packages(prepared_packages, commit.value(), &commit_ref)?;
+            let local_cleanup_requests = published_local_cleanup_requests(
+                self.store_dir,
+                timings,
+                &blob_facts,
+                &audience_objects.blobs,
+            )
+            .await?;
             let local_cleanup = bind_local_cleanup(local_cleanup_requests, &audience_objects.blobs)
                 .map_err(StoreError::Preparation)?;
             Ok::<_, StoreError>(StoreWritePreparation {
@@ -362,6 +326,77 @@ impl AuthorizedWriterOperation<'_> {
             .await?;
         Ok(true)
     }
+}
+
+async fn published_local_cleanup_requests(
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    timings: &mut coven_foundation::stage_timing::StageTimings,
+    facts: &coven_database::StoreWriteBlobFacts,
+    published: &[coven_database::PreparedAudienceBlob],
+) -> Result<Vec<LocalBlobDropRequest>, StoreError> {
+    let published_blobs = published
+        .iter()
+        .map(|prepared| {
+            let locator = prepared.blob().locator();
+            (
+                locator.namespace().to_string(),
+                locator.blob_id().to_string(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut local_cleanup_by_blob = std::collections::BTreeMap::new();
+    for fact in &facts.blobs {
+        let key = (fact.blob.namespace.clone(), fact.blob.id.clone());
+        if !published_blobs.contains(&key)
+            || fact.blob.provenance != coven_protocol::blob::Provenance::HostProvided
+        {
+            continue;
+        }
+        let present = timings
+            .stage(
+                "scan local blobs",
+                store_dir.local_blob_path_if_present(
+                    &fact.blob.namespace,
+                    &fact.blob.id,
+                    fact.plaintext_size,
+                ),
+            )
+            .await
+            .map_err(|error| {
+                StoreError::Preparation(crate::sync::store::StorePreparationError::AssetScanFile(
+                    error,
+                ))
+            })?;
+        if present.is_none() {
+            continue;
+        }
+        let disposition = match fact.blob.fill {
+            coven_protocol::blob::CacheFill::CacheEager => {
+                coven_protocol::blob::DeferredLocalBlobDisposition::Cache
+            }
+            coven_protocol::blob::CacheFill::CacheLazy => {
+                coven_protocol::blob::DeferredLocalBlobDisposition::Drop
+            }
+        };
+        let drop = LocalBlobDropRequest {
+            namespace: fact.blob.namespace.clone(),
+            id: fact.blob.id.clone(),
+            size: fact.plaintext_size,
+            plaintext_hash: fact.plaintext_hash,
+            disposition,
+        };
+        if let Some(prior) = local_cleanup_by_blob.insert(key, drop.clone()) {
+            if prior != drop {
+                return Err(StoreError::Preparation(
+                    crate::sync::store::StorePreparationError::AssetScan(format!(
+                        "captured Store write gives blob {}/{} conflicting local cleanup facts",
+                        drop.namespace, drop.id,
+                    )),
+                ));
+            }
+        }
+    }
+    Ok(local_cleanup_by_blob.into_values().collect())
 }
 
 fn bind_local_cleanup(

@@ -1,6 +1,13 @@
 use super::*;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
+    pub(crate) fn accepted_commit_membership_state(
+        &self,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Option<&coven_protocol::circle_control::StoreMembershipStateRef> {
+        self.history.accepted_commit_membership_state(reference)
+    }
+
     pub(super) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'storage> {
         self.history.membership_objects()
     }
@@ -163,15 +170,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) async fn resolve_acknowledged_snapshot(
         &mut self,
         registration: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        members: &coven_protocol::membership::MembershipChain,
     ) -> Result<
         Result<
-            crate::sync::store::commit_verification::merge_history::SelectedInstallableStoreSnapshot,
+            crate::sync::store::commit_verification::merge_history::SelectedReplayBaselineRetirement,
             crate::sync::store::ReplayBaselineDecline,
         >,
         crate::sync::store::acknowledgements::StoreAckError,
     >{
         self.history
-            .resolve_acknowledged_snapshot(registration)
+            .resolve_acknowledged_snapshot(registration, members)
             .await
     }
 

@@ -413,6 +413,7 @@ impl Store {
     pub(crate) async fn discard_blocked_write(
         &self,
         write_id: coven_protocol::write::WriteId,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<Vec<coven_protocol::write::WriteId>, crate::sync::store::StoreError> {
         if let BlockedWriteDiscard::Discarded(discarded) =
             self.database.discard_blocked_write(&write_id).await?
@@ -420,7 +421,10 @@ impl Store {
             return Ok(discarded);
         }
 
-        match self.abandon_merge_candidate(write_id.clone()).await? {
+        match self
+            .abandon_merge_candidate(write_id.clone(), routing_encryption)
+            .await?
+        {
             crate::sync::store::merge_conflict::MergeCandidateAbandonment::NotRequired => {
                 return Err(StoreError::InvalidOutbound(
                     "blocked Merge candidate has no abandonment authority".to_string(),
@@ -539,6 +543,7 @@ impl Store {
     pub(crate) async fn abandon_merge_candidate(
         &self,
         write_id: coven_protocol::write::WriteId,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::merge_conflict::MergeCandidateAbandonment, StoreError> {
         if self.device_id.is_none() {
             let mut authority = self.authorize_history().await.map_err(StoreError::from)?;
@@ -552,7 +557,9 @@ impl Store {
                 });
         }
         let mut writer = self.authorize_writer().await.map_err(StoreError::from)?;
-        writer.abandon_merge_candidate(write_id).await
+        writer
+            .abandon_merge_candidate(write_id, routing_encryption)
+            .await
     }
 
     #[doc(hidden)]

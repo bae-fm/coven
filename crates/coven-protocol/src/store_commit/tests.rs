@@ -17,6 +17,7 @@ struct Fixture {
     commit: StoreBatchCommit,
     commit_ref: StoreBatchCommitRef,
     package: Vec<u8>,
+    membership: crate::membership::MembershipChain,
 }
 
 impl Fixture {
@@ -867,6 +868,7 @@ fn fixture() -> Fixture {
         commit,
         commit_ref,
         package,
+        membership,
     }
 }
 
@@ -1681,5 +1683,56 @@ fn a_frontier_covers_one_that_names_no_commits() {
     assert!(
         !empty.covers(&populated),
         "a frontier that names no commit on a stream cannot cover one that does",
+    );
+}
+
+#[test]
+fn replay_retirement_requires_every_current_writer() {
+    let fixture = fixture();
+    let (joined, joined_ref) =
+        fixture.joined_registration(&fixture.signer, "second-current-writer");
+    let current_state = ResolvedStoreDeviceState::founder(
+        &fixture.root_ref,
+        fixture.registration_ref.clone(),
+        &fixture.registration.author_pubkey,
+        fixture.root.descriptor.founder_grant.clone(),
+        &fixture.root.descriptor.founder_recovery,
+    )
+    .expect("founder device state")
+    .activate_registration(joined_ref.clone(), None)
+    .expect("activate joined writer");
+    let founder = ReferencedStoreDeviceRegistration::verified(
+        fixture.registration_ref.clone(),
+        fixture.registration.clone(),
+    )
+    .expect("verify founder registration");
+    let joined = ReferencedStoreDeviceRegistration::verified(joined_ref.clone(), joined)
+        .expect("verify joined registration");
+
+    let omitted = BTreeMap::from([(fixture.registration_ref.device_id, founder.clone())]);
+    assert!(
+        super::retained_history::replay_retirement_writer_ids(
+            fixture.root_ref.store_root_hash,
+            &current_state,
+            &omitted,
+            &fixture.membership,
+        )
+        .is_err(),
+        "the receiving boundary must reject an omitted active writer",
+    );
+
+    let complete = BTreeMap::from([
+        (fixture.registration_ref.device_id, founder),
+        (joined_ref.device_id, joined),
+    ]);
+    assert_eq!(
+        super::retained_history::replay_retirement_writer_ids(
+            fixture.root_ref.store_root_hash,
+            &current_state,
+            &complete,
+            &fixture.membership,
+        )
+        .expect("derive current writers"),
+        BTreeSet::from([fixture.registration_ref.device_id, joined_ref.device_id]),
     );
 }

@@ -34,6 +34,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn drain_prepared_store_writes(
         &mut self,
         timings: &mut StageTimings,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<u64, StoreError> {
         let operation = self;
         let database = &operation.database;
@@ -50,6 +51,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let Some(first) = database.oldest_prepared_store_write().await? else {
             return Ok(0);
         };
+        let routing_key = routing_encryption
+            .map(|encryption| {
+                coven_protocol::circle::derive_row_routing_key(
+                    encryption,
+                    operation.store_root().store_root_hash,
+                )
+            })
+            .transpose()?;
         let database = operation.database.clone();
         let storage = operation.storage.as_ref();
         #[cfg(any(test, feature = "test-utils"))]
@@ -172,6 +181,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                                 root.clone(),
                                 head.commit.clone(),
                                 nonactivations,
+                                routing_key.clone(),
                             )
                             .await?
                         {
@@ -251,6 +261,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                             root,
                             head.commit.clone(),
                             nonactivations,
+                            routing_key.clone(),
                         ),
                     )
                     .await?
@@ -281,7 +292,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(published)
     }
 
-    pub(crate) async fn publish_pending_store_writes(&mut self) -> Result<u64, SyncCycleFailure> {
+    pub(crate) async fn publish_pending_store_writes(
+        &mut self,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<u64, SyncCycleFailure> {
         // Publishing one release's worth of host writes was the slowest stage of
         // a live cycle. Each commit it publishes costs several provider round
         // trips — two slot allocations while preparing, then the packages, the
@@ -294,7 +308,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         // including failures.
         let mut timings =
             StageTimings::counting("Store write publication", self.provider_requests());
-        let outcome = Box::pin(self.publish_pending_store_writes_timed(&mut timings)).await;
+        let outcome =
+            Box::pin(self.publish_pending_store_writes_timed(&mut timings, routing_encryption))
+                .await;
         timings.report();
         outcome
     }
@@ -302,6 +318,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     async fn publish_pending_store_writes_timed(
         &mut self,
         timings: &mut StageTimings,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<u64, SyncCycleFailure> {
         let mut published = 0_u64;
         loop {
@@ -313,7 +330,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 return Ok(published);
             }
             let drained = self
-                .drain_prepared_store_writes(timings)
+                .drain_prepared_store_writes(timings, routing_encryption)
                 .await
                 .map_err(|error| SyncCycleFailure::operation("publish Store write", error))?;
             published = published.checked_add(drained).ok_or_else(|| {
@@ -325,10 +342,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         }
     }
 
-    pub(crate) async fn publish_prepared_store_writes(&mut self) -> Result<u64, SyncCycleFailure> {
-        self.drain_prepared_store_writes_timed("prepared Store write publication")
-            .await
-            .map_err(|error| SyncCycleFailure::operation("publish Store write", error))
+    pub(crate) async fn publish_prepared_store_writes(
+        &mut self,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<u64, SyncCycleFailure> {
+        self.drain_prepared_store_writes_timed(
+            "prepared Store write publication",
+            routing_encryption,
+        )
+        .await
+        .map_err(|error| SyncCycleFailure::operation("publish Store write", error))
     }
 
     /// Drain under a timing run of its own, for the callers that publish outside
@@ -336,9 +359,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn drain_prepared_store_writes_timed(
         &mut self,
         run: &'static str,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<u64, StoreError> {
         let mut timings = StageTimings::counting(run, self.provider_requests());
-        let outcome = Box::pin(self.drain_prepared_store_writes(&mut timings)).await;
+        let outcome =
+            Box::pin(self.drain_prepared_store_writes(&mut timings, routing_encryption)).await;
         timings.report();
         outcome
     }

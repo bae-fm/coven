@@ -107,6 +107,7 @@ impl StoreTransaction<'_, '_> {
             schema_version,
             routing_hash,
             install.authority.clone(),
+            &crate::BlobDecls::from_tables(conn, synced_tables).map_err(DbError::from)?,
         )?;
         timings.record("capture the replay baseline", baseline_started.elapsed(), 0);
         let circles_started = coven_foundation::clock::Stopwatch::start();

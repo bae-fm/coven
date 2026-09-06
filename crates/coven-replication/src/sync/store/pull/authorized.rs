@@ -843,6 +843,22 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             coven_database::MaterializationOutcome::Held(
                 coven_database::MaterializationHold::ConstraintConflict(tables),
             ) => ApplyOutcome::Held(HeldStorePositionReason::ConstraintConflict(tables)),
+            coven_database::MaterializationOutcome::Held(
+                coven_database::MaterializationHold::PrivateSharedConflict {
+                    table,
+                    row_id,
+                    commit,
+                },
+            ) => ApplyOutcome::Held(HeldStorePositionReason::PrivateSharedConflict {
+                table,
+                row_id,
+                commit,
+            }),
+            coven_database::MaterializationOutcome::Held(
+                coven_database::MaterializationHold::InvalidLocalCircleContext { circle_id },
+            ) => {
+                ApplyOutcome::Held(HeldStorePositionReason::InvalidLocalCircleContext { circle_id })
+            }
         })
     }
 }

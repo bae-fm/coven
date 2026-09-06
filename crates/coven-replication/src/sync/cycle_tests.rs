@@ -4270,8 +4270,9 @@ impl<'a> InterceptedCycle<'a> {
 
 /// A package stops being needed once the device that acknowledged it advances
 /// its replay baseline over the snapshot covering it. Peer A has pushed A/1; M
-/// pulls it, acknowledges it, snapshots it, adopts that snapshot as its
-/// baseline, and deletes the package.
+/// pulls it, acknowledges it, and snapshots it. The next cycle sees the
+/// published acknowledgement, adopts that snapshot as its baseline, and
+/// deletes the package.
 ///
 /// This is the whole point of the acknowledged-snapshot proof. The retained
 /// materialization for A/1 is what pinned the package, and it existed to serve
@@ -4321,6 +4322,16 @@ async fn cycle_reclaims_a_fully_acked_changeset_once_the_baseline_advances() {
     )
     .await
     .expect("retained-replay cycle succeeds");
+    let device = storage
+        .bind_device_in(&db_m, db_m_store_dir.clone(), &keypair)
+        .await
+        .expect("bind retained-replay Store device for retirement");
+    run_cycle_in_task(
+        Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
+        device,
+    )
+    .await
+    .expect("retained-replay retirement cycle succeeds");
 
     let snapshot = db_m
         .latest_store_snapshot_meta()

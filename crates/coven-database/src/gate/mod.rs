@@ -87,7 +87,8 @@ pub(crate) use audience::{
     capture_routing_changes, filter_inbound_circle_changeset, filter_inbound_store_rows,
     live_row_audience, normalize_inbound_store_changeset, partition_outbound,
     prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_snapshot_audience_rows,
-    validate_scoped_foreign_key_audiences, validate_snapshot_routing_state,
+    validate_accepted_foreign_key_closure, validate_scoped_foreign_key_audiences,
+    validate_snapshot_routing_state,
 };
 pub use audience::{
     is_routing_table, store_audience_transitions, AudienceMove, AudiencePartition,
@@ -449,5 +450,7 @@ impl From<crate::CreateTableSchemaError> for GateError {
     }
 }
 
+#[cfg(test)]
+mod retraction_tests;
 #[cfg(test)]
 mod tests;

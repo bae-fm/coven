@@ -213,9 +213,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn resolve_acknowledged_snapshot(
         &mut self,
         registration: &StoreDeviceRegistrationRef,
+        members: &MembershipChain,
     ) -> Result<
         Result<
-            crate::sync::store::commit_verification::merge_history::SelectedInstallableStoreSnapshot,
+            crate::sync::store::commit_verification::merge_history::SelectedReplayBaselineRetirement,
             crate::sync::store::ReplayBaselineDecline,
         >,
         crate::sync::store::acknowledgements::StoreAckError,
@@ -229,12 +230,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             return Ok(Err(ReplayBaselineDecline::NoAcknowledgedSnapshot));
         };
         let generation = locator.snapshot.generation;
-        // The steady state, answered without asking the provider anything: this
-        // baseline was installed from that very snapshot, so there is nothing
-        // to load and nothing to stand on again.
         if self
             .history_verifier
             .replay_baseline_stands_on(&locator.snapshot)
+            && !self
+                .database
+                .replay_baseline_would_advance(
+                    self.history_verifier.replay_baseline_coverage().clone(),
+                )
+                .await?
         {
             return Ok(Err(ReplayBaselineDecline::BaselineAtCoverage {
                 generation,
@@ -261,21 +265,48 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 generation,
             }));
         };
-        if self
-            .history_verifier
-            .replay_baseline_covers(&snapshot.meta.coverage)
+        if !self
+            .database
+            .replay_baseline_would_advance(snapshot.meta.coverage.clone())
+            .await?
         {
             return Ok(Err(ReplayBaselineDecline::BaselineAtCoverage {
                 generation,
             }));
         }
-        let verified = self
+        let verified = match self
             .history_verifier
-            .verify_acknowledged_store_snapshot(&snapshot)
+            .verify_replay_baseline_retirement(&snapshot, members)
             .await
-            .map_err(crate::sync::store::snapshots::SnapshotError::from)?;
-        let Some(verified) = verified else {
-            return Ok(Err(ReplayBaselineDecline::SnapshotRejected { generation }));
+        {
+            Ok(verified) => verified,
+            Err(crate::sync::store::pull::StorePullError::SnapshotNotStable {
+                member,
+                device_id,
+            }) => {
+                return Ok(Err(ReplayBaselineDecline::MissingWriterAcknowledgement {
+                    generation,
+                    member,
+                    device_id,
+                }));
+            }
+            Err(
+                crate::sync::store::pull::StorePullError::SnapshotAuthorInactive
+                | crate::sync::store::pull::StorePullError::SnapshotAuthorNotOwner
+                | crate::sync::store::pull::StorePullError::SnapshotBehindReplayBaseline,
+            ) => {
+                return Ok(Err(ReplayBaselineDecline::SnapshotRejected { generation }));
+            }
+            Err(
+                crate::sync::store::pull::StorePullError::ReplayRetirementMembershipUnwitnessed,
+            ) => {
+                return Ok(Err(ReplayBaselineDecline::MembershipNotAccepted {
+                    generation,
+                }));
+            }
+            Err(error) => {
+                return Err(crate::sync::store::snapshots::SnapshotError::from(error).into());
+            }
         };
         Ok(Ok(
             crate::sync::store::commit_verification::merge_history::SelectedStoreSnapshot {

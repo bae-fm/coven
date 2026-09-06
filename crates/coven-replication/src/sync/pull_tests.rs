@@ -1481,10 +1481,28 @@ impl<'storage> ExactPublishedCommit<'storage> {
             .expect("publish replacement exact Store package");
     }
 
-    async fn replace_package_with_malformed_bytes(
+    async fn replace_package_with_changeset(
         &self,
+        changeset: &[u8],
     ) -> coven_protocol::store_commit::StoreBatchCommitRef {
-        let malformed = b"not a SQLite changeset";
+        let package_bytes = coven_protocol::audience_package::AudiencePackage::store(
+            self.commit.store_root_hash,
+            self.commit.candidate_family(),
+            self.commit.write_id.clone(),
+            self.reference.coord.clone(),
+            SCHEMA_VERSION,
+            changeset.to_vec(),
+            Vec::new(),
+        )
+        .expect("construct replacement exact Store package")
+        .to_bytes();
+        self.replace_package_and_commit(&package_bytes).await
+    }
+
+    async fn replace_package_and_commit(
+        &self,
+        package_bytes: &[u8],
+    ) -> coven_protocol::store_commit::StoreBatchCommitRef {
         let stream_id = commit_stream_id(&self.reference);
         let package_object = self
             .store
@@ -1497,28 +1515,35 @@ impl<'storage> ExactPublishedCommit<'storage> {
                     self.commit.candidate_family(),
                     &stream_id,
                     self.reference.coord.sequence(),
-                    coven_protocol::store_commit::ObjectHash::digest(malformed),
+                    coven_protocol::store_commit::ObjectHash::digest(package_bytes),
                 ),
                 ".pkg",
-                malformed,
+                package_bytes,
             )
             .await
-            .expect("publish malformed exact Store package");
-        let malformed_commit = self.sign_commit_with_package(
+            .expect("publish replacement exact Store package");
+        let replacement_commit = self.sign_commit_with_package(
             SCHEMA_VERSION,
             self.commit
                 .operations_membership_authority()
                 .expect("published test commit carries validated operations"),
-            malformed,
+            package_bytes,
             package_object,
         );
         self.replace_commit_bytes(
-            malformed_commit.to_bytes(),
-            malformed_commit.commit_hash(),
+            replacement_commit.to_bytes(),
+            replacement_commit.commit_hash(),
             self.head.author_registration.clone(),
             &self.device_signer,
         )
         .await
+    }
+
+    async fn replace_package_with_malformed_bytes(
+        &self,
+    ) -> coven_protocol::store_commit::StoreBatchCommitRef {
+        self.replace_package_and_commit(b"not a SQLite changeset")
+            .await
     }
 }
 
@@ -2392,24 +2417,29 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
     assert_eq!(updated.get(&stream_id).copied().unwrap_or(0), 0);
 }
 
-/// A package whose changeset carries a non-canonical primary key for an
-/// `IndependentUuid` table (SQLite accepts any TEXT id, and the session capture
-/// does not validate identity) is held on the pull path — not applied, not
+/// A signed package whose changeset carries a non-canonical primary key for an
+/// `IndependentUuid` table is held on the pull path — not applied, not
 /// hard-failed — so the stream stalls at the tampered position instead of
 /// admitting an id the local contract forbids.
 #[tokio::test]
 async fn pull_holds_a_non_canonical_uuid_row_identity() {
     let db1_store_dir = crate::sync::test_helpers::test_store_dir();
     let db1 = uuid_note_db(db1_store_dir.clone());
-    let storage = create_store(&db1, db1_store_dir.clone(), UserKeypair::generate()).await;
+    let founder = UserKeypair::generate();
+    let (storage, cloud_storage) =
+        create_store_fixture(&db1, db1_store_dir.clone(), founder.clone()).await;
     let cs = db1
         .capture_test_changeset(&["INSERT INTO uuid_notes (id, title, _updated_at) \
              VALUES ('NOT-A-CANONICAL-UUID', 'Forged', '0000000001000-0000-dev1')"])
         .await;
-    let commit = storage
-        .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
+    let valid = storage
+        .publish_changeset("dev1", 1, &[], SCHEMA_VERSION)
         .await
-        .expect("publish exact Store changeset");
+        .expect("publish valid exact Store changeset");
+    let commit = ExactPublishedCommit::load(&storage, &cloud_storage, valid, &founder)
+        .await
+        .replace_package_with_changeset(&cs)
+        .await;
     let stream_id = commit_stream_id(&commit);
 
     let db2_store_dir = crate::sync::test_helpers::test_store_dir();
@@ -2419,10 +2449,14 @@ async fn pull_holds_a_non_canonical_uuid_row_identity() {
 
     assert_eq!(result.changesets_applied, 0);
     assert_eq!(result.held_positions.len(), 1);
-    assert!(matches!(
-        &result.held_positions[0].reason,
-        HeldStorePositionReason::InvalidRowIdentity(error) if error.table() == "uuid_notes"
-    ));
+    assert!(
+        matches!(
+            &result.held_positions[0].reason,
+            HeldStorePositionReason::InvalidRowIdentity(error) if error.table() == "uuid_notes"
+        ),
+        "unexpected held position: {:?}",
+        result.held_positions
+    );
     assert!(
         !db2.test_row_exists("SELECT 1 FROM uuid_notes WHERE id = 'NOT-A-CANONICAL-UUID'")
             .await
@@ -2573,7 +2607,7 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
 
     let db2_store_dir = crate::sync::test_helpers::test_store_dir();
     let db2 = unique_note_db(db2_store_dir.clone());
-    db2.execute_test_sql(
+    db2.execute_test_host_write(
         "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
          VALUES ('local', 'same-slug', 'Local', '0000000002000-0000-dev2', '2026-01-01')",
     )
@@ -2582,7 +2616,12 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
     let (updated, result) = storage.pull_into(&db2, &ld).await;
 
     let conflicts = constraint_conflicts(&result);
-    assert_eq!(conflicts.len(), 1);
+    assert_eq!(
+        conflicts.len(),
+        1,
+        "held positions: {:#?}",
+        result.held_positions
+    );
     assert_eq!(
         conflicts[0].coordinate,
         HeldStoreCoordinate::Commit {
@@ -2620,16 +2659,29 @@ async fn non_retryable_constraint_is_reported_even_when_the_changeset_also_viola
 {
     let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = mixed_constraint_db(source_store_dir.clone());
-    let storage = create_store(&source, source_store_dir.clone(), UserKeypair::generate()).await;
-    source
+    let founder = UserKeypair::generate();
+    let (storage, cloud_storage) =
+        create_store_fixture(&source, source_store_dir.clone(), founder.clone()).await;
+    let baseline = source
+        .capture_test_changeset(&[
+            "INSERT INTO constraint_parents (id, _updated_at) \
+             VALUES ('present-on-target', '0000000001000-0000-dev1')",
+            "INSERT INTO constraint_items (id, parent_id, slug, _updated_at) \
+             VALUES ('local-row', 'present-on-target', 'duplicate-slug', \
+                     '0000000001001-0000-dev1')",
+        ])
+        .await;
+    let malformed_source_dir = crate::sync::test_helpers::test_store_dir();
+    let malformed_source = mixed_constraint_db(malformed_source_dir);
+    malformed_source
         .execute_test_sql(
             "INSERT INTO constraint_parents (id, _updated_at) \
-         VALUES ('missing-on-target', '0000000001000-0000-dev1'); \
-         INSERT INTO constraint_parents (id, _updated_at) \
-         VALUES ('present-on-target', '0000000001000-0000-dev1')",
+             VALUES ('missing-on-target', '0000000001000-0000-dev1'); \
+             INSERT INTO constraint_parents (id, _updated_at) \
+             VALUES ('present-on-target', '0000000001000-0000-dev1')",
         )
         .await;
-    let changeset = source
+    let changeset = malformed_source
         .capture_test_changeset(&[
             "INSERT INTO constraint_items (id, parent_id, slug, _updated_at) \
              VALUES ('fk-row', 'missing-on-target', 'free-slug', \
@@ -2639,35 +2691,43 @@ async fn non_retryable_constraint_is_reported_even_when_the_changeset_also_viola
                      '0000000002001-0000-dev1')",
         ])
         .await;
-    storage
-        .publish_changeset("dev1", 1, &changeset, SCHEMA_VERSION)
+    let baseline_commit = storage
+        .publish_changeset("dev1", 1, &baseline, SCHEMA_VERSION)
         .await
-        .expect("publish exact Store changeset");
+        .expect("publish target baseline");
+    let stream_id = commit_stream_id(&baseline_commit);
+    let valid = storage
+        .publish_changeset("dev1", 2, &[], SCHEMA_VERSION)
+        .await
+        .expect("publish valid exact Store changeset");
+    ExactPublishedCommit::load(&storage, &cloud_storage, valid, &founder)
+        .await
+        .replace_package_with_changeset(&changeset)
+        .await;
 
     let target_store_dir = crate::sync::test_helpers::test_store_dir();
     let target = mixed_constraint_db(target_store_dir.clone());
-    target
-        .execute_test_sql(
-            "INSERT INTO constraint_parents (id, _updated_at) \
-         VALUES ('present-on-target', '0000000001000-0000-dev2'); \
-         INSERT INTO constraint_items (id, parent_id, slug, _updated_at) \
-         VALUES ('local-row', 'present-on-target', 'duplicate-slug', \
-                 '0000000003000-0000-dev2')",
-        )
-        .await;
     let store_dir = target_store_dir.clone();
 
     let (updated, result) = storage.pull_into(&target, &store_dir).await;
 
-    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.changesets_applied, 1);
     let conflicts = constraint_conflicts(&result);
-    assert_eq!(conflicts.len(), 1);
+    assert_eq!(
+        conflicts.len(),
+        1,
+        "held positions: {:#?}",
+        result.held_positions
+    );
     assert_eq!(
         conflicts[0].reason,
         HeldStorePositionReason::ConstraintConflict(vec!["constraint_items".to_string()])
     );
-    assert_eq!(updated.get("dev1"), None);
-    assert_eq!(target.materialized_sequences().await.get("dev1"), None);
+    assert_eq!(updated.get(&stream_id), Some(&1));
+    assert_eq!(
+        target.materialized_sequences().await.get(&stream_id),
+        Some(&1)
+    );
     assert!(
         !target
             .test_row_exists("SELECT 1 FROM constraint_items WHERE id = 'fk-row'")
@@ -2689,10 +2749,11 @@ async fn non_retryable_constraint_is_reported_even_when_the_changeset_also_viola
 async fn fk_violation_still_retries_and_resolves() {
     let child_source_store_dir = crate::sync::test_helpers::test_store_dir();
     let child_source = crate::sync::test_helpers::open_test_db(child_source_store_dir.clone());
-    let storage = create_store(
+    let founder = UserKeypair::generate();
+    let (storage, cloud_storage) = create_store_fixture(
         &child_source,
         child_source_store_dir.clone(),
-        UserKeypair::generate(),
+        founder.clone(),
     )
     .await;
     storage
@@ -2728,10 +2789,14 @@ async fn fk_violation_still_retries_and_resolves() {
              VALUES ('t1', 'n1', 'green', '0000000001001-0000-child', '2026-01-01')",
         ])
         .await;
-    let child_commit = storage
-        .publish_changeset("dev-child", child_sequence, &child_cs, SCHEMA_VERSION)
+    let valid_child = storage
+        .publish_changeset("dev-child", child_sequence, &[], SCHEMA_VERSION)
         .await
-        .expect("publish child exact Store changeset");
+        .expect("publish valid child Store changeset");
+    let child_commit = ExactPublishedCommit::load(&storage, &cloud_storage, valid_child, &founder)
+        .await
+        .replace_package_with_changeset(&child_cs)
+        .await;
 
     let parent_source_store_dir = crate::sync::test_helpers::test_store_dir();
     let parent_source = crate::sync::test_helpers::open_test_db(parent_source_store_dir.clone());
@@ -3427,43 +3492,7 @@ async fn a_changeset_at_its_own_position_still_applies() {
 }
 
 #[tokio::test]
-async fn corrupt_local_register_fails_without_materializing_the_remote_commit() {
-    let good_source_store_dir = crate::sync::test_helpers::test_store_dir();
-    let good_source = crate::sync::test_helpers::open_test_db(good_source_store_dir.clone());
-    let storage = create_store(
-        &good_source,
-        good_source_store_dir.clone(),
-        UserKeypair::generate(),
-    )
-    .await;
-    storage
-        .device_id("devA")
-        .await
-        .expect("activate valid producer before publishing data");
-    storage
-        .device_id("devB")
-        .await
-        .expect("activate invalid producer before publishing data");
-    let good_sequence = storage
-        .next_commit_sequence("devA")
-        .await
-        .expect("load valid producer position");
-    let bad_sequence = storage
-        .next_commit_sequence("devB")
-        .await
-        .expect("load invalid producer position");
-
-    let good_cs = good_source
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n-good', 'Good', NULL, '0000000001000-0000-devA', '2026-01-01')",
-        ])
-        .await;
-    let good_commit = storage
-        .publish_changeset("devA", good_sequence, &good_cs, SCHEMA_VERSION)
-        .await
-        .expect("publish valid exact Store changeset");
-
+async fn changeset_application_rejects_a_corrupt_local_register() {
     let bad_source_store_dir = crate::sync::test_helpers::test_store_dir();
     let bad_source = crate::sync::test_helpers::open_test_db(bad_source_store_dir.clone());
     // The base row exists (so the UPDATE below is an UPDATE, not an insert), but
@@ -3480,10 +3509,6 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
              WHERE id = 'n-bad'",
         ])
         .await;
-    let bad_commit = storage
-        .publish_changeset("devB", bad_sequence, &bad_cs, SCHEMA_VERSION)
-        .await
-        .expect("publish invalid exact Store changeset bytes");
 
     let target_store_dir = crate::sync::test_helpers::test_store_dir();
     let target = crate::sync::test_helpers::open_test_db(target_store_dir.clone());
@@ -3493,39 +3518,21 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
          VALUES ('n-bad', 'Local', NULL, 'not-a-stamp', '2026-01-01')",
         )
         .await;
-    let ld = target_store_dir.clone();
-    let (_, first) = storage.pull_into(&target, &ld).await;
-    assert!(first.held_positions.is_empty());
-    let error = storage
-        .pull_into_result(&target, &ld)
+    let error = match target
+        .apply_changeset_for_test(bad_cs, test_synced_tables(), target.receive_wall_ms())
         .await
-        .expect_err("an invalid local register must fail loudly");
+    {
+        Ok(_) => panic!("an invalid local register must fail loudly"),
+        Err(error) => error,
+    };
 
-    assert!(matches!(error, TestPullError::Pull(_)));
-    assert!(
-        target
-            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n-good'")
-            .await,
-        "independent commit did not apply",
-    );
-    let good_stream_id = commit_stream_id(&good_commit);
-    let bad_stream_id = commit_stream_id(&bad_commit);
-    assert_eq!(
-        target.materialized_sequences().await.get(&good_stream_id),
-        Some(&good_commit.coord.sequence()),
-        "the independent commit completed before the corrupt local register was read",
-    );
-    assert_eq!(
-        target.materialized_sequences().await.get(&bad_stream_id),
-        None,
-        "the failing commit never materializes",
-    );
+    assert!(error.to_string().contains("no parseable _updated_at"));
     assert_eq!(
         target
             .query_test_text("SELECT title FROM notes WHERE id = 'n-bad'")
             .await,
         "Local",
-        "the failing commit rolls back its row mutation",
+        "the rejected changeset leaves the corrupt local row unchanged",
     );
 }
 

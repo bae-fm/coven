@@ -869,3 +869,78 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
         .expect("prepare write after discarded blocked writes"));
     assert_eq!(device.drain_store_writes().await.unwrap(), 1);
 }
+
+#[tokio::test]
+async fn discarding_a_blocked_write_includes_later_local_only_writes() {
+    let home = InMemoryCloudHome::new();
+    let keypair = UserKeypair::generate();
+    let storage = Arc::new(CloudSyncConnection::new(
+        Arc::new(home),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "blocked-local-discard",
+        keypair.clone(),
+    ));
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let database = coven_database::StoreDatabase::new(&db);
+    crate::sync::test_helpers::TestDevice::create(
+        &db,
+        db_store_dir,
+        storage,
+        "blocked-local-discard",
+        keypair,
+    )
+    .await
+    .expect("create blocked-local-discard Store");
+    db.execute_test_host_write(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('blocked', 'blocked', NULL, 1, \
+                 '0000000001000-0000-writer', '2026-01-01')",
+    )
+    .await;
+    let blocked = database.pending_writes().await.unwrap()[0].write_id.clone();
+    database
+        .set_write_status(
+            &blocked,
+            coven_protocol::write::WriteStatus::Blocked(
+                coven_protocol::write::WriteBlock::InvalidProtocolState {
+                    reason: "discard test precondition".to_string(),
+                },
+            ),
+        )
+        .await
+        .expect("block shared write");
+    db.execute_test_host_write(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('private', 'private', NULL, 0, \
+                 '0000000001001-0000-writer', '2026-01-01')",
+    )
+    .await;
+
+    let discarded = database
+        .discard_blocked_write(&blocked)
+        .await
+        .expect("discard blocked suffix");
+    let coven_database::BlockedWriteDiscard::Discarded(discarded) = discarded else {
+        panic!("blocked suffix unexpectedly requires remote resolution");
+    };
+    assert_eq!(discarded.len(), 2);
+    assert_eq!(discarded[0], blocked);
+    assert_eq!(
+        database
+            .read(|sql| sql.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get::<_, i64>(0)))
+            .await
+            .unwrap()
+            .unwrap(),
+        0,
+    );
+    for write_id in discarded {
+        assert_eq!(
+            database.write_status(&write_id).await.unwrap(),
+            coven_protocol::write::WriteStatus::Resolved(
+                coven_protocol::write::WriteResolution::Discarded
+            ),
+        );
+    }
+}

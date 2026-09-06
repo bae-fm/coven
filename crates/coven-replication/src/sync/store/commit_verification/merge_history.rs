@@ -21,7 +21,7 @@ use coven_protocol::store_commit::{
     OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
     ReferencedStoreDeviceRegistration, ResolvedStoreDeviceState,
     RetainedVerifiedMergeHistorySummary, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceHead, StoreDeviceProposalState, StoreDeviceRegistration,
+    StoreDeviceHead, StoreDeviceId, StoreDeviceProposalState, StoreDeviceRegistration,
     StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
     StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit,
@@ -66,7 +66,7 @@ pub(crate) use promotion::{
 };
 pub(crate) use snapshots::{
     weigh_every_snapshot, SelectedAcknowledgedStoreSnapshot, SelectedInstallableStoreSnapshot,
-    SelectedStoreSnapshot, StoreSnapshotDescentStep,
+    SelectedReplayBaselineRetirement, SelectedStoreSnapshot, StoreSnapshotDescentStep,
 };
 pub use successor::MergeHistorySuccessorEvidence;
 pub use successor::PreparedMergeHistorySuccessor;
@@ -538,18 +538,10 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.history.baseline.coverage()
     }
 
-    /// Whether this device's installed replay baseline already restates
-    /// everything `coverage` does, so standing on it again would retire
-    /// nothing.
-    pub(crate) fn replay_baseline_covers(&self, coverage: &CommitFrontier) -> bool {
-        self.history.baseline.coverage().covers(coverage)
-    }
-
     /// Whether this device's replay baseline was installed from `snapshot`.
     ///
-    /// The local answer to "am I already standing on that?", which is what
-    /// keeps a settled cycle from reading a snapshot back to compare coverages
-    /// it already stands at.
+    /// The local answer to "am I already standing on that?", which keeps a
+    /// settled cycle from reading back the snapshot it already stands on.
     pub(crate) fn replay_baseline_stands_on(
         &self,
         snapshot: &store_commit::StoreSnapshotRef,
@@ -807,6 +799,16 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .as_ref()
                     .map(|control| control.activations.clone()),
             })
+    }
+
+    pub(crate) fn accepted_commit_membership_state(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Option<&StoreMembershipStateRef> {
+        self.history
+            .commits
+            .get(reference)
+            .map(|commit| &commit.verified.value().membership_state)
     }
 
     pub(crate) fn verified_predecessor_membership(

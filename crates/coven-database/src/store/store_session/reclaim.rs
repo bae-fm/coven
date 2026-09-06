@@ -45,18 +45,15 @@ impl StoreSession<'_> {
         Ok(operation)
     }
 
-    /// Adopt an acknowledged snapshot as this device's replay baseline.
-    ///
-    /// Only reclaim calls this, because only reclaim holds the proof that
-    /// licenses it: a snapshot every device that could still need the history
-    /// behind it has acknowledged. Advancing releases the replay pins on that
-    /// history, which is what lets the same run authorize its packages.
+    /// Adopt a snapshot whose cut every current writer has crossed as this
+    /// device's replay baseline.
     fn advance_snapshot_replay_baseline(
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
-        snapshot_authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+        proof: coven_protocol::store_commit::ReplayBaselineRetirementProof,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<Option<crate::AdvancedReplayBaseline>, DbError> {
+        let snapshot_authority = proof.authority.clone();
         let cut = snapshot_authority.metadata.coverage.clone();
         // Ask before rebuilding. The image is reconstructed by replaying the
         // whole retained history, so a cycle whose baseline already stands at
@@ -69,8 +66,14 @@ impl StoreSession<'_> {
             return Ok(None);
         }
         let snapshot_hash = snapshot_authority.snapshot.snapshot_hash;
-        let (image, folded) =
-            self.capture_replay_baseline_at_cut(root, &cut, snapshot_hash, routing_encryption)?;
+        let current_cut = proof.current_cut.frontier();
+        let (image, folded) = self.capture_replay_baseline_at_cut(
+            root,
+            &cut,
+            &current_cut,
+            snapshot_hash,
+            routing_encryption,
+        )?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let schema_version = self.schema_version;
         let routing_hash = self.sync_routing_hash;
@@ -81,9 +84,10 @@ impl StoreSession<'_> {
                 root,
                 schema_version,
                 routing_hash,
-                snapshot_authority,
+                proof,
                 image,
                 &folded,
+                self.blob_decls,
             )?;
         tx.commit().map_err(DbError::from)?;
         if advanced.is_some() {
@@ -666,6 +670,21 @@ impl StoreSession<'_> {
 }
 
 impl StoreDatabase {
+    /// Whether adopting `cut` would move the retained replay baseline or fold
+    /// a settled write-journal prefix into it.
+    pub async fn replay_baseline_would_advance(
+        &self,
+        cut: coven_protocol::store_commit::CommitFrontier,
+    ) -> Result<bool, DbError> {
+        self.call_store(move |session| {
+            crate::store::store_session::replay_baseline_advances_on(
+                crate::store::store_session::StoreRecords::new(session.conn, session.store_dir),
+                &cut,
+            )
+        })
+        .await
+    }
+
     pub async fn begin_store_reclaim_operation(
         &self,
         operation: DurableStoreReclaimOperation,
@@ -686,8 +705,8 @@ impl StoreDatabase {
             .await
     }
 
-    /// Adopt an acknowledged snapshot as this device's replay baseline, and
-    /// retire the retained history it supersedes.
+    /// Adopt a snapshot admitted for replay retirement and retire the retained
+    /// history it supersedes.
     ///
     /// `Ok(None)` means the snapshot does not advance this device's cut, which
     /// is the ordinary result once a device has caught up to the newest
@@ -695,15 +714,12 @@ impl StoreDatabase {
     pub async fn advance_snapshot_replay_baseline(
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
-        snapshot_authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+        proof: crate::VerifiedReplayBaselineRetirementProof,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<Option<crate::AdvancedReplayBaseline>, DbError> {
+        let proof = proof.into_proof();
         self.call_store(move |session| {
-            session.advance_snapshot_replay_baseline(
-                &root,
-                snapshot_authority,
-                routing_encryption.as_ref(),
-            )
+            session.advance_snapshot_replay_baseline(&root, proof, routing_encryption.as_ref())
         })
         .await
     }

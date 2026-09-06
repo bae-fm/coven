@@ -23,15 +23,13 @@
 //! which is why a standing device's reclaim reports every target it considers as
 //! retained for replay and deletes nothing, forever.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use super::retained_replay::PreparedRetainedReplayBaseline;
 use super::{StoreRecords, StoreTransaction};
 use crate::store::verified_store_authority::VerifiedStoreLookup;
 use crate::{Database, DbError, ObjectHash, RetainedReplayOwner};
-use coven_protocol::store_commit::{
-    CommitFrontier, RetainedReplaySnapshotAuthority, StoreBatchCommitRef, StoreRootRef,
-};
+use coven_protocol::store_commit::{CommitFrontier, StoreBatchCommitRef, StoreRootRef};
 
 /// What one advancement retired, for the reclaim report that follows it.
 ///
@@ -72,11 +70,39 @@ impl StoreTransaction<'_, '_> {
         root: &StoreRootRef,
         schema_version: u32,
         routing_hash: ObjectHash,
-        snapshot_authority: RetainedReplaySnapshotAuthority,
+        proof: coven_protocol::store_commit::ReplayBaselineRetirementProof,
         image: Vec<u8>,
         folded: &[crate::SettledStoreWrite],
+        blob_decls: &crate::BlobDecls,
     ) -> Result<Option<AdvancedReplayBaseline>, DbError> {
+        let current_cut = proof.current_cut.frontier();
+        let (installed_state_ref, installed_state) =
+            crate::store::store_device_state::store_device_state_for_history_cut_on(
+                self.transaction,
+                &proof.current_cut,
+            )?;
+        if installed_state_ref != proof.current_state
+            || installed_state != proof.current_device_state
+        {
+            return Err(DbError::Message(
+                "replay retirement proof differs from the installed Store device authority"
+                    .to_string(),
+            ));
+        }
+        let snapshot_authority = proof.authority;
         let records = StoreRecords::new(self.transaction, self.store_dir);
+        let installed_cut = CommitFrontier::from_refs(
+            crate::store::materialized_commit_index::materialized_frontier_on(
+                self.transaction,
+                None,
+            )?,
+        )
+        .map_err(DbError::from)?;
+        if installed_cut != current_cut {
+            return Err(DbError::Message(
+                "replay retirement proof is stale against the installed Store frontier".to_string(),
+            ));
+        }
         let cut = snapshot_authority.metadata.coverage.clone();
         let Some(current) =
             crate::store::retained_replay::load_replay_baseline_metadata_on(records)?
@@ -85,20 +111,17 @@ impl StoreTransaction<'_, '_> {
                 "advancing a replay baseline requires an installed baseline".to_string(),
             ));
         };
-        if !advances(&cut, &current.exact_cut) {
+        if !advances(&cut, &current.exact_cut, !folded.is_empty()) {
             return Ok(None);
         }
-        // Coverage this device already claims must survive the rewrite below.
-        // A snapshot that advances the baseline cut but drops a stream the
-        // device's own coverage names would silently rewind its position.
-        let installed_coverage = installed_coverage_frontier(self.transaction)?;
-        if !cut.covers(&installed_coverage) {
-            return Err(DbError::Message(
-                "advanced replay baseline cut does not cover the installed snapshot coverage"
-                    .to_string(),
-            ));
-        }
-
+        self.validate_replay_retirement_membership_witness(
+            authority,
+            root,
+            &current_cut,
+            &proof.current_membership,
+            &proof.membership_witness,
+            &snapshot_authority,
+        )?;
         let snapshot_hash = snapshot_authority.snapshot.snapshot_hash;
         let prepared = PreparedRetainedReplayBaseline::new(
             cut.clone(),
@@ -107,7 +130,7 @@ impl StoreTransaction<'_, '_> {
             crate::RetainedReplayAuthority::InstalledSnapshot(snapshot_authority),
             image,
         );
-        prepared.validate_image(self.store_dir)?;
+        let prepared = prepared.validate_image(self.store_dir, blob_decls)?;
 
         let (retired_commits, released_pins) =
             self.retire_superseded_history(authority, root, &cut)?;
@@ -139,6 +162,87 @@ impl StoreTransaction<'_, '_> {
             released_pins,
             folded_writes,
         }))
+    }
+
+    fn validate_replay_retirement_membership_witness(
+        &self,
+        authority: &mut dyn VerifiedStoreLookup,
+        root: &StoreRootRef,
+        current_cut: &CommitFrontier,
+        current_membership: &coven_protocol::circle_control::StoreMembershipStateRef,
+        witness: &coven_protocol::store_commit::ReplayRetirementMembershipWitness,
+        snapshot: &coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+    ) -> Result<(), DbError> {
+        match witness {
+            coven_protocol::store_commit::ReplayRetirementMembershipWitness::Snapshot => {
+                if current_membership != &snapshot.metadata.state.membership {
+                    return Err(DbError::Message(
+                        "replay retirement membership differs from its snapshot witness"
+                            .to_string(),
+                    ));
+                }
+            }
+            coven_protocol::store_commit::ReplayRetirementMembershipWitness::StoreCommit(
+                reference,
+            ) => {
+                if !current_cut.covers_commit(reference) {
+                    return Err(DbError::Message(
+                        "replay retirement membership witness lies beyond its current cut"
+                            .to_string(),
+                    ));
+                }
+                let stream_id = reference.coord.stream_id.to_string();
+                let sequence = reference.coord.sequence();
+                let records = StoreRecords::new(self.transaction, self.store_dir);
+                if records.materialized_commit_ref(&stream_id, sequence)? != Some(reference.clone())
+                {
+                    return Err(DbError::Message(
+                        "replay retirement membership witness is not installed accepted history"
+                            .to_string(),
+                    ));
+                }
+                let row = records
+                    .retained_materialization_rows()?
+                    .into_iter()
+                    .find(|(stored_stream, stored_sequence, _, _)| {
+                        stored_stream == &stream_id
+                            && u64::try_from(*stored_sequence).ok() == Some(sequence)
+                    })
+                    .ok_or_else(|| {
+                        DbError::Message(
+                            "replay retirement membership witness has no retained materialization"
+                                .to_string(),
+                        )
+                    })?;
+                let (_, _, encoded_ref, input_hash) = row;
+                let stored_ref: StoreBatchCommitRef =
+                    serde_json::from_str(&encoded_ref).map_err(|error| {
+                        DbError::context("membership witness commit reference", error)
+                    })?;
+                if &stored_ref != reference {
+                    return Err(DbError::Message(
+                        "replay retirement membership witness differs from its retained row"
+                            .to_string(),
+                    ));
+                }
+                let materialization = (*self).load_retained_materialization(
+                    root,
+                    authority,
+                    &stream_id,
+                    sequence,
+                    reference,
+                    &input_hash,
+                    None,
+                )?;
+                if &materialization.commit().membership_state != current_membership {
+                    return Err(DbError::Message(
+                        "replay retirement Store witness names another membership state"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Drop the retained materializations at or under `cut` that the baseline
@@ -261,6 +365,11 @@ impl StoreTransaction<'_, '_> {
                 &crate::payload_store::store_write_owner_key(write_id),
             )?;
             conn.execute(
+                "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            conn.execute(
                 "DELETE FROM store_write_partitions WHERE write_id = ?1",
                 [write_id.as_str()],
             )
@@ -378,20 +487,15 @@ pub(crate) fn replay_baseline_advances_on(
     else {
         return Ok(false);
     };
-    Ok(advances(cut, &current.exact_cut))
+    let folded = crate::StoreDatabase::settled_store_write_prefix_on(records, cut)?;
+    Ok(advances(cut, &current.exact_cut, !folded.is_empty()))
 }
 
-/// Whether `cut` is strictly ahead of `current`.
+/// Whether `cut` covers `current` and changes what the baseline represents.
 ///
-/// Equality is not advancement: re-adopting the cut a device already holds
-/// would rewrite the baseline and retire nothing, so the cycle that finds the
-/// same acknowledged snapshot again does nothing at all.
-fn advances(cut: &CommitFrontier, current: &CommitFrontier) -> bool {
-    cut.covers(current) && cut != current
-}
-
-fn installed_coverage_frontier(conn: &rusqlite::Connection) -> Result<CommitFrontier, DbError> {
-    let covered: BTreeMap<String, StoreBatchCommitRef> =
-        crate::store::store_session::materialized_commit_index::snapshot_coverage_on(conn)?;
-    CommitFrontier::from_refs(covered).map_err(DbError::from)
+/// Equal coverage still advances when the image absorbs a nonempty settled
+/// write prefix. With no writes to consume, adopting the same cut would rewrite
+/// the same baseline and retire nothing.
+fn advances(cut: &CommitFrontier, current: &CommitFrontier, consumes_writes: bool) -> bool {
+    cut.covers(current) && (cut != current || consumes_writes)
 }

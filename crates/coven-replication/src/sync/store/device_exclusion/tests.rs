@@ -691,7 +691,7 @@ async fn excluded_author_removes_indexed_shared_blob_ownership_without_deleting_
         false,
         PreparedAbandonmentHeadPublication::Absent,
         true,
-        false,
+        None,
         None,
     ))
     .await;
@@ -760,7 +760,21 @@ async fn accepted_candidate_is_retracted_when_its_author_exclusion_arrives() {
         false,
         PreparedAbandonmentHeadPublication::Absent,
         false,
-        true,
+        Some(AcceptedRetractionOutcome::Applied),
+        None,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn accepted_candidate_retraction_preserves_a_dependent_local_write() {
+    Box::pin(run_excluded_author_candidate_cleanup_case(
+        ExcludedCandidateHeadPublication::AfterHeadReadBack,
+        false,
+        false,
+        PreparedAbandonmentHeadPublication::Absent,
+        false,
+        Some(AcceptedRetractionOutcome::BlockedByDependentLocalWrite),
         None,
     ))
     .await;
@@ -774,7 +788,7 @@ async fn summary_materialization_failure_rolls_back_terminal_merge_transaction()
         false,
         PreparedAbandonmentHeadPublication::Absent,
         false,
-        true,
+        Some(AcceptedRetractionOutcome::Applied),
         Some(TerminalMergeTransactionFailure::Injected(
             coven_database::MergeMaterializationFailurePoint::SummaryMaterialization,
         )),
@@ -790,7 +804,7 @@ async fn retraction_deletion_failure_rolls_back_terminal_merge_transaction() {
         false,
         PreparedAbandonmentHeadPublication::Absent,
         false,
-        true,
+        Some(AcceptedRetractionOutcome::Applied),
         Some(TerminalMergeTransactionFailure::Injected(
             coven_database::MergeMaterializationFailurePoint::RetractionDeletion,
         )),
@@ -806,7 +820,7 @@ async fn projection_replacement_failure_rolls_back_terminal_merge_transaction() 
         false,
         PreparedAbandonmentHeadPublication::Absent,
         false,
-        true,
+        Some(AcceptedRetractionOutcome::Applied),
         Some(TerminalMergeTransactionFailure::Injected(
             coven_database::MergeMaterializationFailurePoint::ProjectionReplacement,
         )),
@@ -822,7 +836,7 @@ async fn missing_retracted_device_state_rolls_back_terminal_merge_transaction() 
         false,
         PreparedAbandonmentHeadPublication::Absent,
         false,
-        true,
+        Some(AcceptedRetractionOutcome::Applied),
         Some(TerminalMergeTransactionFailure::DeleteDeviceStateDuringRetraction),
     ))
     .await;
@@ -1119,7 +1133,7 @@ async fn run_excluded_author_candidate_cleanup(
         prepare_abandonment,
         prepared_head_publication,
         false,
-        false,
+        None,
         None,
     ))
     .await;
@@ -1131,13 +1145,19 @@ enum TerminalMergeTransactionFailure {
     DeleteDeviceStateDuringRetraction,
 }
 
+#[derive(Clone, Copy)]
+enum AcceptedRetractionOutcome {
+    Applied,
+    BlockedByDependentLocalWrite,
+}
+
 async fn run_excluded_author_candidate_cleanup_case(
     head_publication: ExcludedCandidateHeadPublication,
     sabotage_activation_head: bool,
     prepare_abandonment: bool,
     prepared_head_publication: PreparedAbandonmentHeadPublication,
     index_shared_blobs: bool,
-    materialize_before_exclusion: bool,
+    accepted_retraction: Option<AcceptedRetractionOutcome>,
     transaction_failure: Option<TerminalMergeTransactionFailure>,
 ) {
     let signer = UserKeypair::generate();
@@ -1170,7 +1190,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     .await
     .expect("activate excluded peer");
     let store_dir = peer_db_store_dir.clone();
-    if materialize_before_exclusion {
+    if accepted_retraction.is_some() {
         Box::pin(async {
             owner_db
                 .execute_test_host_write(
@@ -1298,7 +1318,27 @@ async fn run_excluded_author_candidate_cleanup_case(
     } else {
         None
     };
-    if materialize_before_exclusion {
+    if accepted_retraction.is_some() {
+        if matches!(
+            accepted_retraction,
+            Some(AcceptedRetractionOutcome::BlockedByDependentLocalWrite)
+        ) {
+            peer_db
+                .execute_test_host_write(
+                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                     VALUES ('excluded-peer-local-note', 'local', NULL, 0, \
+                             '0000000002001-0000-excluded-peer', '2026-07-18')",
+                )
+                .await;
+            let (local_status, local_partitions, local_changeset_bytes) =
+                StoreDatabase::new(&peer_db)
+                    .latest_local_write_facts_for_test()
+                    .await
+                    .expect("load dependent local replay input");
+            assert_eq!(local_status, "\"local_only\"");
+            assert_eq!(local_partitions, 1);
+            assert!(local_changeset_bytes > 0);
+        }
         peer_device
             .drain_store_writes()
             .await
@@ -1312,20 +1352,6 @@ async fn run_excluded_author_candidate_cleanup_case(
             status => panic!("candidate was not accepted before exclusion: {status:?}"),
         };
         assert_eq!(original.commit(), &candidate_ref);
-        peer_db
-            .execute_test_host_write(
-                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-                 VALUES ('excluded-peer-local-note', 'local', NULL, 0, \
-                         '0000000002001-0000-excluded-peer', '2026-07-18')",
-            )
-            .await;
-        let (local_status, local_partitions, local_changeset_bytes) = StoreDatabase::new(&peer_db)
-            .latest_local_write_facts_for_test()
-            .await
-            .expect("load local-only replay input");
-        assert_eq!(local_status, "\"local_only\"");
-        assert_eq!(local_partitions, 1);
-        assert!(local_changeset_bytes > 0);
         finalize_peer_exclusion_detached(owner_device.clone(), &target).await;
         let activation_commit = coven_database::StoreDatabase::new(&owner_db)
             .author_exclusion_activation_for_candidate(
@@ -1338,6 +1364,45 @@ async fn run_excluded_author_candidate_cleanup_case(
             .expect("owner exclusion covers the accepted candidate")
             .activation_commit()
             .clone();
+        if matches!(
+            accepted_retraction,
+            Some(AcceptedRetractionOutcome::BlockedByDependentLocalWrite)
+        ) {
+            let error = store
+                .pull_into_result(&peer_db, &store_dir)
+                .await
+                .expect_err("dependent local write must block terminal retraction");
+            assert!(
+                format!("{error:?}").contains("WriteDependencyConflict"),
+                "unexpected dependent retraction error: {error:?}"
+            );
+            let StoreCommitCoord {
+                stream_id,
+                sequence,
+            } = &activation_commit.coord;
+            assert!(store_database(&peer_db)
+                .exact_materialized_ref(&stream_id.to_string(), *sequence)
+                .await
+                .expect("read blocked exclusion coordinate")
+                .is_none());
+            assert!(matches!(
+                StoreDatabase::new(&peer_db)
+                    .write_status(&write_id)
+                    .await
+                    .expect("read retained candidate status"),
+                coven_protocol::write::WriteStatus::Published(position)
+                    if position.as_ref() == &original
+            ));
+            assert_eq!(
+                note_row_count(
+                    &peer_db,
+                    &["excluded-peer-note", "excluded-peer-local-note"],
+                )
+                .await,
+                2,
+            );
+            return;
+        }
         if let Some(failure) = transaction_failure {
             Box::pin(async {
                 match failure {
@@ -1390,12 +1455,11 @@ async fn run_excluded_author_candidate_cleanup_case(
                         &peer_db,
                         &[
                             "excluded-peer-note",
-                            "excluded-peer-local-note",
                             "surviving-owner-note",
                         ],
                     )
                     .await,
-                    3,
+                    2,
                 );
                 assert!(!coven_database::StoreDatabase::new(&peer_db)
                     .merge_candidate_cleanup_pending(&write_id)
@@ -1425,8 +1489,6 @@ async fn run_excluded_author_candidate_cleanup_case(
         assert_eq!(witness.original_position(), &original);
         let row_count = note_row_count(&peer_db, &["excluded-peer-note"]).await;
         assert_eq!(row_count, 0);
-        let local_row_count = note_row_count(&peer_db, &["excluded-peer-local-note"]).await;
-        assert_eq!(local_row_count, 1);
         let surviving_row_count = note_row_count(&peer_db, &["surviving-owner-note"]).await;
         assert_eq!(surviving_row_count, 1);
         assert!(coven_database::StoreDatabase::new(&peer_db)

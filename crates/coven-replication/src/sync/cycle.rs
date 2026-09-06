@@ -310,14 +310,13 @@ impl AuthorizedSyncCycle<'_, '_> {
             timings
                 .stage(
                     "publish acknowledgements",
-                    Box::pin(self.authorization.acknowledgements().stage_and_publish(
-                        &completed.sync_time,
-                        routing_encryption,
-                        self.settled,
-                    )),
+                    Box::pin(
+                        self.authorization
+                            .acknowledgements()
+                            .stage_and_publish(&completed.sync_time, self.settled),
+                    ),
                 )
-                .await
-                .map(Self::report_baseline_advance)?;
+                .await?;
             timings
                 .stage(
                     "retire arrived device joins",
@@ -471,7 +470,8 @@ impl AuthorizedSyncCycle<'_, '_> {
             let published = timings
                 .stage(
                     "publish prepared writes",
-                    self.authorization.publish_prepared_store_writes(),
+                    self.authorization
+                        .publish_prepared_store_writes(self.routing_encryption),
                 )
                 .await?;
             if published > 0 {
@@ -506,7 +506,8 @@ impl AuthorizedSyncCycle<'_, '_> {
             let lanes = timings
                 .stage("publish pending writes and drain next blob root", async {
                     tokio::join!(
-                        self.authorization.publish_pending_store_writes(),
+                        self.authorization
+                            .publish_pending_store_writes(self.routing_encryption),
                         upload_authorization.drain_uploads(
                             self.clock,
                             self.routing_encryption,
@@ -672,24 +673,6 @@ impl AuthorizedSyncCycle<'_, '_> {
             ),
         }
         Ok(())
-    }
-
-    /// Say what standing on a newly acknowledged snapshot retired, when the
-    /// acknowledgement stage moved the baseline itself.
-    ///
-    /// The stage above is where a device catches up; this is the ordering
-    /// guarantee for a claim it is about to publish, which has to be true
-    /// locally before it is signed.
-    fn report_baseline_advance(advanced: Option<coven_database::AdvancedReplayBaseline>) {
-        let Some(advanced) = advanced else {
-            return;
-        };
-        info!(
-            commits = advanced.retired_commits,
-            pins = advanced.released_pins,
-            writes = advanced.folded_writes,
-            "Advanced the replay baseline over a newly acknowledged snapshot"
-        );
     }
 
     /// Reclaim, and say what it did every cycle rather than only when it
@@ -1067,7 +1050,9 @@ impl SyncComponents {
         &self,
         write_id: coven_protocol::write::WriteId,
     ) -> Result<Vec<coven_protocol::write::WriteId>, super::store::StoreError> {
-        self.store.discard_blocked_write(write_id).await
+        self.store
+            .discard_blocked_write(write_id, self.routing_encryption.as_ref())
+            .await
     }
 
     pub(crate) async fn members(
@@ -1429,7 +1414,7 @@ impl SyncComponents {
             .await
             .map_err(CircleOperationError::from)?;
         authorization
-            .publish_pending_store_writes()
+            .publish_pending_store_writes(Some(routing_encryption))
             .await
             .map_err(CircleOperationError::from)?;
         let bootstrap = authorization

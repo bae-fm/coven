@@ -5,14 +5,16 @@
 use std::collections::{HashMap, HashSet};
 
 use rusqlite::ffi;
+use rusqlite::session::ConflictAction;
+use rusqlite::types::Value;
 use rusqlite::Connection;
 use tracing::{debug, warn};
 
 use super::audience::live_row_audience;
 use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
 use super::model::{
-    child_rows, foreign_keys, gated_fk_child_edges, truthy, GateColumn, Gates, SharedRows,
-    TableGate,
+    child_rows, foreign_keys, gate_is_derived, gated_fk_child_edges, truthy, GateColumn, Gates,
+    SharedRows, TableGate,
 };
 use super::{execute_batch, query_row_optional, row_value_to_string, GateError};
 use crate::{create_table_sql, quote_ident, rewrite_create_into_schema};
@@ -193,7 +195,7 @@ unsafe fn gate_outbound_raw(
     // Pass 2 (retract): emit DELETEs for the rows leaving the shared set of any
     // root that flipped true→false this cycle. The mirror of reemit_subtrees.
     if !retracted_roots.is_empty() {
-        reemission.reemit_retract_deletes(&retracted_roots)?;
+        reemission.reemit_retract_deletes(&retracted_roots, changeset)?;
     }
 
     group.output()
@@ -357,7 +359,9 @@ impl<'a> OutboundReemission<'a> {
     /// The candidate set is the *structural* connected component of the retracted
     /// roots ([`connected_component`] with `restrict_to_shared = false`): the same
     /// bidirectional FK closure the re-emit path walks, except the down-walk follows
-    /// live FK edges WITHOUT a kept-filter. The rows still physically exist locally —
+    /// live FK edges through derived gates without a kept filter. A child with its
+    /// own gate is another root and remains governed by that gate. The rows in the
+    /// component still physically exist locally —
     /// only the root's gate column changed — so a kept-filter would wrongly exclude
     /// the root's own descendants (they inherit the now-false gate).
     ///
@@ -371,53 +375,56 @@ impl<'a> OutboundReemission<'a> {
     /// would strand the reference on every peer — the same wedge the emit side
     /// avoids, arriving from the other direction.
     ///
-    /// The DELETEs are synthesized by [`full_state_diff`] with
-    /// [`FullStateDirection::Deletes`] (a DELETE per live gated row, scoped here to
-    /// the to-delete set). The changegroup dedups by primary key, so a row both
-    /// locally deleted this cycle and synthetically retracted resolves to a single
-    /// DELETE. That diff only carries rows still present in `main`, so a row the
-    /// captured changeset already removed never collides here.
+    /// The DELETEs are synthesized from the database before the captured write.
+    /// A write can change content while making it private, or reparent a row while
+    /// withdrawing it; neither its private values nor its private graph may enter
+    /// the public retraction. The changegroup dedups a row also deleted directly by
+    /// the captured write.
     unsafe fn reemit_retract_deletes(
         &self,
         retracted_roots: &HashSet<(String, String)>,
+        changeset: &[u8],
     ) -> Result<(), GateError> {
         let conn = self.connection;
         let gates = self.gates;
         let group = self.group;
         let scope = self.scope;
-        let component =
-            connected_component(conn, gates, self.shared, retracted_roots, false, scope)?;
+        with_pre_write_synced_projection(conn, gates, changeset, |before| {
+            let before_shared = gates.shared_rows(before)?;
+            let component =
+                connected_component(before, gates, &before_shared, retracted_roots, false, scope)?;
 
-        // Keep only the rows no longer shared under the post-flip live state. The live
-        // db already reflects the gate flip when gate_outbound runs, so the retracted
-        // root and its now-orphaned descendants/ancestors read not-shared, while a
-        // sibling still held by another managed root reads shared and is spared.
-        let mut to_delete: HashSet<(String, String)> = HashSet::new();
-        for (table, id) in component {
-            if !self.shared.contains(&table, &id)? {
-                to_delete.insert((table, id));
+            // Keep only the rows no longer shared under the post-flip live state. The live
+            // db already reflects the gate flip when gate_outbound runs, so the retracted
+            // root and its now-orphaned descendants/ancestors read not-shared, while a
+            // sibling still held by another managed root reads shared and is spared.
+            let mut to_delete: HashSet<(String, String)> = HashSet::new();
+            for (table, id) in component {
+                if !self.shared.contains(&table, &id)? {
+                    to_delete.insert((table, id));
+                }
             }
-        }
-        if to_delete.is_empty() {
-            return Ok(());
-        }
-
-        let delete_bytes = full_state_diff(conn, gates, FullStateDirection::Deletes)?;
-        if delete_bytes.is_empty() {
-            return Ok(());
-        }
-
-        for_each_change(&delete_bytes, |iter, row| {
-            if !scope.contains(gates, &row.table) {
+            if to_delete.is_empty() {
                 return Ok(());
             }
-            let in_to_delete = row
-                .pk()
-                .is_some_and(|pk| to_delete.contains(&(row.table.clone(), pk.to_string())));
-            if in_to_delete {
-                group.add_change(iter)?;
+
+            let delete_bytes = full_state_diff(before, gates, FullStateDirection::Deletes)?;
+            if delete_bytes.is_empty() {
+                return Ok(());
             }
-            Ok(())
+
+            for_each_change(&delete_bytes, |iter, row| {
+                if !scope.contains(gates, &row.table) {
+                    return Ok(());
+                }
+                let in_to_delete = row
+                    .pk()
+                    .is_some_and(|pk| to_delete.contains(&(row.table.clone(), pk.to_string())));
+                if in_to_delete {
+                    group.add_change(iter)?;
+                }
+                Ok(())
+            })
         })
     }
 }
@@ -431,24 +438,22 @@ impl<'a> OutboundReemission<'a> {
 /// the snapshot `keep_clause` also keeps. The result is the transitive closure,
 /// cycle-guarded by the visited set.
 ///
-/// `restrict_to_shared` governs only the *down*-walk (the *up*-walk is
-/// unconditional either way, so an ancestor is always reached and the caller can
-/// make its share decision):
+/// `restrict_to_shared` governs the *down*-walk. The *up*-walk follows derived
+/// ancestors and stops at independent roots; those roots own their own audience
+/// decision and never inherit a seed's transition.
 ///
 /// - `true` (re-emit, false→true): descend only into currently-*shared* children,
 ///   so the component is exactly the row set the snapshot prune keeps — the rows a
 ///   fresh peer must materialize. Reconstructs in row-walk form the same relation
 ///   [`SharedRows`] expresses recursively.
-/// - `false` (retract, true→false): descend *structurally* into every child by
-///   live FK, no shared-filter. At retract time the root's gate column has already
-///   flipped false, so its descendants are no longer shared; a filtered walk
-///   would never reach them. The retract caller filters the structural component
-///   by the post-flip shared set to decide which rows actually leave it.
+/// - `false` (retract, true→false): descend structurally into every derived-gate
+///   child by live FK, with no shared filter. At retract time the root's gate column
+///   has already flipped false, so its descendants are no longer shared; a filtered
+///   walk would never reach them. The walk stops at independently gated roots.
 ///
-/// Over-collecting is safe for both callers (re-emit dedups by PK and resolves a
-/// duplicate INSERT by LWW; retract filters by the shared set before emitting);
-/// only under-collecting fails, so the closure is computed in full rather than as
-/// a fixed up-then-one-level-down pass.
+/// The closure follows every derived relationship rather than stopping after one
+/// upward and downward pass. Crossing into an independent root would publish rows
+/// whose own gate never elected them, so roots are a hard boundary.
 fn connected_component(
     conn: &Connection,
     gates: &Gates,
@@ -477,6 +482,7 @@ fn connected_component(
             if parent == table
                 || !gates.tables.contains_key(&parent)
                 || !scope.contains(gates, &parent)
+                || !gate_is_derived(gates.tables.get(&parent))
             {
                 continue;
             }
@@ -486,11 +492,15 @@ fn connected_component(
                 work.push((parent, parent_id));
             }
         }
-        // Down: each gated child referencing this row — filtered to kept children
-        // for re-emit, taken structurally (every live FK edge) for retract.
+        // Down: each derived-gate child referencing this row — filtered to shared
+        // children for re-emit, taken structurally for retract. An independently
+        // gated child is another root and never inherits this root's transition.
         if let Some(edges) = down_edges.get(table.as_str()) {
             for (child_table, child_id) in child_rows(conn, edges, &table, &id)? {
                 if !scope.contains(gates, &child_table) {
+                    continue;
+                }
+                if !gate_is_derived(gates.tables.get(&child_table)) {
                     continue;
                 }
                 if !restrict_to_shared || shared.contains(&child_table, &child_id)? {
@@ -500,6 +510,113 @@ fn connected_component(
         }
     }
     Ok(out)
+}
+
+/// Reconstruct the synced tables immediately before `changeset` on an isolated
+/// connection. Retraction must read both row values and foreign-key edges from
+/// that state: the captured write is allowed to change either while moving the
+/// rows to Local.
+fn with_pre_write_synced_projection<R>(
+    conn: &Connection,
+    gates: &Gates,
+    changeset: &[u8],
+    use_projection: impl FnOnce(&Connection) -> Result<R, GateError>,
+) -> Result<R, GateError> {
+    let before = Connection::open_in_memory()
+        .map_err(|source| GateError::Sql("open pre-write projection".to_string(), source))?;
+    before
+        .execute_batch("PRAGMA foreign_keys = OFF")
+        .map_err(|source| GateError::Sql("disable pre-write foreign keys".to_string(), source))?;
+
+    for table in gates.sorted_synced_table_names() {
+        let create = create_table_sql(conn, &table)?;
+        before
+            .execute_batch(&create)
+            .map_err(|source| GateError::Sql(format!("create pre-write table {table}"), source))?;
+        let columns = super::gate_table_columns(conn, &table)?;
+        let select = format!(
+            "SELECT {} FROM {}",
+            columns
+                .iter()
+                .map(|column| quote_ident(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+            quote_ident(&table),
+        );
+        let rows = {
+            let mut statement = conn.prepare(&select).map_err(|source| {
+                GateError::Sql(format!("prepare current rows for {table}"), source)
+            })?;
+            let rows = statement
+                .query_map([], |row| {
+                    (0..columns.len())
+                        .map(|index| row.get::<_, Value>(index))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .map_err(|source| GateError::Sql(format!("read current rows for {table}"), source))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|source| {
+                    GateError::Sql(format!("read current row for {table}"), source)
+                })?;
+            rows
+        };
+        if rows.is_empty() {
+            continue;
+        }
+        let insert = format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            quote_ident(&table),
+            columns
+                .iter()
+                .map(|column| quote_ident(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+            (1..=columns.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let mut statement = before.prepare(&insert).map_err(|source| {
+            GateError::Sql(format!("prepare pre-write rows for {table}"), source)
+        })?;
+        for row in rows {
+            statement
+                .execute(rusqlite::params_from_iter(row))
+                .map_err(|source| {
+                    GateError::Sql(format!("copy current row for {table}"), source)
+                })?;
+        }
+    }
+
+    let mut inverse = Vec::new();
+    rusqlite::session::invert_strm(&mut &changeset[..], &mut inverse).map_err(|source| {
+        GateError::Session {
+            operation: "invert captured write for retraction".to_string(),
+            source,
+        }
+    })?;
+    before
+        .apply_strm(
+            &mut &inverse[..],
+            None::<fn(&str) -> bool>,
+            |_conflict, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
+        )
+        .map_err(|source| GateError::Session {
+            operation: "restore pre-write rows for retraction".to_string(),
+            source,
+        })?;
+    use_projection(&before)
+}
+
+pub(super) fn pre_write_full_state_diff(
+    conn: &Connection,
+    gates: &Gates,
+    changeset: &[u8],
+    direction: FullStateDirection,
+) -> Result<Vec<u8>, GateError> {
+    with_pre_write_synced_projection(conn, gates, changeset, |before| {
+        full_state_diff(before, gates, direction)
+    })
 }
 /// Attach a fresh empty in-memory db, recreate each gated table's schema in it
 /// (copied verbatim from `sqlite_master` so a diff sees identical tables), run

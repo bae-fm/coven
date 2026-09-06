@@ -6,8 +6,8 @@ use super::{
 };
 use crate::{
     candidate_graph_exact_objects, load_prepared_audience_objects_on, load_remote_object_on,
-    update_remote_object_on, BlobActivation, CloudOutboxRecords, CompletePreparedStoreWriteOutcome,
-    Database, DbError, PreparedAudienceBlob, RetainedPackageApplication, LOCAL_DEVICE_ID_STATE_KEY,
+    update_remote_object_on, CloudOutboxRecords, CompletePreparedStoreWriteOutcome, Database,
+    DbError, PreparedAudienceBlob, RetainedPackageApplication, LOCAL_DEVICE_ID_STATE_KEY,
 };
 use coven_protocol::remote_object::{remote_object_id, CandidateNonactivation};
 use coven_protocol::store_commit::{
@@ -22,6 +22,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         root: coven_protocol::store_commit::StoreRootRef,
         accepted: StoreBatchCommitRef,
         nonactivations: std::collections::BTreeMap<StoreBatchCommitRef, CandidateNonactivation>,
+        routing_key: Option<coven_protocol::circle::RowRoutingKey>,
     ) -> Result<
         (
             CompletePreparedStoreWriteOutcome,
@@ -385,23 +386,47 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 )));
             }
         }
-        let activation = BlobActivation {
-            coord: commit_ref.coord.clone(),
-        };
-        let apply_schema = crate::TableSchema::for_apply(tx, synced_tables, gates)?;
-        let store_transaction = MergeMaterializationTransaction::from_store(self.store);
+        let merge_transaction = MergeMaterializationTransaction::from_store(self.store);
+        let retained = merge_transaction.record_materialized_merge_commit(
+            state,
+            &root,
+            &commit_value,
+            &[],
+            &head_value,
+            head.prepared().reference(),
+            &history_evidence,
+            &retained_packages,
+            (!retained_packages.is_empty()).then_some(RetainedPackageApplication::LocallyAuthored),
+        )?;
+        state.insert_verified(retained)?;
+        let replayed = state.replay_projection_watching_on(
+            store_transaction,
+            self.blob_decls,
+            gates,
+            synced_tables,
+            routing_key.as_ref(),
+            &std::collections::BTreeSet::new(),
+            crate::ReplayJournal::Owed,
+            coven_protocol::membership::LocalStoreMembership::Current,
+            commit_ref,
+        )?;
+        match replayed.watched_outcome() {
+            Some(super::WatchedReplayOutcome::Applied { .. }) => {}
+            Some(super::WatchedReplayOutcome::Held(reason)) => {
+                return Err(DbError::Message(format!(
+                    "accepted local Store publication held during replay: {reason:?}"
+                )))
+            }
+            None => {
+                return Err(DbError::Message(
+                    "accepted local Store publication was absent from replay".to_string(),
+                ))
+            }
+        }
+        replayed.install_on(self, &root)?;
         let cloud_outbox = CloudOutboxRecords::new(tx);
         let mut consumed_uploads = 0;
         for package in &audiences.packages {
-            let winning_rows = store_transaction
-                .current_winning_rows(&apply_schema, package.package().changeset())?;
-            store_transaction.install_winning_blob_bindings(
-                gates,
-                synced_tables,
-                package.package(),
-                &activation,
-                &winning_rows,
-            )?;
             for binding in package.package().blob_bindings() {
                 if cloud_outbox.consume_created_upload_handoff(package.package(), binding)? {
                     consumed_uploads += 1;
@@ -470,25 +495,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             [write_id.as_str()],
         )
         .map_err(DbError::from)?;
-        tx.execute(
-            "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
-            [write_id.as_str()],
-        )
-        .map_err(DbError::from)?;
-        let retained = MergeMaterializationTransaction::from_store(self.store)
-            .record_materialized_merge_commit(
-                state,
-                &root,
-                &commit_value,
-                &[],
-                &head_value,
-                head.prepared().reference(),
-                &history_evidence,
-                &retained_packages,
-                (!retained_packages.is_empty())
-                    .then_some(RetainedPackageApplication::LocallyAuthored),
-            )?;
-        state.insert_verified(retained)?;
+        retain_local_replay_blob_leases(tx, self.store.store_dir, &write_id)?;
         let cleared = tx
             .execute(
                 "UPDATE store_writes SET prepared = NULL
@@ -513,12 +520,75 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
     }
 }
 
+fn retain_local_replay_blob_leases(
+    tx: &rusqlite::Transaction<'_>,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    write_id: &WriteId,
+) -> Result<(), DbError> {
+    let records = super::StoreRecords::new(tx, store_dir);
+    let partitions = records.store_write_partitions(write_id.as_str())?;
+    let local_rows = partitions
+        .local
+        .iter()
+        .map(|partition| crate::walk_changeset(&partition.changeset))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .filter(|change| {
+            !crate::is_routing_table(&change.table)
+                && !matches!(change.op, coven_foundation::changeset::ChangeOp::Delete)
+        })
+        .filter_map(|change| {
+            let row_id = change.pk()?.to_string();
+            Some((change.table, row_id))
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let raw_facts: String = tx
+        .query_row(
+            "SELECT blob_facts FROM store_writes WHERE write_id = ?1",
+            [write_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    let facts: crate::StoreWriteBlobFacts = serde_json::from_str(&raw_facts)
+        .map_err(|error| DbError::context("published Store write blob facts", error))?;
+    let retained = facts
+        .blobs
+        .into_iter()
+        .filter(|fact| {
+            fact.blob.provenance == coven_protocol::blob::Provenance::HostProvided
+                && local_rows.contains(&(fact.table.clone(), fact.row_id.clone()))
+        })
+        .map(|fact| (fact.blob.namespace, fact.blob.id))
+        .collect::<std::collections::BTreeSet<_>>();
+    let leases = crate::query_mapped_rows(
+        tx,
+        "SELECT namespace, blob_id FROM store_write_blob_leases
+         WHERE write_id = ?1 ORDER BY namespace, blob_id",
+        [write_id.as_str()],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    for (namespace, blob_id) in leases {
+        if retained.contains(&(namespace.clone(), blob_id.clone())) {
+            continue;
+        }
+        tx.execute(
+            "DELETE FROM store_write_blob_leases
+             WHERE write_id = ?1 AND namespace = ?2 AND blob_id = ?3",
+            (write_id.as_str(), namespace, blob_id),
+        )
+        .map_err(DbError::from)?;
+    }
+    Ok(())
+}
+
 impl StoreSession<'_> {
     fn complete_prepared_store_write(
         &mut self,
         root: coven_protocol::store_commit::StoreRootRef,
         accepted: StoreBatchCommitRef,
         nonactivations: std::collections::BTreeMap<StoreBatchCommitRef, CandidateNonactivation>,
+        routing_key: Option<coven_protocol::circle::RowRoutingKey>,
     ) -> Result<
         (
             CompletePreparedStoreWriteOutcome,
@@ -527,8 +597,12 @@ impl StoreSession<'_> {
         DbError,
     > {
         self.verified_store_transaction(move |transaction| {
-            let result =
-                transaction.complete_prepared_store_write(root, accepted, nonactivations)?;
+            let result = transaction.complete_prepared_store_write(
+                root,
+                accepted,
+                nonactivations,
+                routing_key,
+            )?;
             Ok(StoreTransactionOutcome::Commit(result))
         })
     }
@@ -666,6 +740,7 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         accepted: StoreBatchCommitRef,
         nonactivations: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
+        routing_key: Option<coven_protocol::circle::RowRoutingKey>,
     ) -> Result<CompletePreparedStoreWriteOutcome, DbError> {
         let nonactivations = nonactivations
             .into_iter()
@@ -678,7 +753,7 @@ impl StoreDatabase {
             .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
         let (outcome, notification) = self
             .call_store(move |session| {
-                session.complete_prepared_store_write(root, accepted, nonactivations)
+                session.complete_prepared_store_write(root, accepted, nonactivations, routing_key)
             })
             .await?;
         if let Some((write_id, status)) = notification {

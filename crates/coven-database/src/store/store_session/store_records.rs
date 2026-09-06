@@ -64,8 +64,14 @@ impl<'store> StoreRecords<'store> {
         schema_version: u32,
         routing_hash: ObjectHash,
         authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+        blob_decls: &crate::BlobDecls,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        self.install_snapshot_replay_baseline_records(schema_version, routing_hash, authority)
+        self.install_snapshot_replay_baseline_records(
+            schema_version,
+            routing_hash,
+            authority,
+            blob_decls,
+        )
     }
 
     pub(crate) fn store_write_partitions(
@@ -185,10 +191,6 @@ impl<'store> StoreRecords<'store> {
         self,
     ) -> Result<Option<coven_protocol::store_commit::StoreDeviceRegistrationRef>, DbError> {
         crate::local_activated_registration_ref_on(self.conn)
-    }
-
-    pub(super) fn has_local_device(self) -> Result<bool, DbError> {
-        Ok(crate::get_protocol_state_on(self.conn, crate::LOCAL_DEVICE_ID_STATE_KEY)?.is_some())
     }
 
     pub(super) fn current_store_device_state(

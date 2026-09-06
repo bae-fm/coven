@@ -1227,9 +1227,7 @@ impl AcknowledgedHistory {
     async fn cycle_requests_after_snapshot_number(&self, generations: u64) -> u64 {
         for _ in 1..generations {
             self.publish_snapshot_now().await;
-            self.device.run_cycle(None).await.expect("acknowledge it");
-            self.peer.run_cycle(None).await.expect("peer catches up");
-            self.device.run_cycle(None).await.expect("settle");
+            self.settle_onto_the_published_snapshot().await;
         }
         self.publish_snapshot_now().await;
         let before = self._store.provider_requests_issued();
@@ -1713,6 +1711,14 @@ impl AcknowledgedHistory {
             .run_cycle(None)
             .await
             .expect("stand on the snapshot just acknowledged");
+        self.peer
+            .run_cycle(None)
+            .await
+            .expect("the peer stands on the snapshot it acknowledged");
+        self.device
+            .run_cycle(None)
+            .await
+            .expect("the device observes the peer acknowledgement");
     }
 }
 
@@ -1743,6 +1749,7 @@ async fn publishing_a_snapshot_asks_for_what_it_writes_and_nothing_per_commit() 
 
     for rounds in [1u64, 4, 8] {
         let fixture = AcknowledgedHistory::publish(rounds).await;
+        fixture.settle_onto_the_published_snapshot().await;
         for generation in 0..4 {
             assert_eq!(
                 fixture.snapshot_publication_requests().await,

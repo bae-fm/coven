@@ -318,33 +318,6 @@ impl StoreSession<'_> {
         transaction.commit().map_err(DbError::from)
     }
 
-    fn seed_local_release_rows_for_test(
-        &self,
-        note_id: &str,
-        photo_id: &str,
-        cloud_path: &str,
-        size: i64,
-        hash: String,
-    ) -> Result<(), DbError> {
-        self.conn
-            .execute(
-                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
-                 VALUES (?1, 'Release', NULL, ?2, '0000000001000-0000-A', '2026-01-01')",
-                rusqlite::params![note_id, 0_i64],
-            )
-            .map_err(DbError::from)?;
-        self.conn
-            .execute(
-                "INSERT INTO note_photos
-                 (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path)
-                 VALUES (?1, ?2, 'image', ?3, ?4,
-                         '0000000001000-0000-A', '2026-01-01', ?5)",
-                rusqlite::params![photo_id, note_id, size, hash, cloud_path],
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-    }
-
     fn register_external_blob_for_test(
         &self,
         reference: &coven_protocol::blob::RowBlobRef,
@@ -596,7 +569,7 @@ impl StoreSession<'_> {
                     None,
                     &BTreeSet::new(),
                     None,
-                    crate::ReplayWriteOverlays::Omit,
+                    crate::ReplayJournal::Owed,
                     coven_protocol::membership::LocalStoreMembership::Current,
                 )?;
         let count = replay.row_count(table)?;
@@ -623,7 +596,7 @@ impl StoreSession<'_> {
                     Some(routing_key),
                     &BTreeSet::new(),
                     None,
-                    crate::ReplayWriteOverlays::Omit,
+                    crate::ReplayJournal::Omit,
                     coven_protocol::membership::LocalStoreMembership::Current,
                 )?;
         let retained_count = retained.document_count(historical_id)?;
@@ -642,7 +615,7 @@ impl StoreSession<'_> {
                     Some(routing_key),
                     &BTreeSet::new(),
                     None,
-                    crate::ReplayWriteOverlays::Omit,
+                    crate::ReplayJournal::Omit,
                     coven_protocol::membership::LocalStoreMembership::Current,
                 )?;
         let sabotaged_count = sabotaged.document_count(historical_id)?;

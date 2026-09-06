@@ -45,7 +45,7 @@ impl TestOwnerGraph {
         bytes: &[u8],
     ) -> std::path::PathBuf {
         self.database
-            .seed_local_release_rows_for_test(note_id, photo_id, cloud_path, bytes)
+            .seed_local_release_rows_for_test(None, note_id, photo_id, cloud_path, bytes)
             .await;
         std::fs::create_dir_all(user_dir).expect("create external blob fixture directory");
         let source = user_dir.join(format!("{photo_id}.jpg"));
@@ -69,7 +69,13 @@ impl TestOwnerGraph {
         bytes: &[u8],
     ) {
         self.database
-            .seed_local_release_rows_for_test(note_id, photo_id, cloud_path, bytes)
+            .seed_local_release_rows_for_test(
+                routing_encryption.cloned(),
+                note_id,
+                photo_id,
+                cloud_path,
+                bytes,
+            )
             .await;
         StoreDir::store_local_blob(&self.store_dir, "fixture_sources", photo_id, bytes)
             .await

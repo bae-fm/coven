@@ -8,7 +8,7 @@ use super::snapshots as snapshot;
 use super::{AuthorizedWriterOperation, StoreError};
 use crate::sync::cycle::SyncCycleFailure;
 use crate::sync::store::commit_publication::LocalStoreWriter;
-use crate::sync::store::commit_verification::merge_history::SelectedInstallableStoreSnapshot;
+use crate::sync::store::commit_verification::merge_history::SelectedReplayBaselineRetirement;
 use coven_database::StoreDatabase;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
@@ -55,12 +55,8 @@ impl From<crate::sync::store::StoreWriterAuthorizationError> for StoreAckError {
     }
 }
 
-/// What one acknowledgement pass did: the acknowledgement it staged, if the
-/// standing one no longer held, and what advancing the baseline over the
-/// snapshots this device has said it holds retired.
 pub struct StagedStoreAcknowledgement {
     pub acknowledgement: Option<StoreAck>,
-    pub baseline_advance: Option<coven_database::AdvancedReplayBaseline>,
 }
 
 /// What standing on this device's acknowledged snapshot did, or why it did
@@ -88,6 +84,19 @@ pub enum ReplayBaselineDecline {
     SnapshotUnavailable { generation: u64 },
     /// The acknowledged snapshot did not verify as installable now.
     SnapshotRejected { generation: u64 },
+    /// A current writer has not published an acknowledgement whose Store cut
+    /// covers this snapshot.
+    MissingWriterAcknowledgement {
+        generation: u64,
+        member: String,
+        device_id: String,
+    },
+    /// Current membership has not been named by accepted Store history, so its
+    /// writer set cannot yet license retirement.
+    MembershipNotAccepted { generation: u64 },
+    /// Current accepted history applies a commit outside the snapshot cut
+    /// before a commit inside it, so the cut cannot become a replay baseline.
+    NonPrefixCut { generation: u64 },
     /// The steady state: the baseline already restates everything the
     /// acknowledged snapshot does.
     BaselineAtCoverage { generation: u64 },
@@ -100,6 +109,15 @@ impl ReplayBaselineDecline {
             Self::SnapshotAuthorInactive { .. } => "the acknowledged snapshot's author is inactive",
             Self::SnapshotUnavailable { .. } => "the acknowledged snapshot is gone from its stream",
             Self::SnapshotRejected { .. } => "the acknowledged snapshot did not verify",
+            Self::MissingWriterAcknowledgement { .. } => {
+                "a current writer has not crossed the acknowledged snapshot"
+            }
+            Self::MembershipNotAccepted { .. } => {
+                "current membership is not yet in accepted Store history"
+            }
+            Self::NonPrefixCut { .. } => {
+                "the acknowledged snapshot is not a prefix of accepted replay order"
+            }
             Self::BaselineAtCoverage { .. } => "the baseline already covers it",
         }
     }
@@ -110,6 +128,9 @@ impl ReplayBaselineDecline {
             Self::SnapshotAuthorInactive { generation }
             | Self::SnapshotUnavailable { generation }
             | Self::SnapshotRejected { generation }
+            | Self::MissingWriterAcknowledgement { generation, .. }
+            | Self::MembershipNotAccepted { generation }
+            | Self::NonPrefixCut { generation }
             | Self::BaselineAtCoverage { generation } => Some(*generation),
         }
     }
@@ -138,15 +159,13 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
     }
 
     /// Publish anything queued, then acknowledge where this device now stands.
-    ///
-    /// Returns what advancing this device's replay baseline over the
-    /// acknowledged snapshot retired, when it advanced.
+    /// Local replay retirement runs independently after acknowledgement
+    /// publication, once every current writer has crossed the selected cut.
     pub(crate) async fn stage_and_publish(
         &mut self,
         sync_time: &str,
-        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         settled: &crate::sync::store::SettledCycle,
-    ) -> Result<Option<coven_database::AdvancedReplayBaseline>, SyncCycleFailure> {
+    ) -> Result<(), SyncCycleFailure> {
         Box::pin(self.drain_acknowledgements())
             .await
             .map_err(|error| {
@@ -169,17 +188,14 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("stage Circle acknowledgements", error))?;
-        let StagedStoreAcknowledgement {
-            acknowledgement,
-            baseline_advance,
-        } = Box::pin(self.stage_acknowledgement_against(
-            frontier.clone(),
-            sync_time.to_owned(),
-            routing_encryption,
-            Some(settled),
-        ))
-        .await
-        .map_err(|error| SyncCycleFailure::operation("stage Store acknowledgement", error))?;
+        let StagedStoreAcknowledgement { acknowledgement } =
+            Box::pin(self.stage_acknowledgement_against(
+                frontier.clone(),
+                sync_time.to_owned(),
+                Some(settled),
+            ))
+            .await
+            .map_err(|error| SyncCycleFailure::operation("stage Store acknowledgement", error))?;
         if let Some(acknowledgement) = &acknowledgement {
             debug!(
                 sequence = acknowledgement.sequence,
@@ -193,7 +209,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         Box::pin(self.drain_acknowledgements())
             .await
             .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
-        Ok(baseline_advance)
+        Ok(())
     }
 
     /// Stand on the snapshot this device has already acknowledged.
@@ -215,19 +231,26 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<ReplayBaselineAdvance, StoreAckError> {
         let registration = self.writer.local_registration_ref().clone();
+        let members = self.writer.membership().clone();
         let resolved = self
             .writer
-            .resolve_acknowledged_snapshot(&registration)
+            .resolve_acknowledged_snapshot(&registration, &members)
             .await?;
         let selected = match resolved {
             Ok(selected) => selected,
             Err(decline) => return Ok(ReplayBaselineAdvance::Declined(decline)),
         };
         let generation = selected.snapshot.reference.generation;
-        match self
-            .advance_over(Some(selected), routing_encryption)
-            .await?
-        {
+        let advanced = match self.advance_over(Some(selected), routing_encryption).await {
+            Ok(advanced) => advanced,
+            Err(StoreAckError::Database(coven_database::DbError::ReplayRetirementCutNotPrefix)) => {
+                return Ok(ReplayBaselineAdvance::Declined(
+                    ReplayBaselineDecline::NonPrefixCut { generation },
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        match advanced {
             Some(advanced) => Ok(ReplayBaselineAdvance::Advanced(advanced)),
             // The cut this snapshot covers does not move the baseline forward,
             // which the coverage check above did not catch: the baseline is at
@@ -238,29 +261,12 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         }
     }
 
-    /// Stand on the snapshot this device is about to acknowledge, and report
-    /// which one that is.
-    ///
-    /// The ordering guarantee for a claim being made now: once every device has
-    /// published an acknowledgement of a snapshot — the proof that licenses
-    /// deleting the packages behind it — every one of them must already have
-    /// stopped needing them. Catching up on a claim already made is
-    /// [`stand_on_acknowledged_snapshot`](Self::stand_on_acknowledged_snapshot),
-    /// which is a cycle stage of its own because nothing here runs for a device
-    /// with nothing new to say.
-    async fn stand_on_the_snapshot_it_will_name(
+    async fn snapshot_it_will_name(
         &mut self,
         frontier: &CommitFrontier,
         device_state: &coven_protocol::store_commit::StoreDeviceStateRef,
-        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         settled: Option<&crate::sync::store::SettledCycle>,
-    ) -> Result<
-        (
-            Option<StoreSnapshotLocator>,
-            Option<coven_database::AdvancedReplayBaseline>,
-        ),
-        StoreAckError,
-    > {
+    ) -> Result<Option<StoreSnapshotLocator>, StoreAckError> {
         // Which snapshot a device could acknowledge next is settled by the same
         // local facts reclaim's answer is, and reaching it means reading every
         // activated device's snapshot stream. A device with nothing new to say
@@ -273,7 +279,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                     crate::sync::store::CycleInputs::read(&self.database, self.writer.membership())
                         .await?;
                 if let Some(remembered) = settled.acknowledgeable_snapshot(&inputs) {
-                    return Ok((remembered, None));
+                    return Ok(remembered);
                 }
                 Some((settled, inputs))
             }
@@ -293,21 +299,18 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             );
         }
         let Some(selected) = selected else {
-            return Ok((None, None));
+            return Ok(None);
         };
         let locator = StoreSnapshotLocator {
             author_registration: selected.snapshot.meta.author_registration.clone(),
             snapshot: selected.snapshot.reference.clone(),
         };
-        let advanced = self
-            .advance_over(Some(selected), routing_encryption)
-            .await?;
-        Ok((Some(locator), advanced))
+        Ok(Some(locator))
     }
 
     async fn advance_over(
         &mut self,
-        snapshot: Option<SelectedInstallableStoreSnapshot>,
+        snapshot: Option<SelectedReplayBaselineRetirement>,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<Option<coven_database::AdvancedReplayBaseline>, StoreAckError> {
         let Some(snapshot) = snapshot else {
@@ -317,7 +320,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             .database
             .advance_snapshot_replay_baseline(
                 self.writer.store_root().clone(),
-                snapshot.verified.into_authority(),
+                snapshot.verified,
                 routing_encryption.cloned(),
             )
             .await?)
@@ -346,9 +349,8 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         &mut self,
         frontier: CommitFrontier,
         sync_time: String,
-        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<StagedStoreAcknowledgement, StoreAckError> {
-        self.stage_acknowledgement_against(frontier, sync_time, routing_encryption, None)
+        self.stage_acknowledgement_against(frontier, sync_time, None)
             .await
     }
 
@@ -356,7 +358,6 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         &mut self,
         frontier: CommitFrontier,
         sync_time: String,
-        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         settled: Option<&crate::sync::store::SettledCycle>,
     ) -> Result<StagedStoreAcknowledgement, StoreAckError> {
         let history_cut =
@@ -366,30 +367,18 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             .store_device_state_for_history_cut(&history_cut)
             .await?;
         let previous = self.database.latest_local_store_ack().await?;
-        let (snapshot, baseline_advance) = self
-            .stand_on_the_snapshot_it_will_name(
-                &frontier,
-                &device_state,
-                routing_encryption,
-                settled,
-            )
+        let snapshot = self
+            .snapshot_it_will_name(&frontier, &device_state, settled)
             .await?;
         let acknowledgement = self
             .say_acknowledgement(history_cut, device_state, previous, snapshot, sync_time)
             .await?;
-        Ok(StagedStoreAcknowledgement {
-            acknowledgement,
-            baseline_advance,
-        })
+        Ok(StagedStoreAcknowledgement { acknowledgement })
     }
 
-    /// Stage the acknowledgement itself, once this device stands where it is
-    /// about to say it stands.
-    ///
-    /// Separate from [`stand_on_the_snapshot_it_will_name`](Self::stand_on_the_snapshot_it_will_name)
-    /// because they answer different questions — where this device is, and
-    /// saying so — and because only the pair in that order is safe: the
-    /// statement is what other devices delete against.
+    /// Stage the acknowledgement itself after selecting the snapshot it names.
+    /// Publishing the durable promise does not retire local replay inputs;
+    /// retirement later requires every current writer to have crossed the cut.
     async fn say_acknowledgement(
         &mut self,
         history_cut: coven_protocol::store_commit::StoreHistoryCut,
@@ -410,20 +399,31 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         }
         let assertion = self.local_writer.device_acknowledgement_assertion(
             history_cut,
-            device_state,
+            device_state.clone(),
             snapshot,
             exclusions,
         );
+        let membership_state =
+            coven_protocol::circle_control::StoreMembershipStateRef::from_membership(
+                self.writer.membership(),
+                device_state.recovery().to_vec(),
+            )?;
         // A queued Circle acknowledgement travels to the cloud inside the Store
         // acknowledgement's commit, so one waiting is reason enough to publish
         // even when this device has nothing of its own left to say.
         let carries_circle_acknowledgements = self.database.outbound_circle_acks_pending().await?;
-        if !carries_circle_acknowledgements
-            && previous
-                .as_ref()
-                .and_then(|previous| previous.standing.as_ref())
-                .is_some_and(|standing| standing.still_holds(&assertion))
-        {
+        let standing_still_holds = previous
+            .as_ref()
+            .and_then(|previous| previous.standing.as_ref())
+            .is_some_and(|standing| {
+                standing.still_holds(&assertion)
+                    && standing
+                        .activating_commit
+                        .as_ref()
+                        .and_then(|commit| self.writer.accepted_commit_membership_state(commit))
+                        == Some(&membership_state)
+            });
+        if !carries_circle_acknowledgements && standing_still_holds {
             debug!("skip Store acknowledgement: the standing one still holds");
             return Ok(None);
         }
@@ -491,39 +491,6 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             .stage_store_ack(acknowledgement.clone(), prepared)
             .await?;
         Ok(Some(acknowledgement))
-    }
-
-    /// Stage an acknowledgement without standing on the snapshot it names.
-    ///
-    /// The state every device carries into this build: an acknowledgement it
-    /// published back when nothing advanced a baseline, and a baseline still
-    /// where it always was. There is no other way to reach it now — the
-    /// acknowledgement stage stands on a snapshot before it says anything — so
-    /// a test that wants to prove the standing acknowledgement is the licence
-    /// has to build the state the same way history did.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn stage_acknowledgement_without_advancing(
-        &mut self,
-        frontier: CommitFrontier,
-        sync_time: String,
-    ) -> Result<Option<StoreAck>, StoreAckError> {
-        let history_cut =
-            coven_protocol::store_commit::StoreHistoryCut::from_commits(frontier.commits().clone());
-        let (device_state, _) = self
-            .database
-            .store_device_state_for_history_cut(&history_cut)
-            .await?;
-        let previous = self.database.latest_local_store_ack().await?;
-        let snapshot = self
-            .writer
-            .select_acknowledgement_snapshot(&frontier, &device_state)
-            .await?
-            .map(|selected| StoreSnapshotLocator {
-                author_registration: selected.snapshot.meta.author_registration.clone(),
-                snapshot: selected.snapshot.reference.clone(),
-            });
-        self.say_acknowledgement(history_cut, device_state, previous, snapshot, sync_time)
-            .await
     }
 
     pub(crate) async fn drain_acknowledgements(&mut self) -> Result<u64, StoreAckError> {

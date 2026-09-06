@@ -4,6 +4,47 @@ use super::*;
 use crate::local_blob_cleanup_intents::{LocalBlobCleanupIdentity, LocalBlobCleanupIntent};
 use crate::BlobDecls;
 
+pub(crate) struct ExactBlobBindings {
+    by_row: std::collections::BTreeMap<(String, String), coven_protocol::store_commit::ObjectHash>,
+}
+
+pub(crate) fn exact_blob_bindings_on(
+    conn: &rusqlite::Connection,
+) -> Result<ExactBlobBindings, DbError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT binding.table_name, binding.row_id, locator.locator_hash
+             FROM row_blob_locators AS binding
+             JOIN blob_locators AS locator
+               ON locator.remote_object_id = binding.remote_object_id",
+        )
+        .map_err(DbError::from)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(DbError::from)?;
+    let mut by_row = std::collections::BTreeMap::new();
+    for row in rows {
+        let (table, row_id, encoded) = row.map_err(DbError::from)?;
+        let locator_hash = encoded
+            .parse::<coven_protocol::store_commit::ObjectHash>()
+            .map_err(|error| DbError::context("parse local cleanup locator hash", error))?;
+        if let Some(existing) = by_row.insert((table.clone(), row_id.clone()), locator_hash) {
+            if existing != locator_hash {
+                return Err(DbError::Message(format!(
+                    "local cleanup for {table}.{row_id} has distinct exact locator bindings"
+                )));
+            }
+        }
+    }
+    Ok(ExactBlobBindings { by_row })
+}
+
 /// Record cleanup obligations for each copy identity no live row needs in this
 /// transaction. The transaction mutating the carrying rows must also record the
 /// obligation, so the obsolete state and its cleanup commit together.
@@ -27,67 +68,93 @@ pub(crate) fn record_obsolete_copy_intents_on(
             ));
         }
         LocalBlobCleanupIdentity::Row { table, row_id } => {
-            let mut statement = conn
-                .prepare(
-                    "SELECT locator.locator_hash
-                     FROM row_blob_locators AS binding
-                     JOIN blob_locators AS locator
-                       ON locator.remote_object_id = binding.remote_object_id
-                     WHERE binding.table_name = ?1 AND binding.row_id = ?2",
-                )
-                .map_err(DbError::from)?;
-            let locator_hashes = statement
-                .query_map((table, row_id), |row| row.get::<_, String>(0))
-                .map_err(DbError::from)?
-                .collect::<Result<std::collections::BTreeSet<_>, _>>()
-                .map_err(DbError::from)?;
-            let exact_locator_hash = match locator_hashes.len() {
-                0 => None,
-                1 => {
-                    let locator_hash = locator_hashes
-                        .iter()
-                        .next()
-                        .expect("one exact locator hash")
-                        .parse::<coven_protocol::store_commit::ObjectHash>()
-                        .map_err(|error| {
-                            DbError::context("parse local cleanup locator hash", error)
-                        })?;
-                    Some(locator_hash)
-                }
-                count => {
-                    return Err(DbError::Message(format!(
-                        "local cleanup for {table}.{row_id} has {count} distinct exact locator bindings"
-                    )));
-                }
-            };
-            if let Some(locator_hash) = exact_locator_hash {
-                let exact = LocalBlobCleanupIntent::exact(
-                    intent.namespace(),
-                    intent.blob_id(),
-                    locator_hash,
-                );
-                let referenced = decls
-                    .exact_copy_is_referenced(
-                        conn,
-                        exact.namespace(),
-                        exact.blob_id(),
-                        locator_hash,
-                    )
-                    .map_err(DbError::from)?;
-                if !referenced {
-                    record_durable_intent(conn, &exact)?;
-                }
-            }
-            let local_referenced = decls
-                .local_copy_is_referenced(conn, intent.namespace(), intent.blob_id())
-                .map_err(DbError::from)?;
-            if !local_referenced {
-                record_durable_intent(
-                    conn,
-                    &LocalBlobCleanupIntent::local(intent.namespace(), intent.blob_id()),
-                )?;
-            }
+            record_obsolete_row_copy_intents_on(
+                conn,
+                decls,
+                intent,
+                exact_blob_binding_for_row_on(conn, table, row_id)?,
+            )?;
         }
+    }
+    Ok(())
+}
+
+fn exact_blob_binding_for_row_on(
+    conn: &rusqlite::Connection,
+    table: &str,
+    row_id: &str,
+) -> Result<Option<coven_protocol::store_commit::ObjectHash>, DbError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT DISTINCT locator.locator_hash
+             FROM row_blob_locators AS binding
+             JOIN blob_locators AS locator
+               ON locator.remote_object_id = binding.remote_object_id
+             WHERE binding.table_name = ?1 AND binding.row_id = ?2",
+        )
+        .map_err(DbError::from)?;
+    let locator_hashes = statement
+        .query_map((table, row_id), |row| row.get::<_, String>(0))
+        .map_err(DbError::from)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DbError::from)?;
+    match locator_hashes.as_slice() {
+        [] => Ok(None),
+        [encoded] => encoded
+            .parse()
+            .map(Some)
+            .map_err(|error| DbError::context("parse local cleanup locator hash", error)),
+        _ => Err(DbError::Message(format!(
+            "local cleanup for {table}.{row_id} has {} distinct exact locator bindings",
+            locator_hashes.len()
+        ))),
+    }
+}
+
+pub(crate) fn record_obsolete_copy_intents_from_bindings_on(
+    conn: &rusqlite::Connection,
+    decls: &BlobDecls,
+    intent: &LocalBlobCleanupIntent,
+    bindings: &ExactBlobBindings,
+) -> Result<(), DbError> {
+    match intent.identity() {
+        LocalBlobCleanupIdentity::Row { table, row_id } => record_obsolete_row_copy_intents_on(
+            conn,
+            decls,
+            intent,
+            bindings
+                .by_row
+                .get(&(table.clone(), row_id.clone()))
+                .copied(),
+        ),
+        _ => record_obsolete_copy_intents_on(conn, decls, intent),
+    }
+}
+
+fn record_obsolete_row_copy_intents_on(
+    conn: &rusqlite::Connection,
+    decls: &BlobDecls,
+    intent: &LocalBlobCleanupIntent,
+    exact_locator_hash: Option<coven_protocol::store_commit::ObjectHash>,
+) -> Result<(), DbError> {
+    if let Some(locator_hash) = exact_locator_hash {
+        let exact =
+            LocalBlobCleanupIntent::exact(intent.namespace(), intent.blob_id(), locator_hash);
+        let referenced = decls
+            .exact_copy_is_referenced(conn, exact.namespace(), exact.blob_id(), locator_hash)
+            .map_err(DbError::from)?;
+        if !referenced {
+            record_durable_intent(conn, &exact)?;
+        }
+    }
+    let local_referenced = decls
+        .local_copy_is_referenced(conn, intent.namespace(), intent.blob_id())
+        .map_err(DbError::from)?;
+    if !local_referenced {
+        record_durable_intent(
+            conn,
+            &LocalBlobCleanupIntent::local(intent.namespace(), intent.blob_id()),
+        )?;
     }
     Ok(())
 }
@@ -126,6 +193,12 @@ pub(crate) fn local_blob_cleanup_intents_on(
                        AND lease.blob_id = intent.blob_id
                        AND intent.copy_identity = 'local'
                  )
+                     OR EXISTS (
+                         SELECT 1 FROM retained_replay_blob_leases baseline
+                         WHERE baseline.namespace = intent.namespace
+                           AND baseline.blob_id = intent.blob_id
+                           AND intent.copy_identity = 'local'
+                     )
                  FROM local_cleanup_intents intent
                  ORDER BY namespace, blob_id,
                           CASE WHEN copy_identity = 'local' THEN 1 ELSE 0 END,

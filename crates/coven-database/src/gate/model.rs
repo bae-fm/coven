@@ -514,7 +514,7 @@ impl<'schema> GateModelConstruction<'schema> {
 /// the row itself. A root (gated, scoped, or remote) carries its own decision
 /// about whether its rows leave the device; a descendant and an ancestor both
 /// read theirs off the FK graph. Only a derived gate is extended by closure.
-fn gate_is_derived(gate: Option<&TableGate>) -> bool {
+pub(super) fn gate_is_derived(gate: Option<&TableGate>) -> bool {
     matches!(
         gate,
         Some(TableGate::Child { .. } | TableGate::Parent { .. })
@@ -613,6 +613,37 @@ pub fn from_tables_call_count() -> usize {
 }
 
 impl Gates {
+    pub(crate) fn locality_column_index(&self, table: &str) -> Option<usize> {
+        match self.tables.get(table) {
+            Some(TableGate::Root { gate_col }) => Some(gate_col.index),
+            Some(TableGate::ScopedRoot { audience_col }) => Some(audience_col.index),
+            None
+            | Some(TableGate::RemoteRoot)
+            | Some(TableGate::Child { .. })
+            | Some(TableGate::Parent { .. }) => None,
+        }
+    }
+
+    pub(crate) fn row_can_be_private(&self, table: &str) -> bool {
+        self.tables.contains_key(table)
+    }
+
+    pub(crate) fn private_rows(
+        &self,
+        conn: &Connection,
+    ) -> Result<std::collections::BTreeSet<(String, String)>, GateError> {
+        let shared = self.shared_rows(conn)?;
+        let mut private = std::collections::BTreeSet::new();
+        for table in self.tables.keys() {
+            for row_id in super::all_row_ids(conn, table)? {
+                if !shared.contains(table, &row_id)? {
+                    private.insert((table.clone(), row_id));
+                }
+            }
+        }
+        Ok(private)
+    }
+
     pub fn has_scoped_graph(&self) -> bool {
         self.tables
             .values()

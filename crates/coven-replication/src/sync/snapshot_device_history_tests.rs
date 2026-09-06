@@ -63,7 +63,17 @@ async fn exercise_lagging_peer(prune_image: bool) {
             .device
             .run_cycle(None)
             .await
-            .expect("owner acknowledges snapshot");
+            .expect("owner publishes its snapshot acknowledgement");
+        fixture
+            .peer
+            .run_cycle(None)
+            .await
+            .expect("peer crosses and acknowledges the snapshot");
+        fixture
+            .device
+            .run_cycle(None)
+            .await
+            .expect("owner observes every active writer past the snapshot");
     }
 
     let baseline = store_database(&fixture.db)
@@ -209,7 +219,7 @@ async fn advancing_snapshots_preserve_shared_device_states_and_old_references() 
             .await
             .expect("publish snapshot");
         fixture.settle_onto_the_published_snapshot().await;
-        for db in [&fixture.db, &fixture.peer_db] {
+        for (database_index, db) in [&fixture.db, &fixture.peer_db].into_iter().enumerate() {
             assert_eq!(
                 db.table_row_count_for_test(states_table)
                     .await
@@ -221,7 +231,11 @@ async fn advancing_snapshots_preserve_shared_device_states_and_old_references() 
                 .await
                 .expect("advanced baseline");
             for (reference, state) in &expected {
-                assert_eq!(baseline.covered_state(reference), Some(state));
+                assert_eq!(
+                    baseline.covered_state(reference),
+                    Some(state),
+                    "round {round}, database {database_index}, reference {reference:?}"
+                );
             }
         }
     }
@@ -249,7 +263,17 @@ async fn conflicting_replay_device_history_does_not_change_accepted_data() {
         .device
         .run_cycle(None)
         .await
-        .expect("acknowledge snapshot");
+        .expect("owner acknowledges snapshot");
+    fixture
+        .peer
+        .run_cycle(None)
+        .await
+        .expect("peer crosses and acknowledges snapshot");
+    fixture
+        .device
+        .run_cycle(None)
+        .await
+        .expect("owner observes every active writer past the snapshot");
     let baseline = store_database(&fixture.db)
         .installed_replay_baseline()
         .await

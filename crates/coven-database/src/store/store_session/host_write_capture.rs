@@ -480,9 +480,6 @@ pub(crate) fn capture_partition_blob_facts_on(
 ) -> Result<StoreWriteBlobFacts, DbError> {
     let mut facts = BTreeMap::new();
     for partition in partitions {
-        if partition.audience == coven_protocol::circle::Audience::Local {
-            continue;
-        }
         for fact in
             StoreDatabase::capture_store_write_blob_facts_on(tx, &partition.changeset, blob_decls)?
                 .blobs
@@ -635,6 +632,9 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     .query_row(
                         "SELECT EXISTS(\
                              SELECT 1 FROM store_write_blob_leases \
+                             WHERE namespace = ?1 AND blob_id = ?2\
+                         ) OR EXISTS(\
+                             SELECT 1 FROM retained_replay_blob_leases \
                              WHERE namespace = ?1 AND blob_id = ?2\
                          )",
                         (namespace, id),
@@ -958,7 +958,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             // its writes contain: a host that persists once a second into its
             // own untracked tables leaves a row, a changeset payload and a
             // payload claim every second for as long as it runs, and every
-            // replay afterwards loads each row as an overlay that applies
+            // replay afterwards loads each row as a journal step that applies
             // nothing.
             if partitioned.partitions.is_empty() && partitioned.moves.is_empty() {
                 drop(journal);
@@ -1033,14 +1033,10 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             };
             drop(journal);
             let committed = (|| {
-                let local_stream_id =
-                    crate::store::store_session::StoreTransaction::new(&tx, store_dir)
-                        .local_merge_stream_id(verified_authority)?;
                 let base = StoreWriteBase {
                     dependencies:
                         crate::store::materialized_commit_index::materialized_frontier_on(
-                            &tx,
-                            local_stream_id.as_deref(),
+                            &tx, None,
                         )?,
                 };
                 let status = crate::store::store_session::StoreTransaction::new(&tx, store_dir)

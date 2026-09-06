@@ -40,6 +40,7 @@ pub(crate) mod publication;
 pub(crate) mod pull_replay;
 pub mod reclaim;
 pub(crate) mod replay_projection;
+pub(crate) use replay_projection::{ReplayProjectionResult, WatchedReplayOutcome};
 pub(crate) mod retained_merge_replay;
 pub(crate) mod retained_replay;
 pub(crate) mod snapshot_image;

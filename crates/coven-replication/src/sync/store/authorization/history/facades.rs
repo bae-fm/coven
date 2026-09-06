@@ -1,6 +1,14 @@
 use super::*;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
+    pub(crate) fn accepted_commit_membership_state(
+        &self,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Option<&coven_protocol::circle_control::StoreMembershipStateRef> {
+        self.history_verifier
+            .accepted_commit_membership_state(reference)
+    }
+
     pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, coven_database::DbError> {
         self.blob_cache.drain_local_cleanup().await
     }

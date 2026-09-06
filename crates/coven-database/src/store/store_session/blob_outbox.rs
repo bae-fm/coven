@@ -315,6 +315,11 @@ impl StoreSession<'_> {
                        WHERE lease.namespace = published_blob_drop_intents.namespace
                          AND lease.blob_id = published_blob_drop_intents.blob_id
                    )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM retained_replay_blob_leases baseline
+                       WHERE baseline.namespace = published_blob_drop_intents.namespace
+                         AND baseline.blob_id = published_blob_drop_intents.blob_id
+                   )
                  ORDER BY seq, namespace, blob_id, locator_hash",
             )
             .map_err(DbError::from)?;

@@ -198,7 +198,6 @@ impl StoreSession<'_> {
             .prepare(
                 "SELECT write_id, status, changeset_hash FROM store_writes
                  WHERE ordinal >= ?1
-                   AND status != '\"local_only\"'
                    AND json_extract(status, '$.published') IS NULL
                    AND json_extract(status, '$.resolved') IS NULL
                  ORDER BY ordinal",
@@ -224,7 +223,10 @@ impl StoreSession<'_> {
             })?;
             let status: WriteStatus = serde_json::from_str(&raw_status)
                 .map_err(|error| DbError::context("discard write status", error))?;
-            if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_)) {
+            if !matches!(
+                status,
+                WriteStatus::LocalOnly | WriteStatus::Pending | WriteStatus::Blocked(_)
+            ) {
                 return Err(DbError::Message(format!(
                     "write {stored_id} after blocked write {write_id} has non-discardable status {status:?}"
                 )));

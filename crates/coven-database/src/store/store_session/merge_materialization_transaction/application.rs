@@ -5,7 +5,9 @@ use crate::query_mapped_rows;
 ///
 /// A delete carries the row's old values, which is what makes the identity
 /// readable after the row itself is gone.
-fn deleted_rows(changes: &[RowChange]) -> std::collections::HashSet<(String, String)> {
+pub(super) fn deleted_rows_inner(
+    changes: &[RowChange],
+) -> std::collections::HashSet<(String, String)> {
     changes
         .iter()
         .filter(|change| matches!(change.op, coven_foundation::changeset::ChangeOp::Delete))
@@ -62,7 +64,6 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         timestamp_policy: IncomingTimestampPolicy,
         changeset_max: &mut Option<coven_protocol::hlc::Timestamp>,
         returned_changes: &mut Vec<RowChange>,
-        package_reported_fk_violation: &mut bool,
     ) -> Result<MergeSubsetOutcome, DbError> {
         let applied_changeset = source
             .validate_subset(bytes.clone())
@@ -88,7 +89,6 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 apply.constraint_conflict_tables,
             ));
         }
-        *package_reported_fk_violation |= apply.had_fk_violations;
         if let Some(package_audience) = package_audience {
             crate::align_inbound_scoped_root_audiences(
                 self.store.transaction,
@@ -114,21 +114,19 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         // queue for it is this device's to unwind — the peer that removed the
         // row knows nothing about what is still queued on this one.
         //
-        // No test reaches this today: an upload can only be queued against a
-        // Local blob reference, and a Local root is this device's alone, so a
-        // peer has none to delete. It is here because that is an argument about
-        // two distant rules rather than a property of this code, and the defect
-        // this fixes was exactly a state we had reasoned could not happen. It
-        // costs one query, and only when a merge deleted something.
+        // Uploads are only queued against Local blob references, and a Local
+        // root belongs to this device, so a peer normally has none to delete.
+        // Keep the cancellation at the merge boundary because that conclusion
+        // depends on rules owned outside this transaction.
         crate::Database::cancel_transitions_for_deleted_roots_on(
             self.store.transaction,
-            &deleted_rows(&actual_changes),
+            &deleted_rows_inner(&actual_changes),
         )?;
         Ok(MergeSubsetOutcome::Applied(winning_rows))
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apply_merge_package(
+    fn apply_merge_package(
         &self,
         blob_decls: &BlobDecls,
         gates: &crate::Gates,
@@ -139,7 +137,11 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         timestamp_policy: IncomingTimestampPolicy,
         changeset_max: &mut Option<coven_protocol::hlc::Timestamp>,
         returned_changes: &mut Vec<RowChange>,
-        package_reported_fk_violation: &mut bool,
+        schema: &TableSchema,
+        private_rows: &ReplayRows,
+        commit: &StoreBatchCommitRef,
+        own_publication: bool,
+        adopted_private_rows: &mut BTreeSet<(String, String)>,
     ) -> Result<MergeSubsetOutcome, DbError> {
         let conn = self.store.transaction;
         let mut winning_rows = Vec::new();
@@ -157,7 +159,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     routing_key,
                 )
                 .map_err(DbError::from)?;
-                if let Some(tables) = self
+                if let Err(outcome) = self
                     .apply_merge_subset(
                         blob_decls,
                         gates,
@@ -168,16 +170,28 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                         timestamp_policy,
                         changeset_max,
                         returned_changes,
-                        package_reported_fk_violation,
                     )?
                     .append_winning_rows(&mut winning_rows)
                 {
-                    return Ok(MergeSubsetOutcome::ConstraintConflict(tables));
+                    return Ok(outcome);
                 }
                 let rows =
                     crate::filter_inbound_store_rows(conn, &inbound.rows, gates, routing_key)
                         .map_err(DbError::from)?;
-                if let Some(tables) = self
+                if let Some(hold) = self.adopt_equivalent_private_rows(
+                    gates,
+                    blob_decls,
+                    schema,
+                    private_rows,
+                    &rows,
+                    package,
+                    commit,
+                    own_publication,
+                    adopted_private_rows,
+                )? {
+                    return Ok(MergeSubsetOutcome::Held(hold));
+                }
+                if let Err(outcome) = self
                     .apply_merge_subset(
                         blob_decls,
                         gates,
@@ -188,14 +202,26 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                         timestamp_policy,
                         changeset_max,
                         returned_changes,
-                        package_reported_fk_violation,
                     )?
                     .append_winning_rows(&mut winning_rows)
                 {
-                    return Ok(MergeSubsetOutcome::ConstraintConflict(tables));
+                    return Ok(outcome);
                 }
             }
             PackageAudience::Store => {
+                if let Some(hold) = self.adopt_equivalent_private_rows(
+                    gates,
+                    blob_decls,
+                    schema,
+                    private_rows,
+                    package.changeset(),
+                    package,
+                    commit,
+                    own_publication,
+                    adopted_private_rows,
+                )? {
+                    return Ok(MergeSubsetOutcome::Held(hold));
+                }
                 return self.apply_merge_subset(
                     blob_decls,
                     gates,
@@ -206,7 +232,6 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     timestamp_policy,
                     changeset_max,
                     returned_changes,
-                    package_reported_fk_violation,
                 );
             }
             PackageAudience::Circle { circle_id, .. } => {
@@ -224,6 +249,19 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     routing_key,
                 )
                 .map_err(DbError::from)?;
+                if let Some(hold) = self.adopt_equivalent_private_rows(
+                    gates,
+                    blob_decls,
+                    schema,
+                    private_rows,
+                    &rows,
+                    package,
+                    commit,
+                    own_publication,
+                    adopted_private_rows,
+                )? {
+                    return Ok(MergeSubsetOutcome::Held(hold));
+                }
                 return self.apply_merge_subset(
                     blob_decls,
                     gates,
@@ -234,14 +272,13 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     timestamp_policy,
                     changeset_max,
                     returned_changes,
-                    package_reported_fk_violation,
                 );
             }
         }
         Ok(MergeSubsetOutcome::Applied(winning_rows))
     }
 
-    pub(crate) fn apply_prepared_merge_materialization(
+    pub(super) fn apply_prepared_merge_materialization_inner(
         &self,
         registrations_lookup: &mut dyn VerifiedStoreLookup,
         blob_decls: &BlobDecls,
@@ -257,25 +294,18 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             >,
         >,
         materialization: PreparedMergeMaterialization,
+        local_effect: Option<crate::MergeReplayWriteEffect>,
+        schema: std::sync::Arc<TableSchema>,
+        private_rows: &mut ReplayRows,
     ) -> Result<AppliedMergeMaterialization, DbError> {
         let conn = self.store.transaction;
-        let PreparedMergeMaterialization {
-            root,
-            verified_commit,
-            activation_head,
-            activation_head_object,
-            history_evidence,
-            membership_objects,
-            membership_remote_objects,
-            registrations,
-            packages,
-            device_operations,
-            circle_activations,
-            package_application,
-        } = materialization;
-        let commit = verified_commit.value();
-        let commit_ref = verified_commit.reference();
-        let mut inactive_circles = circle_activations
+        self.record_prepared_materialization_authority(&materialization)?;
+        let commit_ref = materialization.verified_commit.reference();
+        let own_publication = local_effect.is_some();
+        let mut next_private_rows = private_rows.clone();
+        let mut adopted_private_rows = BTreeSet::new();
+        let mut inactive_circles = materialization
+            .circle_activations
             .circles()
             .iter()
             .filter_map(|activation| {
@@ -293,45 +323,41 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             .collect::<BTreeSet<_>>();
         let mut changeset_max = None;
         let mut returned_changes = Vec::new();
-        let mut package_reported_fk_violation = false;
-        crate::store::record_activated_store_device_registrations_on(conn, commit, &registrations)?;
-        for bootstrap in circle_activations.bootstraps() {
-            crate::install_circle_bootstrap_remote_objects_on(conn, commit_ref, bootstrap)?;
-        }
-        self.record_verified_circle_activations(&verified_commit, circle_activations.circles())?;
         // A Circle whose winning control chain is now Deleted prunes its rows,
         // routes, and blob bindings like an inactive recipient. Recording the
         // verified activation above already removed its live access cache while
         // retaining the authority spine.
-        for activation in circle_activations.circles() {
+        for activation in materialization.circle_activations.circles() {
             if self.circle_current_state_is_deleted(activation.circle_id)? {
                 inactive_circles.insert(activation.circle_id);
             }
         }
-        let retained_packages = packages
-            .iter()
-            .map(|prepared| prepared.package.clone())
-            .collect::<Vec<_>>();
-        let store_audience_transitions = packages
+        let store_audience_transitions = materialization
+            .packages
             .iter()
             .find(|prepared| matches!(prepared.package.audience(), PackageAudience::Store))
             .map(|prepared| crate::store_audience_transitions(prepared.package.changeset()))
             .transpose()
             .map_err(DbError::from)?
             .unwrap_or_default();
-        for prepared in packages {
-            let PreparedMergeMaterializationPackage { package, changeset } = prepared;
+        for prepared in &materialization.packages {
+            let package = &prepared.package;
+            let changeset = &prepared.changeset;
             let winning_rows = match self.apply_merge_package(
                 blob_decls,
                 gates,
                 routing_key,
-                &package,
-                &changeset,
+                package,
+                changeset,
                 &store_audience_transitions,
                 timestamp_policy,
                 &mut changeset_max,
                 &mut returned_changes,
-                &mut package_reported_fk_violation,
+                &schema,
+                &next_private_rows,
+                commit_ref,
+                own_publication,
+                &mut adopted_private_rows,
             )? {
                 MergeSubsetOutcome::Applied(rows) => rows,
                 MergeSubsetOutcome::ConstraintConflict(tables) => {
@@ -341,30 +367,72 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                         ),
                         max_updated_at: None,
                         write_status_notifications: Vec::new(),
-                        retained: None,
+                    });
+                }
+                MergeSubsetOutcome::Held(hold) => {
+                    return Ok(AppliedMergeMaterialization {
+                        outcome: crate::MaterializationOutcome::Held(hold),
+                        max_updated_at: None,
+                        write_status_notifications: Vec::new(),
                     });
                 }
             };
-            let retained =
-                crate::RetainedAudiencePackage::verify(commit, commit_ref, package.clone())?;
-            crate::install_pulled_package_activation_on(
-                conn,
-                self.store.store_dir,
-                commit_ref,
-                retained.domain(),
-                retained.object(),
-                retained.package(),
-            )?;
-            Database::install_pulled_blob_activations_on(conn, &package, commit_ref)?;
             self.install_winning_blob_bindings(
                 gates,
                 synced_tables,
-                &package,
+                package,
                 &BlobActivation {
                     coord: commit_ref.coord.clone(),
                 },
                 &winning_rows,
             )?;
+            self.record_accepted_rows(gates, &mut next_private_rows, &winning_rows, commit_ref)?;
+        }
+        let private_row_keys = next_private_rows
+            .private
+            .keys()
+            .filter(|key| !adopted_private_rows.contains(*key))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        match crate::gate::validate_accepted_foreign_key_closure(conn, gates, &private_row_keys) {
+            Ok(()) => {}
+            Err(crate::GateError::UnsharedForeignKeyParent(_)) => {
+                return Ok(AppliedMergeMaterialization {
+                    outcome: crate::MaterializationOutcome::Held(
+                        crate::MaterializationHold::ForeignKeyDependency,
+                    ),
+                    max_updated_at: None,
+                    write_status_notifications: Vec::new(),
+                });
+            }
+            Err(error) => return Err(DbError::from(error)),
+        }
+        if let Some(hold) = self.validate_shared_rows_do_not_borrow_private_state(
+            gates,
+            &next_private_rows,
+            &adopted_private_rows,
+            commit_ref,
+        )? {
+            return Ok(AppliedMergeMaterialization {
+                outcome: crate::MaterializationOutcome::Held(hold),
+                max_updated_at: None,
+                write_status_notifications: Vec::new(),
+            });
+        }
+        if let Some(effect) = local_effect {
+            if let Some(hold) = self.apply_local_replay_effect(
+                effect,
+                schema.clone(),
+                gates,
+                commit_ref,
+                &mut next_private_rows,
+            )? {
+                return Ok(AppliedMergeMaterialization {
+                    outcome: crate::MaterializationOutcome::Held(hold),
+                    max_updated_at: None,
+                    write_status_notifications: Vec::new(),
+                });
+            }
         }
         if gates.has_scoped_graph() && !local_store_membership.retains_circle_rows() {
             let circles = query_mapped_rows(
@@ -409,57 +477,41 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         // peer deleted, and owes the same unwind.
         crate::Database::cancel_transitions_for_deleted_roots_on(
             conn,
-            &deleted_rows(&removal_changes),
+            &deleted_rows_inner(&removal_changes),
         )?;
         returned_changes.extend(removal_changes);
         for intent in removal_cleanup {
             self.record_obsolete_blob_cleanup_intent(blob_decls, &intent)?;
         }
-        if package_reported_fk_violation {
-            let violations: bool = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            if violations {
-                return Ok(AppliedMergeMaterialization {
-                    outcome: crate::MaterializationOutcome::Held(
-                        crate::MaterializationHold::ForeignKeyDependency,
-                    ),
-                    max_updated_at: None,
-                    write_status_notifications: Vec::new(),
-                    retained: None,
-                });
-            }
+        if self.has_foreign_key_violations()? {
+            return Ok(AppliedMergeMaterialization {
+                outcome: crate::MaterializationOutcome::Held(
+                    crate::MaterializationHold::ForeignKeyDependency,
+                ),
+                max_updated_at: None,
+                write_status_notifications: Vec::new(),
+            });
         }
-        let verified = VerifiedMergeMaterialization::verify(
-            &root,
-            &verified_commit,
-            &registrations,
-            &device_operations,
-            &circle_activations,
-            &activation_head,
-            &activation_head_object,
-            &history_evidence,
-            membership_objects.as_ref(),
-            &retained_packages,
-            package_application,
-        )?;
-        crate::install_pulled_merge_membership_activations_on(
-            conn,
-            self.store.store_dir,
+        if let Some(hold) = self.validate_private_rows_unchanged(
+            gates,
+            &schema,
+            &next_private_rows,
+            &adopted_private_rows,
             commit_ref,
-            &membership_remote_objects,
-        )?;
-        let retained =
-            self.record_verified_merge_materialization(registrations_lookup, verified)?;
+        )? {
+            return Ok(AppliedMergeMaterialization {
+                outcome: crate::MaterializationOutcome::Held(hold),
+                max_updated_at: None,
+                write_status_notifications: Vec::new(),
+            });
+        }
+        Self::record_adopted_rows(&mut next_private_rows, &adopted_private_rows, commit_ref);
+        self.retain_prepared_merge_materialization(registrations_lookup, &materialization)?;
+        *private_rows = next_private_rows;
         Ok(AppliedMergeMaterialization {
             outcome: crate::MaterializationOutcome::Applied(returned_changes),
             max_updated_at: changeset_max,
             write_status_notifications: Vec::new(),
-            retained: Some(retained),
         })
     }
 }

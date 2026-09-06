@@ -767,12 +767,13 @@ impl VerifiedAcknowledgedStoreSnapshot {
     /// The authority a device adopts when it advances its own replay baseline
     /// over this snapshot.
     ///
-    /// Reclaim-grade verification is what licenses the advance: every device
-    /// that could still need the history behind this cut has said in a signed
-    /// acknowledgement that it holds this snapshot, so nothing is left needing
-    /// the retained rows the advance retires.
+    /// Every device required by cloud reclaim acknowledged this exact snapshot.
     pub fn authority(&self) -> &coven_protocol::store_commit::RetainedReplaySnapshotAuthority {
         &self.acknowledged.authority
+    }
+
+    pub fn into_acknowledged(self) -> coven_protocol::store_commit::AcknowledgedStoreSnapshot {
+        self.acknowledged
     }
 
     pub fn acknowledgement_refs(
@@ -781,6 +782,28 @@ impl VerifiedAcknowledgedStoreSnapshot {
         self.acknowledged
             .acknowledgement_refs()
             .map_err(crate::DbError::from)
+    }
+}
+
+/// A snapshot verified against every writer active in current Store authority.
+/// Local replay retirement requires this stronger proof; cloud reclaim keeps
+/// using [`VerifiedAcknowledgedStoreSnapshot`].
+#[derive(Debug)]
+pub struct VerifiedReplayBaselineRetirementProof {
+    proof: coven_protocol::store_commit::ReplayBaselineRetirementProof,
+}
+
+impl VerifiedReplayBaselineRetirementProof {
+    pub fn from_proof(
+        proof: coven_protocol::store_commit::ReplayBaselineRetirementProof,
+        accepted_membership: &coven_protocol::membership::MembershipChain,
+    ) -> Result<Self, crate::DbError> {
+        proof.validate(accepted_membership)?;
+        Ok(Self { proof })
+    }
+
+    pub(crate) fn into_proof(self) -> coven_protocol::store_commit::ReplayBaselineRetirementProof {
+        self.proof
     }
 }
 
