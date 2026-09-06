@@ -249,13 +249,13 @@ impl TableBlob {
         table: &str,
         change: &RowChange,
     ) -> Result<Option<BlobRef>, BlobDeclError> {
-        if change.op == ChangeOp::Update && !change.column_changed(self.id_col) {
-            return Ok(None);
-        }
         let Some(id) = change.col(self.id_col).map(str::to_string) else {
             return Ok(None);
         };
-        if self.replacement == BlobReplacement::WriteOnce && change.op == ChangeOp::Update {
+        if self.replacement == BlobReplacement::WriteOnce
+            && change.op == ChangeOp::Update
+            && change.column_changed(self.id_col)
+        {
             return Err(BlobDeclError::WriteOnceBlobRepointed {
                 table: table.to_string(),
                 blob_id: id,
@@ -446,9 +446,9 @@ impl BlobDecls {
 
     /// The exact blob reference and declared size owned by an INSERT or UPDATE,
     /// completed from that row inside the transaction that produced the change.
-    /// Changesets omit unchanged columns, so the change identifies whether this
-    /// write introduced a blob while the live transaction row supplies its full
-    /// cloud path and size before a later write can repoint or delete it.
+    /// The decoded change supplies the blob identity, including an unchanged id,
+    /// while the live transaction row supplies its full cloud path and size before
+    /// a later write can repoint or delete it.
     pub(crate) fn publication_blob_from_change(
         &self,
         conn: &Connection,
@@ -782,12 +782,11 @@ mod tests {
 
         let change = capture_update(&conn, "UPDATE files SET title = 'after'");
 
-        assert_eq!(
-            declarations
-                .ref_from_change(&change)
-                .expect("read unrelated update"),
-            None,
-        );
+        let blob = declarations
+            .ref_from_change(&change)
+            .expect("read unrelated update")
+            .expect("unchanged blob reference remains available");
+        assert_eq!(blob.id, "blob-a");
     }
 
     #[test]
