@@ -288,15 +288,6 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         expected: &[u8],
     ) -> Result<crate::cloud::CloudObjectVersion, StorageError>;
 
-    /// Delete the exact direct record retained by an abandoned Store creation.
-    /// Active Store current records never use this operation.
-    async fn delete_versioned_protocol_record(
-        &self,
-        context: &ProtocolObjectContext,
-        prepared: &PreparedExactObject,
-        semantic_prefix: &str,
-    ) -> Result<(), StorageError>;
-
     /// Read and open one exact Store protocol object using the signed
     /// semantic prefix as encryption AAD.
     async fn read_protocol_object(

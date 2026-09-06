@@ -108,9 +108,6 @@ pub use authorization::{
 pub use circles::CirclePackageReadError;
 pub use circles::StoreCircleCommands;
 pub use commit_publication::{AuthorizedWriterOperation, StoreWriterAuthorizationError};
-pub use founder_creation::{
-    FounderObjectDeleteError, FounderPublicationRollback, FounderRollbackError,
-};
 pub(crate) use pull::VerifiedStoreDeviceHead;
 pub use pull::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
 pub use pull::{LoadedCirclePackage, Readiness};

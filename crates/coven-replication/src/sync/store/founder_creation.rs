@@ -33,33 +33,6 @@ pub(crate) struct FounderStoreCreation<'operation> {
 struct StagedFounderStoreCreation<'operation> {
     creation: FounderStoreCreation<'operation>,
     graph: Box<coven_database::DurableFounderGraph>,
-    rollback_allowed: bool,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("delete founder object {}: {source}", object.slot().logical_key())]
-pub struct FounderObjectDeleteError {
-    object: coven_protocol::objects::ExactObjectRef,
-    #[source]
-    source: coven_protocol::objects::StorageError,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum FounderRollbackError {
-    #[error("prepare founder current publication record for rollback: {0}")]
-    CurrentRecord(#[source] StoreProtocolRootError),
-    #[error("founder object rollback failed: {0:?}")]
-    ObjectDeletes(Vec<FounderObjectDeleteError>),
-    #[error("reset founder publication database state: {0}")]
-    Database(#[from] coven_database::DbError),
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("{operation}; Store founder rollback failed: {rollback}")]
-pub struct FounderPublicationRollback {
-    #[source]
-    operation: StoreProtocolRootError,
-    rollback: FounderRollbackError,
 }
 
 fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority {
@@ -808,57 +781,10 @@ impl<'operation> FounderStoreCreation<'operation> {
         }))
     }
 
-    async fn rollback_founder_publication(
-        &self,
-        graph: &coven_database::DurableFounderGraph,
-    ) -> Result<(), FounderRollbackError> {
-        let mut objects = vec![
-            graph.membership.head.prepared.reference().clone(),
-            graph.membership.entry.prepared.reference().clone(),
-        ];
-        let (current_context, current) = self
-            .founder_current_record(graph)
-            .map_err(FounderRollbackError::CurrentRecord)?;
-        objects.extend([
-            graph.initial_ack.prepared.reference().clone(),
-            graph.registration.prepared.reference().clone(),
-            graph.root.prepared.reference().clone(),
-        ]);
-        let mut failures = Vec::new();
-        if let Err(source) = self
-            .storage
-            .delete_versioned_protocol_record(
-                &current_context,
-                &current.prepared,
-                coven_protocol::store_commit::store_current_publication_semantic_prefix(),
-            )
-            .await
-        {
-            failures.push(FounderObjectDeleteError {
-                object: current.prepared.reference().clone(),
-                source,
-            });
-        }
-        for object in objects {
-            match self.storage.delete_protocol_object(&object).await {
-                Ok(()) | Err(coven_protocol::objects::StorageError::SlotCollision(_)) => {}
-                Err(source) => failures.push(FounderObjectDeleteError { object, source }),
-            }
-        }
-        if !failures.is_empty() {
-            return Err(FounderRollbackError::ObjectDeletes(failures));
-        }
-        self.database
-            .reset_store_founder_graph_publication(graph)
-            .await
-            .map_err(FounderRollbackError::Database)
-    }
-
     async fn stage(
         self,
     ) -> Result<StagedFounderStoreCreation<'operation>, StoreInitializationError> {
         let existing = self.database.local_store_founder_graph().await?;
-        let resumed = existing.is_some();
         let graph = match existing {
             Some(graph) => graph,
             None => {
@@ -874,39 +800,14 @@ impl<'operation> FounderStoreCreation<'operation> {
                     })?
             }
         };
-        let rollback_allowed = match &graph.registration_state {
-            coven_database::LocalDeviceRegistrationState::Prepared
-            | coven_database::LocalDeviceRegistrationState::RegistrationPublished
-            | coven_database::LocalDeviceRegistrationState::Created => true,
-            coven_database::LocalDeviceRegistrationState::RegistrationActivated { .. }
-            | coven_database::LocalDeviceRegistrationState::Activated { .. } => false,
-        };
-        let mut staged = StagedFounderStoreCreation {
+        Ok(StagedFounderStoreCreation {
             creation: self,
             graph,
-            rollback_allowed,
-        };
-        if resumed && staged.rollback_allowed {
-            staged.reset_partial_publication().await?;
-        }
-        Ok(staged)
+        })
     }
 
     pub(crate) async fn execute(self) -> Result<InitializedStore, StoreInitializationError> {
         self.stage().await?.publish().await
-    }
-
-    async fn reload_founder_graph(
-        &self,
-    ) -> Result<Box<coven_database::DurableFounderGraph>, StoreInitializationError> {
-        self.database
-            .local_store_founder_graph()
-            .await?
-            .ok_or_else(|| {
-                StoreInitializationError::FounderState(
-                    "rolled-back Store founder graph is absent".to_string(),
-                )
-            })
     }
 
     async fn publish_history<'creation>(
@@ -953,16 +854,6 @@ impl<'operation> FounderStoreCreation<'operation> {
                 &graph.root.prepared,
                 coven_protocol::store_commit::store_protocol_root_logical_key(),
                 &graph.root.bytes,
-            )
-            .await
-            .map_err(StoreObjectError::from)?;
-        let (current_context, current) = self.founder_current_record(graph)?;
-        storage_access
-            .create_versioned_protocol_record(
-                &current_context,
-                &current.prepared,
-                coven_protocol::store_commit::store_current_publication_semantic_prefix(),
-                &current.bytes,
             )
             .await
             .map_err(StoreObjectError::from)?;
@@ -1078,6 +969,51 @@ impl<'operation> FounderStoreCreation<'operation> {
             )
             .await
             .map_err(StoreObjectError::from)?;
+        let history_verifier = MergeHistoryVerifier::from_commit_verifier(
+            authority,
+            verified_root.clone(),
+            commit_verifier,
+        )
+        .await
+        .map_err(|error| StoreProtocolRootError::History(Box::new(error)))?;
+        let (current_context, current) = self.founder_current_record(graph)?;
+        let current_prefix =
+            coven_protocol::store_commit::store_current_publication_semantic_prefix();
+        let current_version = match storage_access
+            .read_versioned_protocol_record(
+                &current_context,
+                current.prepared.reference().slot(),
+                current_prefix,
+            )
+            .await
+        {
+            Ok((bytes, version)) => {
+                if bytes != current.bytes {
+                    return Err(StoreProtocolRootError::Invariant(
+                        "founder current publication slot contains another accepted record"
+                            .to_string(),
+                    ));
+                }
+                version
+            }
+            Err(coven_protocol::objects::StorageError::NotFound(_)) => storage_access
+                .create_versioned_protocol_record(
+                    &current_context,
+                    &current.prepared,
+                    current_prefix,
+                    &current.bytes,
+                )
+                .await
+                .map_err(StoreObjectError::from)?,
+            Err(error) => return Err(StoreObjectError::from(error).into()),
+        };
+        let observed_current = coven_database::ObservedStorePublication::verified_genesis(
+            current.value.clone(),
+            current_version,
+            root.store_root_hash,
+            &protocol_root.descriptor.founder_pubkey,
+        )
+        .map_err(StoreProtocolRootError::Protocol)?;
         database
             .complete_store_founder_graph(
                 root.clone(),
@@ -1087,16 +1023,10 @@ impl<'operation> FounderStoreCreation<'operation> {
                     entry: membership.entry_ref.clone(),
                     head: membership.head_ref.clone(),
                 },
+                observed_current,
             )
             .await
             .map_err(StoreProtocolRootError::Database)?;
-        let history_verifier = MergeHistoryVerifier::from_commit_verifier(
-            authority,
-            verified_root.clone(),
-            commit_verifier,
-        )
-        .await
-        .map_err(|error| StoreProtocolRootError::History(Box::new(error)))?;
         let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
             database.clone(),
             storage_access,
@@ -1133,33 +1063,26 @@ impl<'operation> FounderStoreCreation<'operation> {
 }
 
 impl StagedFounderStoreCreation<'_> {
-    async fn reset_partial_publication(&mut self) -> Result<(), StoreInitializationError> {
-        Box::pin(self.creation.rollback_founder_publication(&self.graph)).await?;
-        self.graph = self.creation.reload_founder_graph().await?;
-        Ok(())
-    }
-
     async fn publish(self) -> Result<InitializedStore, StoreInitializationError> {
-        let history = match self.creation.publish_history(&self.graph).await {
-            Ok(history) => history,
-            Err(operation) if self.rollback_allowed => {
-                match Box::pin(self.creation.rollback_founder_publication(&self.graph)).await {
-                    Ok(()) => {
-                        return Err(StoreInitializationError::ProtocolRoot(operation));
-                    }
-                    Err(rollback) => {
-                        return Err(FounderPublicationRollback {
-                            operation,
-                            rollback,
-                        }
-                        .into());
-                    }
-                }
-            }
-            Err(operation) => {
-                return Err(StoreInitializationError::ProtocolRoot(operation));
-            }
-        };
+        if matches!(
+            self.graph.registration_state,
+            coven_database::LocalDeviceRegistrationState::Activated { .. }
+        ) {
+            let root = StoreRootRef {
+                store_root_id: self.graph.root.value.descriptor.store_root_id(),
+                store_root_hash: self.graph.root.value.object_hash(),
+                object: self.graph.root.prepared.reference().clone(),
+            };
+            return super::authorization::Store::open(
+                self.creation.database,
+                self.creation.storage,
+                self.creation.store_dir.clone(),
+                &root,
+                self.creation.identity,
+            )
+            .await;
+        }
+        let history = self.creation.publish_history(&self.graph).await?;
         self.creation.finish_published(history).await
     }
 }

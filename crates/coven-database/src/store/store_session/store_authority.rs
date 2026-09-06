@@ -135,48 +135,6 @@ impl StoreSession<'_> {
         load_local_store_founder_graph_on(self.conn)
     }
 
-    fn reset_store_founder_graph_publication(
-        &mut self,
-        expected_identity: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<(), DbError> {
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let durable = load_local_store_founder_graph_on(&tx)?
-            .ok_or_else(|| DbError::Message("local Store founder graph is absent".to_string()))?;
-        if founder_graph_identity(&durable) != expected_identity {
-            return Err(DbError::Message(
-                "local Store founder graph changed before publication rollback".to_string(),
-            ));
-        }
-        match &durable.registration_state {
-            LocalDeviceRegistrationState::Prepared => {}
-            LocalDeviceRegistrationState::RegistrationPublished
-            | LocalDeviceRegistrationState::Created => {
-                let current = serde_json::to_string(&durable.registration_state)
-                    .map_err(|error| DbError::context("serialize current journal state", error))?;
-                let prepared = serde_json::to_string(&LocalDeviceRegistrationState::Prepared)
-                    .map_err(|error| DbError::context("serialize prepared journal state", error))?;
-                let updated = tx
-                    .execute(
-                        "UPDATE local_store_device_registration SET state = ?1 \
-                         WHERE singleton = 1 AND state = ?2",
-                        (prepared, current),
-                    )
-                    .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(
-                        "created founder journal did not reset after exact rollback".to_string(),
-                    ));
-                }
-            }
-            LocalDeviceRegistrationState::RegistrationActivated { .. }
-            | LocalDeviceRegistrationState::Activated { .. } => {
-                return Err(DbError::Message(
-                    "activated founder graph cannot be rolled back".to_string(),
-                ));
-            }
-        }
-        tx.commit().map_err(DbError::from)
-    }
     fn stage_store_founder_graph(
         &mut self,
         graph: Box<DurableFounderGraph>,
@@ -330,6 +288,7 @@ impl StoreSession<'_> {
         expected_registration: StoreDeviceRegistrationRef,
         expected_initial_ack: StoreAckRef,
         expected_membership: FounderMembershipRefs,
+        current_publication: crate::ObservedStorePublication,
     ) -> Result<(), DbError> {
         let schema_version = self.schema_version;
         let routing_hash = self.sync_routing_hash;
@@ -445,6 +404,14 @@ impl StoreSession<'_> {
                             .to_string(),
                     ));
                 }
+                let publication =
+                    super::observed_store_publication::load_store_current_publication_on(&tx)?;
+                if publication != current_publication {
+                    return Err(DbError::Message(
+                        "activated founder journal differs from its Store publication record"
+                            .to_string(),
+                    ));
+                }
                 let owner_authority = RetainedReplayGenesisAuthority {
                     store_root: root.clone(),
                     founder_registration: registration.clone(),
@@ -470,6 +437,18 @@ impl StoreSession<'_> {
             }
         }
         let root_value = install_store_root_authority_on(&tx, &root, &graph.root.bytes)?;
+        current_publication
+            .record()
+            .verify_genesis(
+                root.store_root_hash,
+                &graph.root.value.descriptor.founder_pubkey,
+            )
+            .map_err(DbError::from)?;
+        super::observed_store_publication::install_genesis_store_publication_on(
+            &tx,
+            current_publication.record(),
+            current_publication.version(),
+        )?;
         let activation = serde_json::to_string(
             &coven_protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
                 root: root.clone(),
@@ -638,6 +617,7 @@ impl StoreDatabase {
         expected_registration: StoreDeviceRegistrationRef,
         expected_initial_ack: StoreAckRef,
         expected_membership: FounderMembershipRefs,
+        current_publication: crate::ObservedStorePublication,
     ) -> Result<(), DbError> {
         self.call_store(move |session| {
             session.complete_store_founder_graph(
@@ -645,19 +625,8 @@ impl StoreDatabase {
                 expected_registration,
                 expected_initial_ack,
                 expected_membership,
+                current_publication,
             )
-        })
-        .await
-    }
-
-    pub async fn reset_store_founder_graph_publication(
-        &self,
-        expected: &DurableFounderGraph,
-    ) -> Result<(), DbError> {
-        expected.validate()?;
-        let expected_identity = founder_graph_identity(expected);
-        self.call_store(move |session| {
-            session.reset_store_founder_graph_publication(expected_identity)
         })
         .await
     }

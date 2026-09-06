@@ -139,6 +139,7 @@ pub use test_support::AuthorExclusionLocatorTamper;
 pub use write_lifecycle::BlockedWriteDiscard;
 
 pub(crate) use store_session::install_verified_snapshot_bootstrap_on;
+pub use store_session::observed_store_publication::ObservedStorePublication;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use store_session::{
     circle_bootstrap_replay_inputs_for_test, retained_merge_replay_inputs_for_test,
@@ -152,7 +153,7 @@ pub(crate) struct StoreDatabaseRuntime {
     /// Serializes construction and execution of the one local membership mutation
     /// whose exact signed bytes are held in `outbound_membership_mutation`.
     membership_mutation: std::sync::Arc<tokio::sync::Mutex<()>>,
-    /// Serializes publication and rollback of the one durable founder graph.
+    /// Serializes publication of the one durable founder graph.
     store_creation: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// Serializes the exact local device-exclusion object and its Store-stream
     /// activation candidate across every database-handle clone.

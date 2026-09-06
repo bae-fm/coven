@@ -354,6 +354,10 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         "store_protocol_root_authority",
         ReplayTableDisposition::Preserve,
     ),
+    (
+        "store_publication_current",
+        ReplayTableDisposition::Preserve,
+    ),
     ("store_reclaim_operations", ReplayTableDisposition::Preserve),
     ("store_write_blob_leases", ReplayTableDisposition::Preserve),
     ("store_write_blobs", ReplayTableDisposition::Preserve),

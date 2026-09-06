@@ -12,6 +12,45 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::membership::AuthorHead;
 use crate::store_commit::{ObjectHash, StoreDeviceRegistration, StoreProtocolError};
 
+/// Opaque provider revision for an exact mutable object.
+///
+/// The provider assigns the value and interprets it during conditional
+/// replacement. Coven only requires that it is present and retains it beside
+/// the exact bytes observed at that revision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ExactObjectVersion(String);
+
+impl ExactObjectVersion {
+    pub fn from_provider(value: String) -> Result<Self, StorageError> {
+        if value.is_empty() {
+            return Err(StorageError::Configuration(
+                "cloud object version token is empty".to_string(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_provider(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ExactObjectVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() {
+            return Err(serde::de::Error::custom(
+                "cloud object version token is empty",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
 mod domains;
 mod provider_binding;
 mod rotation;

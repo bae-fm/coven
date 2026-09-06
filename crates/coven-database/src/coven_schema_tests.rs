@@ -69,6 +69,7 @@ fn bookkeeping_blob_columns_are_the_explicit_payload_allowlist() {
         ),
         ("merge_retraction_cleanups", "canonical_cleanup".to_string()),
         ("stream_activations", "activation".to_string()),
+        ("store_publication_current", "record_bytes".to_string()),
         ("outbound_membership_mutation", "plan_bytes".to_string()),
         ("outbound_membership_mutation", "progress_bytes".to_string()),
         ("outbound_store_snapshot", "meta_bytes".to_string()),

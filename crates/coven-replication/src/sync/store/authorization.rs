@@ -86,12 +86,6 @@ pub enum StoreInitializationError {
     LocalDeviceMissing,
     #[error("Store founder state is invalid: {0}")]
     FounderState(String),
-    #[error("Store founder rollback failed: {0}")]
-    FounderRollback(#[from] crate::sync::store::founder_creation::FounderRollbackError),
-    #[error(transparent)]
-    FounderPublicationRollback(
-        #[from] crate::sync::store::founder_creation::FounderPublicationRollback,
-    ),
 }
 
 impl Store {

@@ -484,39 +484,6 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         Ok(versioned.version)
     }
 
-    async fn delete_versioned_protocol_record(
-        &self,
-        context: &ProtocolObjectContext,
-        prepared: &PreparedExactObject,
-        semantic_prefix: &str,
-    ) -> Result<(), StorageError> {
-        context.validate_reference(prepared.reference(), semantic_prefix)?;
-        match self
-            .home
-            .read_versioned_at(prepared.reference().slot())
-            .await
-        {
-            Ok(versioned) => prepared.reference().verify(&versioned.bytes)?,
-            Err(crate::cloud::CloudHomeError::NotFound(_)) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        }
-        self.home
-            .delete_versioned_at(prepared.reference().slot())
-            .await?;
-        match self
-            .home
-            .read_versioned_at(prepared.reference().slot())
-            .await
-        {
-            Err(crate::cloud::CloudHomeError::NotFound(_)) => Ok(()),
-            Ok(_) => Err(StorageError::InvalidContent(format!(
-                "versioned protocol record {} remains after deletion",
-                prepared.reference().slot().logical_key()
-            ))),
-            Err(error) => Err(error.into()),
-        }
-    }
-
     async fn read_protocol_object(
         &self,
         context: &ProtocolObjectContext,

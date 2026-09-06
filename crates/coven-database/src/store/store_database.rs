@@ -184,6 +184,13 @@ impl StoreDatabase {
             .await
     }
 
+    pub async fn store_current_publication(
+        &self,
+    ) -> Result<crate::ObservedStorePublication, DbError> {
+        self.call_store(|session| session.store_current_publication())
+            .await
+    }
+
     pub fn notify_write_status(
         &self,
         write_id: coven_protocol::write::WriteId,

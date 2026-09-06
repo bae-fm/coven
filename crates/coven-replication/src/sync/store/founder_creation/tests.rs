@@ -50,6 +50,30 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
             &coven_keys::keys::public_key_hex(&founder),
         )
         .expect("verify Store genesis current record");
+    let publication = store_database(&db)
+        .store_current_publication()
+        .await
+        .expect("read installed publication boundary");
+    assert_eq!(publication.record(), &current);
+    let graph = store_database(&db)
+        .local_store_founder_graph()
+        .await
+        .expect("read founder graph")
+        .expect("founder graph exists");
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+        root_ref.store_root_hash,
+        coven_protocol::objects::ProtocolObjectDomain::StoreCurrentPublication,
+    );
+    let (remote_bytes, remote_version) = storage
+        .read_versioned_protocol_record(
+            &context,
+            &graph.root.value.descriptor.current_publication_slot,
+            coven_protocol::store_commit::store_current_publication_semantic_prefix(),
+        )
+        .await
+        .expect("read current publication record with its provider version");
+    assert_eq!(remote_bytes, current_bytes);
+    assert_eq!(publication.version(), &remote_version);
 
     let (store, _device_id) = initialized.into_parts();
     let membership = store
@@ -61,7 +85,7 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
 }
 
 #[tokio::test]
-async fn merge_store_creation_failure_removes_every_founder_object_before_returning() {
+async fn interrupted_store_creation_keeps_durable_founder_objects_for_retry() {
     for failing_create in 1..=6 {
         let home = InMemoryCloudHome::new();
         let founder = UserKeypair::generate();
@@ -69,7 +93,7 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
             Arc::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,
-            format!("founder-rollback-{failing_create}"),
+            format!("founder-resume-{failing_create}"),
             founder.clone(),
         ));
         let db_store_dir = crate::sync::test_helpers::test_store_dir();
@@ -97,24 +121,14 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
         exact_objects.push(graph.membership.entry.prepared.reference().clone());
         exact_objects.push(graph.membership.head.prepared.reference().clone());
         home.fail_exact_create_before_call(failing_create);
+        let deletes_before = home.deletes_seen();
 
         assert!(
             staged.publish().await.is_err(),
             "injected founder publication failure must abort creation"
         );
 
-        for object in &exact_objects {
-            assert!(
-                home.get(object.slot().logical_key()).is_none(),
-                "founder object {} remains after create call {failing_create} failed",
-                object.slot().logical_key(),
-            );
-        }
-        assert!(
-            home.get(coven_protocol::store_commit::store_current_publication_logical_key())
-                .is_none(),
-            "founder current publication record remains after create call {failing_create} failed",
-        );
+        assert_eq!(home.deletes_seen(), deletes_before);
         crate::sync::store::Store::create(
             store_database(&db),
             storage.clone(),
@@ -123,7 +137,19 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
             &founder,
         )
         .await
-        .expect("retry creates the Store after complete rollback");
+        .expect("retry resumes the durable Store creation attempt");
+        for object in &exact_objects {
+            assert!(
+                home.get(object.slot().logical_key()).is_some(),
+                "resumed Store creation did not retain {}",
+                object.slot().logical_key(),
+            );
+        }
+        assert!(
+            home.get(coven_protocol::store_commit::store_current_publication_logical_key())
+                .is_some(),
+            "resumed Store creation has no current publication record",
+        );
     }
 }
 
@@ -168,30 +194,30 @@ async fn failed_store_creation_retries_with_its_durable_founder_timestamp() {
 }
 
 #[tokio::test]
-async fn failed_founder_rollback_is_resumed_before_publication_retry() {
+async fn interrupted_founder_publication_resumes_after_database_restart() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
     let storage = Arc::new(CloudSyncConnection::new(
         Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
-        "founder-rollback-retry",
+        "founder-restart-resume",
         founder.clone(),
     ));
-    let temp = tempfile::tempdir().expect("create founder rollback database directory");
-    let path = temp.path().join("founder-rollback.sqlite");
+    let temp = tempfile::tempdir().expect("create founder resume database directory");
+    let path = temp.path().join("founder-resume.sqlite");
     let open = || {
         Database::open(
             &path,
             test_synced_tables(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
-            "founder-rollback-device".to_string(),
+            "founder-resume-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             coven_database::CovenMigrationPolicy::ApplyPending,
             &test_migrations(),
         )
-        .expect("open founder rollback database")
+        .expect("open founder resume database")
     };
     let db = open();
     let (_store_dir_temp, store_dir) = temp_store_dir();
@@ -209,13 +235,13 @@ async fn failed_founder_rollback_is_resumed_before_publication_retry() {
     .await
     .expect("stage exact founder graph");
     home.fail_exact_create_before_call(3);
-    home.fail_exact_delete_on_call(1);
+    let deletes_before = home.deletes_seen();
 
-    let failure = match staged.publish().await {
-        Err(error) => error,
-        Ok(_) => panic!("failed exact deletion must fail the creation call"),
-    };
-    assert!(failure.to_string().contains("rollback"));
+    assert!(
+        staged.publish().await.is_err(),
+        "interrupted founder publication must fail the creation call"
+    );
+    assert_eq!(home.deletes_seen(), deletes_before);
     drop(db);
     let db = open();
 
@@ -227,11 +253,11 @@ async fn failed_founder_rollback_is_resumed_before_publication_retry() {
         &founder,
     )
     .await
-    .expect("retry resumes rollback before publishing the founder graph");
+    .expect("retry resumes founder publication from its durable graph");
 }
 
 #[tokio::test]
-async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
+async fn concurrent_store_creation_calls_do_not_delete_each_others_objects() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
     let storage = Arc::new(CloudSyncConnection::new(
@@ -308,14 +334,14 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
 }
 
 #[tokio::test]
-async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
+async fn founder_publication_preserves_a_different_object_in_the_reserved_slot() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
     let storage = Arc::new(CloudSyncConnection::new(
         Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
-        "founder-rollback-slot-collision",
+        "founder-slot-collision",
         founder.clone(),
     ));
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
@@ -356,7 +382,7 @@ async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
     assert_eq!(
         home.get(&root_slot),
         Some(competing),
-        "founder rollback erased a different object in the reserved root slot",
+        "founder publication erased a different object in the reserved root slot",
     );
 }
 

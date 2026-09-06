@@ -121,6 +121,15 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            store_publication_current,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    record_hash TEXT NOT NULL UNIQUE CHECK (length(record_hash) = 64),
+    record_bytes BLOB NOT NULL CHECK (length(record_bytes) > 0),
+    provider_version TEXT NOT NULL CHECK (length(provider_version) > 0)
+"
+        );
+        $visit!(
             local_blob_refs,
             "
     table_name TEXT NOT NULL,

@@ -30,6 +30,7 @@ pub(crate) mod materialized_commit_index;
 pub(crate) mod membership_mutations;
 pub(crate) mod membership_rotation;
 pub(crate) mod merge_materialization_transaction;
+pub(crate) mod observed_store_publication;
 pub(crate) mod owner_promotion;
 pub(crate) mod owner_recovery_publication;
 pub(crate) mod payload_store;

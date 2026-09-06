@@ -5693,17 +5693,6 @@ where
             .await
     }
 
-    async fn delete_versioned_protocol_record(
-        &self,
-        context: &coven_protocol::objects::ProtocolObjectContext,
-        prepared: &coven_protocol::objects::PreparedExactObject,
-        semantic_prefix: &str,
-    ) -> Result<(), coven_protocol::objects::StorageError> {
-        self.inner
-            .delete_versioned_protocol_record(context, prepared, semantic_prefix)
-            .await
-    }
-
     async fn read_protocol_object(
         &self,
         context: &coven_protocol::objects::ProtocolObjectContext,

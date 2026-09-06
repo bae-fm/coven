@@ -148,24 +148,7 @@ pub enum CloudHomeError {
     InvalidBlobSource(String),
 }
 
-/// Opaque provider revision for an exact cloud object.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloudObjectVersion(String);
-
-impl CloudObjectVersion {
-    pub fn from_provider(value: String) -> Result<Self, CloudHomeError> {
-        if value.is_empty() {
-            return Err(CloudHomeError::Configuration(
-                "cloud object version token is empty".to_string(),
-            ));
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_provider(&self) -> &str {
-        &self.0
-    }
-}
+pub use coven_protocol::objects::ExactObjectVersion as CloudObjectVersion;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloudVersionedObject {
