@@ -196,6 +196,34 @@ fn current_record_accepts_exactly_one_successor_of_its_accepted_boundary() {
 }
 
 #[test]
+fn publication_wire_has_one_source_for_each_boundary_fact() {
+    let (identity, _, commit, device_signer) = verified_fixture_commit();
+    let current = StoreCurrentPublicationRecord::genesis(commit.store_root_hash(), &identity);
+    let entry = StorePublicationEntry::signed_commit(&current, &commit, &device_signer)
+        .expect("sign publication entry");
+    let reference = publication_ref(&entry);
+    let accepted = StoreCurrentPublicationRecord::advance_commit(
+        &current,
+        &entry,
+        reference,
+        &commit,
+        &device_signer,
+    )
+    .expect("accept publication entry");
+    let entry_json: serde_json::Value =
+        serde_json::from_slice(&entry.to_bytes()).expect("decode publication entry JSON");
+    let current_json: serde_json::Value =
+        serde_json::from_slice(&accepted.to_bytes()).expect("decode current publication JSON");
+
+    assert!(entry_json["body"].get("previous_record_hash").is_some());
+    assert!(current_json["body"].get("publisher").is_none());
+    assert!(current_json["body"].get("previous_record_hash").is_none());
+    assert!(current_json["body"]["state"]["accepted"]
+        .get("previous_record_hash")
+        .is_none());
+}
+
+#[test]
 fn publication_reference_rejects_another_protocol_slot() {
     let (identity, _, commit, device_signer) = verified_fixture_commit();
     let current = StoreCurrentPublicationRecord::genesis(commit.store_root_hash(), &identity);

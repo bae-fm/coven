@@ -120,10 +120,7 @@ impl StorePublicationBase {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StorePublicationPayload {
     Commit(StoreBatchCommitRef),
-    Snapshot {
-        snapshot: StoreSnapshotRef,
-        covers: StorePublicationRef,
-    },
+    Snapshot(StoreSnapshotRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,7 +162,7 @@ impl StorePublicationEntry {
         snapshot: StoreSnapshotRef,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        let covers = current.accepted().cloned().ok_or_else(|| {
+        current.accepted().ok_or_else(|| {
             StoreProtocolError::Malformed(
                 "Store snapshot cannot cover an empty publication history".to_string(),
             )
@@ -173,7 +170,7 @@ impl StorePublicationEntry {
         Self::signed_payload(
             current,
             author_registration,
-            StorePublicationPayload::Snapshot { snapshot, covers },
+            StorePublicationPayload::Snapshot(snapshot),
             signer,
         )
     }
@@ -238,13 +235,6 @@ impl StorePublicationEntry {
                 "Store publication entry does not extend the current accepted boundary".to_string(),
             ));
         }
-        if let StorePublicationPayload::Snapshot { covers, .. } = &self.payload {
-            if Some(covers) != current.accepted() {
-                return Err(StoreProtocolError::Malformed(
-                    "Store snapshot does not cover its complete accepted predecessor".to_string(),
-                ));
-            }
-        }
         Ok(())
     }
 
@@ -299,6 +289,14 @@ impl StorePublicationEntry {
         Ok(())
     }
 
+    pub fn verify_published_commit(
+        &self,
+        commit: &VerifiedStoreBatchCommit,
+        publisher_signing_pubkey: &str,
+    ) -> Result<(), StoreProtocolError> {
+        self.validate_commit_against_record(commit, publisher_signing_pubkey)
+    }
+
     fn validate_shape(&self) -> Result<(), StoreProtocolError> {
         self.position.get().checked_add(1).ok_or_else(|| {
             StoreProtocolError::Malformed("Store publication position overflow".to_string())
@@ -320,25 +318,8 @@ impl StorePublicationEntry {
                 "Store publication entry position is not its predecessor's successor".to_string(),
             ));
         }
-        match &self.payload {
-            StorePublicationPayload::Snapshot { covers, .. }
-                if Some(covers) != self.predecessor.as_ref() =>
-            {
-                return Err(StoreProtocolError::Malformed(
-                    "Store snapshot does not cover its complete accepted predecessor".to_string(),
-                ));
-            }
-            _ => {}
-        }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StorePublicationPublisher {
-    Founder { public_key: String },
-    Device(StoreDeviceRegistrationRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,8 +336,6 @@ pub enum StorePublicationState {
 #[serde(deny_unknown_fields)]
 pub struct StoreCurrentPublicationRecordBody {
     pub store_root_hash: ObjectHash,
-    pub previous_record_hash: Option<ObjectHash>,
-    pub publisher: StorePublicationPublisher,
     pub state: StorePublicationState,
 }
 
@@ -371,10 +350,6 @@ impl StoreCurrentPublicationRecord {
         Signed::sign(
             StoreCurrentPublicationRecordBody {
                 store_root_hash,
-                previous_record_hash: None,
-                publisher: StorePublicationPublisher::Founder {
-                    public_key: keys::public_key_hex(founder),
-                },
                 state: StorePublicationState::Genesis,
             },
             founder,
@@ -398,7 +373,7 @@ impl StoreCurrentPublicationRecord {
         reference: StorePublicationRef,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        if !matches!(entry.payload, StorePublicationPayload::Snapshot { .. }) {
+        if !matches!(entry.payload, StorePublicationPayload::Snapshot(_)) {
             return Err(StoreProtocolError::Malformed(
                 "Store publication entry is not a snapshot".to_string(),
             ));
@@ -416,7 +391,7 @@ impl StoreCurrentPublicationRecord {
         reference.verify_entry(entry)?;
         let latest_snapshot = match &entry.payload {
             StorePublicationPayload::Commit(_) => previous.latest_snapshot().cloned(),
-            StorePublicationPayload::Snapshot { snapshot, .. } => Some(AcceptedStoreSnapshotRef {
+            StorePublicationPayload::Snapshot(snapshot) => Some(AcceptedStoreSnapshotRef {
                 snapshot: snapshot.clone(),
                 publication: reference.clone(),
             }),
@@ -424,8 +399,6 @@ impl StoreCurrentPublicationRecord {
         Ok(Signed::sign(
             StoreCurrentPublicationRecordBody {
                 store_root_hash: previous.store_root_hash,
-                previous_record_hash: Some(previous.record_hash()),
-                publisher: StorePublicationPublisher::Device(entry.author_registration.clone()),
                 state: StorePublicationState::Accepted {
                     entry: reference,
                     latest_snapshot,
@@ -475,12 +448,7 @@ impl StoreCurrentPublicationRecord {
         founder_pubkey: &str,
     ) -> Result<(), StoreProtocolError> {
         if self.store_root_hash != expected_store_root_hash
-            || self.previous_record_hash.is_some()
             || self.state != StorePublicationState::Genesis
-            || self.publisher
-                != (StorePublicationPublisher::Founder {
-                    public_key: founder_pubkey.to_string(),
-                })
         {
             return Err(StoreProtocolError::Malformed(
                 "Store genesis publication record differs from its descriptor".to_string(),
@@ -513,7 +481,7 @@ impl StoreCurrentPublicationRecord {
         self.verify_by(publisher_signing_pubkey)?;
         let expected_latest = match &entry.payload {
             StorePublicationPayload::Commit(_) => previous.latest_snapshot().cloned(),
-            StorePublicationPayload::Snapshot { snapshot, .. } => Some(AcceptedStoreSnapshotRef {
+            StorePublicationPayload::Snapshot(snapshot) => Some(AcceptedStoreSnapshotRef {
                 snapshot: snapshot.clone(),
                 publication: reference.clone(),
             }),
@@ -522,12 +490,7 @@ impl StoreCurrentPublicationRecord {
             entry: reference.clone(),
             latest_snapshot: expected_latest,
         };
-        if self.store_root_hash != previous.store_root_hash
-            || self.previous_record_hash != Some(previous.record_hash())
-            || self.publisher
-                != StorePublicationPublisher::Device(entry.author_registration.clone())
-            || self.state != expected_state
-        {
+        if self.store_root_hash != previous.store_root_hash || self.state != expected_state {
             return Err(StoreProtocolError::Malformed(
                 "Store current publication record differs from its accepted transition".to_string(),
             ));
@@ -569,12 +532,7 @@ impl StoreCurrentPublicationRecord {
             entry: reference.clone(),
             latest_snapshot: expected_latest,
         };
-        if self.store_root_hash != entry.store_root_hash
-            || self.previous_record_hash != Some(entry.previous_record_hash)
-            || self.publisher
-                != StorePublicationPublisher::Device(entry.author_registration.clone())
-            || self.state != expected_state
-        {
+        if self.store_root_hash != entry.store_root_hash || self.state != expected_state {
             return Err(StoreProtocolError::Malformed(
                 "Store current publication record differs from its accepted entry".to_string(),
             ));
