@@ -260,6 +260,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         activating_author: &StoreDeviceRegistration,
         predecessor: &MembershipChain,
         activated_join_attempts: &BTreeSet<coven_protocol::store_commit::DeviceJoinAttemptId>,
+        recovery_memberships: &BTreeMap<OwnerRecoveryNodeRef, MembershipChain>,
     ) -> Result<StoreDeviceRegistrationActivation, RegistrationLoadError> {
         if !predecessor.is_owner_now(&activating_author.author_pubkey) {
             return Err(RegistrationLoadError::Invalid(
@@ -327,17 +328,21 @@ impl<'a> MergeHistoryVerifier<'a> {
                     || node_value.readiness.registration != activated.registration
                     || node_value.next_slot == *node.object.slot()
                     || registration.author_pubkey != node_value.owner_pubkey
-                    || !predecessor_verifies_owner(
-                        predecessor,
-                        &node_value.membership,
-                        &node_value.owner_pubkey,
-                        &node_value.owner_grant,
-                    )
                 {
                     return Err(RegistrationLoadError::Invalid(
                         "recovery node differs from its exact registration".to_string(),
                     ));
                 }
+                let historical_membership = recovery_memberships.get(node).ok_or_else(|| {
+                    RegistrationLoadError::Invalid(
+                        "recovery activation lacks its exact historical membership".to_string(),
+                    )
+                })?;
+                Self::verify_owner_recovery_node_authority(
+                    &node_value,
+                    historical_membership,
+                    predecessor,
+                )?;
                 let initial_ack = self
                     .load_store_ack(&node_value.readiness.initial_ack, registration)
                     .await

@@ -94,6 +94,13 @@ pub enum ReplayBaselineDecline {
     /// Current membership has not been named by accepted Store history, so its
     /// writer set cannot yet license retirement.
     MembershipNotAccepted { generation: u64 },
+    /// A published Owner recovery registration has not yet activated its
+    /// replacement writer, so retiring its predecessor history would strand it.
+    PendingOwnerRecovery {
+        generation: u64,
+        member: String,
+        device_id: String,
+    },
     /// Current accepted history applies a commit outside the snapshot cut
     /// before a commit inside it, so the cut cannot become a replay baseline.
     NonPrefixCut { generation: u64 },
@@ -115,6 +122,9 @@ impl ReplayBaselineDecline {
             Self::MembershipNotAccepted { .. } => {
                 "current membership is not yet in accepted Store history"
             }
+            Self::PendingOwnerRecovery { .. } => {
+                "an Owner recovery is waiting to activate its replacement writer"
+            }
             Self::NonPrefixCut { .. } => {
                 "the acknowledged snapshot is not a prefix of accepted replay order"
             }
@@ -130,6 +140,7 @@ impl ReplayBaselineDecline {
             | Self::SnapshotRejected { generation }
             | Self::MissingWriterAcknowledgement { generation, .. }
             | Self::MembershipNotAccepted { generation }
+            | Self::PendingOwnerRecovery { generation, .. }
             | Self::NonPrefixCut { generation }
             | Self::BaselineAtCoverage { generation } => Some(*generation),
         }

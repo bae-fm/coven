@@ -11,6 +11,8 @@ pub(crate) mod keyring;
 pub(crate) use keyring::load_wrapped_store_key;
 mod registration;
 pub(crate) mod registration_outbox;
+#[cfg(test)]
+mod registration_recovery_tests;
 
 mod store_test_support;
 

@@ -304,6 +304,18 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     generation,
                 }));
             }
+            Err(
+                crate::sync::store::pull::StorePullError::ReplayRetirementOwnerRecoveryPending {
+                    member,
+                    device_id,
+                },
+            ) => {
+                return Ok(Err(ReplayBaselineDecline::PendingOwnerRecovery {
+                    generation,
+                    member,
+                    device_id,
+                }));
+            }
             Err(error) => {
                 return Err(crate::sync::store::snapshots::SnapshotError::from(error).into());
             }

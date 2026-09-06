@@ -23,6 +23,7 @@ use super::local_blob_cleanup::{
     exact_blob_bindings_on, record_obsolete_copy_intents_from_bindings_on,
 };
 use super::membership_rotation::commit_rotation_candidate_on;
+use super::owner_recovery_publication::complete_matching_owner_recovery_publication_on;
 use super::store_device_state::{
     load_store_device_exclusion_freezes_on, replace_store_device_exclusion_freezes_on,
     store_device_state_for_history_cut_on,

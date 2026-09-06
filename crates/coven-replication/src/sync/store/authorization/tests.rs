@@ -216,7 +216,7 @@ async fn failed_owner_recovery_materialization_does_not_publish_registration_aut
         .await
         .expect("bind Owner recovery");
     let error = recovery
-        .recover_owner_device(&authority)
+        .recover_owner_device(&authority, None)
         .await
         .expect_err("injected materialization failure must roll back Owner recovery");
     assert!(
@@ -256,7 +256,7 @@ async fn failed_owner_recovery_materialization_does_not_publish_registration_aut
     let head_slot = publication.head.prepared.reference().slot().clone();
     home.replace_exact_object(&head_slot, b"competing Owner recovery head".to_vec());
     let collision = recovery
-        .recover_owner_device(&authority)
+        .recover_owner_device(&authority, None)
         .await
         .expect_err("retry must refuse a different object in the staged head slot");
     assert!(
@@ -271,7 +271,7 @@ async fn failed_owner_recovery_materialization_does_not_publish_registration_aut
     );
 
     let recovered = recovery
-        .recover_owner_device(&authority)
+        .recover_owner_device(&authority, None)
         .await
         .expect("retry Owner recovery after rollback");
     assert_eq!(recovered, reference);

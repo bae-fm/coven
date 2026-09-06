@@ -318,15 +318,35 @@ impl<'a> MergeHistoryVerifier<'a> {
     }
 
     pub(crate) async fn load_merge_commit_registrations(
-        &self,
+        &mut self,
         commit: &StoreBatchCommit,
         author: &StoreDeviceRegistration,
         membership: &MembershipChain,
         accepted_frontier: &[StoreBatchCommitRef],
     ) -> Result<Vec<ActivatedStoreDeviceRegistration>, StorePullError> {
+        let recovery_nodes = commit
+            .device_registrations()
+            .iter()
+            .filter_map(|activated| match &activated.authority {
+                StoreDeviceRegistrationActivationRef::Recovery { node, .. } => Some(node.clone()),
+                StoreDeviceRegistrationActivationRef::Join { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let mut recovery_memberships = BTreeMap::new();
+        for node_ref in recovery_nodes {
+            let node = self.load_owner_recovery_node(&node_ref).await?.value;
+            let membership = self.load_predecessor_membership(&node.membership).await?;
+            recovery_memberships.insert(node_ref, membership);
+        }
         let accepted = VerifiedMergePredecessorHistory::new(&self.history, accepted_frontier);
         let registrations = self
-            .load_commit_registrations(commit, author, Some(membership), accepted)
+            .load_commit_registrations(
+                commit,
+                author,
+                Some(membership),
+                accepted,
+                &recovery_memberships,
+            )
             .await;
         registrations.map_err(StorePullError::from)
     }
@@ -337,6 +357,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         activating_author: &StoreDeviceRegistration,
         predecessor: Option<&MembershipChain>,
         accepted: VerifiedMergePredecessorHistory<'_>,
+        recovery_memberships: &BTreeMap<OwnerRecoveryNodeRef, MembershipChain>,
     ) -> Result<Vec<ActivatedStoreDeviceRegistration>, RegistrationLoadError> {
         if commit.acknowledgement().is_some() {
             self.validate_commit_acknowledgement(commit, activating_author)
@@ -466,6 +487,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 activating_author,
                 predecessor,
                 &activated_join_attempts,
+                recovery_memberships,
             ))
             .await?;
             let registration = ReferencedStoreDeviceRegistration::verified(

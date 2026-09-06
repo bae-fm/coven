@@ -57,6 +57,65 @@ pub(super) struct PreparedRecoveryReadiness {
 }
 
 impl<'storage> RestoringStore<'storage> {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn load_published_owner_recovery_node(
+        &self,
+        recovery_slot: &coven_protocol::objects::ObjectSlot,
+        owner_pubkey: &str,
+        owner_grant: &coven_protocol::membership::MembershipGrantId,
+        sequence: u64,
+        recovery_id: DeviceRecoveryId,
+        predecessor: &Option<OwnerRecoveryNodeRef>,
+    ) -> Result<
+        Option<RecoveryProtocolObject<OwnerRecoveryNode, OwnerRecoveryNodeRef>>,
+        StoreRegistrationError,
+    > {
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            self.root.store_root_hash,
+            ProtocolObjectDomain::OwnerRecoveryNode,
+        );
+        let prefix = owner_recovery_semantic_prefix(owner_pubkey, owner_grant.clone(), sequence);
+        let (bytes, prepared) = match self
+            .storage
+            .read_prepared_protocol_slot(&context, recovery_slot, &prefix)
+            .await
+        {
+            Ok(exact) => exact,
+            Err(coven_protocol::objects::StorageError::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(StoreObjectError::from(error).into()),
+        };
+        let decoded: OwnerRecoveryNode =
+            serde_json::from_slice(&bytes).map_err(StoreRegistrationError::from)?;
+        let reference = OwnerRecoveryNodeRef {
+            owner_pubkey: decoded.owner_pubkey.clone(),
+            owner_grant: decoded.owner_grant.clone(),
+            sequence: decoded.sequence,
+            node_hash: decoded.node_hash(),
+            object: prepared.reference().clone(),
+        };
+        let node = OwnerRecoveryNode::parse_at(&bytes, &self.root, &reference)
+            .map_err(StoreRegistrationError::from)?;
+        if node.recovery_id != recovery_id
+            || node.owner_pubkey != owner_pubkey
+            || node.owner_grant != *owner_grant
+            || node.sequence != sequence
+            || node.predecessor != *predecessor
+            || node.next_slot == *recovery_slot
+        {
+            return Err(StoreRegistrationError::Invalid(
+                "existing Owner recovery node differs from its exact authority".into(),
+            ));
+        }
+        Ok(Some(RecoveryProtocolObject::Existing {
+            exact: coven_protocol::objects::ExactProtocolObject {
+                value: node,
+                bytes,
+                prepared,
+            },
+            reference,
+        }))
+    }
+
     pub(super) async fn prepare_or_load_recovery_registration(
         &self,
         expected: StoreDeviceRegistration,
@@ -187,9 +246,6 @@ impl<'storage> RestoringStore<'storage> {
                 if ack.sequence != 1
                     || ack.successor.predecessor.is_some()
                     || ack.registration != *registration_ref
-                    || ack.store_cut != store_cut
-                    || ack.device_state != device_state
-                    || ack.last_sync != published_at
                     || ack.successor.activation != expected_activation
                     || ack.successor.next_slot == first_slot
                 {
@@ -263,15 +319,130 @@ impl<'storage> RestoringStore<'storage> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn prepare_or_load_owner_recovery_node(
+    pub(super) async fn load_published_recovery_readiness(
         &self,
-        recovery_slot: coven_protocol::objects::ObjectSlot,
+        node: &OwnerRecoveryNode,
+        expected_origin: &StoreDeviceRegistrationOrigin,
+    ) -> Result<PreparedRecoveryReadiness, StoreRegistrationError> {
+        let registration_ref = &node.readiness.registration;
+        let verified_registration = self.history.load_registration(registration_ref).await?;
+        let registration_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            self.root.store_root_hash,
+            ProtocolObjectDomain::StoreDeviceRegistration,
+        );
+        let (registration_bytes, registration_prepared) = self
+            .storage
+            .read_prepared_protocol_slot(
+                &registration_context,
+                registration_ref.object.slot(),
+                &registration_semantic_prefix(&registration_ref.device_id.to_string()),
+            )
+            .await
+            .map_err(StoreObjectError::from)?;
+        if registration_prepared.reference() != &registration_ref.object
+            || registration_bytes != verified_registration.bytes
+        {
+            return Err(StoreRegistrationError::Invalid(
+                "published Owner recovery registration differs from its exact reference".into(),
+            ));
+        }
+        let registration = verified_registration.value;
+        let provider = self
+            .storage
+            .provider_binding()
+            .await
+            .map_err(StoreObjectError::from)?
+            .device;
+        if registration.origin != *expected_origin
+            || registration.author_pubkey != node.owner_pubkey
+            || registration.provider != provider
+        {
+            return Err(StoreRegistrationError::Invalid(
+                "published Owner recovery registration differs from its exact authority".into(),
+            ));
+        }
+
+        let initial_ack_ref = &node.readiness.initial_ack;
+        let DeviceStreamAnchor::StoreAcknowledgements { first_slot } =
+            &registration.acknowledgements
+        else {
+            return Err(StoreRegistrationError::Invalid(
+                "published Owner recovery registration has no acknowledgement stream anchor".into(),
+            ));
+        };
+        if initial_ack_ref.sequence != 1 || initial_ack_ref.object.slot() != first_slot {
+            return Err(StoreRegistrationError::Invalid(
+                "published Owner recovery acknowledgement differs from its stream anchor".into(),
+            ));
+        }
+        let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            self.root.store_root_hash,
+            ProtocolObjectDomain::StoreAck,
+        );
+        let (ack_bytes, ack_prepared) = self
+            .storage
+            .read_prepared_protocol_slot(
+                &ack_context,
+                initial_ack_ref.object.slot(),
+                &ack_slot_prefix(&registration_ref.device_id.to_string(), 1),
+            )
+            .await
+            .map_err(StoreObjectError::from)?;
+        let ack = self
+            .history
+            .restore_history()
+            .load_store_ack(initial_ack_ref, &registration)
+            .await?;
+        if ack_prepared.reference() != &initial_ack_ref.object || ack_bytes != ack.to_bytes() {
+            return Err(StoreRegistrationError::Invalid(
+                "published Owner recovery acknowledgement differs from its exact reference".into(),
+            ));
+        }
+        let expected_activation = registration
+            .store_acknowledgement_activation(registration_ref)
+            .map_err(StoreRegistrationError::from)?
+            .activation_id();
+        if ack.sequence != 1
+            || ack.successor.predecessor.is_some()
+            || ack.registration != *registration_ref
+            || ack.store_cut != node.readiness.bootstrap_cut
+            || ack.successor.activation != expected_activation
+            || ack.successor.next_slot == *first_slot
+        {
+            return Err(StoreRegistrationError::Invalid(
+                "published Owner recovery acknowledgement differs from its recovery node".into(),
+            ));
+        }
+
+        Ok(PreparedRecoveryReadiness {
+            registration: RecoveryProtocolObject::Existing {
+                exact: coven_protocol::objects::ExactProtocolObject {
+                    value: registration,
+                    bytes: registration_bytes,
+                    prepared: registration_prepared,
+                },
+                reference: registration_ref.clone(),
+            },
+            initial_ack: RecoveryProtocolObject::Existing {
+                exact: coven_protocol::objects::ExactProtocolObject {
+                    value: ack,
+                    bytes: ack_bytes,
+                    prepared: ack_prepared,
+                },
+                reference: initial_ack_ref.clone(),
+            },
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn prepare_owner_recovery_node(
+        &self,
+        recovery_slot: &coven_protocol::objects::ObjectSlot,
         owner_pubkey: &str,
         owner_grant: &coven_protocol::membership::MembershipGrantId,
         sequence: u64,
         recovery_id: DeviceRecoveryId,
-        membership: &coven_protocol::circle_control::StoreMembershipStateRef,
+        new_node_membership: &coven_protocol::circle_control::StoreMembershipStateRef,
         predecessor: &Option<OwnerRecoveryNodeRef>,
         readiness: &DeviceRecoveryReadiness,
         identity_signer: &UserKeypair,
@@ -286,95 +457,48 @@ impl<'storage> RestoringStore<'storage> {
             ProtocolObjectDomain::OwnerRecoveryNode,
         );
         let prefix = owner_recovery_semantic_prefix(owner_pubkey, owner_grant.clone(), sequence);
-        match storage
-            .read_prepared_protocol_slot(&context, &recovery_slot, &prefix)
+        let next_sequence = sequence.checked_add(1).ok_or_else(|| {
+            StoreRegistrationError::Invalid("Owner recovery sequence overflow".into())
+        })?;
+        let next_slot = storage
+            .allocate_protocol_slot(
+                &context,
+                &owner_recovery_semantic_prefix(owner_pubkey, owner_grant.clone(), next_sequence),
+                ".json",
+            )
             .await
-        {
-            Ok((bytes, prepared)) => {
-                let object = prepared.reference();
-                let decoded: OwnerRecoveryNode =
-                    serde_json::from_slice(&bytes).map_err(StoreRegistrationError::from)?;
-                let reference = OwnerRecoveryNodeRef {
-                    owner_pubkey: decoded.owner_pubkey.clone(),
-                    owner_grant: decoded.owner_grant.clone(),
-                    sequence: decoded.sequence,
-                    node_hash: decoded.node_hash(),
-                    object: object.clone(),
-                };
-                let node = OwnerRecoveryNode::parse_at(&bytes, root, &reference)
-                    .map_err(StoreRegistrationError::from)?;
-                if node.recovery_id != recovery_id
-                    || node.owner_pubkey != owner_pubkey
-                    || node.owner_grant != *owner_grant
-                    || node.sequence != sequence
-                    || node.membership != *membership
-                    || node.predecessor != *predecessor
-                    || node.readiness != *readiness
-                    || node.next_slot == recovery_slot
-                {
-                    return Err(StoreRegistrationError::Invalid(
-                        "existing Owner recovery node differs from its exact authority".into(),
-                    ));
-                }
-                Ok(RecoveryProtocolObject::Existing {
-                    exact: coven_protocol::objects::ExactProtocolObject {
-                        value: node,
-                        bytes,
-                        prepared,
-                    },
-                    reference,
-                })
-            }
-            Err(coven_protocol::objects::StorageError::NotFound(_)) => {
-                let next_sequence = sequence.checked_add(1).ok_or_else(|| {
-                    StoreRegistrationError::Invalid("Owner recovery sequence overflow".into())
-                })?;
-                let next_slot = storage
-                    .allocate_protocol_slot(
-                        &context,
-                        &owner_recovery_semantic_prefix(
-                            owner_pubkey,
-                            owner_grant.clone(),
-                            next_sequence,
-                        ),
-                        ".json",
-                    )
-                    .await
-                    .map_err(StoreObjectError::from)?;
-                let node = OwnerRecoveryNode::signed(
-                    root.store_root_hash,
-                    recovery_id,
-                    owner_grant.clone(),
-                    sequence,
-                    membership.clone(),
-                    predecessor.clone(),
-                    readiness.clone(),
-                    next_slot,
-                    identity_signer,
-                )
-                .map_err(StoreRegistrationError::from)?;
-                let bytes = node.to_bytes();
-                let prepared = storage
-                    .prepare_protocol_object(&context, recovery_slot, &prefix, bytes.clone())
-                    .map_err(StoreObjectError::from)?;
-                let reference = OwnerRecoveryNodeRef {
-                    owner_pubkey: owner_pubkey.to_string(),
-                    owner_grant: owner_grant.clone(),
-                    sequence,
-                    node_hash: node.node_hash(),
-                    object: prepared.reference().clone(),
-                };
-                Ok(RecoveryProtocolObject::Prepared {
-                    exact: coven_protocol::objects::ExactProtocolObject {
-                        value: node,
-                        bytes,
-                        prepared,
-                    },
-                    reference,
-                })
-            }
-            Err(error) => Err(StoreObjectError::from(error).into()),
-        }
+            .map_err(StoreObjectError::from)?;
+        let node = OwnerRecoveryNode::signed(
+            root.store_root_hash,
+            recovery_id,
+            owner_grant.clone(),
+            sequence,
+            new_node_membership.clone(),
+            predecessor.clone(),
+            readiness.clone(),
+            next_slot,
+            identity_signer,
+        )
+        .map_err(StoreRegistrationError::from)?;
+        let bytes = node.to_bytes();
+        let prepared = storage
+            .prepare_protocol_object(&context, recovery_slot.clone(), &prefix, bytes.clone())
+            .map_err(StoreObjectError::from)?;
+        let reference = OwnerRecoveryNodeRef {
+            owner_pubkey: owner_pubkey.to_string(),
+            owner_grant: owner_grant.clone(),
+            sequence,
+            node_hash: node.node_hash(),
+            object: prepared.reference().clone(),
+        };
+        Ok(RecoveryProtocolObject::Prepared {
+            exact: coven_protocol::objects::ExactProtocolObject {
+                value: node,
+                bytes,
+                prepared,
+            },
+            reference,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

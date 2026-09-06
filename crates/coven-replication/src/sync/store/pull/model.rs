@@ -398,6 +398,10 @@ pub enum StorePullError {
     SnapshotBehindReplayBaseline,
     #[error("current membership is not named by accepted Store history")]
     ReplayRetirementMembershipUnwitnessed,
+    #[error(
+        "replay retirement waits for Owner recovery device {device_id} for member {member} to activate"
+    )]
+    ReplayRetirementOwnerRecoveryPending { member: String, device_id: String },
     #[error("membership: {0}")]
     Membership(#[source] StorePullMembershipError),
     #[error("storage: {0}")]

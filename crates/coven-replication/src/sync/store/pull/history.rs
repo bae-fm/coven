@@ -336,7 +336,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
     }
 
     pub(crate) async fn discover_owner_recoveries(
-        &self,
+        &mut self,
         membership: &MembershipChain,
     ) -> Result<Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>, StorePullError>
     {

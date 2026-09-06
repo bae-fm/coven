@@ -1397,8 +1397,9 @@ impl CovenHandle {
         self.rows.store_write_journal_counts_for_test().await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn cleanup_intent_count_for_test(
+    /// Count cleanup obligations for one blob in integration tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn cleanup_intent_count_for_test(
         &self,
         namespace: &str,
         blob_id: &str,

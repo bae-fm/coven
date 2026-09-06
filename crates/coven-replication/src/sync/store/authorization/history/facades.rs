@@ -30,6 +30,25 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         .await
     }
 
+    pub(crate) async fn current_merge_authority_cut(
+        &mut self,
+        membership: &coven_protocol::membership::MembershipChain,
+    ) -> Result<coven_protocol::store_commit::StoreHistoryCut, pull::StorePullError> {
+        self.history_verifier
+            .current_merge_authority_cut(membership)
+            .await
+    }
+
+    pub(crate) async fn verify_owner_recovery_node_authority(
+        &mut self,
+        node: &coven_protocol::store_commit::OwnerRecoveryNode,
+        activation_membership: &coven_protocol::membership::MembershipChain,
+    ) -> Result<(), pull::StorePullError> {
+        self.history_verifier
+            .verify_owner_recovery_node_authority_at_activation(node, activation_membership)
+            .await
+    }
+
     /// Read and verify the row data a device-join bootstrap must materialize
     /// for the commits this database does not already cover.
     pub(crate) async fn resolve_device_join_bootstrap(

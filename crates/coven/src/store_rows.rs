@@ -232,7 +232,7 @@ impl StoreRows {
         self.writes.store_write_journal_counts_for_test().await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn cleanup_intent_count_for_test(
         &self,
         namespace: &str,

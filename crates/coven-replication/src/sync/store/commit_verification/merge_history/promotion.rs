@@ -159,12 +159,57 @@ impl<'a> MergeHistoryVerifier<'a> {
     }
 
     pub(crate) async fn discover_owner_recoveries(
-        &self,
+        &mut self,
         membership: &MembershipChain,
     ) -> Result<Vec<ReferencedStoreDeviceRegistration>, StorePullError> {
-        self.commit_verifier
-            .discover_owner_recoveries(membership)
-            .await
+        let protocol = self.root.protocol();
+        if membership
+            .active_owner_grant(&protocol.descriptor.founder_pubkey)
+            .as_ref()
+            != Some(&protocol.descriptor.founder_grant)
+        {
+            return Ok(Vec::new());
+        }
+        let mut recovered = Vec::new();
+        for (node, registration) in self.commit_verifier.discover_owner_recoveries().await? {
+            self.verify_owner_recovery_node_authority_at_activation(&node, membership)
+                .await?;
+            recovered.push(registration);
+        }
+        Ok(recovered)
+    }
+
+    pub(crate) async fn verify_owner_recovery_node_authority_at_activation(
+        &mut self,
+        node: &OwnerRecoveryNode,
+        activation_membership: &MembershipChain,
+    ) -> Result<(), StorePullError> {
+        let historical = self.load_predecessor_membership(&node.membership).await?;
+        Self::verify_owner_recovery_node_authority(node, &historical, activation_membership)
+            .map_err(StorePullError::from)
+    }
+
+    pub(super) fn verify_owner_recovery_node_authority(
+        node: &OwnerRecoveryNode,
+        historical_membership: &MembershipChain,
+        activation_membership: &MembershipChain,
+    ) -> Result<(), RegistrationLoadError> {
+        if !predecessor_verifies_owner(
+            historical_membership,
+            &node.membership,
+            &node.owner_pubkey,
+            &node.owner_grant,
+        ) || activation_membership
+            .active_owner_grant(&node.owner_pubkey)
+            .as_ref()
+            != Some(&node.owner_grant)
+        {
+            return Err(RegistrationLoadError::Invalid(
+                "Owner recovery node lacks its exact historical and current Owner authority"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) async fn find_owner_promotion_request_activation(

@@ -402,7 +402,9 @@ pub async fn restore_from_cloud(
                 .await?;
         }
         if let coven_protocol::recovery::RestoreAuthority::OwnerRecovery(recovery) = authority {
-            store.recover_owner_device(recovery).await?;
+            store
+                .recover_owner_device(recovery, routing_encryption.as_ref())
+                .await?;
         }
 
         if pull_result.changesets_applied > 0 {

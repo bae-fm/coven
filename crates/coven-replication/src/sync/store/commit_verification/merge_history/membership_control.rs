@@ -643,6 +643,15 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
     }
 
+    pub(crate) async fn current_merge_authority_cut(
+        &mut self,
+        membership: &MembershipChain,
+    ) -> Result<StoreHistoryCut, StorePullError> {
+        self.current_merge_authority(membership)
+            .await
+            .map(|authority| authority.cut)
+    }
+
     async fn current_merge_authority_from(
         &mut self,
         membership: &MembershipChain,
@@ -663,7 +672,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.load_state_registrations(&state, &mut registrations)
             .await?;
 
-        let mut accepted = BTreeMap::new();
         let mut observed_states = BTreeSet::new();
         loop {
             let mut next = BTreeMap::new();
@@ -690,7 +698,15 @@ impl<'a> MergeHistoryVerifier<'a> {
                         "an authenticated Merge stream position cannot be verified".to_string(),
                     ));
                 }
-                if let Some((_, _, reference, _)) = discovered.commits.last() {
+                if let Some(reference) = discovered
+                    .commits
+                    .last()
+                    .map(|(_, _, reference, _)| reference)
+                    .or_else(|| {
+                        self.commit_verifier
+                            .covered_announcement_commit(registration_ref)
+                    })
+                {
                     let stream_id = reference.coord.stream_id;
                     next.insert(stream_id, reference.clone());
                 }
@@ -716,9 +732,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             let registration_count = registrations.len();
             self.load_state_registrations(&next_state, &mut registrations)
                 .await?;
-            let stable = next == accepted
-                && next_state == state
-                && registrations.len() == registration_count;
+            let stable = next_state == state && registrations.len() == registration_count;
             if stable {
                 return Ok(CurrentMergeAuthority {
                     cut: StoreHistoryCut(next),
@@ -736,7 +750,6 @@ impl<'a> MergeHistoryVerifier<'a> {
                         .to_string(),
                 ));
             }
-            accepted = next;
             state = next_state;
         }
     }

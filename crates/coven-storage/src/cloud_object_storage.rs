@@ -270,6 +270,9 @@ pub trait CloudSyncObjectStorage: Send + Sync {
 
     /// Create the prepared bytes at their reserved slot, settling ambiguous
     /// responses through the provider's configured exact-upload verification.
+    /// A successful return guarantees that every client can immediately read
+    /// the object through its exact slot or reference. Prefix listings may lag;
+    /// an exact read may not report the created object as absent.
     async fn create_protocol_object(
         &self,
         prepared: &PreparedExactObject,

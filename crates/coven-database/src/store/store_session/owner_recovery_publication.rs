@@ -4,6 +4,7 @@ use coven_protocol::store_commit::{
     StoreBatchCommit, StoreCommitCoord, StoreDeviceRegistration,
     StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin, VerifiedStoreBatchCommit,
 };
+use rusqlite::OptionalExtension;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,18 +20,38 @@ pub(super) fn complete_owner_recovery_publication_on(
     head: &coven_protocol::store_commit::StoreDeviceHead,
     head_object: &coven_protocol::objects::ExactObjectRef,
 ) -> Result<(), DbError> {
-    let stored: (String, String) = transaction
+    if complete_matching_owner_recovery_publication_on(transaction, commit, head, head_object)? {
+        return Ok(());
+    }
+    Err(DbError::Message(
+        "completed Owner recovery has no exact publication journal".into(),
+    ))
+}
+
+pub(super) fn complete_matching_owner_recovery_publication_on(
+    transaction: &rusqlite::Transaction<'_>,
+    commit: &VerifiedStoreBatchCommit,
+    head: &coven_protocol::store_commit::StoreDeviceHead,
+    head_object: &coven_protocol::objects::ExactObjectRef,
+) -> Result<bool, DbError> {
+    let stored: Option<(String, String)> = transaction
         .query_row(
             "SELECT registration_hash, publication
              FROM local_owner_recovery_publication WHERE singleton = 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
+        .optional()
         .map_err(DbError::from)?;
+    let Some(stored) = stored else {
+        return Ok(false);
+    };
+    if stored.0 != commit.author_registration.registration_hash.to_string() {
+        return Ok(false);
+    }
     let durable: DurableOwnerRecoveryPublication = serde_json::from_str(&stored.1)
         .map_err(|error| DbError::context("parse completed Owner recovery publication", error))?;
-    if stored.0 != commit.author_registration.registration_hash.to_string()
-        || durable.commit.semantic_bytes() != commit.value().to_bytes()
+    if durable.commit.semantic_bytes() != commit.value().to_bytes()
         || durable.commit.prepared().reference() != &commit.reference().object
         || durable.head.semantic_bytes() != head.to_bytes()
         || durable.head.prepared().reference() != head_object
@@ -51,7 +72,7 @@ pub(super) fn complete_owner_recovery_publication_on(
             "Owner recovery publication changed during completion".into(),
         ));
     }
-    Ok(())
+    Ok(true)
 }
 
 impl DurableOwnerRecoveryPublication {

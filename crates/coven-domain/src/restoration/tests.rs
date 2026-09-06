@@ -46,6 +46,8 @@ struct RestoreCloudKitOps {
     versions: Mutex<HashMap<(CloudKitScope, String), u64>>,
     batches: Mutex<HashMap<String, Vec<CloudKitRecordCreate>>>,
     next_batch: AtomicUsize,
+    atomic_create_calls: AtomicUsize,
+    fail_atomic_create_before_call: Mutex<Option<usize>>,
 }
 
 impl RestoreCloudKitOps {
@@ -55,7 +57,14 @@ impl RestoreCloudKitOps {
             versions: Mutex::new(HashMap::new()),
             batches: Mutex::new(HashMap::new()),
             next_batch: AtomicUsize::new(0),
+            atomic_create_calls: AtomicUsize::new(0),
+            fail_atomic_create_before_call: Mutex::new(None),
         }
+    }
+
+    fn fail_atomic_create_before_call(&self, call: usize) {
+        self.atomic_create_calls.store(0, Ordering::SeqCst);
+        *self.fail_atomic_create_before_call.lock().unwrap() = Some(call);
     }
 }
 
@@ -209,6 +218,15 @@ impl CloudKitOps for RestoreCloudKitOps {
         scope: &CloudKitScope,
         batch: &CloudKitAtomicCreateBatch,
     ) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
+        let call = self.atomic_create_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut fail_before = self.fail_atomic_create_before_call.lock().unwrap();
+        if fail_before.as_ref() == Some(&call) {
+            *fail_before = None;
+            return Err(CloudHomeError::Transport(format!(
+                "injected failure before atomic create call {call}"
+            )));
+        }
+        drop(fail_before);
         let mut batches = self.batches.lock().unwrap();
         let creates = batches
             .get(batch.as_provider())
@@ -298,6 +316,9 @@ impl CloudKitOps for RestoreCloudKitOps {
         ))
     }
 }
+
+#[path = "recovery_retry_tests.rs"]
+mod recovery_retry_tests;
 
 fn membership_floor(author_pubkey: String) -> MembershipFloor {
     let coord = coven_protocol::membership::MembershipCoord {
@@ -943,11 +964,6 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         "the restore reached the final completion marker"
     );
     let candidate_prefix = "store-v1/candidates/";
-    let candidates_after_failure = cloud
-        .list(candidate_prefix)
-        .await
-        .expect("list candidate objects after config failure");
-
     assert!(
         !store_dir.exists(),
         "the failed restore removes its store directory",
@@ -966,6 +982,13 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
             .is_none(),
         "the imported identity must be rolled back",
     );
+    owner_device
+        .publish_fixture_position("history-after-recovery-head")
+        .await;
+    let candidates_before_retry = cloud
+        .list(candidate_prefix)
+        .await
+        .expect("list candidate objects before recovery retry");
 
     let retry = Box::pin(crate::restoration::restore_from_cloud(
         store_id,
@@ -1003,7 +1026,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
             .list(candidate_prefix)
             .await
             .expect("list candidate objects after retry"),
-        candidates_after_failure,
+        candidates_before_retry,
         "retry must reuse the recovery commit",
     );
 }
@@ -1018,6 +1041,7 @@ struct OwnerRecoveryRestoreFixture {
     code: String,
     store_id: String,
     owner: UserKeypair,
+    source_device: TestDevice,
     owner_pubkey: String,
     tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
@@ -1031,6 +1055,7 @@ impl OwnerRecoveryRestoreFixture {
             code,
             store_id: _,
             owner: _,
+            source_device: _,
             owner_pubkey,
             tables,
             migrations,
@@ -1158,6 +1183,7 @@ async fn prepare_owner_recovery_restore(store_id: &str) -> OwnerRecoveryRestoreF
         store_id: store_id.to_string(),
         owner_pubkey: pubkey_hex(&owner),
         owner,
+        source_device: owner_device,
         tables,
         migrations: test_migrations(),
         cloudkit_ops,
@@ -1175,6 +1201,7 @@ async fn a_recovered_owner_device_runs_its_first_sync_cycle() {
             code,
             store_id,
             owner,
+            source_device: _,
             owner_pubkey: _,
             tables,
             migrations: _,
@@ -1251,6 +1278,7 @@ async fn a_repeated_owner_recovery_restore_resumes_the_device_s_published_stream
             code,
             store_id,
             owner,
+            source_device: _,
             owner_pubkey: _,
             tables,
             migrations: _,

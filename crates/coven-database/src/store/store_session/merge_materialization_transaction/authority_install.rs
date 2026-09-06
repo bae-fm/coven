@@ -13,6 +13,14 @@ impl MergeMaterializationTransaction<'_, '_> {
             commit,
             &materialization.registrations,
         )?;
+        if !materialization.registrations.is_empty() {
+            complete_matching_owner_recovery_publication_on(
+                conn,
+                &materialization.verified_commit,
+                &materialization.activation_head,
+                &materialization.activation_head_object,
+            )?;
+        }
         for bootstrap in materialization.circle_activations.bootstraps() {
             crate::install_circle_bootstrap_remote_objects_on(conn, commit_ref, bootstrap)?;
         }

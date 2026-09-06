@@ -9,10 +9,10 @@ use coven_protocol::store_commit::StoreRootRef;
 use coven_protocol::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, head_slot_prefix, owner_recovery_semantic_prefix,
     registration_semantic_prefix, snapshot_slot_prefix, ActivatedStoreDeviceRegistrationRef,
-    DeviceRecoveryId, DeviceRecoveryReadiness, DeviceStreamAnchor, ObjectHash, OwnerRecoveryNode,
-    OwnerRecoveryNodeRef, OwnerRecoveryPosition, StoreAck, StoreAckExclusionState, StoreAckRef,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationActivation,
+    CommitFrontier, DeviceRecoveryId, DeviceRecoveryReadiness, DeviceStreamAnchor, ObjectHash,
+    OwnerRecoveryNode, OwnerRecoveryNodeRef, OwnerRecoveryPosition, StoreAck,
+    StoreAckExclusionState, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
     StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
     StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut,
     StoreOperationMembershipAuthority, SuccessorLink,
@@ -40,6 +40,51 @@ pub struct RestoringStore<'storage> {
 }
 
 impl<'storage> RestoringStore<'storage> {
+    async fn complete_owner_recovery_predecessor_history(
+        &mut self,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<StoreHistoryCut, StoreRegistrationError> {
+        let target = self
+            .history
+            .current_merge_authority_cut(&self.membership)
+            .await?;
+        loop {
+            let before = CommitFrontier::from_refs(
+                self.database
+                    .materialized_frontier()
+                    .await
+                    .map_err(StoreRegistrationError::from)?,
+            )
+            .map_err(StoreRegistrationError::from)?;
+            if before.covers(&target.frontier()) {
+                return Ok(StoreHistoryCut(before.0));
+            }
+
+            let pulled = self.pull(routing_encryption).await?;
+            let after = CommitFrontier::from_refs(
+                self.database
+                    .materialized_frontier()
+                    .await
+                    .map_err(StoreRegistrationError::from)?,
+            )
+            .map_err(StoreRegistrationError::from)?;
+            if after.covers(&target.frontier()) {
+                return Ok(StoreHistoryCut(after.0));
+            }
+            if !pulled.held_positions.is_empty() {
+                return Err(StoreRegistrationError::Invalid(format!(
+                    "Owner recovery predecessor history is held at {:?}",
+                    pulled.held_positions
+                )));
+            }
+            if after == before {
+                return Err(StoreRegistrationError::Invalid(
+                    "Owner recovery predecessor history made no progress".into(),
+                ));
+            }
+        }
+    }
+
     /// Record where an adopted registration's published streams stand: the
     /// acknowledgement head the pulled history activated for it (the initial
     /// acknowledgement when it never published another) and the snapshot its
@@ -99,6 +144,7 @@ impl<'storage> RestoringStore<'storage> {
     pub async fn recover_owner_device(
         &mut self,
         authority: &coven_protocol::recovery::OwnerRecoveryAuthority,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<StoreDeviceRegistrationRef, StoreRegistrationError> {
         let database = self.database.clone();
         let storage = self.storage;
@@ -202,6 +248,16 @@ impl<'storage> RestoringStore<'storage> {
             )
         };
         let commit_context = context(ProtocolObjectDomain::StoreCommit);
+        let published_node = self
+            .load_published_owner_recovery_node(
+                &recovery_slot,
+                &owner_pubkey,
+                &authority.owner_grant,
+                sequence,
+                recovery_id,
+                &predecessor,
+            )
+            .await?;
         let staged = database
             .latest_local_store_device_registration()
             .await
@@ -272,6 +328,9 @@ impl<'storage> RestoringStore<'storage> {
                     initial_ack_exists,
                 ),
             }
+        } else if let Some(node) = published_node.as_ref() {
+            self.load_published_recovery_readiness(&node.exact().value, &origin)
+                .await?
         } else {
             let head_context = context(coven_protocol::objects::ProtocolObjectDomain::StoreHead);
             let ack_context = context(coven_protocol::objects::ProtocolObjectDomain::StoreAck);
@@ -376,7 +435,6 @@ impl<'storage> RestoringStore<'storage> {
         };
         let registration_ref = readiness.registration.reference().clone();
         let initial_ack_ref = readiness.initial_ack.reference().clone();
-        let dependencies = readiness.initial_ack.exact().value.store_cut.0.clone();
         let device_signer = readiness
             .registration
             .exact()
@@ -390,30 +448,45 @@ impl<'storage> RestoringStore<'storage> {
                 "Owner recovery requires resolved membership".into(),
             ));
         };
-        let membership_state = coven_protocol::circle_control::StoreMembershipStateRef::from_parts(
-            membership.head_refs().to_vec(),
-            membership.resolution_refs().to_vec(),
-            vec![authority.recovery.clone()],
-            resolved.state_hash,
-        )
-        .map_err(StoreRegistrationError::from)?;
+        let node_membership_state =
+            coven_protocol::circle_control::StoreMembershipStateRef::from_parts(
+                membership.head_refs().to_vec(),
+                membership.resolution_refs().to_vec(),
+                vec![authority.recovery.clone()],
+                resolved.state_hash,
+            )
+            .map_err(StoreRegistrationError::from)?;
         let recovery_readiness = DeviceRecoveryReadiness {
             registration: registration_ref.clone(),
             initial_ack: initial_ack_ref.clone(),
             bootstrap_cut: bootstrap_cut.clone(),
         };
-        let node = self
-            .prepare_or_load_owner_recovery_node(
-                recovery_slot,
-                &owner_pubkey,
-                &authority.owner_grant,
-                sequence,
-                recovery_id,
-                &membership_state,
-                &predecessor,
-                &recovery_readiness,
-                identity_signer,
-            )
+        let node = match published_node {
+            Some(node) => {
+                if node.exact().value.readiness != recovery_readiness {
+                    return Err(StoreRegistrationError::Invalid(
+                        "published Owner recovery node differs from its exact readiness".into(),
+                    ));
+                }
+                node
+            }
+            None => {
+                self.prepare_owner_recovery_node(
+                    &recovery_slot,
+                    &owner_pubkey,
+                    &authority.owner_grant,
+                    sequence,
+                    recovery_id,
+                    &node_membership_state,
+                    &predecessor,
+                    &recovery_readiness,
+                    identity_signer,
+                )
+                .await?
+            }
+        };
+        self.history
+            .verify_owner_recovery_node_authority(&node.exact().value, &self.membership)
             .await?;
         let node_ref = node.reference().clone();
         let registration_activation = StoreDeviceRegistrationActivation::Recovery {
@@ -497,74 +570,93 @@ impl<'storage> RestoringStore<'storage> {
             .await
             .map_err(StoreRegistrationError::from)?;
 
-        let stream_id = coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
-            root.store_root_hash,
-            &registration_ref,
-            coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
-        );
-        let order = StoreCommitOrder {
-            seq: 1,
-            predecessor: None,
-            dependencies,
-        };
-        let (device_state, predecessor_state) = database
-            .store_device_state_for_order(&order)
-            .await
-            .map_err(StoreRegistrationError::from)?;
-        let coord = StoreCommitCoord {
-            stream_id,
-            sequence: 1,
-        };
-        let activation_ref = ActivatedStoreDeviceRegistrationRef {
-            registration: registration_ref.clone(),
-            authority: StoreDeviceRegistrationActivationRef::Recovery {
-                recovery_id,
-                node: node_ref.clone(),
-            },
-        };
-        let commit = StoreBatchCommit::signed_operations(
-            root.store_root_hash,
-            coven_protocol::write::WriteId::from_generated(format!(
-                "owner-recovery-{recovery_hash}"
-            )),
-            coord.clone(),
-            registration_ref.clone(),
-            &registration,
-            order,
-            membership_state,
-            device_state,
-            StoreOperationMembershipAuthority {
-                predecessor: membership
-                    .active_grant(&authority.owner_grant)
-                    .ok_or_else(|| {
-                        StoreRegistrationError::Invalid(
-                            "Owner recovery grant is absent from active membership".to_string(),
-                        )
-                    })?
-                    .creation_authority
-                    .clone(),
-            },
-            coven_protocol::store_commit::StoreCommitOperationsInput {
-                device_registrations: vec![activation_ref],
-                ..coven_protocol::store_commit::StoreCommitOperationsInput::empty()
-            },
-            &device_signer,
-        )
-        .map_err(StoreRegistrationError::from)?;
         let publication = match database
             .owner_recovery_publication()
             .await
             .map_err(StoreRegistrationError::from)?
         {
-            Some(publication) => {
-                if publication.commit.value.value() != &commit {
-                    return Err(StoreRegistrationError::Invalid(
-                        "staged Owner recovery commit differs from the requested authority".into(),
-                    ));
-                }
-                publication
-            }
+            Some(publication) => publication,
             None => {
+                let predecessor_cut = self
+                    .complete_owner_recovery_predecessor_history(routing_encryption)
+                    .await?;
+                if let Some(adopted) = self
+                    .install_activated_owner_recovery(
+                        &origin,
+                        device_id,
+                        recovery_id,
+                        &recovery_slot,
+                        &owner_pubkey,
+                        &authority.owner_grant,
+                        sequence,
+                        &predecessor,
+                    )
+                    .await?
+                {
+                    self.resume_adopted_device_streams(&adopted).await?;
+                    return Ok(adopted);
+                }
+                let stream_id =
+                    coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
+                        root.store_root_hash,
+                        &registration_ref,
+                        coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                    );
+                let order = StoreCommitOrder {
+                    seq: 1,
+                    predecessor: None,
+                    dependencies: predecessor_cut.0,
+                };
+                let (device_state, predecessor_state) = database
+                    .store_device_state_for_order(&order)
+                    .await
+                    .map_err(StoreRegistrationError::from)?;
+                let membership_state = crate::sync::store::commit_verification::merge_history::merge_membership_state_ref(
+                    &self.membership,
+                    &predecessor_state,
+                )?;
+                let coord = StoreCommitCoord {
+                    stream_id,
+                    sequence: 1,
+                };
+                let activation_ref = ActivatedStoreDeviceRegistrationRef {
+                    registration: registration_ref.clone(),
+                    authority: StoreDeviceRegistrationActivationRef::Recovery {
+                        recovery_id,
+                        node: node_ref.clone(),
+                    },
+                };
+                let commit = StoreBatchCommit::signed_operations(
+                    root.store_root_hash,
+                    coven_protocol::write::WriteId::from_generated(format!(
+                        "owner-recovery-{recovery_hash}"
+                    )),
+                    coord.clone(),
+                    registration_ref.clone(),
+                    &registration,
+                    order,
+                    membership_state,
+                    device_state,
+                    StoreOperationMembershipAuthority {
+                        predecessor: self
+                            .membership
+                            .active_grant(&authority.owner_grant)
+                            .ok_or_else(|| {
+                                StoreRegistrationError::Invalid(
+                                    "Owner recovery grant is absent from active membership"
+                                        .to_string(),
+                                )
+                            })?
+                            .creation_authority
+                            .clone(),
+                    },
+                    coven_protocol::store_commit::StoreCommitOperationsInput {
+                        device_registrations: vec![activation_ref],
+                        ..coven_protocol::store_commit::StoreCommitOperationsInput::empty()
+                    },
+                    &device_signer,
+                )
+                .map_err(StoreRegistrationError::from)?;
                 let commit_prefix = commit_semantic_prefix(
                     commit.candidate_family(),
                     &stream_id.to_string(),
@@ -612,7 +704,7 @@ impl<'storage> RestoringStore<'storage> {
                     .history
                     .prepare_merge_history_successor(
                         &verified_commit,
-                        membership,
+                        &self.membership,
                         Some(&registration_ref),
                         state_after,
                         crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence {

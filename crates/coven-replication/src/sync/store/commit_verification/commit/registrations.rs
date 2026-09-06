@@ -156,16 +156,8 @@ impl<'a> StoreCommitVerifier<'a> {
 
     pub(crate) async fn discover_owner_recoveries(
         &self,
-        membership: &MembershipChain,
-    ) -> Result<Vec<ReferencedStoreDeviceRegistration>, StorePullError> {
+    ) -> Result<Vec<(OwnerRecoveryNode, ReferencedStoreDeviceRegistration)>, StorePullError> {
         let protocol = &self.root.protocol();
-        if membership
-            .active_owner_grant(&protocol.descriptor.founder_pubkey)
-            .as_ref()
-            != Some(&protocol.descriptor.founder_grant)
-        {
-            return Ok(Vec::new());
-        }
         let GrantStreamAnchor::OwnerRecovery { first_slot } = &protocol.descriptor.founder_recovery
         else {
             return Err(StorePullError::InvalidState(
@@ -210,12 +202,6 @@ impl<'a> StoreCommitVerifier<'a> {
                 || reference.owner_grant != protocol.descriptor.founder_grant
                 || reference.sequence != sequence
                 || node.predecessor != predecessor
-                || !predecessor_verifies_owner(
-                    membership,
-                    &node.membership,
-                    &node.owner_pubkey,
-                    &node.owner_grant,
-                )
             {
                 return Err(StorePullError::InvalidState(
                     "Owner recovery stream differs from its root-anchored authority".into(),
@@ -249,13 +235,14 @@ impl<'a> StoreCommitVerifier<'a> {
                     "Owner recovery readiness differs from its registration graph".into(),
                 ));
             }
-            recovered.push(
+            recovered.push((
+                node.clone(),
                 ReferencedStoreDeviceRegistration::verified(
                     node.readiness.registration.clone(),
                     registration,
                 )
                 .map_err(StorePullError::Protocol)?,
-            );
+            ));
             slot = node.next_slot.clone();
             predecessor = Some(reference);
             sequence = sequence.checked_add(1).ok_or_else(|| {

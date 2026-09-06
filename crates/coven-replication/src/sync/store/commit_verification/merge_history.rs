@@ -54,9 +54,9 @@ mod stream;
 mod successor;
 pub use membership_control::VerifiedMergeMembershipPrefix;
 pub(crate) use membership_control::{
-    verified_merge_membership_prefix, verify_merge_membership_state_ref,
-    VerifiedMergeMembershipControl, VerifiedMergeMembershipHeadActivation,
-    VerifiedMergePrefixHeadStatus,
+    merge_membership_state_ref, verified_merge_membership_prefix,
+    verify_merge_membership_state_ref, VerifiedMergeMembershipControl,
+    VerifiedMergeMembershipHeadActivation, VerifiedMergePrefixHeadStatus,
 };
 pub(crate) use predecessor::{
     predecessor_verifies_owner, PredecessorSearch, VerifiedMergePredecessorHistory,

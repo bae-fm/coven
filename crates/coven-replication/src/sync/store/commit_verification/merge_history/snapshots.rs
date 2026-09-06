@@ -663,6 +663,22 @@ impl<'a> MergeHistoryVerifier<'a> {
     ) -> Result<coven_database::VerifiedReplayBaselineRetirementProof, StorePullError> {
         let authority = self.build_snapshot_authority(snapshot).await?;
         let current = self.current_merge_authority(members).await?;
+        if let Some((device_id, registration)) =
+            current
+                .registrations
+                .iter()
+                .find(|(device_id, registration)| {
+                    matches!(
+                        &registration.value().origin,
+                        StoreDeviceRegistrationOrigin::Recovery { .. }
+                    ) && !current.state.devices.contains_key(device_id)
+                })
+        {
+            return Err(StorePullError::ReplayRetirementOwnerRecoveryPending {
+                member: registration.value().author_pubkey.clone(),
+                device_id: device_id.to_string(),
+            });
+        }
         let current_membership =
             super::membership_control::merge_membership_state_ref(members, &current.state)?;
         let accepted_current = self
