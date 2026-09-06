@@ -13,6 +13,7 @@ pub enum StoreCreationAttempt {
     RootReserved(StoreRootReservation),
     FounderRegistrationReserved(FounderRegistrationReservation),
     MembershipReserved(MembershipReservation),
+    CurrentPublicationReserved(CurrentPublicationReservation),
     DescriptorReserved(DescriptorReservation),
     FounderStoreCommitsReserved(FounderStoreCommitsReservation),
     FounderAcknowledgementsReserved(FounderAcknowledgementsReservation),
@@ -77,7 +78,15 @@ pub struct MembershipReservation {
 #[serde(deny_unknown_fields)]
 pub struct DescriptorReservation {
     pub membership: MembershipReservation,
+    pub current_publication_slot: crate::objects::ObjectSlot,
     pub recovery_slot: crate::objects::ObjectSlot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurrentPublicationReservation {
+    pub membership: MembershipReservation,
+    pub current_publication_slot: crate::objects::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

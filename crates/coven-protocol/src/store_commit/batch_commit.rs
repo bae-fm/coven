@@ -17,6 +17,7 @@ pub struct StoreBatchCommitBody {
     pub write_id: WriteId,
     pub author_registration: StoreDeviceRegistrationRef,
     pub order: StoreCommitOrder,
+    pub publication_base: StorePublicationBase,
     pub membership_state: StoreMembershipStateRef,
     pub device_state: StoreDeviceStateRef,
     pub membership_authority: Option<MembershipGrantCreationAuthority>,
@@ -51,6 +52,10 @@ impl StoreBatchCommit {
 
     pub fn seq(&self) -> u64 {
         self.order.seq()
+    }
+
+    pub fn publication_base(&self) -> &StorePublicationBase {
+        &self.publication_base
     }
 
     pub fn candidate_family(&self) -> CandidateFamilyId {

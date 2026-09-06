@@ -46,6 +46,8 @@ pub struct FounderObjectDeleteError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum FounderRollbackError {
+    #[error("prepare founder current publication record for rollback: {0}")]
+    CurrentRecord(#[source] StoreProtocolRootError),
     #[error("founder object rollback failed: {0:?}")]
     ObjectDeletes(Vec<FounderObjectDeleteError>),
     #[error("reset founder publication database state: {0}")]
@@ -69,6 +71,9 @@ fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority
         }
         StoreCreationAttempt::MembershipReserved(reservation) => {
             &reservation.founder.root.authority
+        }
+        StoreCreationAttempt::CurrentPublicationReserved(reservation) => {
+            &reservation.membership.founder.root.authority
         }
         StoreCreationAttempt::DescriptorReserved(reservation) => {
             &reservation.membership.founder.root.authority
@@ -113,6 +118,47 @@ fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority
 }
 
 impl<'operation> FounderStoreCreation<'operation> {
+    fn founder_current_record(
+        &self,
+        graph: &coven_database::DurableFounderGraph,
+    ) -> Result<
+        (
+            coven_protocol::objects::ProtocolObjectContext,
+            coven_protocol::objects::ExactProtocolObject<
+                coven_protocol::store_commit::StoreCurrentPublicationRecord,
+            >,
+        ),
+        StoreProtocolRootError,
+    > {
+        let root_hash = graph.root.value.object_hash();
+        let value = coven_protocol::store_commit::StoreCurrentPublicationRecord::genesis(
+            root_hash,
+            self.identity,
+        );
+        let bytes = value.to_bytes();
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            root_hash,
+            ProtocolObjectDomain::StoreCurrentPublication,
+        );
+        let prepared = self
+            .storage
+            .prepare_protocol_object(
+                &context,
+                graph.root.value.descriptor.current_publication_slot.clone(),
+                coven_protocol::store_commit::store_current_publication_semantic_prefix(),
+                bytes.clone(),
+            )
+            .map_err(StoreObjectError::from)?;
+        Ok((
+            context,
+            coven_protocol::objects::ExactProtocolObject {
+                value,
+                bytes,
+                prepared,
+            },
+        ))
+    }
+
     pub(crate) async fn begin(
         database: StoreDatabase,
         storage: Arc<dyn CloudSyncObjectStorage>,
@@ -249,6 +295,30 @@ impl<'operation> FounderStoreCreation<'operation> {
             attempt = next;
         }
         if let StoreCreationAttempt::MembershipReserved(membership) = &attempt {
+            let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+                allocation_context.store_root_hash(),
+                ProtocolObjectDomain::StoreCurrentPublication,
+            );
+            let current_publication_slot = storage
+                .allocate_protocol_slot(
+                    &context,
+                    coven_protocol::store_commit::store_current_publication_semantic_prefix(),
+                    ".json",
+                )
+                .await
+                .map_err(StoreObjectError::from)?;
+            let next =
+                StoreCreationAttempt::CurrentPublicationReserved(CurrentPublicationReservation {
+                    membership: membership.clone(),
+                    current_publication_slot,
+                });
+            db.advance_store_creation_attempt(attempt.clone(), next.clone())
+                .await
+                .map_err(StoreProtocolRootError::Database)?;
+            attempt = next;
+        }
+        if let StoreCreationAttempt::CurrentPublicationReserved(current) = &attempt {
+            let membership = &current.membership;
             let authority = &membership.founder.root.authority;
             let prefix = owner_recovery_semantic_prefix(
                 &authority.founder_pubkey,
@@ -265,6 +335,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 .map_err(StoreObjectError::from)?;
             let next = StoreCreationAttempt::DescriptorReserved(DescriptorReservation {
                 membership: membership.clone(),
+                current_publication_slot: current.current_publication_slot.clone(),
                 recovery_slot,
             });
             db.advance_store_creation_attempt(attempt, next.clone())
@@ -277,6 +348,11 @@ impl<'operation> FounderStoreCreation<'operation> {
         }
         match attempt {
             StoreCreationAttempt::DescriptorReserved(reservation) => Ok(reservation),
+            StoreCreationAttempt::CurrentPublicationReserved(_) => {
+                Err(StoreProtocolRootError::Invariant(
+                    "Store creation attempt did not reserve its recovery slot".to_string(),
+                ))
+            }
             StoreCreationAttempt::FounderStoreCommitsReserved(reservation) => {
                 Ok(reservation.descriptor)
             }
@@ -506,6 +582,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             founder_pubkey: authority.founder_pubkey.clone(),
             founder_grant: authority.founder_grant.clone(),
             root_slot: reservation.membership.founder.root.root_slot.clone(),
+            current_publication_slot: reservation.current_publication_slot.clone(),
             founder_registration: reservation.membership.founder.registration_slot.clone(),
             founder_provider_admin: provider_admin.clone(),
             founder_membership: founder_anchor.clone(),
@@ -739,12 +816,29 @@ impl<'operation> FounderStoreCreation<'operation> {
             graph.membership.head.prepared.reference().clone(),
             graph.membership.entry.prepared.reference().clone(),
         ];
+        let (current_context, current) = self
+            .founder_current_record(graph)
+            .map_err(FounderRollbackError::CurrentRecord)?;
         objects.extend([
             graph.initial_ack.prepared.reference().clone(),
             graph.registration.prepared.reference().clone(),
             graph.root.prepared.reference().clone(),
         ]);
         let mut failures = Vec::new();
+        if let Err(source) = self
+            .storage
+            .delete_versioned_protocol_record(
+                &current_context,
+                &current.prepared,
+                coven_protocol::store_commit::store_current_publication_semantic_prefix(),
+            )
+            .await
+        {
+            failures.push(FounderObjectDeleteError {
+                object: current.prepared.reference().clone(),
+                source,
+            });
+        }
         for object in objects {
             match self.storage.delete_protocol_object(&object).await {
                 Ok(()) | Err(coven_protocol::objects::StorageError::SlotCollision(_)) => {}
@@ -859,6 +953,16 @@ impl<'operation> FounderStoreCreation<'operation> {
                 &graph.root.prepared,
                 coven_protocol::store_commit::store_protocol_root_logical_key(),
                 &graph.root.bytes,
+            )
+            .await
+            .map_err(StoreObjectError::from)?;
+        let (current_context, current) = self.founder_current_record(graph)?;
+        storage_access
+            .create_versioned_protocol_record(
+                &current_context,
+                &current.prepared,
+                coven_protocol::store_commit::store_current_publication_semantic_prefix(),
+                &current.bytes,
             )
             .await
             .map_err(StoreObjectError::from)?;

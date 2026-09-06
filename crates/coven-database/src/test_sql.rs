@@ -1820,6 +1820,10 @@ impl DatabaseTestSql<'_> {
                 &format!("{label} founder grant"),
             ),
             root_slot: root_slot.clone(),
+            current_publication_slot: ObjectSlot::logical(
+                coven_protocol::store_commit::store_current_publication_logical_key().to_string(),
+            )
+            .map_err(DbError::from)?,
             founder_registration: ObjectSlot::logical(format!(
                 "store-v1/test/{label}/registration.json"
             ))

@@ -3,6 +3,8 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProtectedObjectDomain {
     StoreProtocolRoot,
+    StoreCurrentPublication,
+    StorePublicationEntry,
     StoreCommit,
     StoreHead,
     StoreAck,
@@ -174,6 +176,22 @@ impl ProtectedObjectDomain {
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
                     component_count: 2,
                     fixed_components: &[(0, "store-v1"), (1, "store-protocol-root")],
+                }]),
+                extension: ".json",
+            },
+            Self::StoreCurrentPublication => ProtocolObjectMetadata {
+                aad_label: b"store-current-publication",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 3,
+                    fixed_components: &[(0, "store-v1"), (1, "publications"), (2, "current")],
+                }]),
+                extension: ".json",
+            },
+            Self::StorePublicationEntry => ProtocolObjectMetadata {
+                aad_label: b"store-publication-entry",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 5,
+                    fixed_components: &[(0, "store-v1"), (1, "publications"), (2, "entries")],
                 }]),
                 extension: ".json",
             },
@@ -514,6 +532,10 @@ pub struct ProtocolObjectDomain;
 impl ProtocolObjectDomain {
     pub const StoreProtocolRoot: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreProtocolRoot);
+    pub const StoreCurrentPublication: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreCurrentPublication);
+    pub const StorePublicationEntry: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StorePublicationEntry);
     pub const StoreCommit: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreCommit);
     pub const StoreHead: SignedStoreProtocolObjectDomain =

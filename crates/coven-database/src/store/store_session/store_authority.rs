@@ -219,6 +219,7 @@ impl StoreSession<'_> {
             || authority.schema_version != descriptor.schema_version
             || authority.sync_routing_hash != descriptor.sync_routing_hash
             || founder.root.root_slot != descriptor.root_slot
+            || reservation.current_publication_slot != descriptor.current_publication_slot
             || founder.registration_slot != descriptor.founder_registration
             || &reservation.recovery_slot != descriptor.founder_recovery.first_slot()
             || descriptor.founder_membership.first_slot() != &reservation.membership.first_slot

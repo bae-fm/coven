@@ -154,6 +154,7 @@ impl MergeDeviceAuthority {
             self.reference.clone(),
             &self.registration,
             order,
+            crate::store_commit::StorePublicationBase::Genesis,
             membership_state,
             device_state,
             membership_authority,

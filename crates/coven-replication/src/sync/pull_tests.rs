@@ -1158,6 +1158,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             self.commit.author_registration.clone(),
             &self.registration,
             self.commit.order.clone(),
+            coven_protocol::store_commit::StorePublicationBase::Genesis,
             self.commit.membership_state.clone(),
             self.commit.device_state.clone(),
             membership_authority,

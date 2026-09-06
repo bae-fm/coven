@@ -44,6 +44,7 @@ impl Fixture {
             self.registration_ref.clone(),
             &self.registration,
             self.commit.order.clone(),
+            crate::store_commit::StorePublicationBase::Genesis,
             self.commit.membership_state.clone(),
             self.commit.device_state.clone(),
             manifests,
@@ -159,6 +160,7 @@ impl Fixture {
             self.registration_ref.clone(),
             &self.registration,
             order,
+            crate::store_commit::StorePublicationBase::Genesis,
             self.commit.membership_state.clone(),
             self.commit.device_state.clone(),
             self.commit
@@ -239,6 +241,7 @@ impl Fixture {
             self.registration_ref.clone(),
             &self.registration,
             order,
+            crate::store_commit::StorePublicationBase::Genesis,
             self.commit.membership_state.clone(),
             self.commit.device_state.clone(),
             self.commit
@@ -684,6 +687,7 @@ fn fixture() -> Fixture {
             founder_pubkey: keys::public_key_hex(&signer),
             founder_grant: founder_grant.clone(),
             root_slot: slot(format!("{}.json", store_protocol_root_logical_key())),
+            current_publication_slot: slot(store_current_publication_logical_key().to_string()),
             founder_registration: slot("store-v1/device-registrations/founder.json".to_string()),
             founder_provider_admin: provider_admin.clone(),
             founder_membership: GrantStreamAnchor::StoreMembership {
@@ -819,6 +823,7 @@ fn fixture() -> Fixture {
         registration_ref.clone(),
         &registration,
         order,
+        crate::store_commit::StorePublicationBase::Genesis,
         membership_state,
         device_state,
         StoreOperationMembershipAuthority {
@@ -885,6 +890,16 @@ fn object_hash_is_strict_lowercase_hex() {
     assert!(format!("{}g", "0".repeat(63))
         .parse::<ObjectHash>()
         .is_err());
+}
+
+#[test]
+fn signed_commit_binds_its_shared_publication_base() {
+    let fixture = fixture();
+
+    assert_eq!(
+        fixture.commit.publication_base(),
+        &StorePublicationBase::Genesis
+    );
 }
 
 #[test]

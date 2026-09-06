@@ -1853,6 +1853,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         successor_commit.author_registration.clone(),
         successor_author,
         successor_commit.order.clone(),
+        coven_protocol::store_commit::StorePublicationBase::Genesis,
         successor_commit.membership_state.clone(),
         successor_commit.device_state.clone(),
         coven_protocol::store_commit::StoreOperationMembershipAuthority {

@@ -79,6 +79,10 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
             coven_protocol::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
         )
         .expect("valid Store root slot"),
+        current_publication_slot: coven_protocol::objects::ObjectSlot::logical(
+            coven_protocol::store_commit::store_current_publication_logical_key().to_string(),
+        )
+        .expect("valid current publication slot"),
         founder_registration: coven_protocol::objects::ObjectSlot::logical(
             "store-v1/test/required-store-root/registration.json".to_string(),
         )

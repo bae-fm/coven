@@ -38,6 +38,7 @@ mod membership_rollup;
 mod operation_refs;
 mod packages;
 mod protocol_root;
+mod publication;
 mod registration;
 mod retained_history;
 mod signed;
@@ -54,6 +55,7 @@ pub use identifiers::*;
 pub use membership_rollup::*;
 pub use packages::*;
 pub use protocol_root::*;
+pub use publication::*;
 pub use registration::*;
 pub use retained_history::*;
 pub use signed::{Signed, SignedBody};
@@ -133,6 +135,8 @@ const MEMBERSHIP_ROLLUP_DOMAIN: &[u8] = b"coven.store-membership-rollup.v1\0";
 const CANDIDATE_FAMILY_DOMAIN: &[u8] = b"coven.candidate-family.v1\0";
 const STREAM_ACTIVATION_ID_DOMAIN: &[u8] = b"coven.stream-activation-id.v1\0";
 const AUTHOR_STREAM_ID_DOMAIN: &[u8] = b"coven.author-stream-id.v1\0";
+const STORE_PUBLICATION_ENTRY_DOMAIN: &[u8] = b"coven.store-publication-entry.v1\0";
+const STORE_CURRENT_PUBLICATION_DOMAIN: &[u8] = b"coven.store-current-publication.v1\0";
 
 #[cfg(test)]
 #[path = "store_commit/tests.rs"]

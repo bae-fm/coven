@@ -18,6 +18,7 @@ pub struct StoreCreationDescriptor {
     pub founder_pubkey: String,
     pub founder_grant: MembershipGrantId,
     pub root_slot: ObjectSlot,
+    pub current_publication_slot: ObjectSlot,
     pub founder_registration: ObjectSlot,
     pub founder_provider_admin: crate::provider::FounderProviderAdminGrant,
     pub founder_membership: GrantStreamAnchor,
@@ -160,6 +161,8 @@ impl StoreProtocolRootBody {
         }
         if descriptor.founder_pubkey.is_empty()
             || descriptor.root_slot.logical_key() != "store-v1/store-protocol-root.json"
+            || descriptor.current_publication_slot.logical_key()
+                != store_current_publication_logical_key()
             || !matches!(
                 descriptor.founder_membership,
                 GrantStreamAnchor::StoreMembership { .. }

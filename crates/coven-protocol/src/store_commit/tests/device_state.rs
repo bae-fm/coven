@@ -371,6 +371,7 @@ fn retained_registration_activations_reopen_exact_canonical_inputs() {
         fixture.registration_ref.clone(),
         &fixture.registration,
         fixture.commit.order.clone(),
+        crate::store_commit::StorePublicationBase::Genesis,
         fixture.commit.membership_state.clone(),
         fixture.commit.device_state.clone(),
         fixture
@@ -513,6 +514,7 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
         fixture.registration_ref.clone(),
         &fixture.registration,
         fixture.commit.order.clone(),
+        crate::store_commit::StorePublicationBase::Genesis,
         fixture.commit.membership_state.clone(),
         fixture.commit.device_state.clone(),
         fixture
@@ -591,6 +593,7 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
         fixture.registration_ref.clone(),
         &fixture.registration,
         fixture.commit.order.clone(),
+        crate::store_commit::StorePublicationBase::Genesis,
         fixture.commit.membership_state.clone(),
         fixture.commit.device_state.clone(),
         fixture

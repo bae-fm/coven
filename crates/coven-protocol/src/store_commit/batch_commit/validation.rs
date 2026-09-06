@@ -567,6 +567,8 @@ impl StoreBatchCommit {
     ) -> Result<(), StoreProtocolError> {
         self.require_version()?;
         crate::objects::verify_store_root(expected_store_root_hash, self.store_root_hash)?;
+        self.publication_base
+            .validate_for_store(expected_store_root_hash)?;
         let stream_id = commit_stream_id(expected_coord);
         if self.order.seq() != expected_coord.sequence() {
             return Err(StoreProtocolError::RelocatedSlot {

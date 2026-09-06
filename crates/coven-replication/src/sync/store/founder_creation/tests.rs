@@ -15,7 +15,7 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
     let storage = Arc::new(CloudSyncConnection::new(
-        Arc::new(home),
+        Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
         "exact-founder-graph",
@@ -27,7 +27,7 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
 
     let initialized = crate::sync::store::Store::create(
         store_database(&db),
-        storage,
+        storage.clone(),
         store_dir,
         "0000000000001-0000-founder",
         &founder,
@@ -39,6 +39,17 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
         .await
         .expect("read exact Store root")
         .expect("created Store root exists");
+    let current_bytes = home
+        .get(coven_protocol::store_commit::store_current_publication_logical_key())
+        .expect("created Store current publication record exists");
+    let current: coven_protocol::store_commit::StoreCurrentPublicationRecord =
+        serde_json::from_slice(&current_bytes).expect("parse current publication record");
+    current
+        .verify_genesis(
+            root_ref.store_root_hash,
+            &coven_keys::keys::public_key_hex(&founder),
+        )
+        .expect("verify Store genesis current record");
 
     let (store, _device_id) = initialized.into_parts();
     let membership = store
@@ -51,7 +62,7 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
 
 #[tokio::test]
 async fn merge_store_creation_failure_removes_every_founder_object_before_returning() {
-    for failing_create in 1..=5 {
+    for failing_create in 1..=6 {
         let home = InMemoryCloudHome::new();
         let founder = UserKeypair::generate();
         let storage = Arc::new(CloudSyncConnection::new(
@@ -99,6 +110,11 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
                 object.slot().logical_key(),
             );
         }
+        assert!(
+            home.get(coven_protocol::store_commit::store_current_publication_logical_key())
+                .is_none(),
+            "founder current publication record remains after create call {failing_create} failed",
+        );
         crate::sync::store::Store::create(
             store_database(&db),
             storage.clone(),

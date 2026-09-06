@@ -3900,6 +3900,7 @@ impl TestStore {
             candidate.author_registration.clone(),
             registration.value(),
             candidate.order.clone(),
+            coven_protocol::store_commit::StorePublicationBase::Genesis,
             candidate.membership_state.clone(),
             candidate.device_state.clone(),
             coven_protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
@@ -4055,6 +4056,7 @@ impl TestStore {
             candidate.commit.value().author_registration.clone(),
             registration.value(),
             candidate.commit.value().order.clone(),
+            coven_protocol::store_commit::StorePublicationBase::Genesis,
             candidate.commit.value().membership_state.clone(),
             candidate.commit.value().device_state.clone(),
             candidate

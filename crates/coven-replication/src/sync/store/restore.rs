@@ -635,6 +635,7 @@ impl<'storage> RestoringStore<'storage> {
                     registration_ref.clone(),
                     &registration,
                     order,
+                    coven_protocol::store_commit::StorePublicationBase::Genesis,
                     membership_state,
                     device_state,
                     StoreOperationMembershipAuthority {

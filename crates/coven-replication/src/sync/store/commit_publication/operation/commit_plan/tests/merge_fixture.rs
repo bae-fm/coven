@@ -395,6 +395,7 @@ impl PreparedWriteFixture {
             candidate.author_registration.clone(),
             registration.value(),
             candidate.order.clone(),
+            coven_protocol::store_commit::StorePublicationBase::Genesis,
             candidate.membership_state.clone(),
             candidate.device_state.clone(),
             StoreOperationMembershipAuthority { predecessor },
