@@ -56,7 +56,15 @@ impl StorePublicationRef {
         entry: &StorePublicationEntry,
         object: ExactObjectRef,
     ) -> Result<Self, StoreProtocolError> {
+        entry.validate_shape()?;
         object.verify(&entry.to_bytes())?;
+        let expected_key = format!("{}.json", store_publication_entry_semantic_prefix(entry));
+        if object.slot().logical_key() != expected_key {
+            return Err(StoreProtocolError::RelocatedSlot {
+                expected: expected_key,
+                actual: object.slot().logical_key().to_string(),
+            });
+        }
         Ok(Self {
             store_root_hash: entry.store_root_hash,
             position: entry.position,

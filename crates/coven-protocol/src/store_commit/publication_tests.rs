@@ -6,13 +6,16 @@ use crate::objects::{ExactObjectRef, ObjectSlot};
 use coven_keys::keys::{self, UserKeypair};
 use std::collections::BTreeMap;
 
-fn publication_ref(entry: &StorePublicationEntry, label: &str) -> StorePublicationRef {
+fn publication_ref(entry: &StorePublicationEntry) -> StorePublicationRef {
     let bytes = entry.to_bytes();
     StorePublicationRef::from_entry(
         entry,
         ExactObjectRef::new(
-            ObjectSlot::logical(format!("store-v1/test/publication-{label}.json"))
-                .expect("valid publication slot"),
+            ObjectSlot::logical(format!(
+                "{}.json",
+                store_publication_entry_semantic_prefix(entry)
+            ))
+            .expect("valid publication slot"),
             bytes.len() as u64,
             ObjectHash::digest(&bytes),
         ),
@@ -141,7 +144,7 @@ fn current_record_accepts_exactly_one_successor_of_its_accepted_boundary() {
     let entry = StorePublicationEntry::signed_commit(&current, &commit, &device_signer)
         .expect("sign first publication entry");
     let entry_bytes = entry.to_bytes();
-    let entry_ref = publication_ref(&entry, "first");
+    let entry_ref = publication_ref(&entry);
 
     let accepted = StoreCurrentPublicationRecord::advance_commit(
         &current,
@@ -173,7 +176,7 @@ fn current_record_accepts_exactly_one_successor_of_its_accepted_boundary() {
 
     let stale = StorePublicationEntry::signed_commit(&current, &commit, &device_signer)
         .expect("sign stale publication entry");
-    let stale_ref = publication_ref(&stale, "stale");
+    let stale_ref = publication_ref(&stale);
     assert!(StoreCurrentPublicationRecord::advance_commit(
         &accepted,
         &stale,
@@ -193,12 +196,29 @@ fn current_record_accepts_exactly_one_successor_of_its_accepted_boundary() {
 }
 
 #[test]
+fn publication_reference_rejects_another_protocol_slot() {
+    let (identity, _, commit, device_signer) = verified_fixture_commit();
+    let current = StoreCurrentPublicationRecord::genesis(commit.store_root_hash(), &identity);
+    let entry = StorePublicationEntry::signed_commit(&current, &commit, &device_signer)
+        .expect("sign publication entry");
+    let bytes = entry.to_bytes();
+    let wrong = ExactObjectRef::new(
+        ObjectSlot::logical("store-v1/commits/not-a-publication.json".to_string())
+            .expect("valid wrong slot"),
+        bytes.len() as u64,
+        ObjectHash::digest(&bytes),
+    );
+
+    assert!(StorePublicationRef::from_entry(&entry, wrong).is_err());
+}
+
+#[test]
 fn commit_signed_at_genesis_cannot_cross_an_accepted_snapshot() {
     let (identity, registration, commit, device_signer) = verified_fixture_commit();
     let current = StoreCurrentPublicationRecord::genesis(commit.store_root_hash(), &identity);
     let commit_entry = StorePublicationEntry::signed_commit(&current, &commit, &device_signer)
         .expect("sign commit publication");
-    let commit_ref = publication_ref(&commit_entry, "before-snapshot");
+    let commit_ref = publication_ref(&commit_entry);
     let accepted_commit = StoreCurrentPublicationRecord::advance_commit(
         &current,
         &commit_entry,
@@ -225,7 +245,7 @@ fn commit_signed_at_genesis_cannot_cross_an_accepted_snapshot() {
         &device_signer,
     )
     .expect("sign snapshot publication");
-    let snapshot_ref = publication_ref(&snapshot_entry, "snapshot");
+    let snapshot_ref = publication_ref(&snapshot_entry);
     let accepted_snapshot = StoreCurrentPublicationRecord::advance_snapshot(
         &accepted_commit,
         &snapshot_entry,
