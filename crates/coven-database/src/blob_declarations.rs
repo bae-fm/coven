@@ -239,16 +239,19 @@ impl TableBlob {
     /// The blob a changeset row references.
     ///
     /// The gate a [`WriteOnce`](BlobReplacement::WriteOnce) row passes through. A
-    /// changeset UPDATE reports only the columns whose values CHANGED, so the blob-id
-    /// column appearing in one *is* the repointing: the row now names a different blob.
-    /// That is what write-once forbids — its cloud path is a stable readable name, so the
-    /// new blob would be keyed at the old blob's object and overwrite it. Refused here,
-    /// where the change is read, rather than discovered as a corrupted bucket later.
+    /// changeset UPDATE marks only the columns whose values changed. The decoded row
+    /// also carries old values for unchanged columns, so write-once enforcement must
+    /// inspect that marker before treating its blob id as a repointing. A real repoint
+    /// is refused here, where the change is read, rather than discovered as a corrupted
+    /// bucket later.
     fn ref_from_change(
         &self,
         table: &str,
         change: &RowChange,
     ) -> Result<Option<BlobRef>, BlobDeclError> {
+        if change.op == ChangeOp::Update && !change.column_changed(self.id_col) {
+            return Ok(None);
+        }
         let Some(id) = change.col(self.id_col).map(str::to_string) else {
             return Ok(None);
         };
@@ -724,4 +727,95 @@ fn publication_blob_from_row(
         plaintext_size: blob.size_from_row(table, row)?,
         plaintext_hash,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coven_protocol::blob::{CacheFill, Provenance};
+    use coven_protocol::synced_schema::{BlobDecl, RowIdentity};
+    use rusqlite::session::Session;
+
+    fn capture_update(conn: &Connection, sql: &str) -> RowChange {
+        let mut session = Session::new(conn).expect("create session");
+        session.attach(Some("files")).expect("attach files");
+        conn.execute(sql, []).expect("update file row");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract changeset");
+        crate::walk_changeset(&changeset)
+            .expect("walk changeset")
+            .into_iter()
+            .next()
+            .expect("captured update")
+    }
+
+    fn write_once_decl(id_column: Option<&str>) -> BlobDecl {
+        let decl =
+            BlobDecl::new("files", Provenance::HostProvided, CacheFill::CacheEager).write_once();
+        match id_column {
+            Some(column) => decl.with_id_column(column),
+            None => decl,
+        }
+    }
+
+    #[test]
+    fn unrelated_update_does_not_repoint_a_primary_key_blob() {
+        let conn = Connection::open_in_memory().expect("open connection");
+        conn.execute_batch(
+            "CREATE TABLE files (
+                 id TEXT PRIMARY KEY,
+                 title TEXT NOT NULL,
+                 size INTEGER NOT NULL,
+                 hash TEXT NOT NULL
+             );
+             INSERT INTO files VALUES ('blob-a', 'before', 1, 'hash-a');",
+        )
+        .expect("create file row");
+        let declarations = BlobDecls::from_tables(
+            &conn,
+            &[SyncedTable::new("files", RowIdentity::IndependentUuid)
+                .carries_blob(write_once_decl(None))],
+        )
+        .expect("resolve declarations");
+
+        let change = capture_update(&conn, "UPDATE files SET title = 'after'");
+
+        assert_eq!(
+            declarations
+                .ref_from_change(&change)
+                .expect("read unrelated update"),
+            None,
+        );
+    }
+
+    #[test]
+    fn changing_a_write_once_blob_column_is_rejected() {
+        let conn = Connection::open_in_memory().expect("open connection");
+        conn.execute_batch(
+            "CREATE TABLE files (
+                 id TEXT PRIMARY KEY,
+                 blob_id TEXT NOT NULL,
+                 size INTEGER NOT NULL,
+                 hash TEXT NOT NULL
+             );
+             INSERT INTO files VALUES ('row-a', 'blob-a', 1, 'hash-a');",
+        )
+        .expect("create file row");
+        let declarations = BlobDecls::from_tables(
+            &conn,
+            &[SyncedTable::new("files", RowIdentity::IndependentUuid)
+                .carries_blob(write_once_decl(Some("blob_id")))],
+        )
+        .expect("resolve declarations");
+
+        let change = capture_update(&conn, "UPDATE files SET blob_id = 'blob-b'");
+
+        assert!(matches!(
+            declarations.ref_from_change(&change),
+            Err(BlobDeclError::WriteOnceBlobRepointed { blob_id, .. })
+                if blob_id == "blob-b"
+        ));
+    }
 }

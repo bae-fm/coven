@@ -73,16 +73,18 @@ fn walk_with_update_values(
             .collect::<Result<Vec<_>, _>>()?;
         let columns = cells
             .iter()
-            .map(|cell| match cell {
+            .map(|(cell, _)| match cell {
                 ColumnCell::Absent => None,
                 ColumnCell::Present(value) => value.clone(),
             })
             .collect();
-        changes.push(RowChange {
-            table: op.table_name().to_string(),
-            op: change_op,
+        let changed_columns = cells.iter().map(|(_, changed)| *changed).collect();
+        changes.push(RowChange::new(
+            op.table_name().to_string(),
+            change_op,
             columns,
-        });
+            changed_columns,
+        ));
     }
 
     Ok(changes)
@@ -96,19 +98,25 @@ fn extract_col(
     col: usize,
     op: ChangeOp,
     update_value: UpdateValue,
-) -> Result<ColumnCell, ChangesetError> {
+) -> Result<(ColumnCell, bool), ChangesetError> {
     match op {
-        ChangeOp::Insert => changeset_value(item, col, UpdateValue::New),
-        ChangeOp::Delete => changeset_value(item, col, UpdateValue::Old),
+        ChangeOp::Insert => changeset_value(item, col, UpdateValue::New).map(|cell| (cell, true)),
+        ChangeOp::Delete => changeset_value(item, col, UpdateValue::Old).map(|cell| (cell, true)),
         ChangeOp::Update => {
-            let fallback = match update_value {
-                UpdateValue::New => UpdateValue::Old,
-                UpdateValue::Old => UpdateValue::New,
+            let new = changeset_value(item, col, UpdateValue::New)?;
+            let old = changeset_value(item, col, UpdateValue::Old)?;
+            let changed = matches!(new, ColumnCell::Present(_));
+            let cell = match update_value {
+                UpdateValue::New => match new {
+                    ColumnCell::Absent => old,
+                    present => present,
+                },
+                UpdateValue::Old => match old {
+                    ColumnCell::Absent => new,
+                    present => present,
+                },
             };
-            match changeset_value(item, col, update_value)? {
-                ColumnCell::Absent => changeset_value(item, col, fallback),
-                present => Ok(present),
-            }
+            Ok((cell, changed))
         }
     }
 }
