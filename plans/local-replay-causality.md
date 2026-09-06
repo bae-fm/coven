@@ -1,294 +1,474 @@
-# Preserve local write causality through replay
+# Preserve local state through causal replay
 
-## Status and objective
+## Decision and status
 
-Implementation plan, verified against Coven `853d58f7`.
+Implementation plan following investigation of Coven `f0dc1155` (production
+source at `853d58f7`). The investigation used real host capture, publication,
+pull, conflict application, and baseline advancement. It changed no production
+code or live application data.
 
-Rebuilding a device's database must preserve the relationships between its
-local writes, accepted shared commits, and changes in who can see a row.
-Advancing the saved replay database must preserve the same result and retain
-every input needed by work beyond its boundary. A release-specific deletion
-exception is not the repair.
+Keep the shared commit scheduler and walk the existing local write journal
+alongside it. Complete the journal's Local partition so it describes what the
+author keeps after the published audience packages apply. Retain the full
+shared frontier observed by each write. Retire history only at a boundary that
+later accepted work cannot cross.
 
-This plan changes Coven's local capture, replay, and retirement model. It reuses
-the Store commit protocol's exact dependency references and conflict rules.
-Private writes remain private; peers do not acquire dependencies on local
-journal entries they cannot download.
+Remove the proposed second event graph, separate capture/publication nodes,
+extra local sequence and baseline counter, and separate stored publication base.
+Do not substitute original host SQL for published SQL: the investigation
+demonstrated different conflict results for those representations.
 
-## Verified source behavior
+A private value must also not silently become shared authority when an incoming
+relationship makes its ancestor shared. Conflicting private/shared identities
+are rejected atomically, identifying the row and commit. Discarding private
+values or publishing them requires an explicit host operation.
 
-The preceding device-state change does not change host capture, write insertion,
-outgoing partitioning, the replay scheduler, or settled-write selection. Those
-files are byte-identical to `fab6b47e`. The new shared `store_device_states`
-representation and exact per-commit references must survive this work.
+## Investigation results
 
-| Owner | Verified behavior |
+Diagnostic programs used synthetic libraries, an in-memory cloud provider, and
+production `test-utils` owners. Cached dependencies were matched through Cargo
+fingerprints; their recorded source dependencies were older than their compiled
+artifacts and the checkout had no source changes. This was not a fresh rebuild
+or a full test-suite run.
+
+| Production execution | Observed result | Consequence |
+| --- | --- | --- |
+| Create privately, share, delete child, advance baseline | Live and accepted-only replay have zero children; the advanced baseline has one. Starting shared gives zero throughout. | Old private INSERTs are replayed after later shared DELETEs. |
+| Create shared, make local, advance baseline | Live retains one private note; the baseline retains none. Starting private retains it only through the earlier INSERT. | Reordering the existing incomplete partitions is insufficient. |
+| Capture a peer update, make the author's note local, publish the peer update, pull | Pull succeeds but removes the private note, without a baseline advance. | Incoming materialization needs the repaired model too. |
+| A private write reads a peer commit beyond an older snapshot cut, then that cut is acknowledged | The private write is folded and its journal removed, while its observed peer commit is absent from the baseline. | Status alone does not establish a foldable prefix. |
+| Apply the real host sharing UPDATE versus its generated full INSERT to the same concurrent row | UPDATE gives `Author title / Peer body`; INSERT gives `Author title / Base body`. | Skipping an author's published SQL changes shared conflict semantics. |
+
+Drivers, compilation commands, outputs, and a synthetic baseline are preserved
+under `/private/tmp/straight-ahead-diagnosis/`; the record is
+`current-investigation-results.md`. Diagnostic executables were removed,
+releasing about 161 MB; retained evidence occupies about 744 KB.
+
+Source review established two further required regressions:
+
+- Anchoring private writes at the *next* publication is unstable. A tail folded
+  before that publication existed would be placed on a different side of
+  intervening commits when replaying without compaction.
+- A `SharedKey` ancestor can be private on A and shared on B. A's private value
+  at stamp 20 beats B's incoming INSERT at stamp 10; B's incoming descendant
+  then makes that ancestor shared on A. The devices expose different shared
+  values at the same frontier. This case is source-derived, not production-run
+  yet. Matching package SQL alone does not ensure matching input state.
+
+## Necessity review
+
+| Mechanism | Decision and reason |
 | --- | --- |
-| [Store commit order](../crates/coven-protocol/src/store_commit/identifiers.rs) | `StoreCommitOrder` has a sequence, exact same-stream predecessor, and exact cross-stream dependencies. `CommitFrontier` represents covered shared history. |
-| [Host capture](../crates/coven-database/src/store/store_session/host_write_capture.rs) | One transaction captures the original application changeset and audience partitions. It computes `StoreWriteBase.dependencies` from the materialized frontier, excluding the current author's announcement stream. |
-| [Write insertion](../crates/coven-database/src/store/store_session/store_transaction.rs) | Every retained write gets an auto-incremented journal ordinal and `WriteId`. Only publishable writes retain `base`; local-only writes deliberately store `NULL`. The complete original changeset and outgoing partitions are separate payloads. |
-| [Publication preparation](../crates/coven-replication/src/sync/store/commit_publication/operation/preparation.rs) | Publication uses the captured cross-stream dependencies and obtains the author's previous shared commit when preparing publication. Capture and publication are different events. The signed commit carries the original `WriteId`. |
-| [Publication completion](../crates/coven-database/src/store/store_session/publication.rs) | The author's live completion activates accepted objects and installs bindings for currently winning rows without executing the published package's SQL again. This existing separation is a primitive for replay to reuse. |
-| [Audience partitioning](../crates/coven-database/src/gate/audience/partitioning.rs) and [outgoing gates](../crates/coven-database/src/gate/outbound.rs) | Sharing can synthesize complete INSERTs; making a root local can synthesize DELETEs for peers. These payloads describe the recipient's database, not necessarily the author's original edit. |
-| [Replay input loading](../crates/coven-database/src/store/store_session/retained_merge_replay/materialization_io.rs) | Local replay inputs retain partition bytes and write IDs, but omit observed shared history. Journal order comes from `ORDER BY ordinal`. Published writes contribute only their remaining local partition because shared packages are replayed separately. |
-| [Replay scheduling](../crates/coven-database/src/store/store_session/retained_merge_replay/cache.rs) | Accepted shared commits are replayed after their predecessors and dependencies. Only after all of them are applied does a separate loop apply journal overlays. |
-| [Projection application](../crates/coven-database/src/store/store_session/replay_projection.rs) | An overlay applies Store, Circle, and local partitions inside one transaction, using existing changeset conflict handling. It does not consume the original full host changeset. |
-| [Incoming materialization](../crates/coven-database/src/store/store_session/materialization.rs) | Concurrent discovery and certain control changes can rebuild and replace the live projection using the same replay path. The defect is not confined to snapshot creation. |
-| [Snapshot capture](../crates/coven-database/src/store/store_session/snapshot_image.rs) and [baseline retirement](../crates/coven-database/src/store/store_session/store_records/baseline_advance.rs) | Internal capture replays to a shared cut and includes a settled journal prefix. Local-only writes are considered settled without checking observed dependencies. Retirement releases their payloads and removes or reduces the journal rows in the transaction that installs the new image. |
+| Shared causal replay | Keep. Concurrent discovery, retraction, Circle cutoff and bootstrap can change which history supplies the projection. Replaying previous local application results preserves invalidated results. |
+| Ordered write journal | Keep. It owns unpublished work, private effects, reversal, and mixed private/shared transaction resolution. Current private rows alone cannot identify which effects a retracted mixed transaction introduced. |
+| Full observed frontier | Keep once per retained write. Without it, the post-cut experiment folds work before its inputs. Include the author's stream. |
+| Separate publication base | Remove. Derive cross-stream dependencies from the observed frontier; choose and validate the own predecessor at preparation. |
+| Two-event graph | Remove. Published writes have exact commit anchors; LocalOnly entries drain in ordinal order when their observed dependencies are covered. |
+| Another residual payload | Remove. Complete the existing Local partition. Keep the original full changeset for reversal. |
+| Baseline local counter | Remove. Atomic adoption consumes an exact retained journal prefix; the remaining journal says what is still owed. No dependency names a retired local ordinal. |
+| Skip own package SQL | Reject. The executed UPDATE/INSERT experiment disproves equivalence. |
+| Copy current private rows over replay | Reject. It bypasses mixed-write retraction, historical cuts, and private/shared ancestor conflicts. |
+| Clone a database to simulate publication during every capture | Reject. Existing audience moves, full-state INSERT generation, and gate walkers supply the missing author rows directly. |
+| Direct incoming apply followed by optional replay | Remove as a separate behavior. Preliminary live application can fail or trigger cleanup before the correct projection exists. |
+| Acknowledgement requires immediate local retirement | Remove. Readiness to release cloud history and permission to discard local reconstruction inputs are different facts. Reuse acknowledgement proofs, without another coordination protocol. |
 
-The confirmed regression is a local INSERT whose row later becomes shared and
-is deleted by shared history. Appending the old local INSERT after that history
-resurrects the row. The earlier production-code reproduction demonstrated a
-deleted child absent from the live database and shared replay but present after
-internal baseline advancement. It was run against `fab6b47e`; it has not been
-rerun against `853d58f7`. The relevant algorithms are unchanged.
+Rebuilding for each accepted row-bearing change increases replay work compared
+with the direct path. This is a runtime tradeoff. Keep the verified-input cache
+and advance baselines when admissible; do not introduce another application mode.
 
-Two additional constraints follow from the code and require regression tests:
+## Capture and stored shape
 
-- Sorting the existing partitions cannot, by itself, reproduce every original
-  local transaction. An outgoing make-local DELETE means removal on a peer,
-  while the author retained the row with a changed locality flag.
-- A shared snapshot cut is not enough to decide whether a local-only write can
-  be absorbed. That write may have observed shared commits beyond the cut.
+In `CapturedStoreWriteTransaction::execute`, read
+`materialized_frontier_on(tx, None)` in the same transaction as the host write.
+Store that `CommitFrontier` for every retained write, including LocalOnly.
+An empty frontier means no shared history was observed, not missing metadata.
 
-## Required invariants
+Replace the stored cross-stream-only `base` with this frontier. Preparation
+excludes the actual publication stream when deriving outgoing dependencies.
+Its chosen own predecessor must cover any position in that stream observed by
+capture. Preserve capture-time cross-stream dependencies; upload-time remote
+history must not replace them.
 
-1. Every captured host write retains its original position among host writes
-   and the exact shared history visible in its transaction, including the
-   author's own accepted stream position.
-2. Capture order, shared publication order, and delivery order remain distinct.
-   A later publication cannot rewrite what an earlier host transaction observed.
-3. Shared commit readiness and authority continue to come from the existing
-   signed predecessor/dependency graph. Local metadata cannot authorize a commit,
-   fabricate a shared dependency, or satisfy a peer's missing input.
-4. A local host transaction has one application effect on its author. Publishing
-   its recipient representation does not execute that effect a second time.
-5. Audience transitions preserve the appropriate result on each device: local
-   retention on the author, removal or introduction on recipients, correct
-   routing, and exact blob bindings. A routing change is not an application
-   deletion and must not be confused with one.
-6. Concurrent shared edits retain the protocol's defined conflict outcomes.
-   Adding unrelated private writes cannot change the canonical result for shared
-   rows. No timestamp sort substitutes for causal dependencies.
-7. Replay, direct incoming application, restart, snapshot capture, and replay
-   from an advanced baseline agree for equivalent retained history and local
-   writes. Compare actual row values, locality, routing, and blob bindings, not
-   only row counts or shared frontier equality.
-8. Installation and retirement commit together. A failed projection, missing
-   causal predecessor, invalid binding, or constraint failure leaves the old
-   database, baseline, payload claims, and write receipts intact.
+Reuse ordinal, WriteId, original changeset hash, partitions, status, exact
+accepted position, and blob facts. A replay write has required captured data;
+a folded publication receipt is not a replay write with empty defaults. Load
+retained inputs using `changeset_hash` presence and validate status/data pairs.
+Update internal schema and fixtures to one shape under Coven's greenfield rule;
+do not manufacture missing frontiers for old journals. Shared wire ordering
+and application schema migration semantics are unchanged.
 
-## Durable information
+### Complete the Local partition
 
-Separate the local replay context from the publication base; they answer
-different questions. Do not expand the publication dependency map with the
-author's capture-time predecessor and then reuse it unchanged for signing.
-Publication currently supplies its own predecessor at preparation time.
+Its contract is the author's private row/routing effect accompanying the
+Store/Circle representations of the same captured transaction. All parts are
+one atomic replay step. It is not a correction copied from current live state.
 
-Retain for each host write:
+Extend `partition_outbound` while actual post-write state is available:
 
-- The existing `WriteId` and journal `ordinal`, representing identity and local
-  write order. Derive adjacent local-write relationships from this order; do not
-  introduce a competing local sequence or timestamps for ordering.
-- A full observed `CommitFrontier`, captured in the same SQLite transaction as
-  the application effect. Retain it for local-only as well as publishable writes.
-  Reuse exact commit references; an empty frontier is legitimate only when no
-  shared history has been observed, never as a missing-data default.
-- The original captured changeset, already stored by content hash, as the source
-  of the author's application effect. Preserve any additional routing/transition
-  facts that the original bytes demonstrably do not encode; establish this with
-  the transition tests before adding fields.
-- Existing publication status and its exact accepted commit reference. Link the
-  original effect and shared activation through `WriteId`; validate that the
-  linkage names the same write rather than inferring it from a clock or row ID.
-- Existing captured blob facts and ownership required to realize those rows.
-  Local replay retention must cover these facts for as long as its effect is
-  retained, independently of whether an upload is still pending.
+1. Keep original changes to rows remaining private, including real DELETEs.
+2. Collect rows moving to Local and outbound host-row DELETEs whose rows still
+   exist privately after the host transaction. Expand to their private
+   retention and foreign-key closure, including ancestor-owned assets removed
+   by outbound retraction.
+3. Emit full post-write INSERT images for this set with
+   `full_state_diff(Inserts)` and existing gate walkers. Exclude rows still
+   shared through another descendant. `required_store_ancestors` alone is
+   insufficient: it returns Parent rows, missing their inheriting assets.
+4. Suppress original Local INSERT/UPDATE entries represented by full images,
+   as existing destination materialization already does. Real deleted rows
+   cannot enter the retained set.
+5. Include captured private routing changes and complete private route images
+   where needed, using the existing route helper. `routing.private_routes`
+   currently excludes Local; it is not an available Local partition.
+6. Capture facts and retain ownership for every blob these private effects need,
+   independently of upload leases. Use existing fact/payload owners. Transfer
+   surviving ownership to the baseline before retiring a write.
 
-The saved replay database must describe both the shared frontier it includes
-and the local journal prefix it includes. Persist the covered local position
-with the baseline so removing journal rows does not remove the meaning of the
-boundary. A downloaded cloud snapshot supplies shared coverage and no history
-of the joining device's private writes; the founder begins with neither.
+Store/Circle moves still use verified destination packages and routing.
+Circle-to-Local additionally needs private row images, routes, and locally
+materialized blob facts. Mixed transactions and reparenting use the same rule.
 
-Update Coven's internal schema and all producers/consumers to one shape, as
-required by its greenfield policy. Do not synthesize absent observed history for
-old journals or silently treat it as empty. Application schema migration support
-and Store commit wire compatibility are separate concerns.
+At the original capture context, replaying audience parts plus Local must
+reproduce host rows, locality, routing, and exact blob facts. Test actual capture,
+including transitions whose original changeset contains only a root UPDATE.
 
-## Replay design
+## Replay algorithm
 
-### One dependency model, distinct events
+### Existing shared order and one journal cursor
 
-Extend the database owner's replay planning to understand accepted Store commits
-and captured host writes. Keep capture and publication as distinct events: the
-shared commit may not exist when the host write commits.
+Keep accepted commit selection, authority checks, predecessor/dependency
+readiness, canonical ready-batch order, Circle bootstrap coverage, epoch cutoff,
+and exclusions under the existing replay owner.
 
-The planner must express and check these relationships:
+Load retained writes in ordinal order. The shared frontier is the baseline
+coverage plus successfully applied commits. One journal cursor follows:
 
-- An accepted commit follows its exact predecessor and shared dependencies,
-  using the existing checks and canonical ordering of concurrent shared inputs.
-- A host write follows its recorded observed shared frontier and preceding
-  retained host writes, with a covered baseline position satisfying retired
-  predecessors.
-- When a projection substitutes the originating host effect for publication
-  SQL, that effect must precede its exact accepted publication: add the explicit
-  host-write-to-publication dependency, or prove the effect is already included
-  in the baseline's local coverage. Association by itself does not impose order.
-  A peer only has the accepted publication.
-- Shared dependencies beyond a requested historical cut prevent the dependent
-  host write from being folded into that cut. Missing or conflicting exact
-  references cause an explicit failure, not an arbitrary scheduling choice.
-
-The local replay graph must not introduce a second public ordering protocol or
-leak private journal positions into public dependencies. Erasing private events
-must leave the accepted shared graph and its conflict semantics unchanged.
-
-### Apply the right representation exactly once
-
-Replace partition overlays as the authority for reproducing a host transaction.
-Use the original host effect for this device and the verified recipient
-representation for received shared writes. Keep package verification, membership
-and device controls, activation records, routing, blob ownership, and winning
-blob bindings under their existing transaction owners.
-
-Reuse the separation in `complete_prepared_store_write`: original SQL has
-already run, while accepted objects and winning blob bindings still need
-activation. Factor the shared application/activation capability under the
-materialization owner instead of copying publication's implementation. Replay
-must not repeat live upload handoff consumption or filesystem cleanup merely
-because it is reconstructing historical activation state.
-
-Do not implement this as “skip packages whose author is this device.” A package
-can contain synthesized ancestors, existing shared rows re-emitted for a new
-recipient, or blob activations. After restore, a commit authored by the same
-identity may have no local journal effect to substitute. Dispatch on a verified,
-retained write-to-commit association and the replay boundary, not author identity.
-
-Shared-only projections, including the existing `ReplayWriteOverlays::Omit`
-callers, must continue to apply accepted audience packages for own commits too:
-they contain no private host events to substitute. Make the requested projection
-explicit in the replacement model. A host effect can replace published SQL only
-when that exact effect is represented in that projection or its baseline.
-
-Before replacing the scheduler, establish the application contract for an
-associated host effect and publication. The contract must explain which row
-operations are applied once and which accepted protocol/blob effects still run.
-Exercise delayed publication, intervening incoming changes, and re-emission of
-other shared rows. If raw host changeset substitution cannot preserve shared
-conflict outcomes, introduce the required explicit association/representation
-inside the materialization owner; do not suppress the discrepancy or claim that
-topological ordering alone solves it.
-
-This is the principal design proof still required. The source establishes the
-missing information and incorrect overlay order; it does not establish that
-arbitrarily interleaving raw changesets is a correct replacement algorithm.
-
-Both normal replay and historical capture must consume the resulting planner
-and application contract. Direct incoming application must honor the same local
-context: checking only the shared frontier cannot establish that no relevant
-local writes are present. Preserve a direct path only when its precondition
-proves equivalence to replay.
-
-### Historical cuts, retirement, and resolution
-
-Choose the local prefix together with the shared cut. Inclusion must be closed
-over the host writes' observed shared references, required earlier local effects,
-and publication relationships. A prefix that cannot be represented at that cut
-must remain retained; it must not be absorbed by pretending it is independent.
-
-Handle the inverse obligation too: a shared commit included in the cut may
-require local history for the author's representation. Retain enough information
-to reproduce the author result or decline that baseline advancement. Never
-retire a shared/local relationship needed by the unfurled suffix.
-
-Resolved or retracted writes must not regain application effects. Integrate
-their causal dependents with the existing explicit resolution policy: remove
-only effects with verified resolution authority, or fail with a diagnostic
-identifying the unresolved dependent writes. Do not silently drop a dependent
-local-only edit because it has no publication receipt.
-
-Save the image, both coverage boundaries, and retained dependency/authority/blob
-closure atomically before releasing the replaced history's ownership. Preserve
-the exact device-state references introduced by `853d58f7` and the existing
-Circle bootstrap, epoch-cutoff, and author-exclusion evidence.
-
-## Implementation sequence
-
-1. Add failing tests through real host capture, publication, incoming
-   materialization, and baseline advancement. Start with the confirmed
-   local-create/share/delete regression, then sharing transitions and observed
-   remote history. Establish failures before changing production behavior.
-2. Add full local observed-history retention and baseline local coverage.
-   Update capture, schema, stored models, payload ownership, and fixture
-   construction together. Verify that publication still uses the intended
-   captured cross-stream base and preparation-time predecessor.
-3. Establish and test the once-only application contract for original host
-   effects and accepted recipient representations. Resolve the design proof
-   above before relying on it for scheduling or retirement.
-4. Replace the shared-then-local loops with dependency-aware replay planning
-   under the existing database owner. Thread verified context through replay
-   loading rather than consulting the current live rows to guess past order.
-   Update direct incoming application, live rebuilds, and historical projections.
-5. Replace settled-status-only folding with explicit causal coverage. Update
-   snapshot installation/advancement, restart, discard/retraction, and payload
-   retirement together. Keep failed attempts atomic and retryable.
-6. Delete superseded overlay types/loaders and assumptions after every caller
-   uses the replacement. Update the Store protocol documentation's host capture
-   and replay descriptions. Verify all old references, tests, and fixtures.
-
-These are implementation dependencies, not independently deployable protocol
-modes. The final change must satisfy the whole contract before integration.
-
-## Acceptance tests
-
-Tests call production owners; fixtures may supply storage, clocks, identities,
-and application schemas. Do not recreate replay or partitioning in the test.
-
-| Scenario | Required observation |
+| Head | Rule |
 | --- | --- |
-| Local creation, sharing, deletion, baseline advancement, then a new row using the deleted row's unique key | No resurrection and no false uniqueness conflict, before and after restart. |
-| Creation while already shared, followed by the same deletion | Same shared result as the local-first path. |
-| Share, make local, edit, share again; repeat across baselines | Author retains the correct local values when private; eligible peers see exactly the shared intervals and values. |
-| One transaction edits local and shared roots, their common ancestor, or reparents a child | Complete transaction effects and foreign-key closure survive every projection. |
-| A local-only write observes a remote commit beyond an older acknowledged snapshot cut | The write is not folded into a baseline omitting its dependency. Its inputs remain available. |
-| Pending capture, incoming commit or local control publication, later host edit, then publication | Capture order and publication order remain distinct; exact dependencies and final conflict outcomes are preserved. |
-| Other shared rows re-emitted during a sharing transition | Author and peers agree on shared values; skipping duplicate original effects does not skip required recipient state. |
-| Shared-only historical capture of an own commit, compared with author-preserving replay | The shared-only image applies the accepted audience package; the author image applies the original effect once and still installs valid accepted bindings. |
-| Concurrent update/delete and different-column/same-column edits on two devices, varied delivery orders | Existing conflict policy and shared convergence hold. Unrelated private edits do not change the outcome. |
-| Delayed remote edit from an earlier shared interval while the author has made the item private | Define and test the locality/routing outcome through the existing audience authority; private rows and blobs are not accidentally removed or republished by replay. |
-| Blob-bearing local/shared/Circle transitions | Row versions, exact locators, byte availability, visibility, and payload claims agree with the chosen row representation. |
-| Discard, rejected publication, verified retraction, Circle close/exclusion | Removed effects do not reappear; surviving dependents retain valid authority or fail explicitly. |
-| Consecutive baseline advances, including one with unresolved suffix writes | Replay from each baseline equals replay of the same complete retained history; no needed dependency or blob is retired. |
-| Join/restore, including the same author identity without its old local journal | Downloaded accepted history applies correctly without inventing local effects. |
-| Injected failure before image adoption, during projection replacement, or during retirement | Database, coverage, journal, and ownership remain wholly before or wholly after the operation. |
-| Missing or contradictory local causal context | An actionable failure names the write/reference; no empty default, arbitrary reorder, or silent skip. |
+| LocalOnly | Apply Local as soon as its full observed frontier is covered; advance. |
+| Associated accepted publication | Wait for its exact verified commit. Apply canonical audience packages and its Local part together; advance on success. |
+| Pending/Publishing/Blocked without accepted publication | Wait until accepted shared history is exhausted. For current author state, apply captured Store/Circle/Local parts atomically without remote activation, then continue. |
+| Resolved | Apply nothing, after the resolution dependency checks below. |
 
-Include generated operation sequences across multiple devices and snapshot
-boundaries. Compare production executions with different delivery/compaction
-schedules; use explicit expected states for the targeted regressions. Check
-foreign keys and exact relevant values as well as counts. Random seeds must be
-reproducible, and a failure must print the operation sequence through the test
-failure output.
+Drain eligible LocalOnly heads before the first shared application and after
+each successful shared application, including between entries of a ready batch.
+Do not move them to the end or a future publication. A preceding unaccepted
+write blocks the local suffix. An unavailable exact dependency is an error for
+current replay; a dependency beyond a historical cut prevents folding that
+write and the suffix.
 
-## Verification and integration
+Before an associated publication applies, all earlier surviving journal inputs
+must have been consumed. Its signed predecessor/dependency ancestry must cover
+the earlier local entries' observed contexts. Otherwise identify the write and
+missing reference; do not reorder public commits to make the cursor fit.
 
-Run the new regressions against the original implementation and record their
-failures. After implementation, run focused database and replication tests,
-formatting, strict lint, the required repository hooks, and the affected existing
-replay, gate, snapshot, blob, and exclusion suites. Obtain an independent review
-of causal coverage and author-versus-recipient application. Do not use the
-code-rules-review skill.
+Association requires exact WriteId and accepted reference validated against the
+publication record. Identity alone is insufficient: restored own commits may
+have no original journal. Such commits apply canonical packages normally.
 
-Reuse configured build caches; do not override `CARGO_TARGET_DIR` or
-`RUSTC_WRAPPER`, create duplicate build directories, or retain test databases
-beyond diagnostic need. Rebase implementation work onto current main, integrate
-with fast-forward-only history, and push after the completed change passes its
-checks. Publish Coven and repin bae only after the generic repair is verified.
+Published and unpublished replay use the same captured row representations.
+Only accepted publication activates remote objects. Original full host SQL is
+for explicit reversal, not a substitute for packages.
 
-An already-corrupted baseline requires separate, evidence-based recovery. Missing
-local dependency history cannot be reconstructed from timestamps. Preserve the
-working database and unpublished writes before replacing any saved replay state;
-validate recovery inputs and resulting rows on a copy first. This plan does not
-authorize mutating a user's live library, resetting its data, or silently
-accepting older journals with invented causal context.
+### Atomic realization and private conflicts
+
+Apply an associated commit's audience packages and Local part before final
+foreign-key checks, scoped pruning, and binding validation, within one
+savepoint. Visibility cleanup must not remove the Local part. A held package
+rolls back both parts, so retry cannot apply either twice.
+
+Validate the shared result independently before private retention is allowed to
+satisfy final constraints. Every surviving shared row must have its parents and
+accepted row values supplied by shared state. A Local INSERT must not repair a
+missing parent of a concurrent shared sibling: a peer has no such Local input.
+Private-only foreign-key obligations may be completed by the Local part; shared
+ones may not. Use the gate/FK closure and known incoming row representations
+inside the same savepoint, without a second scheduler or persistent database.
+An indeterminate closure fails explicitly rather than borrowing private rows.
+
+Validate Local realization against replay-time visibility too. A row captured
+as private may now be shared through a concurrent descendant; its Local effect
+must not overwrite, delete, or supply shared authority. Return an atomic conflict
+if that captured private effect cannot coexist with the shared result. The own
+publication exception applies to its public representation, not arbitrary Local
+rows. This also covers concurrent withdrawal plus a new shared sibling.
+
+Continue verified membership/device controls, Circle rules, remote activation,
+and exact winning blob bindings under their owners. Separate row/routing/binding
+realization from publication bookkeeping and filesystem cleanup. Historical
+DELETEs followed by private retention must not cancel live transfers or delete
+their bytes. Unpublished realization uses captured facts without inventing
+activated locators or signed commits; invalid Circle context fails explicitly.
+
+Before an incoming step changes the shared set, check private rows it touches
+and ancestors/assets whose visibility changes. A private value is not an
+accepted shared predecessor:
+
+- Exact associated own publication may introduce its captured private values;
+  that representation is the recorded sharing operation.
+- An incoming complete image may adopt an equivalent private row if all host
+  data columns, foreign-key identities, and blob content identities agree.
+  Exclude only version/locality/routing/binding metadata from equivalence and
+  replace those with validated accepted values. Do not keep a private timestamp
+  as shared authority or omit schema/blob validation.
+- Conflicting state, destruction of private retained data, or insufficient
+  complete state to establish equivalence returns `PrivateSharedConflict`,
+  identifying table, row, and exact commit. Roll back everything together.
+
+Check indirect foreign-key visibility changes too; roots alone miss the
+SharedKey ancestor case. Use before/after gate classification and verified
+incoming representations, not the final row's timestamp, to establish authority.
+Resolution must be replay-admissible: an ordinary appended correction only
+works if its observed dependencies place it before the blocked step. Otherwise
+require an explicit authorized suffix resolution or return a dependency
+conflict. Do not claim an appended edit repairs an earlier replay slot. Do not
+automatically republish or discard private values, or keep a hidden second row
+version. Expose this error distinctly from malformed history.
+
+### One installation path
+
+Remove direct incoming preflight application. Inside the owning transaction,
+prepare the verified candidate as a replay input without advancing durable
+positions, construct the projection including it, and install the projection,
+retained input, positions, authority, and bindings together. Reuse the existing
+projection table-copy boundary.
+
+Publication completion uses the same path after establishing its exact accepted
+association. Replace optimistic unaccepted state with accepted packages plus
+Local, then reapply the retained suffix. Finalize receipt/transfer bookkeeping
+in the same transaction. Derive live cleanup from the installed before/after
+result, not intermediate scratch-projection deletions.
+
+Keep requests explicit: current author state, foldable author prefix at a cut,
+or audience image at a cut. Audience images apply accepted own packages too
+and use existing audience pruning before export. A baseline may hold private
+rows; omitting new journal inputs alone does not make it shareable. Preserve
+Circle cutoff capture and bootstrap through the same rules.
+
+## Baseline and acknowledgement
+
+### Admit a prefix that future work cannot cross
+
+The cursor supplies the exact foldable journal prefix. Every included observed
+frontier is covered, every included publication is represented, and no
+unaccepted write is crossed. Conversely, a covered own publication's Local part
+must be included; otherwise decline the cut.
+
+The shared cut must also remain a prefix of canonical application order after
+retirement. A device's own acknowledgement does not prove this: another device
+can still reveal a pre-cut concurrent commit. Folding private effects before
+that discovery changes their placement during replay.
+
+Use existing verified acknowledgement and registration history to admit a cut:
+
+1. Verify the snapshot and identify **every currently active writer**, including
+   devices activated after the snapshot. Require an activated acknowledgement
+   whose `store_cut` covers the cut from each. Determine current writers using
+   both device status and current principal membership; removed members' devices
+   can remain marked Active. Validate each acknowledgement against its own
+   registration and declared device state. Do not require it to name this older
+   snapshot or use that snapshot's older device-state hash: a newly activated
+   device cannot make that assertion. Existing snapshot-stability verification demands
+   acknowledgements only from devices active at the snapshot and still active;
+   that proof is weaker than this retirement requirement.
+2. Materialize the complete predecessor/dependency closure of those
+   acknowledgement activating commits. Reading their metadata is insufficient:
+   pre-acknowledgement row commits must be present in local replay inputs.
+3. Run the actual canonical shared scheduler over those inputs. Commits included
+   in the cut must form an application prefix. An outside-cut commit preceding
+   an included commit makes this cut inadmissible: retain inputs and use a later
+   snapshot, without pretending that commit happened after the cut.
+4. Check the journal prefix against that same run. Capture and adoption must
+   agree on baseline, membership/device evidence, retained input identities,
+   exact cut, write statuses, and payload hashes.
+
+Future commits on each crossed writer's stream follow its acknowledgement
+through the existing exact predecessor chain. Newly activated writers must
+descend the crossed authority through verified activation/bootstrap history;
+refuse retirement if that descent is not established. Excluded writers and
+invalidated candidates remain subject to exact exclusion/retraction proofs.
+
+This strengthens local admission without new wire fields or a new shared order.
+The database retirement entry point accepts this verified admission evidence,
+composed from existing snapshot/acknowledgement/registration types, rather than
+an installable-snapshot authority alone. Keep it distinct from the existing
+weaker acknowledged-snapshot proof; revalidate its exact inputs on adoption.
+Preserve snapshot-required authority closure, Circle bootstrap/epoch evidence,
+and exact historical device-state references during retirement.
+
+### Publish acknowledgements independently of retirement
+
+The current path advances the baseline *before* publishing its acknowledgement.
+Waiting for all acknowledgements inside that call would deadlock. Separate them:
+
+- Before acknowledging, verify the snapshot and that the device durably owns
+  its baseline and the complete retained replay/payload/authority closure for
+  the covered work and surviving local writes. Keep those owners pinned. This
+  promises that cloud deletion cannot remove its reconstruction inputs; it
+  does not require already removing its local journal.
+- Publish through the existing acknowledgement chain.
+- Advance and retire locally when all-writer closure and prefix checks hold.
+  Missing acknowledgements and non-prefix cuts are typed declines, not sync
+  failures or permission to discard inputs.
+
+Do not stage another reconstructed baseline just to acknowledge. Existing
+retained inputs remain valid durable state throughout. Another device cannot
+see this device's local replay pins and may reclaim cloud history after the
+acknowledgement. Before publishing it, ensure every required package, bootstrap,
+authority payload, and locally retained blob input is available under durable
+local ownership independently of that deletion. Metadata naming missing cloud
+objects is insufficient. This device's own reclaim continues to honor its local
+owners. Update acknowledgement/reclaim documentation and tests together so
+neither path assumes acknowledgements remove local pins.
+
+An offline active writer can delay history retirement. Surface this disk
+retention consequence through existing decline/reclaim reporting. Existing
+explicit exclusion can remove its authority; timeout-based deletion is excluded.
+
+### Atomic consumption without another counter
+
+The replay result carries an in-memory manifest of the exact prefix it consumed:
+write identity, status/position, observed frontier, and input hashes. Adoption
+revalidates it in the transaction, installs the image, transfers surviving
+ownership, and consumes the prefix atomically.
+
+Delete consumed LocalOnly inputs and reduce published/resolved inputs to their
+existing receipts. Next replay loads remaining retained inputs in ordinal order.
+No dependency points at a retired local ordinal, so another persisted counter
+adds no information. A payload-free receipt needs baseline coverage or verified
+resolution, never an empty-data fallback.
+
+Failure preserves old image, journal, shared coverage, authority cache, and
+payload claims. Never release an input before the adopting image commits.
+
+Allow a new image at the same admitted shared cut when it consumes additional
+eligible LocalOnly inputs. The exact consumed-prefix manifest establishes
+progress even when those writes cancel each other and leave the image hash
+unchanged. Do not require a different image hash or another counter. Decline only
+when neither shared coverage nor consumed local inputs advance. Update the
+coverage-only early return and cache invalidation accordingly; a stale retry
+must not consume the prefix twice.
+
+This permits retirement of eligible private inputs, not bounded retention for
+every private workload. Writes observing acknowledgements beyond the admitted
+cut need a later admissible snapshot, and a preceding unaccepted write still
+blocks its suffix. Retain those inputs explicitly rather than folding across
+missing history. This plan adds no separate private compaction protocol and
+makes no disk bound while admission remains unavailable.
+
+## Discard and retraction
+
+Local order is conservative: a transaction may read earlier values and copy
+them into unrelated rows. Row overlap cannot prove absence of a dependency.
+
+Before removing a write or accepted dependency, inspect the surviving journal
+suffix and observed frontiers. If private/unpublished dependents are outside
+the explicit resolution operation, return a typed dependency conflict listing
+WriteIds before changing anything. Receiving a protocol retraction does not
+authorize silently discarding dependent private work.
+
+An explicit discard can authorize an exact suffix including LocalOnly inputs.
+Reverse original full host changesets in reverse ordinal order, then resolve
+the authorized set atomically under existing remote-cleanup requirements.
+Replace the query that silently excludes LocalOnly writes. If strict reversal
+conflicts with intervening accepted work, preserve everything and report it;
+do not force an inverse over newer state.
+
+Successful resolution cannot leave pre-existing dependent writes outside its
+resolved set. Newly captured writes observe the resulting valid frontier.
+No resolution event stream or dependency counter is required. Terminal shared
+retraction still needs its exact existing shared closure; apply the local
+dependency check before removing any private effect or ownership.
+
+## Implementation order
+
+1. **Start with failing tests.** Port the five executed scenarios into real
+   production-owner tests. Add SharedKey private/shared collision, unanchored-tail
+   compaction, and pre-cut concurrent discovery. Confirm failures before changing
+   production behavior; use sibling test files under the file-size policy.
+2. **Capture the correct inputs.** Store one full observed frontier and derive
+   publication dependencies. Complete Local row/routing/blob retention within
+   the gate/capture owners. Test capture equivalence across supported transitions.
+3. **Replace overlay replay.** Add the ordinal cursor to the existing scheduler,
+   realize canonical packages plus Local atomically, and enforce the private/shared
+   identity boundary. Remove `MergeReplayWriteOverlay` and the shared-then-local
+   loaders when all callers use retained write inputs.
+4. **Unify installation.** Route incoming and publication completion through the
+   projection transaction. Separate historical realization from live transfer
+   cleanup while preserving all control and binding checks.
+5. **Admit retirement.** Separate acknowledgement publication from local
+   retirement. Add all-current-writer/closure/prefix admission under existing
+   history owners, validate exact journal consumption, and enforce resolution
+   dependencies before discarding or retracting inputs.
+6. **Verify and integrate.** Exercise the contract below, obtain independent
+   review, remove obsolete fields/types/comments/fixtures, and run required
+   hooks before committing and pushing the implementation.
+
+These are implementation dependencies within one coherent repair, not deployed
+half-states or compatibility modes. Tests use actual owning services, not a
+reimplemented scheduler or gate resolver.
+
+| Responsibility | Source |
+| --- | --- |
+| Signed order/frontier | [identifiers.rs](../crates/coven-protocol/src/store_commit/identifiers.rs) |
+| Host journal/blob capture | [host_write_capture.rs](../crates/coven-database/src/store/store_session/host_write_capture.rs) |
+| Stored writes/payload claims | [store_transaction.rs](../crates/coven-database/src/store/store_session/store_transaction.rs), [write_models.rs](../crates/coven-database/src/write_models.rs) |
+| Publication dependencies | [preparation.rs](../crates/coven-replication/src/sync/store/commit_publication/operation/preparation.rs), [pending_publication.rs](../crates/coven-database/src/store/store_session/pending_publication.rs) |
+| Author Local representation | [partitioning.rs](../crates/coven-database/src/gate/audience/partitioning.rs), [outbound.rs](../crates/coven-database/src/gate/outbound.rs), [routing.rs](../crates/coven-database/src/gate/audience/routing.rs) |
+| Replay inputs/scheduling | [materialization_io.rs](../crates/coven-database/src/store/store_session/retained_merge_replay/materialization_io.rs), [cache.rs](../crates/coven-database/src/store/store_session/retained_merge_replay/cache.rs) |
+| Row/routing/blob realization | [application.rs](../crates/coven-database/src/store/store_session/merge_materialization_transaction/application.rs), [replay_projection.rs](../crates/coven-database/src/store/store_session/replay_projection.rs) |
+| Projection installation | [materialization.rs](../crates/coven-database/src/store/store_session/materialization.rs), [publication.rs](../crates/coven-database/src/store/store_session/publication.rs) |
+| Snapshot/retirement | [snapshot_image.rs](../crates/coven-database/src/store/store_session/snapshot_image.rs), [baseline_advance.rs](../crates/coven-database/src/store/store_session/store_records/baseline_advance.rs) |
+| Ack proofs/ordering | [snapshots.rs](../crates/coven-replication/src/sync/store/commit_verification/merge_history/snapshots.rs), [acknowledgements/mod.rs](../crates/coven-replication/src/sync/store/acknowledgements/mod.rs) |
+| Resolution | [write_lifecycle.rs](../crates/coven-database/src/store/store_session/write_lifecycle.rs), [retraction.rs](../crates/coven-database/src/store/store_session/merge_materialization_transaction/retraction.rs) |
+
+## Required validation
+
+Compare production executions across delivery order, restart, and admitted
+compaction schedules. Assert row values, locality, exact blob bindings and byte
+availability, routing, foreign keys, receipts, and retained ownership. Counts
+alone do not establish equivalence.
+
+| Scenario | Required result |
+| --- | --- |
+| Local create/share/delete, then reuse the child's unique key | No resurrection or false uniqueness conflict, including restart and successive baseline advances. |
+| Shared-first control | Same final shared result as local-first. |
+| Share/local/edit/share with and without prior private history | Author retains recorded private values; recipients see accepted shared intervals. |
+| Late peer update after withdrawal | No silent private deletion; canonical application or explicit atomic private/shared conflict according to the representation. |
+| Host UPDATE versus generated INSERT under concurrent edits | Replay uses package conflict outcomes. |
+| Private/shared SharedKey ancestor | Conflicting values hold atomically; equivalent values adopt accepted version/binding. No private value becomes shared authority. |
+| Private/shared conflict, explicit correction/resolution, retry | Replay-admissible correction admits the same candidate once; a correction ordered after the conflict reports a dependency conflict. No failed-attempt positions, bindings, or cleanup persist. |
+| Mixed roots, ancestors/assets, reparenting | Author retention and shared foreign-key closure survive. |
+| Concurrent withdrawal and new shared sibling | A private parent image cannot satisfy a missing shared FK or overwrite shared values; hold atomically if the representations cannot coexist. |
+| Store/Circle/Local moves, exclusion, and close | Exact controls, routes, winning bindings, and retained local bytes remain valid. |
+| Private write observes history beyond the cut | It and its dependent suffix remain retained. |
+| Private tail followed by publication after compaction | Placement/results match replay without compaction. |
+| Pre-cut concurrent commit arrives before/after attempted retirement | Retirement waits for all-writer closure and prefix proof. |
+| Post-snapshot writer activation, exclusion, pre-ack prepared write | Every authorized writer and exact predecessor chain is covered; no metadata-only shortcut. |
+| Acknowledging while retirement declines | No deadlock; inputs remain pinned and sync continues. |
+| Another device reclaims cloud history during that decline | Restart and replay use locally owned inputs and require no deleted cloud object. |
+| Repeated baselines with unresolved suffix | Same projection, exact consumed prefix, no premature release. |
+| Only private writes after an admitted shared cut | Same-cut compaction consumes eligible private inputs; restart and later publication match replay without compaction. |
+| Eligible private create/delete or edit/revert leaves image unchanged | The nonempty manifest advances consumption atomically despite an unchanged image hash; stale retry does not reapply inputs. |
+| Private writes observe acknowledgement commits beyond the admitted cut | Same-cut compaction retains those writes and their suffix until a covering cut is admissible. |
+| Discard/retraction followed by private writes | Explicit dependency conflict or exact authorized suffix resolution; no dropped or revived effects. |
+| Same-author restore without original journal | Canonical packages apply; identity does not imply substitution. |
+| Audience image from private-bearing baseline | Only eligible data and bindings are exported. |
+| Failures during realization, copy, adoption, ownership transfer | Complete before-state survives or complete after-state commits; retry is idempotent. |
+
+Add reproducible generated sequences through real owners, varying delivery and
+compaction. Failures print seed and operation sequence. Run focused database and
+replication regressions, affected gate/replay/snapshot/blob/exclusion/ack suites,
+then normal format, ownership, strict lint, and commit hooks. The design is
+selected; failing acceptance tests require correcting it, not weakening assertions.
+
+Use an independent background reviewer, without the code-rules-review skill.
+Reuse configured build targets and avoid duplicate caches. Rebase implementation
+onto current main, integrate with fast-forward-only history, and push after
+checks. Publish Coven and repin bae after verification; neither operation is
+part of writing this plan.
+
+Already-corrupted baselines and journals missing observed history need explicit
+recovery inputs. Do not infer causality from timestamps or add empty defaults.
+Preserve working rows and unpublished data, validate recovery on a copy, and
+keep live-library repair explicit. This investigation performed no live reset.
