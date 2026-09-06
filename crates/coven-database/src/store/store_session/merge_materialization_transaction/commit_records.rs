@@ -635,16 +635,11 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         }
         let retained_commit_ref = retention.commit_ref.as_str();
         let retained_input_hash = retention.input_hash.to_string();
-        conn.execute(
-            "INSERT INTO store_device_state_snapshots (commit_ref, state) VALUES (?1, ?2)",
-            rusqlite::params![
-                &commit_ref_json,
-                serde_json::to_string(&device_state).map_err(|error| {
-                    DbError::context("serialize materialized Store device state", error)
-                })?,
-            ],
-        )
-        .map_err(DbError::from)?;
+        crate::store::store_device_state::record_store_device_snapshot_on(
+            conn,
+            commit_ref,
+            &device_state,
+        )?;
         conn.execute(
             "INSERT INTO materialized_commits
              (device_id, seq, commit_ref, retained_commit_ref, retained_input_hash)

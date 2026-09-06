@@ -247,7 +247,7 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
             "activation_authority".to_string(),
         ),
         ("store_device_state_snapshots", "commit_ref".to_string()),
-        ("store_device_state_snapshots", "state".to_string()),
+        ("store_device_states", "state".to_string()),
         (
             "store_author_exclusion_activations",
             "exclusion_ref".to_string(),

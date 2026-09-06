@@ -223,25 +223,10 @@ impl StoreSession<'_> {
         .map_err(|error| DbError::context("open test replay image", error))?;
         let reference = serde_json::to_string(&reference)
             .map_err(|error| DbError::context("encode test device-state reference", error))?;
-        let changed = match state {
-            Some(state) => image.execute(
-                "UPDATE store_device_state_snapshots SET state = ?2 WHERE commit_ref = ?1",
-                rusqlite::params![
-                    reference,
-                    serde_json::to_string(&state)
-                        .map_err(|error| DbError::context("encode test device state", error))?
-                ],
-            ),
-            None => image.execute(
-                "DELETE FROM store_device_state_snapshots WHERE commit_ref = ?1",
-                [reference],
-            ),
-        }
-        .map_err(DbError::from)?;
-        if changed != 1 {
-            return Err(DbError::Message(format!(
-                "test replay image mutation changed {changed} rows"
-            )));
+        let database = crate::DatabaseTestSql::new(&image);
+        match state {
+            Some(state) => database.replace_device_state_snapshot(&reference, &state)?,
+            None => database.delete_device_state_snapshot(&reference)?,
         }
         let bytes = crate::connection_io::serialize_database_image(&image)?;
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;

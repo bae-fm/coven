@@ -1075,7 +1075,7 @@ async fn bootstrap_rejects_an_orphan_store_mirror() {
 }
 
 #[tokio::test]
-async fn snapshot_retains_only_frontier_device_states_without_exclusion_authority() {
+async fn snapshot_retains_covered_device_references_with_one_shared_state_body() {
     let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = crate::sync::test_helpers::open_test_db(source_store_dir.clone());
     let signer = UserKeypair::generate();
@@ -1116,13 +1116,14 @@ async fn snapshot_retains_only_frontier_device_states_without_exclusion_authorit
             1,
         );
     }
-    let expected = StoreDatabase::new(&source)
-        .materialized_frontier()
+    let expected = source
+        .store_device_state_snapshot_refs_for_test()
         .await
-        .expect("load snapshot frontier")
-        .into_values()
-        .map(|reference| serde_json::to_string(&reference).expect("encode frontier reference"))
+        .expect("load accepted device-state references")
+        .into_iter()
+        .map(|reference| serde_json::to_string(&reference).expect("encode accepted reference"))
         .collect::<BTreeSet<_>>();
+    assert_eq!(expected.len(), 3);
     let image_dir = tempfile::tempdir().expect("snapshot image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
@@ -1138,6 +1139,14 @@ async fn snapshot_retains_only_frontier_device_states_without_exclusion_authorit
         .into_iter()
         .collect::<BTreeSet<_>>();
     assert_eq!(actual, expected);
+    assert_eq!(
+        scoped
+            .coven_table_row_count(coven_database::DatabaseTestTable::named(
+                "store_device_states"
+            ))
+            .expect("count shared state bodies"),
+        1,
+    );
 }
 
 #[tokio::test]

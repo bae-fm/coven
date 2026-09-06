@@ -2070,9 +2070,12 @@ async fn restore_bootstrap_defers_eager_blob_files_until_open() {
             continuation.registration.device_id,
         )
         .expect("parse continuation Store registration");
-        let mut expected_device_snapshots = snapshot_coverage
-            .values()
-            .cloned()
+        let mut expected_device_snapshots = db_owner
+            .store_device_state_snapshot_refs_for_test()
+            .await
+            .expect("load accepted device-state references")
+            .into_iter()
+            .filter(|reference| snapshot_frontier.covers_commit(reference))
             .collect::<std::collections::BTreeSet<_>>();
         let ancestry = owner_device
             .load_commit_ancestry_until(latest_position.clone(), &snapshot_frontier)

@@ -526,10 +526,18 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            store_device_states,
+            "
+    state_hash TEXT PRIMARY KEY CHECK (length(state_hash) = 64),
+    state TEXT NOT NULL CHECK (json_valid(state)),
+    CHECK (json_extract(state, '$.state_hash') IS state_hash)
+"
+        );
+        $visit!(
             store_device_state_snapshots,
             "
     commit_ref TEXT PRIMARY KEY CHECK (json_valid(commit_ref)),
-    state TEXT NOT NULL CHECK (json_valid(state))
+    state_hash TEXT NOT NULL REFERENCES store_device_states(state_hash)
 "
         );
         $visit!(
@@ -917,6 +925,10 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
     }
 
     coven_tables!(apply_table);
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS store_device_state_snapshots_by_state
+         ON store_device_state_snapshots(state_hash);",
+    )?;
     conn.execute_batch(OBJECT_OWNERSHIP_TRIGGERS)?;
     Ok(())
 }

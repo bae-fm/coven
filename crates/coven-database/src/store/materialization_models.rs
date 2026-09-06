@@ -287,7 +287,7 @@ pub struct InstalledReplayBaseline {
     coverage: coven_protocol::store_commit::CommitFrontier,
     covered_states: std::collections::BTreeMap<
         StoreBatchCommitRef,
-        coven_protocol::store_commit::ResolvedStoreDeviceState,
+        std::sync::Arc<coven_protocol::store_commit::ResolvedStoreDeviceState>,
     >,
     summary: Option<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
     /// The snapshot this baseline was installed or advanced from, when it came
@@ -317,7 +317,7 @@ impl InstalledReplayBaseline {
         coverage: coven_protocol::store_commit::CommitFrontier,
         covered_states: std::collections::BTreeMap<
             StoreBatchCommitRef,
-            coven_protocol::store_commit::ResolvedStoreDeviceState,
+            std::sync::Arc<coven_protocol::store_commit::ResolvedStoreDeviceState>,
         >,
         summary: Option<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
         snapshot: Option<coven_protocol::store_commit::StoreSnapshotRef>,
@@ -362,7 +362,7 @@ impl InstalledReplayBaseline {
         &self,
         reference: &StoreBatchCommitRef,
     ) -> Option<&coven_protocol::store_commit::ResolvedStoreDeviceState> {
-        self.covered_states.get(reference)
+        self.covered_states.get(reference).map(AsRef::as_ref)
     }
 
     pub fn covered_states(
@@ -373,7 +373,9 @@ impl InstalledReplayBaseline {
             &coven_protocol::store_commit::ResolvedStoreDeviceState,
         ),
     > {
-        self.covered_states.iter()
+        self.covered_states
+            .iter()
+            .map(|(reference, state)| (reference, state.as_ref()))
     }
 }
 

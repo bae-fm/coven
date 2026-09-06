@@ -1026,6 +1026,7 @@ const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
     "row_blob_locators",
     "store_device_registration_activations",
     "store_device_state_snapshots",
+    "store_device_states",
     "store_author_exclusion_activations",
     "circle_control_activations",
     "circle_access_cache",

@@ -414,6 +414,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 notifications.push((retained.commit().write_id.clone(), status));
             }
         }
+        if !provided.is_empty() {
+            crate::store::store_device_state::prune_unreferenced_store_device_states_on(conn)?;
+        }
         Ok(notifications)
     }
 }

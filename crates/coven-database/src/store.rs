@@ -36,6 +36,10 @@ pub(crate) use retained_merge_replay::remove_retained_replay_ownership_from_snap
 mod store_database;
 mod store_device_state;
 pub use store_database::StoreDatabase;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use store_device_state::{
+    prune_unreferenced_store_device_states_on, record_store_device_snapshot_on,
+};
 mod store_session;
 pub(crate) use store_session::StoreSession;
 pub(crate) use verified_store_authority::VerifiedStoreAuthority;

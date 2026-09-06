@@ -1064,6 +1064,7 @@ impl StoreTransaction<'_, '_> {
                 "snapshot device-state closure differs from its exact authority".to_string(),
             ));
         }
+        crate::store::store_device_state::prune_unreferenced_store_device_states_on(conn)?;
         conn.execute_batch("DROP TABLE snapshot_required_device_states")
             .map_err(DbError::from)?;
         Ok(())

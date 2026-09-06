@@ -14,7 +14,7 @@ impl ReplayProjection {
         cut: &coven_protocol::store_commit::CommitFrontier,
         accepted: std::collections::BTreeMap<
             coven_protocol::store_commit::StoreBatchCommitRef,
-            coven_protocol::store_commit::ResolvedStoreDeviceState,
+            std::sync::Arc<coven_protocol::store_commit::ResolvedStoreDeviceState>,
         >,
     ) -> Result<Self, DbError> {
         let mut connection = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
@@ -28,6 +28,7 @@ impl ReplayProjection {
                 &connection,
                 cut,
             )?;
+        let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
         for (reference, state) in accepted {
             match image_states.get(&reference) {
                 Some(existing) if existing != &state => {
@@ -37,16 +38,15 @@ impl ReplayProjection {
                 }
                 Some(_) => {}
                 None => {
-                    connection.execute(
-                        "INSERT INTO store_device_state_snapshots (commit_ref, state) VALUES (?1, ?2)",
-                        (
-                            serde_json::to_string(&reference).map_err(|error| DbError::context("encode accepted device-state reference", error))?,
-                            serde_json::to_string(&state).map_err(|error| DbError::context("encode accepted device state", error))?,
-                        ),
-                    ).map_err(DbError::from)?;
+                    crate::store::store_device_state::record_store_device_snapshot_on(
+                        &transaction,
+                        &reference,
+                        &state,
+                    )?;
                 }
             }
         }
+        transaction.commit().map_err(DbError::from)?;
         Ok(Self {
             connection,
             store_dir,

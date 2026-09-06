@@ -1129,7 +1129,8 @@ impl DatabaseTestSql<'_> {
         forged_device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<(), DbError> {
         let rows = self.query(
-            "SELECT commit_ref, state FROM store_device_state_snapshots",
+            "SELECT snapshot.commit_ref, body.state FROM store_device_state_snapshots AS snapshot
+             JOIN store_device_states AS body USING (state_hash)",
             [],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?;
@@ -1149,15 +1150,7 @@ impl DatabaseTestSql<'_> {
             let forged = state
                 .activate_registration(forged_registration, None)
                 .map_err(DbError::from)?;
-            self.connection
-                .execute(
-                    "UPDATE store_device_state_snapshots SET state = ?1 WHERE commit_ref = ?2",
-                    rusqlite::params![
-                        serde_json::to_string(&forged).map_err(DbError::from)?,
-                        commit,
-                    ],
-                )
-                .map_err(DbError::from)?;
+            self.replace_device_state_snapshot(&commit, &forged)?;
         }
         Ok(())
     }
@@ -1279,20 +1272,25 @@ impl DatabaseTestSql<'_> {
         commit_ref: &str,
         state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
     ) -> Result<(), DbError> {
-        let encoded = serde_json::to_string(state).map_err(DbError::from)?;
-        let updated = self
+        let reference = serde_json::from_str(commit_ref).map_err(DbError::from)?;
+        let transaction = self
             .connection
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let deleted = transaction
             .execute(
-                "UPDATE store_device_state_snapshots SET state = ?1 WHERE commit_ref = ?2",
-                rusqlite::params![encoded, commit_ref],
+                "DELETE FROM store_device_state_snapshots WHERE commit_ref = ?1",
+                [commit_ref],
             )
             .map_err(DbError::from)?;
-        if updated != 1 {
+        if deleted != 1 {
             return Err(DbError::Message(
                 "checkpoint state forgery found no exact row".to_string(),
             ));
         }
-        Ok(())
+        crate::store::record_store_device_snapshot_on(&transaction, &reference, state)?;
+        crate::store::prune_unreferenced_store_device_states_on(&transaction)?;
+        transaction.commit().map_err(DbError::from)
     }
 
     pub(crate) fn register_external_blob(

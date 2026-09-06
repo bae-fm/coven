@@ -333,6 +333,7 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
     // Preserved for the same reason as `materialized_commits`: a commit's
     // derived device state is accepted at commit time, never recomputed by a
     // filtered replay; only explicit retraction removes it.
+    ("store_device_states", ReplayTableDisposition::Preserve),
     (
         "store_device_state_snapshots",
         ReplayTableDisposition::Preserve,
