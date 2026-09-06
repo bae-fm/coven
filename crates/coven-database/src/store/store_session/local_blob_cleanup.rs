@@ -182,6 +182,81 @@ fn record_durable_intent(
     Ok(())
 }
 
+pub(crate) struct SuspendedBlobCleanup {
+    local: Vec<LocalBlobCleanupIntent>,
+    published: Vec<super::blob_outbox::PublishedBlobDropIntent>,
+}
+
+/// Temporarily remove cleanup obligations for blobs whose bytes a replay lease
+/// still owns. The caller must reevaluate every returned intent against the
+/// resulting rows before committing its transaction.
+pub(crate) fn suspend_leased_blob_cleanup_for_restoration_on(
+    conn: &rusqlite::Connection,
+    blobs: &[coven_protocol::blob::BlobRef],
+) -> Result<SuspendedBlobCleanup, DbError> {
+    let blob_keys = blobs
+        .iter()
+        .map(|blob| (blob.namespace.as_str(), blob.id.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut taken = Vec::new();
+    for (namespace, blob_id) in blob_keys {
+        let removed = crate::with_coven_sql_authority(|| {
+            conn.execute(
+                "DELETE FROM local_cleanup_intents
+                 WHERE namespace = ?1 AND blob_id = ?2 AND copy_identity = 'local'
+                   AND (
+                       EXISTS (
+                           SELECT 1 FROM store_write_blob_leases
+                           WHERE namespace = ?1 AND blob_id = ?2
+                       ) OR EXISTS (
+                           SELECT 1 FROM retained_replay_blob_leases
+                           WHERE namespace = ?1 AND blob_id = ?2
+                       )
+                   )",
+                (namespace, blob_id),
+            )
+            .map_err(DbError::from)
+        })?;
+        match removed {
+            0 => {}
+            1 => taken.push(LocalBlobCleanupIntent::local(namespace, blob_id)),
+            count => {
+                return Err(DbError::Message(format!(
+                "local cleanup restoration removed {count} obligations for {namespace}/{blob_id}"
+            )))
+            }
+        }
+    }
+    let published = super::blob_outbox::take_leased_published_blob_drop_intents_for_restoration_on(
+        conn, blobs,
+    )?;
+    Ok(SuspendedBlobCleanup {
+        local: taken,
+        published,
+    })
+}
+
+/// Cancel a suspended obligation when the restored rows need its local source,
+/// or put it back when the completed replay still leaves the source obsolete.
+pub(crate) fn reevaluate_suspended_blob_cleanup_on(
+    conn: &rusqlite::Connection,
+    decls: &BlobDecls,
+    cleanup: &SuspendedBlobCleanup,
+) -> Result<(), DbError> {
+    for intent in &cleanup.local {
+        record_obsolete_copy_intents_on(conn, decls, intent)?;
+    }
+    for intent in &cleanup.published {
+        let local_referenced = decls
+            .local_copy_is_referenced(conn, &intent.drop.namespace, &intent.drop.id)
+            .map_err(DbError::from)?;
+        if !local_referenced {
+            super::blob_outbox::reinsert_published_blob_drop_intent_on(conn, intent)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn local_blob_cleanup_intents_on(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<(LocalBlobCleanupIntent, bool)>, DbError> {

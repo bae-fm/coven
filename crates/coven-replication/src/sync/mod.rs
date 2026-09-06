@@ -15,6 +15,8 @@ mod exact_founder_graph_tests;
 #[cfg(test)]
 mod hlc_register_tests;
 #[cfg(test)]
+mod local_replay_blob_cleanup_tests;
+#[cfg(test)]
 mod local_replay_causality_tests;
 #[cfg(test)]
 mod local_replay_invariant_tests;

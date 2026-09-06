@@ -1,4 +1,6 @@
 use super::*;
+use crate::sync::test_helpers::{open_test_db_with_blob, photo_decl};
+use coven_database::{HostWriteOperation, StoreRowWrites, WriteBatch};
 
 #[tokio::test]
 async fn accepted_package_transfers_to_shared_live_set_ownership() {
@@ -943,4 +945,220 @@ async fn discarding_a_blocked_write_includes_later_local_only_writes() {
             ),
         );
     }
+}
+
+#[tokio::test]
+async fn discarding_a_blocked_suffix_restores_its_retained_blob_and_reclaims_its_new_blob() {
+    let home = InMemoryCloudHome::new();
+    let keypair = UserKeypair::generate();
+    let storage = Arc::new(CloudSyncConnection::new(
+        Arc::new(home),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "blocked-blob-discard",
+        keypair.clone(),
+    ));
+    let store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = open_test_db_with_blob(store_dir.clone(), photo_decl());
+    let database = coven_database::StoreDatabase::new(&db);
+    crate::sync::test_helpers::TestDevice::create(
+        &db,
+        store_dir.clone(),
+        storage,
+        "blocked-blob-discard",
+        keypair,
+    )
+    .await
+    .expect("create Store");
+
+    let original_bytes = b"original private blob";
+    let mut original_batch = WriteBatch::new();
+    original_batch.put_blob("photos", "blob-original", original_bytes.to_vec());
+    StoreRowWrites::new(database.clone())
+        .execute(
+            HostWriteOperation::new(original_batch, move |sql| {
+                sql.execute_batch(&format!(
+                    "INSERT INTO notes VALUES \
+                     ('private-row', 'Private', NULL, 0, \
+                      '0000000001000-0000-writer', '2026-01-01'); \
+                     INSERT INTO note_photos \
+                     (id, note_id, kind, size, hash, _updated_at, created_at) VALUES \
+                     ('blob-original', 'private-row', 'image', {}, '{}', \
+                      '0000000001000-0000-writer', '2026-01-01');",
+                    original_bytes.len(),
+                    coven_protocol::blob::content_hash(original_bytes),
+                ))?;
+                Ok::<_, coven_database::DbError>(())
+            }),
+            None,
+            None,
+        )
+        .await
+        .expect("capture original private blob");
+    let original = database
+        .row_blob_ref("note_photos", "blob-original")
+        .await
+        .expect("read original blob reference");
+
+    db.execute_test_host_write(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('blocked-row', 'Blocked', NULL, 1, \
+                 '0000000002000-0000-writer', '2026-01-01')",
+    )
+    .await;
+    let blocked = database.pending_writes().await.unwrap()[0].write_id.clone();
+    database
+        .set_write_status(
+            &blocked,
+            coven_protocol::write::WriteStatus::Blocked(
+                coven_protocol::write::WriteBlock::InvalidProtocolState {
+                    reason: "discard test precondition".to_string(),
+                },
+            ),
+        )
+        .await
+        .expect("block shared write");
+
+    let replacement_bytes = b"replacement private blob";
+    let mut replacement_batch = WriteBatch::new();
+    replacement_batch.delete_blob(original.blob().clone());
+    replacement_batch.put_blob("photos", "blob-replacement", replacement_bytes.to_vec());
+    let replacement = StoreRowWrites::new(database.clone())
+        .execute(
+            HostWriteOperation::new(replacement_batch, move |sql| {
+                sql.execute_batch(&format!(
+                    "DELETE FROM note_photos WHERE id = 'blob-original'; \
+                     INSERT INTO note_photos \
+                     (id, note_id, kind, size, hash, _updated_at, created_at) VALUES \
+                     ('blob-replacement', 'private-row', 'image', {}, '{}', \
+                      '0000000003000-0000-writer', '2026-01-01');",
+                    replacement_bytes.len(),
+                    coven_protocol::blob::content_hash(replacement_bytes),
+                ))?;
+                Ok::<_, coven_database::DbError>(())
+            }),
+            None,
+            None,
+        )
+        .await
+        .expect("replace private blob after blocked write");
+    let replacement_leases = database
+        .write_blob_lease_count_for_test(&replacement.write_id)
+        .await
+        .expect("count replacement blob leases");
+    assert!(replacement_leases > 0);
+
+    let original_path = store_dir
+        .local_blob_path("photos", "blob-original")
+        .expect("original blob path");
+    let replacement_path = store_dir
+        .local_blob_path("photos", "blob-replacement")
+        .expect("replacement blob path");
+    db.execute_test_sql(
+        "CREATE TEMP TRIGGER fail_blocked_suffix_reversal
+         BEFORE DELETE ON notes
+         WHEN OLD.id = 'blocked-row'
+         BEGIN
+             SELECT RAISE(ABORT, 'forced blocked suffix reversal failure');
+         END;",
+    )
+    .await;
+
+    let failed = database
+        .discard_blocked_write(&blocked)
+        .await
+        .expect_err("later reversal must fail");
+    assert!(failed.to_string().contains("reverse blocked-write suffix"));
+    assert!(!database
+        .read(|sql| sql.query_row(
+            "SELECT EXISTS(SELECT 1 FROM note_photos WHERE id = 'blob-original')",
+            [],
+            |row| row.get::<_, bool>(0),
+        ))
+        .await
+        .expect("read original row after rollback")
+        .expect("original row query after rollback"));
+    assert!(database
+        .row_blob_ref("note_photos", "blob-replacement")
+        .await
+        .is_ok());
+    assert_eq!(
+        db.query_test_text(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM local_cleanup_intents
+             WHERE namespace = 'photos' AND blob_id = 'blob-original'
+               AND copy_identity = 'local'",
+        )
+        .await,
+        "1",
+        "the failed reversal rolls back the temporarily removed original cleanup intent",
+    );
+    assert_eq!(
+        db.query_test_text(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM local_cleanup_intents
+             WHERE namespace = 'photos' AND blob_id = 'blob-replacement'
+               AND copy_identity = 'local'",
+        )
+        .await,
+        "0",
+        "the failed reversal rolls back the replacement cleanup intent",
+    );
+    assert_eq!(
+        database.write_status(&replacement.write_id).await.unwrap(),
+        coven_protocol::write::WriteStatus::LocalOnly,
+    );
+    assert_eq!(
+        database
+            .write_blob_lease_count_for_test(&replacement.write_id)
+            .await
+            .expect("count replacement blob leases after rollback"),
+        replacement_leases,
+    );
+    assert_eq!(
+        std::fs::read(&original_path).expect("read retained original after rollback"),
+        original_bytes,
+    );
+    assert_eq!(
+        std::fs::read(&replacement_path).expect("read live replacement after rollback"),
+        replacement_bytes,
+    );
+    db.execute_test_sql("DROP TRIGGER fail_blocked_suffix_reversal")
+        .await;
+
+    let discarded = database
+        .discard_blocked_write(&blocked)
+        .await
+        .expect("discard blocked suffix");
+    let coven_database::BlockedWriteDiscard::Discarded(discarded) = discarded else {
+        panic!("blocked suffix unexpectedly requires remote resolution");
+    };
+    assert_eq!(discarded.len(), 2);
+    assert_eq!(discarded[0], blocked);
+    assert!(database
+        .row_blob_ref("note_photos", "blob-original")
+        .await
+        .is_ok());
+    assert!(!database
+        .read(|sql| sql.query_row(
+            "SELECT EXISTS(SELECT 1 FROM note_photos WHERE id = 'blob-replacement')",
+            [],
+            |row| row.get::<_, bool>(0),
+        ))
+        .await
+        .expect("read replacement row")
+        .expect("replacement row query"));
+
+    assert!(!coven_database::LocalBlobCleanup::new(&database)
+        .drain()
+        .await
+        .expect("drain reversed suffix cleanup"));
+    assert_eq!(
+        std::fs::read(&original_path).expect("read restored original blob"),
+        original_bytes,
+    );
+    assert!(!replacement_path.exists());
+    assert!(!coven_database::LocalBlobCleanup::new(&database)
+        .drain()
+        .await
+        .expect("repeat cleanup after restoration"));
+    assert!(original_path.exists());
 }

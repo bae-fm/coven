@@ -291,8 +291,17 @@ impl MergeMaterializationTransaction<'_, '_> {
     pub(crate) fn apply_changeset_strict<B: AsRef<[u8]>>(
         &self,
         changeset: ValidatedChangeset<B>,
+        blob_decls: &crate::BlobDecls,
     ) -> Result<(), DbError> {
         let bytes = changeset.bytes();
+        let old_changes = crate::walk_old_changeset(bytes).map_err(DbError::Changeset)?;
+        let new_changes = crate::walk_changeset(bytes).map_err(DbError::Changeset)?;
+        let old_exact_bindings = super::exact_blob_bindings_on(self.store.transaction)?;
+        let obsolete = crate::local_blob_cleanup_intents::intents_from_changes(
+            blob_decls,
+            &old_changes,
+            &new_changes,
+        )?;
         self.store
             .transaction
             .apply_strm(
@@ -301,6 +310,14 @@ impl MergeMaterializationTransaction<'_, '_> {
                 |_conflict_type, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
             )
             .map_err(DbError::from)?;
+        for intent in obsolete {
+            super::record_obsolete_copy_intents_from_bindings_on(
+                self.store.transaction,
+                blob_decls,
+                &intent,
+                &old_exact_bindings,
+            )?;
+        }
         Ok(())
     }
 }

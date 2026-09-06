@@ -99,6 +99,15 @@ impl ReplayProjectionResult {
 }
 
 impl ReplayProjection {
+    pub(super) fn publication_blobs(
+        &self,
+        blob_decls: &crate::BlobDecls,
+    ) -> Result<Vec<crate::PublicationBlob>, DbError> {
+        blob_decls
+            .publication_blobs_in_db(&self.connection)
+            .map_err(DbError::from)
+    }
+
     pub(super) fn from_image(
         image: &[u8],
         store_dir: coven_foundation::store_dir::StoreDir,

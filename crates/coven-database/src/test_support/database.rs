@@ -877,6 +877,31 @@ impl Database {
         .await
     }
 
+    pub async fn first_published_blob_drop_intent_for_test(
+        &self,
+        namespace: &str,
+        blob_id: &str,
+    ) -> Result<(i64, coven_protocol::blob::DeferredLocalBlobDisposition), DbError> {
+        let namespace = namespace.to_string();
+        let blob_id = blob_id.to_string();
+        self.test_sql(move |database| {
+            let (sequence, disposition): (i64, String) = database
+                .query_row(
+                    "SELECT seq, disposition FROM published_blob_drop_intents
+                     WHERE namespace = ?1 AND blob_id = ?2
+                     ORDER BY seq LIMIT 1",
+                    (&namespace, &blob_id),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let disposition =
+                coven_protocol::blob::DeferredLocalBlobDisposition::from_db(&disposition)
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+            Ok((sequence, disposition))
+        })
+        .await
+    }
+
     pub async fn scoped_store_state_counts_for_test(&self) -> Result<[i64; 4], DbError> {
         self.test_sql(|database| database.scoped_store_state_counts())
             .await

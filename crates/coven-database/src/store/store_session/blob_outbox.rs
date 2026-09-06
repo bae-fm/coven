@@ -324,67 +324,7 @@ impl StoreSession<'_> {
             )
             .map_err(DbError::from)?;
         let intents = statement
-            .query_map([max_seq as i64], |row| {
-                let size: Option<i64> = row.get(3)?;
-                let size = size.ok_or_else(|| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        3,
-                        rusqlite::types::Type::Integer,
-                        Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "published blob drop intent is missing size",
-                        )),
-                    )
-                })?;
-                if size < 0 {
-                    return Err(rusqlite::Error::FromSqlConversionFailure(
-                        3,
-                        rusqlite::types::Type::Integer,
-                        Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("published blob drop intent has negative size {size}"),
-                        )),
-                    ));
-                }
-                let plaintext_hash = row.get::<_, String>(4)?.parse().map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        4,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?;
-                let locator_hash = row.get::<_, String>(5)?.parse().map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        5,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?;
-                let disposition_raw: String = row.get(6)?;
-                let disposition =
-                    coven_protocol::blob::DeferredLocalBlobDisposition::from_db(&disposition_raw)
-                        .map_err(|message| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            6,
-                            rusqlite::types::Type::Text,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                message,
-                            )),
-                        )
-                    })?;
-                Ok(PublishedBlobDropIntent {
-                    seq: row.get::<_, i64>(0)? as u64,
-                    drop: coven_protocol::blob::DeferredLocalBlobDrop {
-                        namespace: row.get(1)?,
-                        id: row.get(2)?,
-                        size: size as u64,
-                        plaintext_hash,
-                        locator_hash,
-                        disposition,
-                    },
-                })
-            })
+            .query_map([max_seq as i64], row_to_published_blob_drop_intent)
             .map_err(DbError::from)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(DbError::from)?;
@@ -509,6 +449,104 @@ impl StoreSession<'_> {
         transaction.commit().map_err(DbError::from)?;
         Ok(finished)
     }
+}
+
+pub(super) fn take_leased_published_blob_drop_intents_for_restoration_on(
+    conn: &rusqlite::Connection,
+    blobs: &[coven_protocol::blob::BlobRef],
+) -> Result<Vec<PublishedBlobDropIntent>, DbError> {
+    let blobs = blobs
+        .iter()
+        .map(|blob| (blob.namespace.as_str(), blob.id.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut taken = Vec::new();
+    for (namespace, blob_id) in blobs {
+        let intents = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition
+                     FROM published_blob_drop_intents
+                     WHERE namespace = ?1 AND blob_id = ?2
+                       AND (
+                           EXISTS (
+                               SELECT 1 FROM store_write_blob_leases
+                               WHERE namespace = ?1 AND blob_id = ?2
+                           ) OR EXISTS (
+                               SELECT 1 FROM retained_replay_blob_leases
+                               WHERE namespace = ?1 AND blob_id = ?2
+                           )
+                       )
+                     ORDER BY seq, locator_hash",
+                )
+                .map_err(DbError::from)?;
+            let intents = statement
+                .query_map((namespace, blob_id), row_to_published_blob_drop_intent)
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            intents
+        };
+        for intent in intents {
+            let removed = crate::with_coven_sql_authority(|| {
+                conn.execute(
+                    "DELETE FROM published_blob_drop_intents
+                     WHERE seq = ?1 AND namespace = ?2 AND blob_id = ?3 AND locator_hash = ?4",
+                    rusqlite::params![
+                        i64::try_from(intent.seq).map_err(|_| DbError::Message(format!(
+                            "published blob drop sequence {} exceeds SQLite integer range",
+                            intent.seq
+                        )))?,
+                        intent.drop.namespace,
+                        intent.drop.id,
+                        intent.drop.locator_hash.to_string(),
+                    ],
+                )
+                .map_err(DbError::from)
+            })?;
+            if removed != 1 {
+                return Err(DbError::Message(format!(
+                    "published blob drop intent changed while restoring {namespace}/{blob_id}"
+                )));
+            }
+            taken.push(intent);
+        }
+    }
+    Ok(taken)
+}
+
+pub(super) fn reinsert_published_blob_drop_intent_on(
+    conn: &rusqlite::Connection,
+    intent: &PublishedBlobDropIntent,
+) -> Result<(), DbError> {
+    let inserted = crate::with_coven_sql_authority(|| {
+        conn.execute(
+            "INSERT INTO published_blob_drop_intents
+             (seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                i64::try_from(intent.seq).map_err(|_| DbError::Message(format!(
+                    "published blob drop sequence {} exceeds SQLite integer range",
+                    intent.seq
+                )))?,
+                intent.drop.namespace,
+                intent.drop.id,
+                i64::try_from(intent.drop.size).map_err(|_| DbError::Message(format!(
+                    "published blob drop size {} exceeds SQLite integer range",
+                    intent.drop.size
+                )))?,
+                intent.drop.plaintext_hash.to_string(),
+                intent.drop.locator_hash.to_string(),
+                intent.drop.disposition.as_db(),
+            ],
+        )
+        .map_err(DbError::from)
+    })?;
+    if inserted != 1 {
+        return Err(DbError::Message(
+            "published blob drop intent was not restored".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl StoreDatabase {
@@ -786,6 +824,61 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
         last_failure,
         created_at: row.get(8)?,
         last_attempt_at: row.get(9)?,
+    })
+}
+
+fn row_to_published_blob_drop_intent(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<PublishedBlobDropIntent> {
+    let size: Option<i64> = row.get(3)?;
+    let size = size.ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Integer,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "published blob drop intent is missing size",
+            )),
+        )
+    })?;
+    if size < 0 {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Integer,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("published blob drop intent has negative size {size}"),
+            )),
+        ));
+    }
+    let plaintext_hash = row.get::<_, String>(4)?.parse().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let locator_hash = row.get::<_, String>(5)?.parse().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let disposition_raw: String = row.get(6)?;
+    let disposition = coven_protocol::blob::DeferredLocalBlobDisposition::from_db(&disposition_raw)
+        .map_err(|message| {
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    message,
+                )),
+            )
+        })?;
+    Ok(PublishedBlobDropIntent {
+        seq: row.get::<_, i64>(0)? as u64,
+        drop: coven_protocol::blob::DeferredLocalBlobDrop {
+            namespace: row.get(1)?,
+            id: row.get(2)?,
+            size: size as u64,
+            plaintext_hash,
+            locator_hash,
+            disposition,
+        },
     })
 }
 

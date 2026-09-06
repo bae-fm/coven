@@ -1771,11 +1771,17 @@ mod test_device {
             let prepared = writer.prepare_pending_store_write().await?;
             let published = writer.drain_store_writes().await?;
             if published > 0 {
+                let through_sequence = self
+                    .latest_local_store_position()
+                    .await?
+                    .expect("published Store write has no local position")
+                    .coord
+                    .sequence();
                 crate::sync::test_owner_graph::TestOwnerGraph::new(
                     self.db.clone(),
                     self.store_dir.clone(),
                 )
-                .drain_published_blob_drop_intents(u64::MAX)
+                .drain_published_blob_drop_intents(through_sequence)
                 .await?;
                 coven_database::LocalBlobCleanup::new(&self.db)
                     .drain()

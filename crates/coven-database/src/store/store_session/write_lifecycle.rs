@@ -259,17 +259,41 @@ impl StoreSession<'_> {
         )?);
         let store_transaction =
             crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
+        let mut inverses = Vec::with_capacity(discarded.len());
+        let mut restored_blobs = Vec::new();
         for (_, changeset_hash) in discarded.iter().rev() {
             let changeset = store_transaction.payload(*changeset_hash)?;
             let inverse = StoreDatabase::invert_changeset(&changeset)?;
+            for change in crate::walk_changeset(&inverse).map_err(DbError::Changeset)? {
+                if let Some(blob) = self
+                    .blob_decls
+                    .ref_from_change(&change)
+                    .map_err(DbError::from)?
+                {
+                    restored_blobs.push(blob);
+                }
+            }
             let inverse = crate::ValidatedChangeset::new(inverse, schema.clone())
                 .map_err(|error| DbError::context("invalid blocked-write inverse", error))?;
+            inverses.push(inverse);
+        }
+        let suspended_cleanup =
+            super::local_blob_cleanup::suspend_leased_blob_cleanup_for_restoration_on(
+                &tx,
+                &restored_blobs,
+            )?;
+        for inverse in inverses {
             MergeMaterializationTransaction::from_store(
                 crate::store::store_session::StoreTransaction::new(&tx, self.store_dir),
             )
-            .apply_changeset_strict(inverse)
+            .apply_changeset_strict(inverse, self.blob_decls)
             .map_err(|error| DbError::context("reverse blocked-write suffix", error))?;
         }
+        super::local_blob_cleanup::reevaluate_suspended_blob_cleanup_on(
+            &tx,
+            self.blob_decls,
+            &suspended_cleanup,
+        )?;
         let discarded_ids: Vec<_> = discarded
             .into_iter()
             .map(|(write_id, _)| write_id)
