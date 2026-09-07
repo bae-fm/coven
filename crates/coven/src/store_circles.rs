@@ -157,14 +157,4 @@ impl StoreCircles {
     ) -> Result<crate::CircleCloseStatus, crate::CircleError> {
         self.sync.circle_close_status(circle_id).await
     }
-
-    #[cfg(test)]
-    pub(crate) async fn install_test_active_circle(
-        &self,
-        label: &str,
-    ) -> Result<crate::CircleId, coven_database::DbError> {
-        self.database
-            .install_test_active_circle(label.to_string())
-            .await
-    }
 }

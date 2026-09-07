@@ -1266,10 +1266,10 @@ impl RemoteOnlyStoreBlob {
             .create_test_store("lib-test", signer, home.clone())
             .await
             .expect("create exact test Store");
-        let destination_circle = handle
-            .install_test_active_circle("blob-circle")
+        let destination_circle = store
+            .create_circle("0000000001000-0000-device-test", "Blob circle")
             .await
-            .expect("install Circle authority");
+            .expect("publish the destination Circle authority");
 
         let bytes = b"remote-only-circle-blob".to_vec();
         let hash = coven_protocol::blob::content_hash(&bytes);
@@ -1312,11 +1312,12 @@ impl RemoteOnlyStoreBlob {
             .object()
             .slot()
             .clone();
-        std::fs::remove_file(
-            dir.local_blob_path("media-files", "circleblob")
-                .expect("local blob path"),
-        )
-        .expect("remove local plaintext to leave a remote-only source");
+        assert!(
+            !dir.local_blob_path("media-files", "circleblob")
+                .expect("local blob path")
+                .exists(),
+            "publication retires the local upload source",
+        );
 
         Self {
             _tmp: tmp,
@@ -1579,20 +1580,6 @@ async fn audience_move_publishes_from_precommit_spool_after_source_disappears() 
         )
         .await
         .expect("connect the exact test Store");
-
-    // The fabricated destination Circle names its fixed owner in its roster;
-    // that identity must be an active Store member or the Circle would be
-    // rotation-required and reject new content.
-    let destination_owner =
-        coven_protocol::circle_activation_test_fixtures::test_circle_owner_keypair();
-    fixture
-        .handle
-        .admit_member_for_test(
-            &coven_keys::keys::public_key_hex(&destination_owner),
-            crate::MemberRole::Member,
-        )
-        .await
-        .expect("register the fabricated Circle roster owner as a Store member");
 
     let destination_circle_value = fixture.destination_circle.to_string();
     let receipt = fixture
@@ -2294,18 +2281,15 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
     handle
         .write(move |sql| {
             let hash = coven_protocol::blob::content_hash(b"live");
-            for id in ["remote-deletes", "still-live"] {
-                sql.execute(
-                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
-                         VALUES (?1, 'shared01', 4, ?2, \
-                                 '0000000001000-0000-dev-remote')",
-                    params![id, &hash],
-                )?;
-            }
+            sql.execute(
+                "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                     VALUES ('still-live', 'shared01', 4, ?1, ?2)",
+                params![hash, sql.stamp()],
+            )?;
             Ok(())
         })
         .await
-        .expect("seed two rows sharing the blob");
+        .expect("seed the local row sharing the blob");
 
     let local = dir
         .local_blob_path("media-files", blob_id)
@@ -2346,6 +2330,10 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
         .publish_test_store(storage.as_ref())
         .await
         .expect("publish remote insert");
+    // Receive the remote row through its publication. A separate pending local
+    // insert would be replayed after the remote delete and restore that row.
+    handle.pull_test_store(storage.as_ref()).await;
+    assert!(handle_row_exists(&handle, "SELECT 1 FROM files WHERE id = 'remote-deletes'").await);
     let remote_reference = source
         .row_blob_ref("files", "remote-deletes")
         .await

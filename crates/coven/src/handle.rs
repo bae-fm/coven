@@ -1400,14 +1400,6 @@ impl CovenHandle {
     }
 
     #[cfg(test)]
-    pub(crate) async fn install_test_active_circle(
-        &self,
-        label: &str,
-    ) -> Result<crate::CircleId, coven_database::DbError> {
-        self.circles.install_test_active_circle(label).await
-    }
-
-    #[cfg(test)]
     pub(crate) async fn publish_test_store(
         &self,
         store: &coven_replication::sync::test_helpers::TestStore,

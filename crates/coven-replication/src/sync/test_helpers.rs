@@ -3267,6 +3267,14 @@ impl TestStore {
         }
     }
 
+    pub async fn create_circle(
+        &self,
+        metadata_stamp: &str,
+        name: &str,
+    ) -> Result<coven_protocol::CircleId, crate::sync::store::CircleOperationError> {
+        self.founder.create_circle(metadata_stamp, name).await
+    }
+
     pub async fn run_founder_cycle(
         &self,
         observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
