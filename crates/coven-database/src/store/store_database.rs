@@ -52,18 +52,6 @@ impl StoreDatabase {
         self.database.read_store(read).await
     }
 
-    pub async fn read_tracked<F, R, E>(
-        &self,
-        read: F,
-    ) -> Result<(Result<R, E>, crate::QueryDependencies), DbError>
-    where
-        F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<R, E> + Send + 'static,
-        R: Send + 'static,
-        E: Send + 'static,
-    {
-        self.database.read_store_tracked(read).await
-    }
-
     pub fn schema_version(&self) -> u32 {
         self.database.store_schema_version()
     }
@@ -470,7 +458,8 @@ mod tests {
             .expect("read value");
         assert_eq!(value, 1);
 
-        let (tracked_value, _) = reader
+        let (tracked_value, _) = StoreReads::open(&path)
+            .expect("open application readers")
             .read_tracked(|database| database.query_row("SELECT 2", [], |row| row.get::<_, i64>(0)))
             .await
             .expect("run tracked read-only Store operation");

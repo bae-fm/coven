@@ -14,6 +14,7 @@
 
 pub mod atomic_file;
 pub mod blocking;
+pub mod bounded_workers;
 pub mod changeset;
 pub mod clock;
 pub mod code_envelope;

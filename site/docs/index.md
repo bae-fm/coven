@@ -124,11 +124,15 @@ ledger. Its initial status is `LocalOnly` when the transaction changed no shared
 rows, otherwise `Pending`. Separate calls produce separate write ids and Store
 commits.
 
-**Read on the read connection.** Pure reads go through `handle.read`,
-which runs on a read-only companion connection: no change capture, and reads
-run concurrently with the writer instead of queuing behind it. The connection
-is read-only at the SQLite layer, so a write inside the closure is refused. A
-read issued after an awaited write sees that write.
+**Read through the handle.** Pure reads go through `handle.read`, which uses
+four read-only connection workers. Independent reads run concurrently with each
+other and the writer. Each closure runs in one transaction, so all its SQL
+statements see a consistent snapshot. SQLite refuses writes on these
+connections. A read issued after an awaited write sees that write.
+
+The readers share a queue holding at most 64 waiting operations. When it is
+full, callers wait for admission; cancelled operations that have not started
+are discarded. Live queries use the same pool.
 
 ```rust
 let titles: Vec<String> = handle.read(|conn| {
@@ -161,6 +165,14 @@ loop {
 }
 ```
 
+For expensive result assembly, `handle.read_processed(read, process)` fetches
+owned values in the read transaction, then passes them to a separate bounded
+pool after releasing the connection. Fetch every database input in `read`;
+`process` receives owned values without a SQL context. The live equivalents are
+`subscribe_processed` and `subscribe_reconfigurable_processed`: dependencies
+stay attached to the read that produced the data, and superseded requests do
+not replace newer results.
+
 Everything else follows the same ownership boundary: `handle.write_with_blobs`
 commits a row and its file bytes in one transaction, `handle.pending_writes` reconstructs
 unpublished writes after restart, `handle.connect_sync` starts the background
@@ -176,9 +188,9 @@ sync needs to be correct, and the host owns the product.
 coven owns the sync layer and the database connections:
 
 - The SQLite connections: one writer, where coven runs the change-capture
-  session and keeps its own bookkeeping, and a read-only companion for
-  queries. You run your writes through the first and your reads through the
-  second; there is no connection coven does not own.
+  session and keeps its own bookkeeping, and a bounded pool of read-only
+  connections for application queries. Callers use the handle's write and read
+  methods; every connection stays owned by coven.
 - Capturing local changes and applying remote ones.
 - Encrypting, signing, and verifying everything that leaves the device.
 - Moving rows and files through your storage.

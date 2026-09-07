@@ -26,6 +26,7 @@ use crate::store_blobs::{StoreBlobAccess, StoreBlobs};
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::ConfigProvider;
+use coven_database::store::StoreReads;
 use coven_database::Database;
 use coven_database::StoreDatabase;
 use coven_foundation::clock::ClockRef;
@@ -57,7 +58,7 @@ use coven_replication::sync::{BlobCacheError, BlobStream};
 /// home-less full handle does — there is no sync loop to reuse.
 #[derive(Clone)]
 pub struct CovenReadHandle {
-    database: StoreDatabase,
+    reads: StoreReads,
     blobs: StoreBlobs,
     security: StoreSecurity,
 }
@@ -66,6 +67,7 @@ impl CovenReadHandle {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         db: Database,
+        reads: StoreReads,
         store_dir: StoreDir,
         config_provider: ConfigProvider,
         key_service: StoreKeys,
@@ -104,7 +106,7 @@ impl CovenReadHandle {
         );
         let blobs = StoreBlobs::new(database.clone(), blob_access, local_blob_access);
         Self {
-            database,
+            reads,
             blobs,
             security,
         }
@@ -114,8 +116,8 @@ impl CovenReadHandle {
     ///
     /// This is the read handle's form of
     /// [`CovenHandle::read`](crate::CovenHandle::read): the closure receives
-    /// the same [`SqlReadContext`](crate::SqlReadContext), and Coven serializes the
-    /// query on its retained read-only connection.
+    /// the same [`SqlReadContext`](crate::SqlReadContext), and Coven runs the
+    /// query in one transaction on an available read-only worker.
     pub async fn read<F, R>(&self, f: F) -> CovenResult<R>
     where
         F: for<'connection> FnOnce(crate::SqlReadContext<'connection>) -> CovenResult<R>
@@ -123,7 +125,7 @@ impl CovenReadHandle {
             + 'static,
         R: Send + 'static,
     {
-        crate::store_rows::read_rows(&self.database, f).await
+        crate::store_rows::read_rows(&self.reads, f).await
     }
 
     /// Capture the exact current blob-bearing row version from this reader's

@@ -1114,3 +1114,6 @@ async fn the_first_value_after_an_error_is_delivered_even_when_it_repeats() {
         "an error clears the remembered value, so the repeat is delivered"
     );
 }
+
+#[path = "read_responsiveness_tests.rs"]
+mod read_responsiveness;

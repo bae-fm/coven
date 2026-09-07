@@ -1,11 +1,16 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{CovenError, CovenResult, SqlReadContext};
-use coven_database::{QueryDependencies, StoreDatabase, StoreRowWrites};
+use coven_database::store::StoreReads;
+use coven_database::{QueryDependencies, StoreRowWrites};
 
 type Query<T> =
     dyn for<'connection> Fn(SqlReadContext<'connection>) -> CovenResult<T> + Send + Sync;
-type RequestedQuery<Request, Value> = dyn for<'connection> Fn(&Request, SqlReadContext<'connection>) -> CovenResult<Value>
+type QueryOutcome<Value> = CovenResult<(CovenResult<Value>, QueryDependencies)>;
+type RequestedQuery<Request, Value> = dyn Fn(
+        StoreReads,
+        Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = QueryOutcome<Value>> + Send>>
     + Send
     + Sync;
 
@@ -205,7 +210,7 @@ impl<Request, Value> ReconfigurableLiveQueryEvent<Request, Value> {
 /// are always delivered; the first successful value after an error is too.
 pub struct ReconfigurableLiveQuery<Request, Value> {
     _writer: StoreRowWrites,
-    reader: StoreDatabase,
+    reader: StoreReads,
     changes: tokio::sync::broadcast::Receiver<Arc<coven_database::CommittedChanges>>,
     dependencies: QueryDependencies,
     pending: Option<PendingRun>,
@@ -226,12 +231,73 @@ where
 {
     pub(crate) fn new<F>(
         writer: StoreRowWrites,
-        reader: StoreDatabase,
+        reader: StoreReads,
         initial_request: Request,
         query: F,
     ) -> Self
     where
         F: for<'connection> Fn(&Request, SqlReadContext<'connection>) -> CovenResult<Value>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let query = Arc::new(query);
+        Self::from_query(writer, reader, initial_request, move |reader, request| {
+            let query = query.clone();
+            Box::pin(async move {
+                reader
+                    .read_tracked(move |sql| query(&request, sql))
+                    .await
+                    .map_err(CovenError::from)
+            })
+        })
+    }
+
+    pub(crate) fn new_processed<F, P, Raw>(
+        writer: StoreRowWrites,
+        reader: StoreReads,
+        initial_request: Request,
+        read: F,
+        process: P,
+    ) -> Self
+    where
+        F: for<'connection> Fn(&Request, SqlReadContext<'connection>) -> CovenResult<Raw>
+            + Send
+            + Sync
+            + 'static,
+        P: Fn(&Request, Raw) -> CovenResult<Value> + Send + Sync + 'static,
+        Raw: Send + 'static,
+    {
+        let read = Arc::new(read);
+        let process = Arc::new(process);
+        Self::from_query(writer, reader, initial_request, move |reader, request| {
+            let read = read.clone();
+            let process = process.clone();
+            Box::pin(async move {
+                let extraction_request = request.clone();
+                reader
+                    .read_tracked_processed(
+                        move |sql| read(&extraction_request, sql),
+                        move |raw| process(&request, raw),
+                    )
+                    .await
+                    .map_err(CovenError::from)
+            })
+        })
+    }
+
+    fn from_query<F>(
+        writer: StoreRowWrites,
+        reader: StoreReads,
+        initial_request: Request,
+        query: F,
+    ) -> Self
+    where
+        F: Fn(
+                StoreReads,
+                Request,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = QueryOutcome<Value>> + Send>>
             + Send
             + Sync
             + 'static,
@@ -286,11 +352,7 @@ where
             let state = self.current.clone();
             let query = self.query.clone();
             let request = state.request.clone();
-            let outcome = self
-                .reader
-                .read_tracked(move |sql| query(&request, sql))
-                .await
-                .map_err(CovenError::from);
+            let outcome = query(self.reader.clone(), request).await;
 
             if self.request_receiver.has_changed().unwrap_or(false) {
                 self.pending
@@ -416,7 +478,7 @@ impl<T> LiveQuery<T>
 where
     T: Clone + PartialEq + Send + 'static,
 {
-    pub(crate) fn new<F>(writer: StoreRowWrites, reader: StoreDatabase, query: F) -> Self
+    pub(crate) fn new<F>(writer: StoreRowWrites, reader: StoreReads, query: F) -> Self
     where
         F: for<'connection> Fn(SqlReadContext<'connection>) -> CovenResult<T>
             + Send
@@ -426,6 +488,31 @@ where
         let query: Arc<Query<T>> = Arc::new(query);
         Self {
             inner: ReconfigurableLiveQuery::new(writer, reader, (), move |(), sql| query(sql)),
+        }
+    }
+
+    pub(crate) fn new_processed<F, P, Raw>(
+        writer: StoreRowWrites,
+        reader: StoreReads,
+        read: F,
+        process: P,
+    ) -> Self
+    where
+        F: for<'connection> Fn(SqlReadContext<'connection>) -> CovenResult<Raw>
+            + Send
+            + Sync
+            + 'static,
+        P: Fn(Raw) -> CovenResult<T> + Send + Sync + 'static,
+        Raw: Send + 'static,
+    {
+        Self {
+            inner: ReconfigurableLiveQuery::new_processed(
+                writer,
+                reader,
+                (),
+                move |(), sql| read(sql),
+                move |(), raw| process(raw),
+            ),
         }
     }
 

@@ -1,9 +1,9 @@
-//! The owned SQLite connection.
+//! Owned SQLite writes and concurrent application reads.
 //!
-//! coven owns one `rusqlite::Connection` together with the sync bookkeeping
-//! beside it. Every database access — the host's app SQL, coven's bookkeeping,
-//! changeset capture and apply — runs against that one connection, so access is
-//! serialized.
+//! [`Database`] serializes writes, sync bookkeeping, changeset capture and
+//! apply on its owned connection. [`store::StoreReads`] owns a bounded pool of
+//! read-only connections for application queries, with one transaction per
+//! operation and separate bounded workers for processing owned query results.
 //!
 //! Hosts open coven with `Coven::builder` and run app SQL through
 //! `CovenHandle::write` or `CovenHandle::read`.

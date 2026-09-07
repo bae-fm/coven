@@ -36,6 +36,7 @@ use crate::store_recovery::StoreRecovery;
 use crate::store_rows::StoreRows;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::{ConfigProvider, StoreSync, SyncError};
+use coven_database::store::StoreReads;
 use coven_database::{Database, DbError, StoreDatabase};
 use coven_foundation::clock::ClockRef;
 use coven_foundation::store_dir::StoreDir;
@@ -149,7 +150,7 @@ impl CovenHandle {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         db: Database,
-        read_db: Database,
+        read_database: StoreReads,
         store_dir: StoreDir,
         config_provider: ConfigProvider,
         key_service: StoreKeys,
@@ -188,7 +189,6 @@ impl CovenHandle {
             cloud_storage.clone(),
             local_blob_access.clone(),
         );
-        let read_database = StoreDatabase::from_database(read_db);
         let sync = StoreSync::new(
             config_provider.clone(),
             security.clone(),
@@ -258,6 +258,61 @@ impl CovenHandle {
         R: Send + 'static,
     {
         self.rows.read(read).await
+    }
+
+    /// Read owned data in one snapshot, then process it on bounded CPU workers
+    /// after releasing the database connection. The processor receives owned
+    /// data without a SQL context; include every needed lookup in the read.
+    pub async fn read_processed<F, P, Raw, R>(&self, read: F, process: P) -> crate::CovenResult<R>
+    where
+        F: for<'connection> FnOnce(crate::SqlReadContext<'connection>) -> crate::CovenResult<Raw>
+            + Send
+            + 'static,
+        P: FnOnce(Raw) -> crate::CovenResult<R> + Send + 'static,
+        Raw: Send + 'static,
+        R: Send + 'static,
+    {
+        self.rows.read_processed(read, process).await
+    }
+
+    /// Track a SQL extraction and process its owned result after its snapshot
+    /// ends. Commits during processing remain pending for the next query run.
+    pub fn subscribe_processed<F, P, Raw, R>(&self, read: F, process: P) -> crate::LiveQuery<R>
+    where
+        F: for<'connection> Fn(crate::SqlReadContext<'connection>) -> crate::CovenResult<Raw>
+            + Send
+            + Sync
+            + 'static,
+        P: Fn(Raw) -> crate::CovenResult<R> + Send + Sync + 'static,
+        Raw: Send + 'static,
+        R: Clone + PartialEq + Send + 'static,
+    {
+        self.rows.subscribe_processed(read, process)
+    }
+
+    /// Track and process replaceable requests without publishing superseded
+    /// results. Both stages use the exact same request revision.
+    pub fn subscribe_reconfigurable_processed<Request, F, P, Raw, R>(
+        &self,
+        request: Request,
+        read: F,
+        process: P,
+    ) -> crate::ReconfigurableLiveQuery<Request, R>
+    where
+        Request: Clone + PartialEq + Send + Sync + 'static,
+        F: for<'connection> Fn(
+                &Request,
+                crate::SqlReadContext<'connection>,
+            ) -> crate::CovenResult<Raw>
+            + Send
+            + Sync
+            + 'static,
+        P: Fn(&Request, Raw) -> crate::CovenResult<R> + Send + Sync + 'static,
+        Raw: Send + 'static,
+        R: Clone + PartialEq + Send + 'static,
+    {
+        self.rows
+            .subscribe_reconfigurable_processed(request, read, process)
     }
 
     /// Create a query that returns its initial value and runs again when a

@@ -126,12 +126,12 @@ both hold the invariant above the same way: they run on read-only SQLite
 connections, so a write through them is refused by SQLite itself — a read
 cannot bypass capture because it cannot write at all.
 
-- **In the host's own process**: `handle.read(...)`. The full handle
-  opens a read-only companion connection on the same database, on its own
-  thread; a pure read runs there, concurrent with the writer instead of
-  queued behind it, with no session attached. Read-your-writes holds for
-  committed writes: a `read` after an awaited `write` sees that
-  data.
+- **In the host's own process**: `handle.read(...)`. The full handle owns
+  four read-only connections with one worker per connection. Independent reads
+  can run concurrently with each other and the writer, with no change-capture
+  session attached. Each read uses one transaction; all statements in that
+  closure see the same snapshot. A `read` after an awaited `write` sees that
+  committed data.
 - **From a second process (or a second handle)**:
   `Coven::builder(store_dir, config).synced_tables(...).migrations(...).open_read_only()` returns a
   [`CovenReadHandle`](rustdoc:struct:coven::CovenReadHandle) — a same-store
@@ -142,6 +142,25 @@ cannot bypass capture because it cannot write at all.
   exposes reads only: SQL, and blob reads that may fetch from the cloud into
   the device cache. SQLite's locking coordinates the readers with the writer,
   and each new read transaction sees committed state.
+
+Application reads and live queries share a FIFO queue holding at most 64
+waiting operations. A full queue makes callers wait for admission. Cancelling
+an operation before it starts discards its closure; a running read finishes
+and its result is discarded if the caller has gone away. Write dispatch keeps
+its separate contract: a dispatched write can commit even after its caller
+stops awaiting it.
+
+`handle.read_processed(read, process)` separates SQL from expensive processing.
+The first closure fetches owned values in one transaction. Once that transaction
+ends and the connection is available, a separate pool of four workers processes
+the values, with its own queue of at most 64 waiting operations. Processing
+receives no SQL context: all database inputs belong in the first closure.
+
+`handle.subscribe_processed` and `handle.subscribe_reconfigurable_processed`
+apply the same split to live queries. The extracted values retain their exact
+read dependencies through processing, including processing errors. Relevant
+commits arriving during processing remain available for the next query run;
+a result for a superseded request is discarded before delivery.
 
 The write path polices itself: a `handle.write(...)` callback that prepares no
 `INSERT`, `UPDATE`, or `DELETE` statement is rejected as a pure read on the

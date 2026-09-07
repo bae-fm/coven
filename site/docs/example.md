@@ -1,7 +1,7 @@
 # Example
 
 Here we build a small todo app to show how coven fits into a host. The app owns
-its schema, its UI, and its product policy. coven owns the SQLite connection,
+its schema, its UI, and its product policy. coven owns the SQLite connections,
 change capture, encrypted sync, membership, and blob transfer. The two meet at
 one call to open the database and a handful of methods after that.
 
@@ -22,7 +22,7 @@ apply pending Coven migrations or requires it to refuse them; readers always
 refuse. The writer advances the Coven ladder before any host migration rungs,
 then seeds its clock off the rows already on disk, attaches the change-capture
 session to the synced tables, and spawns the threads that own the connections —
-a writer, and a read-only companion that backs `handle.read`.
+one writer and a pool of read-only connections that backs `handle.read`.
 
 ```rust
 use coven::{Coven, CovenMigrationPolicy, Migration, RowIdentity, SyncedTable};
@@ -121,12 +121,12 @@ always sorts after them.
 ## Read a row
 
 Reads go through [`handle.read`](rustdoc:struct:coven::CovenHandle), which
-runs the closure on a read-only companion connection: no change capture, and
-reads run concurrently with the writer instead of queuing behind it. The
-closure gets a `SqlReadContext` with query operations but no retained connection
-(and no stamp to mint on a read), and a write inside it is refused by SQLite —
-the connection is read-only. A
-read issued after an awaited write sees that write.
+runs the closure in one transaction on a read-only connection from a bounded
+pool. Independent reads can run concurrently with each other and the writer,
+while every statement in one closure sees a consistent snapshot. The closure
+gets a `SqlReadContext` with query operations but no retained connection
+(and no stamp to mint on a read). SQLite refuses writes on that connection.
+A read issued after an awaited write sees that write.
 
 ```rust
 let titles: Vec<String> = handle
@@ -141,6 +141,13 @@ let titles: Vec<String> = handle
     })
     .await?;
 ```
+
+If building the result requires expensive parsing or computation, use
+`handle.read_processed(read, process)`: fetch every database input as owned
+values in `read`, then build the result in `process`. Processing runs on
+separate bounded workers after the read transaction has ended. For values that
+must stay current, `handle.subscribe_processed` repeats the same extraction
+and processing when a relevant committed change occurs.
 
 A local-only app stops here: open the handle, write through `handle.write`, read
 through `handle.read`, and never build any of the sync machinery below.

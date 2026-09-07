@@ -173,8 +173,8 @@ pub(crate) const KEYRING_BOUNDARY: &[GatedCapability] = &[GatedCapability {
 /// identity of that runtime is coherent by construction. Ambient acquisition
 /// (`Handle::current`) is a process-state read and has its own reviewed homes:
 /// the host API edge that donates the host's runtime to blob staging, and the
-/// connection thread's drop path that must detect whether joining would stall
-/// an executor worker.
+/// connection and bounded-worker drop paths that must detect whether joining
+/// would stall an executor worker.
 pub(crate) const RUNTIME_BOUNDARY: &[GatedCapability] = &[
     GatedCapability {
         kind: "tokio runtime construction",
@@ -200,6 +200,7 @@ pub(crate) const RUNTIME_BOUNDARY: &[GatedCapability] = &[
         allowed: &[
             "crates/coven/src/store_sync/blobs.rs",
             "crates/coven-database/src/database_connection.rs",
+            "crates/coven-foundation/src/bounded_workers.rs",
         ],
     },
 ];

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::handle::CovenHandle;
 use crate::store_sync::ConfigProvider;
 use crate::{Migration, MigrationError};
+use coven_database::store::StoreReads;
 use coven_database::{CovenMigrationPolicy, Database, DbError, OpenError};
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::config::{Config, HomeStorage};
@@ -351,21 +352,9 @@ impl CovenBuilder {
             coven_migration_policy,
             &migrations,
         )?;
-        // A second, read-only connection on the same database, opened after the
-        // writer completed its migrations so the schema exists. It backs
-        // [`CovenHandle::read`]: a pure read runs here on its own connection
-        // thread, concurrent with the writer rather than queued behind it, and
-        // attaches no changeset session. Opening it fails `open()` loudly — there is
-        // no full handle without its read path.
-        let read_db = Database::open_read_only(
-            &db_path,
-            tables,
-            self.blob_tombstone_grace,
-            transfer_limits,
-            config.device_id.clone(),
-            self.clock.clone(),
-            &migrations,
-        )?;
+        // Application reads get independent snapshots after the writer has
+        // completed schema validation. Opening every reader is part of open.
+        let read_db = StoreReads::open(&db_path)?;
         let (key_service, key_custody, identity_custody) =
             resolve_custody(&config, &store_dir, self.key_custody, self.identity_custody);
         Ok(CovenHandle::new(
@@ -427,8 +416,10 @@ impl CovenBuilder {
         )?;
         let (key_service, key_custody, identity_custody) =
             resolve_custody(&config, &store_dir, self.key_custody, self.identity_custody);
+        let reads = StoreReads::open(&db_path)?;
         Ok(crate::read_handle::CovenReadHandle::new(
             db,
+            reads,
             store_dir,
             provider,
             key_service,

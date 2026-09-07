@@ -19,6 +19,9 @@ pub(crate) use device_join::{
 };
 pub mod device_join_journal;
 mod host_sql;
+mod host_sql_reads;
+mod store_reads;
+pub use store_reads::StoreReads;
 mod host_sql_transaction;
 pub(crate) use host_write_operation::{NewBlob, StagedBlobBatch};
 pub(crate) use local_blob_cleanup::{

@@ -3,15 +3,15 @@ use coven_database::{HostWriteError, HostWriteOperation, StoreRowWrites};
 
 use crate::store_sync::StoreSync;
 use crate::{CovenError, CovenResult};
-use coven_database::StoreDatabase;
+use coven_database::store::StoreReads;
 
-/// Run a host read on `database`'s retained read connection.
+/// Run a host read through `database`'s bounded application reader pool.
 ///
-/// The connection's own failure to carry the read out and the read's own
+/// The worker's own failure to carry the read out and the read's own
 /// failure are separate results; flattening them is the only thing this adds,
 /// and it is the same for every reader. Both the full handle's rows owner and
 /// the read-only handle call it, so a read means one thing across both.
-pub(crate) async fn read_rows<F, R>(database: &StoreDatabase, read: F) -> CovenResult<R>
+pub(crate) async fn read_rows<F, R>(database: &StoreReads, read: F) -> CovenResult<R>
 where
     F: for<'connection> FnOnce(SqlReadContext<'connection>) -> CovenResult<R> + Send + 'static,
     R: Send + 'static,
@@ -22,7 +22,7 @@ where
 #[derive(Clone)]
 pub(crate) struct StoreRows {
     writes: StoreRowWrites,
-    read_database: StoreDatabase,
+    read_database: StoreReads,
     master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
     sync: StoreSync,
 }
@@ -30,7 +30,7 @@ pub(crate) struct StoreRows {
 impl StoreRows {
     pub(crate) fn new(
         writes: StoreRowWrites,
-        read_database: StoreDatabase,
+        read_database: StoreReads,
         master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
         sync: StoreSync,
     ) -> Self {
@@ -59,6 +59,68 @@ impl StoreRows {
         R: Send + 'static,
     {
         read_rows(&self.read_database, read).await
+    }
+
+    pub(crate) async fn read_processed<F, P, Raw, R>(&self, read: F, process: P) -> CovenResult<R>
+    where
+        F: for<'connection> FnOnce(SqlReadContext<'connection>) -> CovenResult<Raw>
+            + Send
+            + 'static,
+        P: FnOnce(Raw) -> CovenResult<R> + Send + 'static,
+        Raw: Send + 'static,
+        R: Send + 'static,
+    {
+        self.read_database
+            .read_processed(read, process)
+            .await
+            .map_err(CovenError::from)?
+    }
+
+    pub(crate) fn subscribe_processed<F, P, Raw, R>(
+        &self,
+        read: F,
+        process: P,
+    ) -> crate::LiveQuery<R>
+    where
+        F: for<'connection> Fn(SqlReadContext<'connection>) -> CovenResult<Raw>
+            + Send
+            + Sync
+            + 'static,
+        P: Fn(Raw) -> CovenResult<R> + Send + Sync + 'static,
+        Raw: Send + 'static,
+        R: Clone + PartialEq + Send + 'static,
+    {
+        crate::LiveQuery::new_processed(
+            self.writes.clone(),
+            self.read_database.clone(),
+            read,
+            process,
+        )
+    }
+
+    pub(crate) fn subscribe_reconfigurable_processed<Request, F, P, Raw, R>(
+        &self,
+        request: Request,
+        read: F,
+        process: P,
+    ) -> crate::ReconfigurableLiveQuery<Request, R>
+    where
+        Request: Clone + PartialEq + Send + Sync + 'static,
+        F: for<'connection> Fn(&Request, SqlReadContext<'connection>) -> CovenResult<Raw>
+            + Send
+            + Sync
+            + 'static,
+        P: Fn(&Request, Raw) -> CovenResult<R> + Send + Sync + 'static,
+        Raw: Send + 'static,
+        R: Clone + PartialEq + Send + 'static,
+    {
+        crate::ReconfigurableLiveQuery::new_processed(
+            self.writes.clone(),
+            self.read_database.clone(),
+            request,
+            read,
+            process,
+        )
     }
 
     pub(crate) fn subscribe<F, R>(&self, query: F) -> crate::LiveQuery<R>
