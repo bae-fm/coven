@@ -119,36 +119,6 @@ pub(super) fn install_genesis_store_publication_on(
     Ok(())
 }
 
-pub(super) fn install_store_publication_successor_on(
-    transaction: &rusqlite::Transaction<'_>,
-    expected: &ObservedStorePublication,
-    successor: &ObservedStorePublication,
-) -> Result<(), DbError> {
-    let successor_bytes = successor.record.to_bytes();
-    let updated = transaction
-        .execute(
-            "UPDATE store_publication_current
-             SET record_hash = ?1, record_bytes = ?2, provider_version = ?3
-             WHERE singleton = 1 AND record_hash = ?4 AND record_bytes = ?5
-               AND provider_version = ?6",
-            rusqlite::params![
-                successor.record.record_hash().to_string(),
-                successor_bytes,
-                successor.version.as_provider(),
-                expected.record.record_hash().to_string(),
-                expected.record.to_bytes(),
-                expected.version.as_provider(),
-            ],
-        )
-        .map_err(DbError::from)?;
-    if updated != 1 {
-        return Err(DbError::Message(
-            "Store publication boundary changed before local completion".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 impl StoreSession<'_> {
     pub(crate) fn store_current_publication(&self) -> Result<ObservedStorePublication, DbError> {
         load_store_current_publication_on(self.conn)
