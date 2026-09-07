@@ -113,6 +113,14 @@ impl ExactSlotStorage for CountingCloudHome {
         self.counted().create_at(upload, control).await
     }
 
+    async fn create_versioned_at(
+        &self,
+        upload: &ExactUpload<'_>,
+        control: &UploadControl,
+    ) -> Result<ExactCreateOutcome, CloudHomeError> {
+        self.counted().create_versioned_at(upload, control).await
+    }
+
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         self.counted().read_at(slot).await
     }
@@ -164,6 +172,10 @@ impl ExactSlotStorage for CountingCloudHome {
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         self.counted().delete_at(slot).await
+    }
+
+    async fn delete_versioned_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        self.counted().delete_versioned_at(slot).await
     }
 
     async fn delete_and_verify_absent(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
