@@ -24,6 +24,9 @@ pub type CovenResult<T> = Result<T, CovenError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CovenError {
+    /// A host callback's error, retained with its concrete type and source chain.
+    #[error("host callback failed: {0}")]
+    Host(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
     #[error("database error: {0}")]
     Database(#[source] Box<DbError>),
     #[error("migration error: {0}")]
@@ -52,11 +55,13 @@ pub enum CovenError {
         "write failed: {write}; failed to remove installed local blobs during rollback: {rollback}"
     )]
     WriteRollbackFailed {
+        #[source]
         write: Box<CovenError>,
         rollback: coven_database::BlobFileFailures,
     },
     #[error("write failed: {operation}; failed to remove unpublished local blobs: {cleanup}")]
     BlobCleanupFailed {
+        #[source]
         operation: Box<CovenError>,
         cleanup: coven_database::BlobFileFailures,
     },

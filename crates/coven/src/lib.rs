@@ -14,6 +14,8 @@ mod cloud_outbox_live_query;
 pub(crate) mod coven;
 mod device_pairing;
 mod handle;
+#[cfg(test)]
+mod host_callback_error_tests;
 mod live_query;
 #[cfg(test)]
 mod live_query_tests;
