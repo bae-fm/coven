@@ -310,6 +310,19 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
         })
     }
 
+    /// Require an earlier blob reference to still describe this transaction's
+    /// current row and stored object. Call before changing or deleting the row;
+    /// a stale reference aborts the write when the error is propagated.
+    pub fn validate_row_blob_ref(
+        &self,
+        reference: &coven_protocol::blob::RowBlobRef,
+    ) -> Result<(), DbError> {
+        crate::with_coven_sql_authority(|| {
+            let table = self.blob_table(reference.table())?;
+            Database::validate_row_blob_ref_on(self.transaction, self.gates, table, reference)
+        })
+    }
+
     pub fn enqueue_blob_delete(
         &self,
         blob: &coven_protocol::blob::RowBlobRef,

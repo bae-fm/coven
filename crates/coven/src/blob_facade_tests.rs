@@ -7,6 +7,9 @@
 
 use coven_replication::sync::test_helpers::*;
 
+#[path = "blob_reference_validation_tests.rs"]
+mod reference_validation;
+
 struct PauseUploads(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 #[async_trait::async_trait]

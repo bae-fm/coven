@@ -161,19 +161,18 @@ impl StoreDatabase {
         &self,
         reference: &coven_protocol::blob::RowBlobRef,
     ) -> Result<(), DbError> {
-        let current = self
-            .row_blob_ref(reference.table(), reference.row_id())
-            .await?;
-        if &current != reference {
-            return Err(DbError::Message(format!(
-                "row blob reference {:?}/{:?}/{:?} at {:?} is stale",
-                reference.table(),
-                reference.row_id(),
-                reference.column(),
-                reference.row_stamp()
-            )));
-        }
-        Ok(())
+        let reference = reference.clone();
+        self.call_store(move |session| {
+            let table = session
+                .synced_tables
+                .iter()
+                .find(|table| table.name() == reference.table())
+                .ok_or_else(|| {
+                    DbError::Message(format!("undeclared synced table {:?}", reference.table()))
+                })?;
+            Database::validate_row_blob_ref_on(session.conn, session.gates, table, &reference)
+        })
+        .await
     }
 
     pub async fn external_blob_for_row(

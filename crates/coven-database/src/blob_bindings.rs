@@ -284,6 +284,25 @@ impl Database {
         })
     }
 
+    pub(crate) fn validate_row_blob_ref_on(
+        conn: &Connection,
+        gates: &Gates,
+        table: &SyncedTable,
+        reference: &RowBlobRef,
+    ) -> Result<(), DbError> {
+        let current = Self::row_blob_ref_on(conn, gates, table, reference.row_id())?;
+        if &current != reference {
+            return Err(DbError::Message(format!(
+                "row blob reference {:?}/{:?}/{:?} at {:?} is stale",
+                reference.table(),
+                reference.row_id(),
+                reference.column(),
+                reference.row_stamp()
+            )));
+        }
+        Ok(())
+    }
+
     /// The same reference for a row that may not be there, `None` when it is
     /// not. This is the shape a list-shaped read needs: a caller asking about
     /// many ids at once holds ids it has not checked, and one naming no live
