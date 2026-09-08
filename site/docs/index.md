@@ -165,13 +165,17 @@ loop {
 }
 ```
 
-For expensive result assembly, `handle.read_processed(read, process)` fetches
-owned values in the read transaction, then passes them to a separate bounded
-pool after releasing the connection. Fetch every database input in `read`;
-`process` receives owned values without a SQL context. The live equivalents are
-`subscribe_processed` and `subscribe_reconfigurable_processed`: dependencies
+For expensive result assembly, `handle.read(fetch).process(transform).await`
+fetches owned values in the read transaction, then passes them to a separate
+bounded pool after releasing the connection. Fetch every database input in `fetch`;
+`transform` receives owned values without a SQL context. The live equivalents are
+`subscribe(fetch).process(transform)` and
+`subscribe_reconfigurable(request, fetch).process(transform)`: dependencies
 stay attached to the read that produced the data, and superseded requests do
 not replace newer results.
+
+Without `.process(...)`, awaiting the read returns the fetched values directly.
+Reads begin when awaited; subscriptions begin when their `next()` is awaited.
 
 Everything else follows the same ownership boundary: `handle.write_with_blobs`
 commits a row and its file bytes in one transaction, `handle.pending_writes` reconstructs

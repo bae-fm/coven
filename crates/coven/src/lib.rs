@@ -19,6 +19,7 @@ mod host_callback_error_tests;
 mod live_query;
 #[cfg(test)]
 mod live_query_tests;
+mod read;
 mod read_handle;
 pub(crate) mod store_blobs;
 pub(crate) mod store_circles;
@@ -172,6 +173,7 @@ pub use live_query::{
     LiveQuery, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, ReconfigurableLiveQuery,
     ReconfigurableLiveQueryCause, ReconfigurableLiveQueryEvent,
 };
+pub use read::Read;
 pub use read_handle::CovenReadHandle;
 pub use store_joining::DeviceAdmissionError;
 pub use store_security::CloudHomeKeyState;

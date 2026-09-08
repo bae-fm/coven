@@ -65,41 +65,12 @@ impl StoreReads {
             .await
     }
 
-    pub async fn read_processed<F, P, Raw, R, E>(
-        &self,
-        read: F,
-        process: P,
-    ) -> Result<Result<R, E>, DbError>
+    /// Run owned result processing without occupying a read connection.
+    pub async fn process<F, R>(&self, process: F) -> R
     where
-        F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<Raw, E> + Send + 'static,
-        P: FnOnce(Raw) -> Result<R, E> + Send + 'static,
-        Raw: Send + 'static,
+        F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
-        E: Send + 'static,
     {
-        match self.read(read).await? {
-            Ok(raw) => Ok(self.processing.call(move |()| process(raw)).await),
-            Err(error) => Ok(Err(error)),
-        }
-    }
-
-    pub async fn read_tracked_processed<F, P, Raw, R, E>(
-        &self,
-        read: F,
-        process: P,
-    ) -> Result<(Result<R, E>, QueryDependencies), DbError>
-    where
-        F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<Raw, E> + Send + 'static,
-        P: FnOnce(Raw) -> Result<R, E> + Send + 'static,
-        Raw: Send + 'static,
-        R: Send + 'static,
-        E: Send + 'static,
-    {
-        let (result, dependencies) = self.read_tracked(read).await?;
-        let result = match result {
-            Ok(raw) => self.processing.call(move |()| process(raw)).await,
-            Err(error) => Err(error),
-        };
-        Ok((result, dependencies))
+        self.processing.call(move |()| process()).await
     }
 }

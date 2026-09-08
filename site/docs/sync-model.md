@@ -150,17 +150,25 @@ and its result is discarded if the caller has gone away. Write dispatch keeps
 its separate contract: a dispatched write can commit even after its caller
 stops awaiting it.
 
-`handle.read_processed(read, process)` separates SQL from expensive processing.
-The first closure fetches owned values in one transaction. Once that transaction
-ends and the connection is available, a separate pool of four workers processes
+`handle.read(fetch).process(transform).await` separates SQL from expensive
+processing. The first closure fetches owned values in one transaction. Once that
+transaction ends and the connection is available, a separate pool of four workers processes
 the values, with its own queue of at most 64 waiting operations. Processing
 receives no SQL context: all database inputs belong in the first closure.
 
-`handle.subscribe_processed` and `handle.subscribe_reconfigurable_processed`
+`handle.subscribe(fetch).process(transform)` and
+`handle.subscribe_reconfigurable(request, fetch).process(transform)`
 apply the same split to live queries. The extracted values retain their exact
 read dependencies through processing, including processing errors. Relevant
 commits arriving during processing remain available for the next query run;
 a result for a superseded request is discarded before delivery.
+
+For a reconfigurable subscription, `fetch` receives `(&request, sql)` and
+`transform` receives `(&request, fetched)`, both for the same request revision.
+Only the processed value needs `Clone` and `PartialEq` for delivery; fetched
+values can be owned types that support neither. Adding processing to a
+subscription starts a fresh sequence of deliveries while retaining its request
+handles.
 
 The write path polices itself: a `handle.write(...)` callback that prepares no
 `INSERT`, `UPDATE`, or `DELETE` statement is rejected as a pure read on the

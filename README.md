@@ -71,8 +71,9 @@ separate write ids and Store commits.
 Pure reads go through `handle.read`, which uses a bounded pool of read-only
 connections. Independent reads can run concurrently with each other and the
 writer; each operation sees one consistent database snapshot. For expensive
-result processing, `handle.read_processed` fetches owned data first, releases
-its connection, then processes the result on separate bounded workers.
+result processing, `handle.read(fetch).process(transform).await` fetches owned
+data first, releases its connection, then processes the result on separate
+bounded workers.
 
 Connect storage when there is somewhere to sync to. A store with no cloud
 home is complete on its own. Identity and keys live in the OS keyring: the

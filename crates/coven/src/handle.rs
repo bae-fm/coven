@@ -250,69 +250,16 @@ impl CovenHandle {
         self.rows.write(sql).await
     }
 
-    pub async fn read<F, R>(&self, read: F) -> crate::CovenResult<R>
+    /// Read one consistent snapshot when awaited. Attach `process` to compute
+    /// a result on separate workers after releasing the connection.
+    pub fn read<F, R>(&self, read: F) -> crate::Read<'_, F>
     where
         F: for<'connection> FnOnce(crate::SqlReadContext<'connection>) -> crate::CovenResult<R>
             + Send
             + 'static,
         R: Send + 'static,
     {
-        self.rows.read(read).await
-    }
-
-    /// Read owned data in one snapshot, then process it on bounded CPU workers
-    /// after releasing the database connection. The processor receives owned
-    /// data without a SQL context; include every needed lookup in the read.
-    pub async fn read_processed<F, P, Raw, R>(&self, read: F, process: P) -> crate::CovenResult<R>
-    where
-        F: for<'connection> FnOnce(crate::SqlReadContext<'connection>) -> crate::CovenResult<Raw>
-            + Send
-            + 'static,
-        P: FnOnce(Raw) -> crate::CovenResult<R> + Send + 'static,
-        Raw: Send + 'static,
-        R: Send + 'static,
-    {
-        self.rows.read_processed(read, process).await
-    }
-
-    /// Track a SQL extraction and process its owned result after its snapshot
-    /// ends. Commits during processing remain pending for the next query run.
-    pub fn subscribe_processed<F, P, Raw, R>(&self, read: F, process: P) -> crate::LiveQuery<R>
-    where
-        F: for<'connection> Fn(crate::SqlReadContext<'connection>) -> crate::CovenResult<Raw>
-            + Send
-            + Sync
-            + 'static,
-        P: Fn(Raw) -> crate::CovenResult<R> + Send + Sync + 'static,
-        Raw: Send + 'static,
-        R: Clone + PartialEq + Send + 'static,
-    {
-        self.rows.subscribe_processed(read, process)
-    }
-
-    /// Track and process replaceable requests without publishing superseded
-    /// results. Both stages use the exact same request revision.
-    pub fn subscribe_reconfigurable_processed<Request, F, P, Raw, R>(
-        &self,
-        request: Request,
-        read: F,
-        process: P,
-    ) -> crate::ReconfigurableLiveQuery<Request, R>
-    where
-        Request: Clone + PartialEq + Send + Sync + 'static,
-        F: for<'connection> Fn(
-                &Request,
-                crate::SqlReadContext<'connection>,
-            ) -> crate::CovenResult<Raw>
-            + Send
-            + Sync
-            + 'static,
-        P: Fn(&Request, Raw) -> crate::CovenResult<R> + Send + Sync + 'static,
-        Raw: Send + 'static,
-        R: Clone + PartialEq + Send + 'static,
-    {
-        self.rows
-            .subscribe_reconfigurable_processed(request, read, process)
+        self.rows.read(read)
     }
 
     /// Create a query that returns its initial value and runs again when a
@@ -322,19 +269,24 @@ impl CovenHandle {
     /// Coven records the tables and columns SQLite reads, and narrows supported
     /// single-table primary-key predicates to their bound values. Other
     /// predicates retain safe table-and-column invalidation.
+    /// Attach [`process`](crate::LiveQuery::process) to move result processing
+    /// off the read connection. Only the final delivered value needs `Clone`
+    /// and `PartialEq`.
     pub fn subscribe<F, R>(&self, query: F) -> crate::LiveQuery<R>
     where
         F: for<'connection> Fn(crate::SqlReadContext<'connection>) -> crate::CovenResult<R>
             + Send
             + Sync
             + 'static,
-        R: Clone + PartialEq + Send + 'static,
+        R: Send + 'static,
     {
         self.rows.subscribe(query)
     }
 
     /// Create a tracked query whose absolute request can be replaced while the
     /// subscription remains active.
+    /// Attach [`process`](crate::ReconfigurableLiveQuery::process) to process
+    /// each result together with the request that produced it.
     pub fn subscribe_reconfigurable<Request, F, R>(
         &self,
         initial_request: Request,
@@ -349,7 +301,7 @@ impl CovenHandle {
             + Send
             + Sync
             + 'static,
-        R: Clone + PartialEq + Send + 'static,
+        R: Send + 'static,
     {
         self.rows.subscribe_reconfigurable(initial_request, query)
     }

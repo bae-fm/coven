@@ -227,7 +227,7 @@ pub struct ReconfigurableLiveQuery<Request, Value> {
 impl<Request, Value> ReconfigurableLiveQuery<Request, Value>
 where
     Request: Clone + PartialEq + Send + Sync + 'static,
-    Value: Clone + PartialEq + Send + 'static,
+    Value: Send + 'static,
 {
     pub(crate) fn new<F>(
         writer: StoreRowWrites,
@@ -242,66 +242,6 @@ where
             + 'static,
     {
         let query = Arc::new(query);
-        Self::from_query(writer, reader, initial_request, move |reader, request| {
-            let query = query.clone();
-            Box::pin(async move {
-                reader
-                    .read_tracked(move |sql| query(&request, sql))
-                    .await
-                    .map_err(CovenError::from)
-            })
-        })
-    }
-
-    pub(crate) fn new_processed<F, P, Raw>(
-        writer: StoreRowWrites,
-        reader: StoreReads,
-        initial_request: Request,
-        read: F,
-        process: P,
-    ) -> Self
-    where
-        F: for<'connection> Fn(&Request, SqlReadContext<'connection>) -> CovenResult<Raw>
-            + Send
-            + Sync
-            + 'static,
-        P: Fn(&Request, Raw) -> CovenResult<Value> + Send + Sync + 'static,
-        Raw: Send + 'static,
-    {
-        let read = Arc::new(read);
-        let process = Arc::new(process);
-        Self::from_query(writer, reader, initial_request, move |reader, request| {
-            let read = read.clone();
-            let process = process.clone();
-            Box::pin(async move {
-                let extraction_request = request.clone();
-                reader
-                    .read_tracked_processed(
-                        move |sql| read(&extraction_request, sql),
-                        move |raw| process(&request, raw),
-                    )
-                    .await
-                    .map_err(CovenError::from)
-            })
-        })
-    }
-
-    fn from_query<F>(
-        writer: StoreRowWrites,
-        reader: StoreReads,
-        initial_request: Request,
-        query: F,
-    ) -> Self
-    where
-        F: Fn(
-                StoreReads,
-                Request,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = QueryOutcome<Value>> + Send>>
-            + Send
-            + Sync
-            + 'static,
-    {
         let changes = writer.subscribe_committed_changes();
         let current = RequestState {
             revision: LiveQueryRevision(0),
@@ -315,10 +255,57 @@ where
             changes,
             dependencies: QueryDependencies::unknown(),
             pending: Some(PendingRun::Initial),
-            query: Arc::new(query),
+            query: Arc::new(move |reader, request| {
+                let query = query.clone();
+                Box::pin(async move {
+                    reader
+                        .read_tracked(move |sql| query(&request, sql))
+                        .await
+                        .map_err(CovenError::from)
+                })
+            }),
             request_receiver,
             requests: LiveQueryRequests { state, sender },
             current,
+            last_delivered: None,
+        }
+    }
+
+    /// Process each fetched value on bounded workers after releasing its read
+    /// connection. Dependencies and request revisions stay attached to the read;
+    /// only processed values are compared when deciding whether to deliver.
+    ///
+    /// The returned subscription starts with an initial result for the latest
+    /// request, even if this subscription previously delivered values. Existing
+    /// request handles continue to control it.
+    pub fn process<P, R>(self, process: P) -> ReconfigurableLiveQuery<Request, R>
+    where
+        P: Fn(&Request, Value) -> CovenResult<R> + Send + Sync + 'static,
+        R: Send + 'static,
+    {
+        let query = self.query;
+        let process = Arc::new(process);
+        ReconfigurableLiveQuery {
+            _writer: self._writer,
+            reader: self.reader,
+            changes: self.changes,
+            dependencies: QueryDependencies::unknown(),
+            pending: Some(PendingRun::Initial),
+            query: Arc::new(move |reader, request| {
+                let query = query.clone();
+                let process = process.clone();
+                Box::pin(async move {
+                    let (result, dependencies) = query(reader.clone(), request.clone()).await?;
+                    let result = match result {
+                        Ok(raw) => reader.process(move || process(&request, raw)).await,
+                        Err(error) => Err(error),
+                    };
+                    Ok((result, dependencies))
+                })
+            }),
+            request_receiver: self.request_receiver,
+            requests: self.requests,
+            current: self.current,
             last_delivered: None,
         }
     }
@@ -335,7 +322,10 @@ where
     /// future preserves the pending request or database change. A commit-caused
     /// rerun whose value equals the last delivered value is not an event; the
     /// query goes back to waiting.
-    pub async fn next(&mut self) -> ReconfigurableLiveQueryEvent<Request, Value> {
+    pub async fn next(&mut self) -> ReconfigurableLiveQueryEvent<Request, Value>
+    where
+        Value: Clone + PartialEq,
+    {
         loop {
             self.await_pending().await;
             self.drain_pending();
@@ -347,7 +337,10 @@ where
 
     /// Evaluate the pending run. `None` means the run produced the value
     /// already delivered and no event is due.
-    async fn run(&mut self) -> Option<ReconfigurableLiveQueryEvent<Request, Value>> {
+    async fn run(&mut self) -> Option<ReconfigurableLiveQueryEvent<Request, Value>>
+    where
+        Value: Clone + PartialEq,
+    {
         loop {
             let state = self.current.clone();
             let query = self.query.clone();
@@ -476,7 +469,7 @@ pub struct LiveQuery<T> {
 
 impl<T> LiveQuery<T>
 where
-    T: Clone + PartialEq + Send + 'static,
+    T: Send + 'static,
 {
     pub(crate) fn new<F>(writer: StoreRowWrites, reader: StoreReads, query: F) -> Self
     where
@@ -491,35 +484,29 @@ where
         }
     }
 
-    pub(crate) fn new_processed<F, P, Raw>(
-        writer: StoreRowWrites,
-        reader: StoreReads,
-        read: F,
-        process: P,
-    ) -> Self
+    /// Process each fetched value after releasing the database connection.
+    /// Only the processed result needs to implement `Clone` and `PartialEq`
+    /// to deliver values through [`next`](Self::next).
+    ///
+    /// The returned subscription delivers an initial processed result even if
+    /// this subscription previously delivered unprocessed values.
+    pub fn process<P, R>(self, process: P) -> LiveQuery<R>
     where
-        F: for<'connection> Fn(SqlReadContext<'connection>) -> CovenResult<Raw>
-            + Send
-            + Sync
-            + 'static,
-        P: Fn(Raw) -> CovenResult<T> + Send + Sync + 'static,
-        Raw: Send + 'static,
+        P: Fn(T) -> CovenResult<R> + Send + Sync + 'static,
+        R: Send + 'static,
     {
-        Self {
-            inner: ReconfigurableLiveQuery::new_processed(
-                writer,
-                reader,
-                (),
-                move |(), sql| read(sql),
-                move |(), raw| process(raw),
-            ),
+        LiveQuery {
+            inner: self.inner.process(move |(), raw| process(raw)),
         }
     }
 
     /// Return the query's initial value, or wait for a committed change that can
     /// affect it and return the value after that commit. A commit whose rerun
     /// produces the value already returned is not a value; the wait continues.
-    pub async fn next(&mut self) -> CovenResult<T> {
+    pub async fn next(&mut self) -> CovenResult<T>
+    where
+        T: Clone + PartialEq,
+    {
         self.inner.next().await.into_result()
     }
 }

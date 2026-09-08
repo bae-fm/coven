@@ -118,14 +118,16 @@ impl CovenReadHandle {
     /// [`CovenHandle::read`](crate::CovenHandle::read): the closure receives
     /// the same [`SqlReadContext`](crate::SqlReadContext), and Coven runs the
     /// query in one transaction on an available read-only worker.
-    pub async fn read<F, R>(&self, f: F) -> CovenResult<R>
+    /// Attach [`process`](crate::Read::process) before awaiting to process owned
+    /// results on separate workers after releasing the connection.
+    pub fn read<F, R>(&self, f: F) -> crate::Read<'_, F>
     where
         F: for<'connection> FnOnce(crate::SqlReadContext<'connection>) -> CovenResult<R>
             + Send
             + 'static,
         R: Send + 'static,
     {
-        crate::store_rows::read_rows(&self.reads, f).await
+        crate::Read::new(&self.reads, f)
     }
 
     /// Capture the exact current blob-bearing row version from this reader's

@@ -143,11 +143,11 @@ let titles: Vec<String> = handle
 ```
 
 If building the result requires expensive parsing or computation, use
-`handle.read_processed(read, process)`: fetch every database input as owned
-values in `read`, then build the result in `process`. Processing runs on
+`handle.read(fetch).process(transform).await`: fetch every database input as
+owned values in `fetch`, then build the result in `transform`. Processing runs on
 separate bounded workers after the read transaction has ended. For values that
-must stay current, `handle.subscribe_processed` repeats the same extraction
-and processing when a relevant committed change occurs.
+must stay current, `handle.subscribe(fetch).process(transform)` repeats the same
+extraction and processing when a relevant committed change occurs.
 
 A local-only app stops here: open the handle, write through `handle.write`, read
 through `handle.read`, and never build any of the sync machinery below.
