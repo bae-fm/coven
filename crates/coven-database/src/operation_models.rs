@@ -242,6 +242,33 @@ impl ActiveStorePublication {
         &self.owner
     }
 
+    pub(crate) fn author_registration(&self) -> &StoreDeviceRegistrationRef {
+        match &self.attempt {
+            ActiveStorePublicationAttempt::AwaitingPreparation {
+                author_registration,
+                ..
+            }
+            | ActiveStorePublicationAttempt::Discarding {
+                author_registration,
+                ..
+            }
+            | ActiveStorePublicationAttempt::Commit {
+                author_registration,
+                ..
+            } => author_registration,
+            ActiveStorePublicationAttempt::MembershipAbandonment { candidate } => {
+                &candidate.commit.author_registration
+            }
+            ActiveStorePublicationAttempt::CompletingCoveredWrite { position, .. } => {
+                &position.author_registration
+            }
+            ActiveStorePublicationAttempt::Snapshot { publication, .. }
+            | ActiveStorePublicationAttempt::SnapshotSuperseded { publication, .. } => {
+                &publication.entry.author_registration
+            }
+        }
+    }
+
     pub fn attempt(
         &self,
     ) -> Result<&coven_protocol::prepared_commit::PreparedStorePublication, DbError> {

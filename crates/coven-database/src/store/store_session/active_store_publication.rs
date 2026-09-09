@@ -38,6 +38,32 @@ pub(crate) fn claim_active_store_publication_on(
     conn: &rusqlite::Connection,
     publication: &ActiveStorePublication,
 ) -> Result<ActiveStorePublicationClaim, DbError> {
+    // Reserving an operation also retains its device signer. A cached writer
+    // cannot claim a new operation after recovery replaces that local signer.
+    // Recovery itself claims while its registration is Created, before a
+    // local device activation exists, so the registration journal is authority.
+    let (device_id, registration_hash, prepared): (String, String, String) = conn
+        .query_row(
+            "SELECT device_id, registration_hash, prepared_object \
+             FROM local_store_device_registration WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            DbError::Message("Store publication requires a local device registration".into())
+        })?;
+    let prepared: coven_protocol::objects::PreparedExactObject = serde_json::from_str(&prepared)
+        .map_err(|error| DbError::context("local Store registration object", error))?;
+    let author = publication.author_registration();
+    if device_id != author.device_id.to_string()
+        || registration_hash != author.registration_hash.to_string()
+        || prepared.reference() != &author.object
+    {
+        return Err(DbError::Message(
+            "Store publication author differs from the current local registration".into(),
+        ));
+    }
     match load_active_store_publication_on(conn)? {
         Some(active) if active == *publication => Ok(ActiveStorePublicationClaim::AlreadyOwned),
         Some(active) => Ok(ActiveStorePublicationClaim::Occupied(

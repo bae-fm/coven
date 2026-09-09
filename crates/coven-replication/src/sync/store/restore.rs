@@ -67,6 +67,7 @@ impl<'storage> RestoringStore<'storage> {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<StoreDeviceRegistrationRef, StoreRegistrationError> {
         let database = self.database.clone();
+        let _authorship = database.author_own_stream().await;
         let storage = self.storage;
         let identity_signer = &self.identity;
         let membership = &self.membership;
@@ -504,7 +505,6 @@ impl<'storage> RestoringStore<'storage> {
                 {
                     return Ok(adopted);
                 }
-                let _authorship = database.author_own_stream().await;
                 let stream_id =
                     coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                         root.store_root_hash,

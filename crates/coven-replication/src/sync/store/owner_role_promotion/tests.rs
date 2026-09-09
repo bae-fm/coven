@@ -13,6 +13,7 @@ mod excluded_authority;
 mod finalization;
 mod issuer_retirement;
 mod preparation;
+mod recovery;
 mod request_retirement;
 mod rotation_staging;
 mod snapshot_authority;

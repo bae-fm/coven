@@ -119,6 +119,18 @@ impl LocalRegistrationRecord {
         state: LocalDeviceRegistrationState,
         subject: &str,
     ) -> Result<(), DbError> {
+        // A retained publication still needs its original device signer to
+        // settle a competing accepted position. Keep that authority until its
+        // owner completes; adoption of the same device remains valid.
+        if let Some(active) = super::active_store_publication::load_active_store_publication_on(tx)?
+        {
+            if active.author_registration() != self.reference() {
+                return Err(DbError::Message(format!(
+                    "cannot replace local Store registration while {:?} owns publication",
+                    active.owner()
+                )));
+            }
+        }
         let objects = self.columns(subject)?;
         let state = encode(&state, subject, "journal state")?;
         tx.execute("DELETE FROM local_store_device_registration", [])?;
