@@ -117,28 +117,7 @@ pub(crate) fn install_circle_bootstrap_connection_on(
                 "Circle bootstrap row blob lacks remote package authority".to_string(),
             ));
         };
-        let locator_hash = stored.locator().locator_hash().to_string();
-        let locator_inserted = conn
-            .execute(
-                "INSERT INTO blob_locators (remote_object_id, locator_hash) VALUES (?1, ?2)
-             ON CONFLICT(remote_object_id) DO NOTHING",
-                rusqlite::params![object_id.to_string(), &locator_hash],
-            )
-            .map_err(DbError::from)?;
-        if locator_inserted == 0 {
-            let retained_locator_hash: String = conn
-                .query_row(
-                    "SELECT locator_hash FROM blob_locators WHERE remote_object_id = ?1",
-                    [object_id.to_string()],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            if retained_locator_hash != locator_hash {
-                return Err(DbError::Message(format!(
-                    "Circle bootstrap blob locator conflicts for {object_id}"
-                )));
-            }
-        }
+        crate::blob_records::validate_stored_locator_on(conn, stored)?;
         let encoded_authority = serde_json::to_string(authority).map_err(|error| {
             DbError::context("serialize Circle bootstrap blob authority", error)
         })?;
@@ -239,6 +218,7 @@ fn install_circle_bootstrap_remote_objects_from_reference_on(
             ],
         )
         .map_err(DbError::from)?;
+        crate::blob_records::record_stored_locator_on(conn, stored)?;
     }
     Ok(())
 }

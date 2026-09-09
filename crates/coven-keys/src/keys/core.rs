@@ -205,13 +205,13 @@ impl std::fmt::Debug for CloudHomeCredentials {
     }
 }
 
-/// Ed25519 keypair for signing changesets and membership changes.
+/// Ed25519 keypair used for Store identities and derived device signers.
 /// The same seed can derive an X25519 keypair for key wrapping.
 ///
-/// One keypair is generated per (store, device) pair: a device holds a
-/// distinct identity in each store it belongs to, so a key scoped to one
-/// store carries no authority in another, and the same device's pubkey does
-/// not appear in more than one store's membership chain.
+/// A Store identity authorizes membership and device registration. Each
+/// registration derives a device signing key from that identity and its
+/// Store root and registration origin; the identity and device signer are
+/// distinct protocol roles.
 #[derive(Clone)]
 pub struct UserKeypair {
     signing_key: SigningKey,
@@ -468,11 +468,10 @@ pub enum RoutingEncryptionError {
     NotEstablished,
 }
 
-/// A device's signing identity's custody FOR ONE STORE: who unlocks it,
-/// where a newly established one is written, and how it is removed. The
-/// signing-key sibling of [`MasterKeyCustody`], same three-method shape and
-/// the same per-store selection, over [`UserKeypair`] instead of a store's
-/// master keyring.
+/// Custody of the Store identity used by this installation: who unlocks it,
+/// where an established identity is written, and how it is removed. Selected
+/// per Store, like [`MasterKeyCustody`], but retains a [`UserKeypair`] instead
+/// of the Store's encryption keyring.
 pub trait DeviceIdentityCustody: Send + Sync {
     /// This store's established signing identity. `Ok(None)` means none has
     /// ever been established — distinct from a failure to produce one (wrong

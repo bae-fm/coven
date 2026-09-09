@@ -2,9 +2,10 @@ mod activated_registration_records;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use circle_operations::circle_current_state_on;
 use circle_operations::circle_publication_context_on;
+pub(crate) use store_session::active_store_publication::{
+    clear_active_store_commit_for_owner_on, load_active_store_publication_on,
+};
 pub(crate) use store_session::payload_store;
-#[cfg(any(test, feature = "test-utils"))]
-use store_session::test_support;
 use store_session::{
     blob_outbox, blob_transitions, circle_authority, circle_controls, circle_operations,
     host_write_capture, host_write_operation, local_blob_cleanup, materialized_commit_index,
@@ -44,20 +45,16 @@ pub(crate) use store_device_state::{
     prune_unreferenced_store_device_states_on, record_store_device_snapshot_on,
 };
 mod store_session;
-pub(crate) use store_session::StoreSession;
+pub use store_session::PreparedStoreSnapshot;
+pub(crate) use store_session::{SnapshotPreparationDirectory, StoreSession};
 pub(crate) use verified_store_authority::VerifiedStoreAuthority;
 
 use crate::{
-    begin_remote_candidate_nonactivation_on, finish_outbound_store_ack_on,
-    load_protocol_inert_object_on, load_remote_object_on, persist_exact_remote_object_on,
-    replace_prepared_merge_head_remote_on, Database, DbError, OutboundStoreAckActivation,
+    load_remote_object_on, persist_exact_remote_object_on, Database, DbError,
+    OutboundStoreAckActivation,
 };
-use coven_protocol::objects::PreparedExactObject;
 use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
-use coven_protocol::remote_object::{
-    remote_object_id, CandidateNonactivationProof, VerifiedCandidateNonactivation,
-};
-use coven_protocol::store_commit::{StoreAckRef, StoreBatchCommitRef, StoreDeviceHead};
+use coven_protocol::store_commit::{StoreAckRef, StoreBatchCommitRef};
 
 const CACHE_BUDGET_STATE_KEY_PREFIX: &str = "cache_budget:";
 
@@ -75,9 +72,8 @@ pub use blob_outbox::{
 pub use blob_transitions::{
     BlobTransitionRoot, MakeRemoteAdmission, MaterializedLocalBlob, PostUpload,
 };
-#[cfg(any(test, feature = "test-utils"))]
-pub use candidate_records::select_author_exclusion_activation_locator;
 pub use candidate_records::CandidateCleanupObject;
+pub use circle_authority::CirclePackageAccess;
 pub use circle_controls::PreparedCircleObjects;
 pub use device_join::DeviceJoinJournalStore;
 pub use host_sql::{SqlContext, SqlReadContext};
@@ -90,38 +86,35 @@ pub use host_write_operation::{BlobFileFailure, BlobFileFailures, WriteBatch};
 pub use host_write_operation::{HostWriteError, HostWriteOperation};
 pub use local_blob_cleanup::LocalBlobCleanup;
 pub use materialization_models::{
-    activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
-    DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, DeviceJoinBootstrapRowData,
-    InstalledReplayBaseline, MembershipAuthorityBytes, OwnedVerifiedMergeMaterialization,
-    PreparedMergeMaterialization, PreparedMergeMaterializationPackage, ResolvedDeviceJoinBootstrap,
-    RetainedAudiencePackage, RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey,
-    RetainedPackageApplication, VerifiedAcknowledgedStoreSnapshot, VerifiedMergeMaterialization,
-    VerifiedMergeMembershipObjects, VerifiedReplayBaselineRetirementProof,
-    VerifiedStoreSnapshotAuthority,
+    activated_merge_membership_remote_objects, DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan,
+    DeviceJoinBootstrapRowData, InstalledReplayBaseline, MembershipAuthorityBytes,
+    OwnedVerifiedMergeMaterialization, PreparedMergeMaterialization,
+    PreparedMergeMaterializationPackage, ResolvedDeviceJoinBootstrap, RetainedAudiencePackage,
+    RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
+    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, VerifiedStoreSnapshotAuthority,
 };
 #[cfg(test)]
 pub(crate) use merge_materialization_transaction::test_install_winning_blob_bindings;
-#[cfg(test)]
-pub(crate) use merge_materialization_transaction::test_retire_circle_bootstrap_coverage;
-pub(crate) use merge_materialization_transaction::MergeMaterializationTransaction;
 #[cfg(any(test, feature = "test-utils"))]
 pub use merge_materialization_transaction::{resolve_and_apply_changeset, ApplyResult};
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use merge_materialization_transaction::{
     test_apply_changeset, test_record_verified_circle_activations,
 };
+pub(crate) use merge_materialization_transaction::{
+    AppliedMergeMaterialization, MergeMaterializationTransaction,
+};
 pub use merge_materialization_transaction::{
     IncomingTimestampPolicy, TableSchema, ValidatedChangeset, WinningRow,
 };
-pub use publication_state::{MergeCandidateAbandonmentPreparation, StoreWritePreparation};
+pub use publication_state::{StorePublicationPreparation, StoreWritePreparation};
 pub(crate) use pull_replay::{
     install_circle_bootstrap_connection_on, install_circle_bootstrap_image_on,
     install_circle_bootstrap_remote_objects_on,
 };
 pub use reclaim::journal::{
-    DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,
-    ReclaimedStorePackage, StoreReclaimCandidateLoss, StoreReclaimJournalError,
-    StuckReclaimOperation,
+    DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimedStorePackage,
+    StoreReclaimJournalError, StuckReclaimOperation,
 };
 pub(crate) use retained_replay::copy_table_with_conflicts;
 pub(crate) use retained_replay::migrate_retained_replay_schema_on;
@@ -131,18 +124,19 @@ pub use retained_replay::{
 };
 pub(crate) use snapshot_image::verify_circle_bootstrap_connection;
 pub use snapshot_image::{
-    CreatedSnapshot, SnapshotBlobAudience, SnapshotBlobFact, SnapshotDatabaseImage,
-    SnapshotImageError, SnapshotImageOperationError,
+    CreatedSnapshot, SnapshotBlobFact, SnapshotDatabaseImage, SnapshotImageError,
+    SnapshotImageOperationError,
 };
-use store_device_state::apply_store_device_exclusion_freezes_on;
 pub use store_session::circle_acknowledgements::CircleAckPublicationInput;
+pub use store_session::observed_store_publication::{
+    AcceptedStoreCommitEvidence, AcceptedStoreCommitPublication, AcceptedStorePublicationInterval,
+    ObservedStorePublication, StoreCommitPublicationOutcome, StorePublicationBoundary,
+};
+pub use store_session::store_records::{CoveredStoreWrite, CoveredStoreWriteCompletion};
 pub use store_session::AdvancedReplayBaseline;
-#[cfg(any(test, feature = "test-utils"))]
-pub use test_support::AuthorExclusionLocatorTamper;
 pub use write_lifecycle::BlockedWriteDiscard;
 
 pub(crate) use store_session::install_verified_snapshot_bootstrap_on;
-pub use store_session::observed_store_publication::ObservedStorePublication;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use store_session::{
     circle_bootstrap_replay_inputs_for_test, retained_merge_replay_inputs_for_test,
@@ -226,10 +220,8 @@ impl StoreDatabaseRuntime {
         }
     }
 
-    pub(crate) async fn author_own_stream(&self) -> OwnStreamAuthorship {
-        OwnStreamAuthorship {
-            _guard: self.own_stream_authorship.clone().lock_owned().await,
-        }
+    pub(crate) async fn author_own_stream(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.own_stream_authorship.clone().lock_owned().await
     }
 
     pub(crate) async fn snapshot_publication_permit(&self) -> SnapshotPublicationPermit {
@@ -271,6 +263,7 @@ pub struct DeviceExclusionPermit {
 /// reading the position through publishing the head that takes it.
 pub struct OwnStreamAuthorship {
     _guard: tokio::sync::OwnedMutexGuard<()>,
+    database: StoreDatabase,
 }
 
 /// This drain's exclusive turn over the blob upload queue, held from reading

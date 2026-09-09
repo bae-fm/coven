@@ -134,8 +134,10 @@ pub enum StoreProtocolError {
 pub struct VerifiedStoreBatchCommit {
     store_root_hash: ObjectHash,
     reference: StoreBatchCommitRef,
-    value: StoreBatchCommit,
-    author: StoreDeviceRegistration,
+    // Verification fixes these immutable records. History checkpoints and
+    // publication futures share them without copying their bodies on the stack.
+    value: std::sync::Arc<StoreBatchCommit>,
+    author: std::sync::Arc<StoreDeviceRegistration>,
 }
 
 fn parse_store_batch_commit(
@@ -162,8 +164,8 @@ impl VerifiedStoreBatchCommit {
         Ok(Self {
             store_root_hash,
             reference,
-            value,
-            author: author.clone(),
+            value: std::sync::Arc::new(value),
+            author: std::sync::Arc::new(author.clone()),
         })
     }
 
@@ -178,8 +180,8 @@ impl VerifiedStoreBatchCommit {
         Ok(Self {
             store_root_hash,
             reference: reference.clone(),
-            value,
-            author: author.clone(),
+            value: std::sync::Arc::new(value),
+            author: std::sync::Arc::new(author.clone()),
         })
     }
 
@@ -346,10 +348,6 @@ pub fn semantic_prefix_from_exact_object(
         })
 }
 
-pub fn head_slot_prefix(device_id: &str, seq: u64) -> String {
-    format!("{STORE_HEAD_PREFIX}{device_id}/{seq}")
-}
-
 pub(crate) fn registration_slot_prefix(device_id: &str) -> String {
     format!("{STORE_DEVICE_REGISTRATION_PREFIX}{device_id}")
 }
@@ -390,8 +388,9 @@ pub fn circle_snapshot_image_semantic_prefix(
     format!("circles/{circle_id}/snapshot-images/{device_id}/{image_hash}")
 }
 
-pub fn snapshot_slot_prefix(device_id: &str, generation: u64) -> String {
-    format!("{STORE_SNAPSHOT_META_PREFIX}{device_id}/{generation}")
+/// Logical metadata prefix for one independently allocated Store snapshot candidate.
+pub fn snapshot_candidate_semantic_prefix(device_id: &str, candidate_id: &str) -> String {
+    format!("{STORE_SNAPSHOT_META_PREFIX}{device_id}/{candidate_id}")
 }
 
 pub fn membership_entry_semantic_prefix(
@@ -454,16 +453,27 @@ pub fn membership_resolution_semantic_prefix(
     format!("store-v1/membership/resolutions/{conflict_hash}/{resolver}/{resolution_hash}")
 }
 
-pub fn membership_rollup_semantic_prefix(author: &str, rollup_hash: ObjectHash) -> String {
-    format!("{STORE_MEMBERSHIP_ROLLUP_PREFIX}{author}/{rollup_hash}")
+pub fn membership_rollup_semantic_prefix(
+    metadata_slot: &ObjectSlot,
+    rollup_hash: ObjectHash,
+) -> String {
+    let owner = snapshot_artifact_owner(metadata_slot);
+    format!("{STORE_MEMBERSHIP_ROLLUP_PREFIX}{owner}/{rollup_hash}")
 }
 
-pub fn snapshot_image_semantic_prefix(author: &str, image_hash: ObjectHash) -> String {
-    format!("{STORE_SNAPSHOT_IMAGE_PREFIX}{author}/{image_hash}")
+pub fn snapshot_image_semantic_prefix(
+    metadata_slot: &ObjectSlot,
+    image_hash: ObjectHash,
+) -> String {
+    let owner = snapshot_artifact_owner(metadata_slot);
+    format!("{STORE_SNAPSHOT_IMAGE_PREFIX}{owner}/{image_hash}")
 }
 
-pub(crate) fn snapshot_semantic_prefix(author: &str, snapshot_hash: ObjectHash) -> String {
-    format!("{STORE_SNAPSHOT_META_PREFIX}{author}/{snapshot_hash}")
+fn snapshot_artifact_owner(metadata_slot: &ObjectSlot) -> ObjectHash {
+    ObjectHash::digest(&domain_json(
+        b"coven.store-snapshot-artifact-owner.v1\0",
+        metadata_slot,
+    ))
 }
 
 pub(crate) fn domain_json(domain: &[u8], value: &impl Serialize) -> Vec<u8> {
@@ -566,13 +576,6 @@ pub(crate) fn validate_store_history_cut(
     validate_commit_frontier(&CommitFrontier(frontier.0.clone()))
 }
 
-pub(super) fn validate_store_device_state_ref(
-    state: &StoreDeviceStateRef,
-) -> Result<(), StoreProtocolError> {
-    validate_recovery_cursors(state.recovery())?;
-    validate_commit_frontier(state.frontier())
-}
-
 pub(super) fn validate_successor_sequence(
     sequence: u64,
     successor: &SuccessorLink,
@@ -587,35 +590,14 @@ pub(super) fn validate_successor_sequence(
 }
 
 pub(super) fn validate_ack_state(
-    store_root_hash: ObjectHash,
-    registration: &StoreDeviceRegistrationRef,
     store_cut: &StoreHistoryCut,
     device_state: &StoreDeviceStateRef,
-    exclusions: &StoreAckExclusionState,
 ) -> Result<(), StoreProtocolError> {
     validate_store_history_cut(store_cut)?;
-    let _ = (store_root_hash, registration);
-    let state_matches = device_state.frontier() == &store_cut.frontier();
-    if !state_matches {
+    if device_state.frontier() != &store_cut.frontier() {
         return Err(StoreProtocolError::DeviceStateMismatch);
     }
-    {
-        let proposal_freezes = &exclusions.proposal_freezes;
-        if proposal_freezes
-            .windows(2)
-            .any(|pair| pair[0].proposal.proposal_id >= pair[1].proposal.proposal_id)
-        {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-        for freeze in proposal_freezes {
-            validate_store_history_cut(&freeze.target_cut)?;
-            freeze.proposal.validate_path()?;
-            if !store_cut.frontier().covers(&freeze.target_cut.frontier()) {
-                return Err(StoreProtocolError::DeviceStateMismatch);
-            }
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 fn validate_membership_coord(coord: &MembershipCoord) -> Result<(), StoreProtocolError> {

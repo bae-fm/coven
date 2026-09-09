@@ -44,16 +44,3 @@ pub(crate) fn clear_table(
         .map(|_| ())
         .map_err(DbError::from)
 }
-
-pub(crate) fn author_exclusion_activation_evidence(
-    connection: &Connection,
-) -> Result<(String, String, String, String), DbError> {
-    connection
-        .query_row(
-            "SELECT exclusion_ref, accepted_cut, activation_commit, activation_head
-             FROM store_author_exclusion_activations",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .map_err(DbError::from)
-}

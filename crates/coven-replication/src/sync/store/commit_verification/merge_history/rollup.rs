@@ -18,6 +18,19 @@ use super::{membership, MergeHistoryVerifier};
 use std::collections::BTreeMap;
 
 impl<'a> MergeHistoryVerifier<'a> {
+    pub(crate) async fn membership_rollup_parts(
+        &self,
+        traversed: membership::TraversedMembership,
+    ) -> Result<
+        (
+            Vec<coven_protocol::store_commit::MembershipRollupStream>,
+            Vec<coven_protocol::store_commit::MembershipRollupResolution>,
+        ),
+        crate::sync::store::membership::AnchoredChainError,
+    > {
+        traversed.into_rollup_parts(&self.commit_verifier).await
+    }
+
     /// Find the membership rollup the Store's newest published snapshot names
     /// and hold its objects for the walk that follows.
     ///
@@ -36,7 +49,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     ///
     /// Returns whether a rollup was adopted.
     pub async fn adopt_published_membership_rollup(&self) -> bool {
-        let meta = match self.commit_verifier.newest_listed_store_snapshot().await {
+        let meta = match self.load_current_snapshot_hint().await {
             Ok(Some(meta)) => meta,
             Ok(None) => {
                 tracing::debug!("no published Store snapshot names a membership rollup");
@@ -63,7 +76,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         match self.admit_membership_rollup(&rollup).await {
             Ok(()) => {
                 tracing::info!(
-                    generation = meta.generation,
+                    snapshot = %meta.snapshot_hash(),
                     streams,
                     heads,
                     "took the membership chain from a published rollup"
@@ -75,6 +88,24 @@ impl<'a> MergeHistoryVerifier<'a> {
                 false
             }
         }
+    }
+
+    /// Obtain rollup inputs from the current record's exact snapshot locator.
+    /// This does not establish acceptance or authority; the anchored membership
+    /// reader authenticates every object admitted from the result.
+    async fn load_current_snapshot_hint(
+        &self,
+    ) -> Result<
+        Option<coven_protocol::store_commit::SnapshotMeta>,
+        crate::sync::store::StorePullError,
+    > {
+        let (current, _) = self.read_current_store_publication().await?;
+        let Some(accepted) = current.latest_snapshot() else {
+            return Ok(None);
+        };
+        self.load_snapshot_metadata(&accepted.snapshot)
+            .await
+            .map(Some)
     }
 
     /// Take a published membership rollup as bytes for the walk that follows.
@@ -149,6 +180,26 @@ impl<'a> MergeHistoryVerifier<'a> {
                             object: carried.head.object.clone(),
                         },
                     );
+                }
+                if let Some(result) = &carried.predecessor_acceptance {
+                    let object = carried
+                        .head_value
+                        .body
+                        .predecessor
+                        .as_ref()
+                        .and_then(|previous| previous.acceptance())
+                        .ok_or_else(|| {
+                            crate::sync::store::membership::AnchoredChainError::LoadFailed(
+                                "rollup predecessor result lacks its signed exact reference".into(),
+                            )
+                        })?;
+                    let bytes = result.to_bytes();
+                    object.verify(&bytes).map_err(|error| {
+                        crate::sync::store::membership::AnchoredChainError::LoadFailed(
+                            error.to_string(),
+                        )
+                    })?;
+                    entries.push((object.clone(), bytes));
                 }
                 // Every entry, including the one the newest covered head
                 // selects: an entry is asked for by content address, and the

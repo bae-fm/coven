@@ -1,13 +1,16 @@
 use rusqlite::Connection;
 
+mod discard;
+
 use super::{
     MergeMaterializationTransaction, StoreDatabase, StoreSession, StoreTransactionOutcome,
     VerifiedStoreTransaction,
 };
 use crate::{
     candidate_graph_exact_objects, circle_operation_ids_in_phase_on, load_circle_operation_on,
-    load_remote_object_on, persist_prepared_remote_object_on, update_remote_object_on, DbError,
-    PreparedCircleOperationRow, VerifiedMergeMaterialization,
+    load_remote_object_on, persist_prepared_remote_object_on, update_remote_object_on,
+    ActiveStorePublication, ActiveStorePublicationOwner, DbError, PreparedCircleOperationRow,
+    VerifiedMergeMaterialization,
 };
 use coven_protocol::circle::{CircleOperationId, CircleOperationState};
 use coven_protocol::circle_activation::VerifiedCircleActivations;
@@ -15,8 +18,7 @@ use coven_protocol::circle_journal::{CircleOperationJournal, CircleOperationProg
 use coven_protocol::objects::PreparedExactObject;
 use coven_protocol::remote_object::remote_object_id;
 use coven_protocol::store_commit::{
-    commit_semantic_prefix, StoreBatchCommit, StoreDeviceHead, VerifiedStoreBatchCommit,
-    VerifiedStoreDeviceOperations,
+    commit_semantic_prefix, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
 
 /// The stored bytes of one operation's objects, supplied alongside the
@@ -55,6 +57,19 @@ fn persist_circle_operation_objects_on(
 }
 
 impl StoreSession<'_> {
+    fn activate_circle_operation(
+        &mut self,
+        journal: CircleOperationJournal,
+        verified: VerifiedCircleActivations,
+        accepted_transition: crate::StoreCommitPublicationOutcome,
+    ) -> Result<Option<crate::OwnedVerifiedMergeMaterialization>, DbError> {
+        self.verified_store_transaction(move |transaction| {
+            let materialization =
+                transaction.activate_circle_operation(journal, verified, accepted_transition)?;
+            Ok(StoreTransactionOutcome::Commit(materialization))
+        })
+    }
+
     fn insert_circle_operation(
         &mut self,
         journal: CircleOperationJournal,
@@ -63,9 +78,10 @@ impl StoreSession<'_> {
         let remotes = journal
             .closed_remote_objects(&prepared_objects)
             .map_err(DbError::from)?;
-        let owner = journal.operation().commit_ref.clone();
+        let owner = journal.operation().commit_ref().clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        claim_circle_publication_on(&tx, &journal)?;
         persist_circle_operation_objects_on(
             &tx,
             self.store_dir,
@@ -88,7 +104,7 @@ impl StoreSession<'_> {
         let remotes = journal
             .closed_remote_objects(&prepared_objects)
             .map_err(DbError::from)?;
-        let owner = journal.operation().commit_ref.clone();
+        let owner = journal.operation().commit_ref().clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let superseded = superseded.as_str().to_string();
         let circle_id = row.circle_id.clone();
@@ -113,6 +129,7 @@ impl StoreSession<'_> {
                 "superseded Circle operation is absent from its slot".to_string(),
             ));
         }
+        claim_circle_publication_on(&tx, &journal)?;
         persist_circle_operation_objects_on(
             &tx,
             self.store_dir,
@@ -241,7 +258,7 @@ impl StoreSession<'_> {
         let remotes = journal
             .closed_remote_objects(&prepared_objects)
             .map_err(DbError::from)?;
-        let owner = journal.operation().commit_ref.clone();
+        let owner = journal.operation().commit_ref().clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let durable =
@@ -262,6 +279,7 @@ impl StoreSession<'_> {
                 journal.operation_id
             )));
         }
+        claim_circle_publication_on(&tx, &journal)?;
         persist_circle_operation_objects_on(
             &tx,
             self.store_dir,
@@ -339,12 +357,13 @@ impl StoreSession<'_> {
     }
 }
 
-impl VerifiedStoreTransaction<'_, '_, '_> {
+impl VerifiedStoreTransaction<'_, '_, '_, '_> {
     fn activate_circle_operation(
         &mut self,
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,
-    ) -> Result<(), DbError> {
+        accepted_transition: crate::StoreCommitPublicationOutcome,
+    ) -> Result<Option<crate::OwnedVerifiedMergeMaterialization>, DbError> {
         let authority = &mut *self.authority;
         let gates = self.gates;
         let tx = self.store.transaction;
@@ -368,6 +387,10 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             ));
         }
         let operation = journal.operation();
+        operation
+            .store_commit
+            .validate_closed_shape()
+            .map_err(DbError::from)?;
         let creation = &operation.creation;
         let resolved_roster = creation.resolved_roster();
         if !creation.control.verify() || !creation.metadata.verify() || !resolved_roster.verify() {
@@ -375,9 +398,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 "circle operation contains invalid signed objects".to_string(),
             ));
         }
-        let unverified_commit: StoreBatchCommit =
-            serde_json::from_slice(&operation.commit_bytes)
-                .map_err(|error| DbError::context("parse circle Store commit", error))?;
+        let unverified_commit = operation.commit();
         let root = authority.root().clone();
         let author =
             super::verified_store_authority::VerifiedRegistrationLookup::activated_registration_on(
@@ -396,16 +417,16 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         };
         let verify_commit = || {
             let commit = VerifiedStoreBatchCommit::parse(
-                &operation.commit_bytes,
+                &unverified_commit.to_bytes(),
                 root.store_root_hash,
-                &operation.commit_ref,
+                operation.commit_ref(),
                 &author,
             )
             .map_err(|error| DbError::context("verify circle Store commit", error))?;
-            if operation.commit_ref.object.slot().logical_key()
+            if operation.commit_ref().object.slot().logical_key()
                 != commit_semantic_prefix(
                     commit.candidate_family(),
-                    &operation.commit_ref.coord.stream_id.to_string(),
+                    &operation.commit_ref().coord.stream_id.to_string(),
                     commit.seq(),
                     commit.commit_hash(),
                 ) + ".json"
@@ -436,7 +457,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             if activation.reference != *control_ref
                 || activation.circle_id != creation.circle_id
                 || activation.control != creation.control
-                || verified.stream_activations().activating_commit() != &operation.commit_ref
+                || verified.stream_activations().activating_commit() != operation.commit_ref()
                 || verified.stream_activations().as_slice() != commit.stream_activations()
             {
                 return Err(DbError::Message(
@@ -446,82 +467,58 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             }
             Ok(commit)
         };
-        let (commit, activation, head_object_id, retained) = {
-            let head = &operation.policy.head;
-            let history_evidence = &operation.policy.history_evidence;
+        let (commit, activation, retained, materialize) = {
             let commit = verify_commit()?;
-            let parsed = StoreDeviceHead::parse_at(
-                &head.to_bytes(),
-                commit.store_root_hash,
-                &author,
-                &operation.commit_ref,
-            )
-            .map_err(|error| DbError::context("verify circle activation head", error))?;
-            if parsed.commit != operation.commit_ref {
-                return Err(DbError::Message(
-                    "circle activation head names a different commit".to_string(),
-                ));
+            let accepted_transition =
+                accepted_transition.resolve_installed_on(self.store, &commit)?;
+            let materialize = accepted_transition.requires_materialization();
+            if materialize {
+                super::clock_floor::observe_circle_metadata(
+                    &mut self.clock_floor,
+                    verified.circles(),
+                    crate::IncomingTimestampPolicy::LocallyAuthored,
+                )?;
             }
-            let device_operations = VerifiedStoreDeviceOperations::without_exclusions(&commit)
-                .map_err(DbError::from)?;
-            let prepared_head = operation
-                .prepared_objects
-                .get("store-head")
-                .ok_or_else(|| {
-                    DbError::Message(
-                        "Merge Circle operation lacks its prepared Store head".to_string(),
-                    )
-                })?;
-            let materialization = VerifiedMergeMaterialization::verify(
-                &root,
-                &commit,
-                &[],
-                &device_operations,
-                &verified,
-                head,
-                prepared_head,
-                history_evidence,
-                None,
-                &[],
-                None,
-            )?;
-            let retained = MergeMaterializationTransaction::from_store(self.store)
-                .record_verified_merge_materialization(authority, materialization)?;
-            (
-                commit,
-                activation.clone(),
-                Some(remote_object_id(prepared_head)),
-                retained,
-            )
+            let acceptance = accepted_transition.install_on(self.store, &commit)?;
+            let retained = if materialize {
+                let device_operations = VerifiedStoreDeviceOperations::without_exclusions(&commit)
+                    .map_err(DbError::from)?;
+                let materialization = VerifiedMergeMaterialization::verify(
+                    &root,
+                    &commit,
+                    &[],
+                    &device_operations,
+                    &verified,
+                    &acceptance,
+                    &operation.store_commit.history_evidence,
+                    None,
+                    &[],
+                    None,
+                )?;
+                let retained = MergeMaterializationTransaction::from_store(self.store)
+                    .record_verified_merge_materialization(authority, materialization)?;
+                authority.insert_verified(retained.clone())?;
+                Some(retained)
+            } else {
+                None
+            };
+            (commit, activation.clone(), retained, materialize)
         };
-        authority.insert_verified(retained)?;
         let mut object_ids = candidate_graph_exact_objects(&commit)?
             .iter()
             .map(remote_object_id)
             .collect::<Vec<_>>();
-        for access in &creation.access {
-            if let coven_protocol::circle::CircleAccessDisposition::Active {
-                bootstrap: Some(bootstrap),
-                ..
-            } = &access.leaf.value.disposition
-            {
-                object_ids.extend(bootstrap.blobs.iter().map(|blob| {
-                    remote_object_id(
-                        blob.stored()
-                            .expect("verified bootstrap remote blob has a locator")
-                            .object(),
-                    )
-                }));
-            }
-        }
-        object_ids.push(remote_object_id(&operation.commit_ref.object));
-        if let Some(head_object_id) = head_object_id {
-            object_ids.push(head_object_id);
-        }
+        object_ids.extend(operation.bootstrap_blobs()?.into_keys());
+        object_ids.push(remote_object_id(&operation.commit_ref().object));
         let store_transaction = MergeMaterializationTransaction::from_store(self.store);
         store_transaction
-            .activate_store_operation_remote_objects(&operation.commit_ref, &object_ids)?;
-        store_transaction.record_verified_circle_activations(&commit, &[activation])?;
+            .activate_store_operation_remote_objects(operation.commit_ref(), &object_ids)?;
+        if materialize {
+            store_transaction.record_verified_circle_activations(&commit, &[activation])?;
+        }
+        let active_owner =
+            ActiveStorePublicationOwner::CircleOperation(journal.operation_id.clone());
+        let active_candidate = operation.commit_ref().clone();
         // A deletion the local device authored prunes its own rows,
         // routes, and blob bindings in this activation transaction.
         // Recording the verified activation above already removed its
@@ -560,20 +557,12 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 ));
             }
         }
-        Ok(())
-    }
-}
-
-impl StoreSession<'_> {
-    fn activate_circle_operation(
-        &mut self,
-        journal: CircleOperationJournal,
-        verified: VerifiedCircleActivations,
-    ) -> Result<(), DbError> {
-        self.verified_store_transaction(move |transaction| {
-            transaction.activate_circle_operation(journal, verified)?;
-            Ok(StoreTransactionOutcome::Commit(()))
-        })
+        super::active_store_publication::clear_active_store_commit_for_owner_on(
+            tx,
+            &active_owner,
+            &active_candidate,
+        )?;
+        Ok(retained)
     }
 }
 
@@ -718,9 +707,40 @@ impl StoreDatabase {
         &self,
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,
-    ) -> Result<(), DbError> {
-        self.call_store(move |session| session.activate_circle_operation(journal, verified))
-            .await
+        accepted_transition: crate::StoreCommitPublicationOutcome,
+    ) -> Result<Option<crate::OwnedVerifiedMergeMaterialization>, DbError> {
+        self.call_store(move |session| {
+            session.activate_circle_operation(journal, verified, accepted_transition)
+        })
+        .await
+    }
+}
+
+fn claim_circle_publication_on(
+    conn: &Connection,
+    journal: &CircleOperationJournal,
+) -> Result<(), DbError> {
+    if !journal.is_publishable() {
+        return Err(DbError::Message(format!(
+            "Circle operation {} cannot reserve Store publication from its current state",
+            journal.operation_id
+        )));
+    }
+    let owner = ActiveStorePublicationOwner::CircleOperation(journal.operation_id.clone());
+    let active = ActiveStorePublication::for_commit(owner, &journal.operation().store_commit)?;
+    match super::active_store_publication::claim_active_store_publication_on(conn, &active)? {
+        super::active_store_publication::ActiveStorePublicationClaim::Acquired => Ok(()),
+        super::active_store_publication::ActiveStorePublicationClaim::AlreadyOwned => {
+            Err(DbError::Message(format!(
+                "Circle operation {} already owns Store publication without its journal transition",
+                journal.operation_id
+            )))
+        }
+        super::active_store_publication::ActiveStorePublicationClaim::Occupied(owner) => {
+            Err(DbError::Message(format!(
+                "another local Store operation owns publication: {owner:?}"
+            )))
+        }
     }
 }
 

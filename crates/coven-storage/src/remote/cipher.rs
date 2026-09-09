@@ -254,14 +254,12 @@ impl CloudCipher {
         }
     }
 
-    /// Protect an immutable Store object or mutable membership/key object for
-    /// storage. Encrypted homes seal under the current store-key generation and
-    /// prefix that generation in cleartext; plaintext homes return the bytes
-    /// unchanged.
+    /// Protect a whole payload assigned to this cipher. Encryption prefixes the
+    /// selected key's fingerprint in cleartext; plaintext returns the bytes
+    /// unchanged. The caller supplies the protection domain's context.
     pub fn seal(&self, plaintext: Vec<u8>, aad_context: &[u8]) -> Vec<u8> {
-        // A control object is always whole-home scoped; only blobs carry a scope.
-        // This is exactly the master-scoped blob path: `encryption_for_scope`
-        // maps `Master` to the store key itself.
+        // Master scope uses this cipher's key directly; blob scopes can instead
+        // derive a scoped key from it.
         self.seal_scoped(
             coven_protocol::blob::BlobScope::Master,
             plaintext,
@@ -269,14 +267,14 @@ impl CloudCipher {
         )
     }
 
-    /// Recover a control object read from storage. Inverse of [`Self::seal`].
+    /// Recover a whole payload read from storage. Inverse of [`Self::seal`].
     pub fn open(&self, stored: Vec<u8>, aad_context: &[u8]) -> Result<Vec<u8>, EncryptionError> {
         self.open_scoped(coven_protocol::blob::BlobScope::Master, stored, aad_context)
     }
 
-    /// Protect a blob under its scope. Encrypted blobs carry the current
-    /// store-key generation in cleartext, so a later read knows which
-    /// generation to open with.
+    /// Protect a blob under its scope. Encrypted blobs carry the selected
+    /// audience key's fingerprint in cleartext; opening uses that key and
+    /// derives the same scoped key.
     pub fn seal_scoped(
         &self,
         scope: coven_protocol::blob::BlobScope,
@@ -304,9 +302,9 @@ impl CloudCipher {
         }
     }
 
-    /// The object-key suffix this cipher implies: `.enc` for an encrypted home,
-    /// empty for a plaintext one. Note `"x".strip_suffix("")` returns `Some("x")`,
-    /// so the listing parsers strip an empty suffix as a clean no-op.
+    /// A cipher-dependent suffix for auxiliary object names: `.enc` when
+    /// encrypted, empty when plaintext. Exact protocol slots and blob locators
+    /// determine their own paths without this suffix.
     pub fn suffix(&self) -> &'static str {
         match self {
             CloudCipher::Encrypted(_) => ".enc",

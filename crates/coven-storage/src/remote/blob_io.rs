@@ -6,11 +6,11 @@ use super::*;
 /// opaque home is `Hashed` + encrypted, a browsable home is `Plain` + plaintext.
 #[derive(Clone, Copy)]
 pub enum BlobPathScheme {
-    /// Content-addressed shard `{namespace}/{ab}/{cd}/{id}` (an opaque home).
+    /// Locator-addressed `{namespace}/opaque/{locator_hash}` (an opaque home).
     Hashed,
-    /// The consumer's own readable path, verbatim: `{namespace}/{cloud_path}`
-    /// (a browsable home). The consumer must supply `cloud_path` on every blob;
-    /// coven errors otherwise.
+    /// A readable path with an immutable version:
+    /// `{namespace}/readable/{cloud_path}/.coven-versions/{locator_hash}`.
+    /// A browsable home requires the consumer's `cloud_path` on every blob.
     Plain,
 }
 
@@ -303,11 +303,10 @@ impl ExactBlobPlaintextReader {
 /// fingerprint naming what sealed it, the header framing its chunks, and the
 /// sealed chunks themselves.
 ///
-/// The layout is `[CKF1][fingerprint: 32][version: 1][chunk_size: 4][plaintext_len: 8][chunks…]`.
-/// Everything before the chunks is cleartext — a reader must know the key and the
-/// chunk size before it can open anything — and all of it is bound into every
-/// chunk's AAD, so a rewritten prefix fails the first open rather than re-framing
-/// the object.
+/// The layout is `[KeyTag][SealedBlobHeader][chunks…]`. The cleartext key tag
+/// selects the exact key fingerprint. The header includes the format version,
+/// nonce policy, chunk size, plaintext length, and any stored nonce; its bytes
+/// are authenticated with each chunk's context and index when the chunk opens.
 pub(crate) fn split_sealed_blob(
     stored: &[u8],
 ) -> Result<

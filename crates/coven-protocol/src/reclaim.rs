@@ -9,10 +9,9 @@ use crate::circle_control::StoreMembershipStateRef;
 use crate::membership::MembershipGrantId;
 use crate::objects::ExactObjectRef;
 use crate::store_commit::{
-    CircleAckRef, CirclePackageRef, CircleSnapshotRef, MembershipRollupRef, ObjectHash, Signed,
-    SignedBody, SnapshotImageRef, StoreAckRef, StoreBatchCommitRef, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StorePackageRef, StoreProtocolError, StoreSnapshotLocator,
-    StoreSnapshotRef, StreamActivationId,
+    CircleAckRef, CirclePackageRef, CircleSnapshotRef, ObjectHash, Signed, SignedBody,
+    SnapshotImageRef, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    StorePackageRef, StoreProtocolError,
 };
 use coven_keys::keys::{self, UserKeypair};
 
@@ -31,7 +30,6 @@ pub enum ReclaimTarget {
     CirclePackage(CirclePackageReclaimTarget),
     CircleBootstrapImage(CircleBootstrapImageReclaimTarget),
     CircleSnapshotImage(CircleSnapshotImageReclaimTarget),
-    StoreMembershipRollup(StoreMembershipRollupReclaimTarget),
     AudienceBlob(AudienceBlobReclaimTarget),
 }
 
@@ -42,8 +40,7 @@ impl ReclaimTarget {
             Self::CirclePackage(target) => &target.package.package.object,
             Self::CircleBootstrapImage(target) => &target.coverage.bootstrap.image.object,
             Self::CircleSnapshotImage(target) => &target.image.object,
-            Self::StoreMembershipRollup(target) => &target.rollup.object,
-            Self::AudienceBlob(target) => target.blob.object(),
+            Self::AudienceBlob(target) => target.blob().object(),
         }
     }
 
@@ -61,17 +58,11 @@ impl ReclaimTarget {
                     snapshot: &target.snapshot,
                 })
             }
-            Self::StoreMembershipRollup(target) => {
-                ReclaimActivation::StoreSnapshotMetadata(StoreSnapshotStreamActivation {
-                    author_registration: &target.snapshot_author,
-                    snapshot: &target.snapshot,
-                })
+            Self::AudienceBlob(AudienceBlobReclaimTarget::Store { blob }) => {
+                ReclaimActivation::StoreBlobInventory(blob)
             }
-            Self::AudienceBlob(target) => {
-                ReclaimActivation::PackageBlobBinding(PackageBlobBindingActivation {
-                    package: &target.package,
-                    activation: &target.activation,
-                })
+            Self::AudienceBlob(AudienceBlobReclaimTarget::Circle { source, .. }) => {
+                ReclaimActivation::PackageBlobBinding(source)
             }
         }
     }
@@ -87,31 +78,21 @@ impl ReclaimTarget {
 pub enum ReclaimActivation<'a> {
     Commit(&'a StoreBatchCommitRef),
     CircleSnapshotMetadata(CircleSnapshotStreamActivation<'a>),
-    StoreSnapshotMetadata(StoreSnapshotStreamActivation<'a>),
-    PackageBlobBinding(PackageBlobBindingActivation<'a>),
+    PackageBlobBinding(&'a CirclePackageReclaimTarget),
+    StoreBlobInventory(&'a crate::blob::locator::StoredBlobRef),
 }
 
 impl ReclaimActivation<'_> {
-    /// The exact object carrying the activating signature. Reclaim identity checks
-    /// use it to refuse a target that aliases its own authority.
-    pub fn object(&self) -> &ExactObjectRef {
+    pub fn names_authority_object(&self, object: &ExactObjectRef) -> bool {
         match self {
-            Self::Commit(commit) => &commit.object,
-            Self::CircleSnapshotMetadata(activation) => &activation.snapshot.object,
-            Self::StoreSnapshotMetadata(activation) => &activation.snapshot.object,
-            Self::PackageBlobBinding(activation) => activation.package.object(),
+            Self::Commit(commit) => &commit.object == object,
+            Self::CircleSnapshotMetadata(source) => &source.snapshot.object == object,
+            Self::PackageBlobBinding(source) => &source.package.package.object == object,
+            // Store inventory authority comes from the verified predecessor's
+            // accepted snapshot, rather than an object supplied by the claim.
+            Self::StoreBlobInventory(_) => false,
         }
     }
-}
-
-/// The exact package whose row-blob bindings carry a reclaimed blob's locator,
-/// together with the Store commit that activated it. A blob rides inside a package
-/// addressed to one audience and is never named by the commit body, so the package
-/// is the signed statement a verifier re-reads to confirm the blob was published
-/// where the claim says.
-pub struct PackageBlobBindingActivation<'a> {
-    pub package: &'a AudienceBlobBindingPackage,
-    pub activation: &'a StoreBatchCommitRef,
 }
 
 /// One generation of a device's per-Circle snapshot stream, named by the exact
@@ -125,15 +106,6 @@ pub struct CircleSnapshotStreamActivation<'a> {
     pub snapshot: &'a CircleSnapshotRef,
 }
 
-/// One generation of a device's Store snapshot stream, named by the exact
-/// metadata object whose signature vouches for what that generation published
-/// beside its image. The Store stream is anchored on the author's device
-/// registration alone, which every Store member can check.
-pub struct StoreSnapshotStreamActivation<'a> {
-    pub author_registration: &'a StoreDeviceRegistrationRef,
-    pub snapshot: &'a StoreSnapshotRef,
-}
-
 /// The eligibility proof an Owner signs to authorize one reclaim. The claim kind
 /// matches its `ReclaimTarget` kind and carries the exact coverage and
 /// acknowledgement references verified before the target is deleted.
@@ -144,7 +116,6 @@ pub enum ReclaimClaim {
     CirclePackage(CirclePackageReclaimClaim),
     CircleBootstrapImage(CircleBootstrapImageReclaimClaim),
     CircleSnapshotImage(CircleSnapshotImageReclaimClaim),
-    StoreMembershipRollup(StoreMembershipRollupReclaimClaim),
     AudienceBlob(AudienceBlobReclaimClaim),
 }
 
@@ -159,9 +130,6 @@ impl ReclaimClaim {
             Self::CircleSnapshotImage(claim) => {
                 ReclaimTarget::CircleSnapshotImage(claim.target.clone())
             }
-            Self::StoreMembershipRollup(claim) => {
-                ReclaimTarget::StoreMembershipRollup(claim.target.clone())
-            }
             Self::AudienceBlob(claim) => ReclaimTarget::AudienceBlob(claim.target.clone()),
         }
     }
@@ -172,7 +140,6 @@ impl ReclaimClaim {
             Self::CirclePackage(claim) => claim.validate(),
             Self::CircleBootstrapImage(claim) => claim.validate(),
             Self::CircleSnapshotImage(claim) => claim.validate(),
-            Self::StoreMembershipRollup(claim) => claim.validate(),
             Self::AudienceBlob(claim) => claim.validate(),
         }
     }
@@ -436,7 +403,7 @@ impl CircleSnapshotImageReclaimTarget {
         &self,
         store_root_hash: ObjectHash,
     ) -> Result<crate::remote_object::SnapshotObjectOwner, StoreProtocolError> {
-        Ok(crate::remote_object::SnapshotObjectOwner {
+        Ok(crate::remote_object::SnapshotObjectOwner::Circle {
             activation: crate::store_commit::circle_snapshot_stream_activation(
                 store_root_hash,
                 &self.snapshot_author,
@@ -472,61 +439,6 @@ impl CircleSnapshotImageReclaimClaim {
         if *image == self.target.snapshot.object || *image == self.superseding.object {
             return Err(StoreProtocolError::Malformed(
                 "Circle snapshot reclaim target aliases proof authority".to_string(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// One superseded generation's membership rollup, named beside the generation
-/// that published it.
-///
-/// The activation is carried rather than derived because a Store snapshot
-/// stream's activation lives inside the author's registration *value*, which the
-/// closure that validates ownership does not hold — so the claim verifier is
-/// where it is checked against the registration, and the closure checks only
-/// that the record it deletes names the generation the claim does.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreMembershipRollupReclaimTarget {
-    pub snapshot_author: StoreDeviceRegistrationRef,
-    pub activation: StreamActivationId,
-    pub snapshot: StoreSnapshotRef,
-    pub rollup: MembershipRollupRef,
-}
-
-impl StoreMembershipRollupReclaimTarget {
-    /// The ownership record's owner for this rollup: the generation that
-    /// published it, on the author's Store snapshot stream.
-    pub fn snapshot_owner(&self) -> crate::remote_object::SnapshotObjectOwner {
-        crate::remote_object::SnapshotObjectOwner {
-            activation: self.activation,
-            generation: self.snapshot.generation,
-        }
-    }
-}
-
-/// Evidence that a later generation of the same device's Store snapshot stream
-/// supersedes the reclaimed one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreMembershipRollupReclaimClaim {
-    pub target: StoreMembershipRollupReclaimTarget,
-    pub superseding: StoreSnapshotRef,
-}
-
-impl StoreMembershipRollupReclaimClaim {
-    fn validate(&self) -> Result<(), StoreProtocolError> {
-        if self.superseding.generation <= self.target.snapshot.generation {
-            return Err(StoreProtocolError::Malformed(
-                "Store membership rollup reclaim names a superseding generation that is not later"
-                    .to_string(),
-            ));
-        }
-        let rollup = &self.target.rollup.object;
-        if *rollup == self.target.snapshot.object || *rollup == self.superseding.object {
-            return Err(StoreProtocolError::Malformed(
-                "Store membership rollup reclaim target aliases proof authority".to_string(),
             ));
         }
         Ok(())
@@ -570,11 +482,23 @@ impl AudienceBlobBindingPackage {
 /// the locator, which names the audience and the uploading device, so a target
 /// cannot describe one object while naming another's addressing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AudienceBlobReclaimTarget {
-    pub blob: crate::blob::locator::StoredBlobRef,
-    pub package: AudienceBlobBindingPackage,
-    pub activation: StoreBatchCommitRef,
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AudienceBlobReclaimTarget {
+    Store {
+        blob: crate::blob::locator::StoredBlobRef,
+    },
+    Circle {
+        blob: crate::blob::locator::StoredBlobRef,
+        source: CirclePackageReclaimTarget,
+    },
+}
+
+impl AudienceBlobReclaimTarget {
+    pub fn blob(&self) -> &crate::blob::locator::StoredBlobRef {
+        match self {
+            Self::Store { blob } | Self::Circle { blob, .. } => blob,
+        }
+    }
 }
 
 /// Evidence that a row blob is no longer bound by any live row. The claim carries
@@ -589,13 +513,20 @@ pub struct AudienceBlobReclaimClaim {
 
 impl AudienceBlobReclaimClaim {
     fn validate(&self) -> Result<(), StoreProtocolError> {
-        let blob = self.target.blob.object();
-        if blob == self.target.package.object() || *blob == self.target.activation.object {
-            return Err(StoreProtocolError::Malformed(
-                "audience blob reclaim target aliases proof authority".to_string(),
-            ));
-        }
-        if self.target.blob.locator().audience() != self.target.package.remote_audience() {
+        let audience = match &self.target {
+            AudienceBlobReclaimTarget::Store { .. } => crate::blob::locator::RemoteAudience::Store,
+            AudienceBlobReclaimTarget::Circle { blob, source } => {
+                if blob.object() == &source.package.package.object
+                    || blob.object() == &source.activation.object
+                {
+                    return Err(StoreProtocolError::Malformed(
+                        "audience blob reclaim target aliases proof authority".to_string(),
+                    ));
+                }
+                crate::blob::locator::RemoteAudience::Circle(source.package.circle_id)
+            }
+        };
+        if self.target.blob().locator().audience() != audience {
             return Err(StoreProtocolError::Malformed(
                 "audience blob reclaim target names a package for another audience".to_string(),
             ));
@@ -608,46 +539,13 @@ impl AudienceBlobReclaimClaim {
 #[serde(deny_unknown_fields)]
 pub struct StorePackageReclaimClaim {
     pub target: StorePackageReclaimTarget,
-    pub covering_snapshot: StoreSnapshotLocator,
-    pub acknowledgements: Vec<StoreAckRef>,
 }
 
 impl StorePackageReclaimClaim {
     fn validate(&self) -> Result<(), StoreProtocolError> {
-        if self.acknowledgements.is_empty() {
+        if self.target.package.object == self.target.activation.object {
             return Err(StoreProtocolError::Malformed(
-                "Store package reclaim evidence has no acknowledgements".to_string(),
-            ));
-        }
-        if self
-            .acknowledgements
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-        {
-            return Err(StoreProtocolError::Malformed(
-                "Store package reclaim acknowledgements are not strictly sorted and unique"
-                    .to_string(),
-            ));
-        }
-        let mut registrations = BTreeSet::new();
-        if self
-            .acknowledgements
-            .iter()
-            .any(|acknowledgement| !registrations.insert(&acknowledgement.registration))
-        {
-            return Err(StoreProtocolError::Malformed(
-                "Store package reclaim evidence repeats a device registration".to_string(),
-            ));
-        }
-        if self.target.package.object == self.target.activation.object
-            || self.target.package.object == self.covering_snapshot.snapshot.object
-            || self
-                .acknowledgements
-                .iter()
-                .any(|acknowledgement| acknowledgement.object == self.target.package.object)
-        {
-            return Err(StoreProtocolError::Malformed(
-                "Store package reclaim target aliases proof authority".to_string(),
+                "Store package reclaim target aliases its activation".to_string(),
             ));
         }
         Ok(())

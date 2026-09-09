@@ -1,7 +1,12 @@
+use super::clock_floor;
+use super::retained_replay::load_generation_zero_replay_baseline_on;
+use super::verified_store_authority::VerifiedRegistrationLookup;
+use crate::PublishedStoreSnapshot;
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::store_commit::ObjectHash;
+use coven_protocol::store_commit::{SnapshotMeta, StoreRootRef, StoreSnapshotRef};
 use coven_protocol::write::{WriteId, WriteStatus};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use super::payload_store::{
     read_payload_blocking, read_verified_payload_blocking, write_payload_blocking,
@@ -16,6 +21,9 @@ mod baseline_advance;
 pub(crate) use baseline_advance::replay_baseline_advances_on;
 pub use baseline_advance::AdvancedReplayBaseline;
 mod circle_bootstrap;
+mod covered_store_write;
+pub use covered_store_write::{CoveredStoreWrite, CoveredStoreWriteCompletion};
+mod received_snapshot;
 mod retained_replay;
 mod snapshot_install;
 
@@ -44,6 +52,35 @@ impl<'store> StoreRecords<'store> {
 
     pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadStoreError> {
         write_payload_blocking(self.conn, self.store_dir, bytes)
+    }
+
+    pub(crate) fn rebased_store_write(
+        self,
+        write_id: &WriteId,
+    ) -> Result<Option<crate::write_models::RebasedStoreWrite>, DbError> {
+        let encoded: Option<String> = self.conn.query_row(
+            "SELECT rebased FROM store_writes WHERE write_id = ?1",
+            [write_id.as_str()],
+            |row| row.get(0),
+        )?;
+        encoded
+            .map(|encoded| {
+                serde_json::from_str(&encoded)
+                    .map_err(|error| DbError::context("read rebased Store write", error))
+            })
+            .transpose()
+    }
+
+    pub(crate) fn effective_store_write_base(
+        self,
+        write_id: &WriteId,
+        captured: &str,
+    ) -> Result<crate::StoreWriteBase, DbError> {
+        match self.rebased_store_write(write_id)? {
+            Some(rebased) => Ok(rebased.base),
+            None => serde_json::from_str(captured)
+                .map_err(|error| DbError::context("read captured Store write base", error)),
+        }
     }
 
     pub(super) fn install_generation_zero_replay_baseline(
@@ -193,37 +230,95 @@ impl<'store> StoreRecords<'store> {
         crate::local_activated_registration_ref_on(self.conn)
     }
 
-    pub(super) fn current_store_device_state(
-        self,
-    ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
-        let frontier =
-            crate::store::materialized_commit_index::materialized_frontier_on(self.conn, None)?
-                .into_values()
-                .map(|reference| (reference.coord.stream_id, reference))
-                .collect::<std::collections::BTreeMap<_, _>>();
-        let (_, state) = super::store_device_state::store_device_state_for_history_cut_on(
-            self.conn,
-            &coven_protocol::store_commit::StoreHistoryCut(frontier),
-        )?;
-        Ok(state)
-    }
-
     pub(super) fn author_exclusion_activation_row(
         self,
         exclusion: &str,
-    ) -> Result<Option<(String, String, String)>, DbError> {
+    ) -> Result<Option<String>, DbError> {
         use rusqlite::OptionalExtension;
 
         self.conn
             .query_row(
-                "SELECT accepted_cut, activation_commit, activation_head
+                "SELECT activation_commit
                  FROM store_author_exclusion_activations
                  WHERE exclusion_ref = ?1",
                 [exclusion],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| row.get(0),
             )
             .optional()
             .map_err(DbError::from)
+    }
+
+    pub(super) fn store_publication_entries(
+        self,
+    ) -> Result<
+        Vec<
+            coven_protocol::objects::ExactProtocolObject<
+                coven_protocol::store_commit::StorePublicationEntry,
+            >,
+        >,
+        DbError,
+    > {
+        super::observed_store_publication::load_store_publication_entries_on(self.conn)
+    }
+
+    pub(super) fn accepted_store_commit(
+        self,
+        commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        publisher_signing_pubkey: &str,
+    ) -> Result<crate::AcceptedStoreCommitPublication, DbError> {
+        super::observed_store_publication::load_accepted_store_commit_on(
+            self.conn,
+            commit,
+            publisher_signing_pubkey,
+        )
+    }
+
+    /// Cumulative coverage settles the reserved logical edit, independently of
+    /// which of its candidate hashes was accepted. It cannot authenticate an
+    /// arbitrary historical commit supplied by a caller.
+    pub(super) fn snapshot_covers_reserved_write(
+        self,
+        write_id: &WriteId,
+        candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
+        snapshot: &coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+    ) -> Result<bool, DbError> {
+        snapshot.validate()?;
+        if snapshot
+            .metadata
+            .coverage
+            .commits()
+            .get(&candidate.coord.stream_id)
+            .is_none_or(|covered| covered.coord.sequence() < candidate.coord.sequence())
+        {
+            return Ok(false);
+        }
+        let active = super::active_store_publication::load_active_store_publication_on(self.conn)?
+            .ok_or_else(|| {
+                DbError::Message(
+                    "covered unresolved write has no durable publication reservation".into(),
+                )
+            })?;
+        let (reserved_id, registration, coord) = active.commit_reservation().ok_or_else(|| {
+            DbError::Message("covered unresolved write has no reserved author position".into())
+        })?;
+        let stream = coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
+            snapshot.store_root.store_root_hash,
+            registration,
+            coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        );
+        if active.owner() != &crate::ActiveStorePublicationOwner::StoreWrite(write_id.clone())
+            || reserved_id != write_id
+            || coord != &candidate.coord
+            || stream != coord.stream_id
+            || active.attempt()?.entry.author_registration != *registration
+            || active.attempt()?.entry.payload
+                != coven_protocol::store_commit::StorePublicationPayload::Commit(candidate.clone())
+        {
+            return Err(DbError::Message(
+                "covered unresolved write differs from its durable publication reservation".into(),
+            ));
+        }
+        Ok(true)
     }
 
     pub(super) fn materialized_commit_ref(
@@ -369,17 +464,6 @@ impl<'store> StoreRecords<'store> {
         super::store_device_state::store_device_state_for_history_cut_on(self.conn, cut)
     }
 
-    pub(super) fn store_device_exclusion_freezes(
-        self,
-        root: &coven_protocol::store_commit::StoreRootRef,
-    ) -> Result<Vec<coven_protocol::store_commit::StoreDeviceProposalAck>, DbError> {
-        Ok(
-            super::store_device_state::load_store_device_exclusion_freezes_on(self.conn, root)?
-                .into_values()
-                .collect(),
-        )
-    }
-
     pub(super) fn activated_registration_references(
         self,
     ) -> Result<Vec<coven_protocol::store_commit::StoreDeviceRegistrationRef>, DbError> {
@@ -509,8 +593,7 @@ impl<'store> StoreRecords<'store> {
         registration_hash: &str,
         encoded: &str,
     ) -> Result<(), DbError> {
-        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        transaction
+        self.conn
             .execute(
                 "INSERT INTO local_owner_recovery_publication
                      (singleton, registration_hash, publication)
@@ -519,7 +602,8 @@ impl<'store> StoreRecords<'store> {
                 (registration_hash, encoded),
             )
             .map_err(DbError::from)?;
-        let stored: (String, String) = transaction
+        let stored: (String, String) = self
+            .conn
             .query_row(
                 "SELECT registration_hash, publication
                  FROM local_owner_recovery_publication WHERE singleton = 1",
@@ -532,7 +616,7 @@ impl<'store> StoreRecords<'store> {
                 "Owner recovery publication journal owns different exact objects".into(),
             ));
         }
-        transaction.commit().map_err(DbError::from)
+        Ok(())
     }
 
     pub(super) fn owner_recovery_publication_row(
@@ -578,6 +662,86 @@ impl<'store> StoreRecords<'store> {
             )
             .map_err(DbError::from)?;
         Ok(changed == 1)
+    }
+
+    pub(super) fn published_store_snapshot(
+        self,
+        root: &StoreRootRef,
+        lookup: &mut dyn VerifiedRegistrationLookup,
+    ) -> Result<Option<PublishedStoreSnapshot>, DbError> {
+        self.conn
+            .query_row(
+                "SELECT publication_position, snapshot_ref, meta_bytes \
+             FROM published_store_snapshot ORDER BY publication_position DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|row| self.parse_published_store_snapshot(row, root, lookup))
+            .transpose()
+    }
+
+    pub(super) fn published_store_snapshots(
+        self,
+        root: &StoreRootRef,
+        lookup: &mut dyn VerifiedRegistrationLookup,
+    ) -> Result<Vec<PublishedStoreSnapshot>, DbError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT publication_position, snapshot_ref, meta_bytes \
+                 FROM published_store_snapshot ORDER BY publication_position DESC",
+            )
+            .map_err(DbError::from)?;
+        let snapshots = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(DbError::from)?
+            .map(|row| {
+                self.parse_published_store_snapshot(row.map_err(DbError::from)?, root, lookup)
+            })
+            .collect();
+        snapshots
+    }
+
+    fn parse_published_store_snapshot(
+        self,
+        (position, reference, bytes): (i64, String, Vec<u8>),
+        root: &StoreRootRef,
+        lookup: &mut dyn VerifiedRegistrationLookup,
+    ) -> Result<PublishedStoreSnapshot, DbError> {
+        let position = u64::try_from(position).map_err(|_| {
+            DbError::Message("published Store snapshot position is negative".to_string())
+        })?;
+        let reference: StoreSnapshotRef = serde_json::from_str(&reference)
+            .map_err(|error| DbError::context("published Store snapshot ref", error))?;
+        let unverified: SnapshotMeta = serde_json::from_slice(&bytes)
+            .map_err(|error| DbError::context("published Store snapshot author", error))?;
+        let author_ref = &unverified.author_registration;
+        let author = lookup.activated_registration_on(self, root, author_ref)?;
+        let meta = SnapshotMeta::parse_at(&bytes, root.store_root_hash, &reference, &author)
+            .map_err(|error| DbError::context("published Store snapshot", error))?;
+        if &meta.author_registration != author_ref
+            || meta.publication_predecessor.next_position()?.get() != position
+        {
+            return Err(DbError::Message(
+                "published Store snapshot differs from its accepted publication position"
+                    .to_string(),
+            ));
+        }
+        Ok(PublishedStoreSnapshot { reference, meta })
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -682,5 +846,57 @@ impl<'store> StoreRecords<'store> {
         DbError,
     > {
         StoreDatabase::circle_bootstrap_replay_inputs_on(self)
+    }
+    pub(super) fn received_snapshot_image_with_local_rows(
+        self,
+        local_image: &[u8],
+        gates: &crate::Gates,
+        covered_suffix: &[crate::MergeReplayWriteEffect],
+    ) -> Result<Vec<u8>, DbError> {
+        self.received_snapshot_image_with_local_rows_records(local_image, gates, covered_suffix)
+    }
+}
+
+impl StoreTransaction<'_, '_> {
+    pub(super) fn import_snapshot_device_states(
+        self,
+        source: StoreRecords<'_>,
+    ) -> Result<(), DbError> {
+        self.import_snapshot_device_state_records(source)
+    }
+
+    pub(super) fn import_received_snapshot_inputs(
+        self,
+        source: StoreRecords<'_>,
+        inputs: &[crate::OwnedVerifiedMergeMaterialization],
+        baseline: &crate::RetainedReplayBaseline,
+    ) -> Result<(), DbError> {
+        self.import_received_snapshot_inputs_records(source, inputs, baseline)
+    }
+
+    pub(super) fn import_received_snapshot_blob_inventory(
+        self,
+        source: StoreRecords<'_>,
+    ) -> Result<(), DbError> {
+        self.import_received_snapshot_blob_inventory_records(source)
+    }
+
+    pub(super) fn replace_received_snapshot_baseline(
+        self,
+        source: StoreRecords<'_>,
+        baseline: &crate::RetainedReplayBaseline,
+        image: Vec<u8>,
+        folded: &[crate::SettledStoreWrite],
+        retained_inputs: &[crate::OwnedVerifiedMergeMaterialization],
+        blob_decls: &crate::BlobDecls,
+    ) -> Result<crate::RetainedReplayBaseline, DbError> {
+        self.replace_received_snapshot_baseline_records(
+            source,
+            baseline,
+            image,
+            folded,
+            retained_inputs,
+            blob_decls,
+        )
     }
 }

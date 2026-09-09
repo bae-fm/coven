@@ -90,7 +90,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
 
     pub(crate) async fn finalize_ready_circle_epoch_closes(
         &mut self,
-        metadata_stamp: &str,
         routing_encryption: &coven_keys::encryption::EncryptionService,
     ) -> Result<(), CircleOperationError> {
         let journals = self.database.waiting_circle_operations().await?;
@@ -194,25 +193,30 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                         journal.operation_id
                     ))
                 })?;
+            let metadata_stamp = self.database.stamp();
+            let plan = self.writer.prepare_plan().await?;
             let prepared = self
                 .preparer()
-                .prepare_request(CircleOperationRequest::FinalizeEpochClose(Box::new(
-                    CircleFinalizeEpochCloseRequest::new(
-                        journal.operation_id.clone(),
-                        journal.circle_id,
-                        member_pubkey,
-                        metadata_stamp.to_string(),
-                        current,
-                        reference.clone(),
-                        roster_chain,
-                        intent,
-                        settlements
-                            .into_iter()
-                            .map(|(settlement, _)| settlement)
-                            .collect(),
-                        bootstrap,
-                    ),
-                )))
+                .prepare_from_plan(
+                    &plan,
+                    CircleOperationRequest::FinalizeEpochClose(Box::new(
+                        CircleFinalizeEpochCloseRequest::new(
+                            journal.operation_id.clone(),
+                            journal.circle_id,
+                            member_pubkey,
+                            metadata_stamp,
+                            current,
+                            reference.clone(),
+                            roster_chain,
+                            intent,
+                            settlements
+                                .into_iter()
+                                .map(|(settlement, _)| settlement)
+                                .collect(),
+                            bootstrap,
+                        ),
+                    )),
+                )
                 .await?;
             if prepared.journal.operation_id != journal.operation_id
                 || prepared.journal.circle_id != journal.circle_id
@@ -227,6 +231,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             self.database
                 .begin_circle_operation_finalization(journal.clone(), prepared.prepared_objects)
                 .await?;
+            drop(plan);
             let routing_key = coven_protocol::circle::derive_row_routing_key(
                 routing_encryption,
                 self.root.store_root_hash,

@@ -241,7 +241,7 @@ impl StoreSession<'_> {
                             Box::new(std::io::Error::other(format!(
                                 "invalid make_remote state {state:?}"
                             ))),
-                        ))
+                        ));
                     }
                 };
                 Ok(QueuedMakeRemote {

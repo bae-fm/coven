@@ -2,23 +2,24 @@ use coven_protocol::objects::{ProtocolObjectDomain, StoreObjectError};
 use coven_protocol::store_commit::{circle_ack_slot_prefix, CircleAck, CommitFrontier};
 
 use super::StoreAckError;
+use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 
 pub(crate) struct CircleAcknowledgementReader<'operation, 'storage> {
     database: &'operation coven_database::StoreDatabase,
     storage: &'storage dyn coven_storage::CloudSyncObjectStorage,
-    root: &'operation coven_protocol::store_commit::StoreRootRef,
+    history: &'operation mut MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation coven_database::StoreDatabase,
         storage: &'storage dyn coven_storage::CloudSyncObjectStorage,
-        root: &'operation coven_protocol::store_commit::StoreRootRef,
+        history: &'operation mut MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {
             database,
             storage,
-            root,
+            history,
         }
     }
 
@@ -29,7 +30,7 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
         let access = self
             .database
             .circle_epoch_access(
-                self.root.clone(),
+                self.history.verified_root().reference().clone(),
                 reference.circle_id,
                 reference.control.clone(),
             )
@@ -45,7 +46,7 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
             .activated_store_device_registration(reference.registration.clone())
             .await?;
         let context = access.protocol_context(
-            self.root.store_root_hash,
+            self.history.verified_root().reference().store_root_hash,
             ProtocolObjectDomain::CircleAcknowledgement,
         );
         let semantic_prefix = circle_ack_slot_prefix(
@@ -58,12 +59,17 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
             .read_protocol_object(&context, &reference.object, &semantic_prefix)
             .await
             .map_err(StoreObjectError::from)?;
-        CircleAck::parse_at(&bytes, self.root, reference, author.value())
-            .map_err(StoreAckError::from)
+        CircleAck::parse_at(
+            &bytes,
+            self.history.verified_root().reference(),
+            reference,
+            author.value(),
+        )
+        .map_err(StoreAckError::from)
     }
 
     pub(crate) async fn stable_dominating(
-        &self,
+        &mut self,
         circle_id: coven_protocol::circle::CircleId,
         snapshot_cut: &CommitFrontier,
     ) -> Result<Option<Vec<coven_protocol::store_commit::CircleAckRef>>, StoreAckError> {
@@ -84,7 +90,20 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
                 return Ok(None);
             };
             let acknowledgement = self.load(&reference).await?;
-            if !acknowledgement.store_cut.covers(snapshot_cut) {
+            if !acknowledgement.store_cut.covers(snapshot_cut)
+                && !self
+                    .history
+                    .history_has_only_acknowledgements(
+                        &coven_protocol::store_commit::StoreHistoryCut::from_commits(
+                            acknowledgement.store_cut.0.clone(),
+                        ),
+                        &coven_protocol::store_commit::StoreHistoryCut::from_commits(
+                            snapshot_cut.0.clone(),
+                        ),
+                    )
+                    .await
+                    .map_err(crate::sync::store::StoreError::from)?
+            {
                 return Ok(None);
             }
             acknowledgements.push(reference);

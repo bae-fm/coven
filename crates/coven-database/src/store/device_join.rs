@@ -362,6 +362,24 @@ impl StoreDatabase {
         previous: &DeviceJoinJournalRecord,
         next: DeviceJoinJournalRecord,
     ) -> Result<(), DeviceJoinJournalError> {
+        use coven_protocol::store_commit::device_join_journal::{
+            DeviceJoinRoleProgress, OwnerJoinProgress,
+        };
+
+        // Publication preparation and completion also own the active author
+        // reservation and accepted authority. Their transaction is the only
+        // route into or out of the prepared publication state.
+        if [&*previous.progress, &*next.progress]
+            .into_iter()
+            .any(|progress| {
+                matches!(
+                    progress,
+                    DeviceJoinRoleProgress::Owner(OwnerJoinProgress::StorePublicationPrepared(_))
+                )
+            })
+        {
+            return Err(DeviceJoinJournalError::NonAdjacentJournalTransition);
+        }
         validate_successor(previous, &next)?;
         let key = previous.store_key();
         let previous = serde_json::to_string(previous)?;

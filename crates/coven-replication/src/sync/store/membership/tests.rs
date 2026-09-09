@@ -194,7 +194,7 @@ async fn retrying_join_after_admission_reuses_the_active_attempt() {
 }
 
 #[tokio::test]
-async fn current_floor_requires_every_exact_entry() {
+async fn retained_floor_reuses_verified_entries_while_a_cold_reader_requires_them() {
     let fixture = MergeFixture::new("missing-entry").await;
     let member = UserKeypair::generate();
     fixture.admit_member(&member, MemberRole::Member).await;
@@ -211,10 +211,38 @@ async fn current_floor_requires_every_exact_entry() {
         .await
         .expect("remove exact selected entry");
 
-    assert!(
-        fixture.device.restore_membership().await.is_err(),
-        "a signed head whose exact entry is absent must fail"
+    assert_eq!(
+        fixture
+            .device
+            .restore_membership()
+            .await
+            .expect("the installed accepted proof retains its exact entry")
+            .membership_floor
+            .0,
+        chain.head_refs(),
     );
+    fixture.home.clear_exact_reads();
+    let cold = crate::sync::store::HistoryConstructionAuthority::admission()
+        .open_pinned(fixture.storage.as_ref(), &fixture.store.root())
+        .await
+        .expect("open a reader without retained membership proof");
+    let error = cold
+        .load_accepted_anchored_membership(chain.head_refs(), Some(&fixture.owner_pubkey))
+        .await
+        .expect_err("a cold reader must obtain every selected exact entry");
+    assert!(
+        matches!(
+            error,
+            AnchoredChainError::Object(coven_protocol::objects::StoreObjectError::Storage(
+                coven_protocol::objects::StorageError::NotFound(_)
+            ))
+        ),
+        "{error:?}"
+    );
+    assert!(fixture
+        .home
+        .exact_reads()
+        .contains(loaded_head.body.entry.object.slot()));
 }
 
 #[tokio::test]
@@ -422,6 +450,9 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
         storage,
         fixture.store_dir.clone(),
         fixture.owner.clone(),
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("load Store owner");
@@ -482,6 +513,9 @@ async fn store_membership_reads_require_the_installed_owner_anchor() {
         storage,
         fixture.store_dir.clone(),
         fixture.owner.clone(),
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("load Store owner");
@@ -520,6 +554,9 @@ async fn store_membership_reads_reject_tampered_founder_state() {
         storage,
         fixture.store_dir.clone(),
         fixture.owner.clone(),
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("load Store owner");
@@ -561,74 +598,11 @@ async fn open_store_reuses_its_verified_replay_baseline() {
         .expect("reuse the replay baseline verified by the open connection");
 }
 
-#[tokio::test]
-async fn store_prefix_projection_retains_direct_membership_heads() {
-    let fixture = MergeFixture::new("project-direct-membership").await;
-    let member = UserKeypair::generate();
-    fixture.admit_member(&member, MemberRole::Member).await;
-    let current = fixture.load().await;
-    let projected = fixture
-        .device
-        .project_membership_for_test(current.head_refs())
-        .await
-        .expect("project direct membership to the empty Store prefix");
+#[path = "projection_tests.rs"]
+mod projection;
 
-    assert_eq!(projected.head_refs(), current.head_refs());
-    assert!(projected.can_write_now(&pubkey_hex(&member)));
-}
-
-#[tokio::test]
-async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_suffix() {
-    let fixture = MergeFixture::new("project-store-bound-membership").await;
-    let member = UserKeypair::generate();
-    fixture.admit_member(&member, MemberRole::Member).await;
-    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
-    fixture
-        .store
-        .activate_joined_device(
-            &fixture.db,
-            fixture.store_dir.clone(),
-            &member_db,
-            member_db_store_dir.clone(),
-            &member,
-            "2026-07-21T00:00:00Z",
-        )
-        .await
-        .expect("activate member device");
-    let before_promotion = fixture.load().await;
-    fixture
-        .store
-        .promote_active_member_fixture(
-            &fixture.db,
-            fixture.store_dir.clone(),
-            &member_db,
-            member_db_store_dir.clone(),
-            &fixture.owner,
-            &member,
-            &EncryptionService::from_key([42; 32]),
-        )
-        .await
-        .expect("promote member to Owner");
-    let after_promotion = fixture.load().await;
-    assert_ne!(after_promotion.head_refs(), before_promotion.head_refs());
-    let later_member = UserKeypair::generate();
-    fixture
-        .admit_member(&later_member, MemberRole::Member)
-        .await;
-    let candidate = fixture.load().await;
-    assert!(candidate.can_write_now(&pubkey_hex(&later_member)));
-    let projected = fixture
-        .device
-        .project_membership_for_test(candidate.head_refs())
-        .await
-        .expect("project membership before the Owner promotion Store control");
-
-    assert_eq!(projected.head_refs(), before_promotion.head_refs());
-    assert!(projected.can_write_now(&pubkey_hex(&member)));
-    assert!(!projected.is_owner_now(&pubkey_hex(&member)));
-    assert!(!projected.can_write_now(&pubkey_hex(&later_member)));
-}
+#[path = "head_acceptance_tests.rs"]
+mod head_acceptance;
 
 #[tokio::test]
 async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
@@ -969,6 +943,9 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
         fixture.store_dir.clone(),
         &fixture.store.root(),
         &fixture.owner,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32]
+        )),
     )
     .await
     .is_err());
@@ -984,482 +961,8 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
         .is_empty());
 }
 
-#[tokio::test]
-async fn reader_refuses_a_head_that_regresses_below_its_cursor() {
-    let fixture = MergeFixture::new("cursor-regression").await;
-    let member = UserKeypair::generate();
-    fixture.admit_member(&member, MemberRole::Member).await;
-    fixture.remove_member(&member).await;
-    let chain = fixture.load().await;
-    let latest = chain.head_refs().last().expect("latest head").clone();
-    let latest_head = fixture
-        .device
-        .load_membership_head_for_test(&latest)
-        .await
-        .expect("load latest head");
-    let predecessor = latest_head
-        .body
-        .predecessor
-        .clone()
-        .expect("remove predecessor");
-    fixture
-        .storage
-        .delete_protocol_object(&latest.object)
-        .await
-        .expect("remove latest exact head");
-
-    let error = fixture
-        .load_result()
-        .await
-        .expect_err("the accepted cursor cannot regress to its predecessor");
-    assert!(error.to_string().contains("regressed"));
-    assert!(predecessor.coord.seq < latest.coord.seq);
-}
-
-#[tokio::test]
-async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively() {
-    let fixture = MergeFixture::new("deep-membership-projection").await;
-    let chain = fixture.load().await;
-    fixture
-        .device
-        .assert_deep_membership_projection_for_test(chain.head_refs())
-        .await
-        .expect("project deep membership path");
-}
-
-/// A Store-activated removal composes its candidate against this device's next
-/// stream position, stages the mutation durably, then publishes — releasing the
-/// turn that claimed the position in between. A queued host write that drains in
-/// that window takes the position, and the staged candidate is bound to that
-/// create-once head slot, so it can never activate there. Publication reads the
-/// occupant, verifies it is a real winner, and ends the removal on that evidence:
-/// the staged mutation is cleared rather than retried against a position that is
-/// gone, and the initiator's next removal composes at the position that follows.
-/// The mutation journal names the objects it publishes and does not carry their
-/// bytes: every entry, head, commit, and resolution in it sits beside the exact
-/// reference the upload rebuilds it under. The one payload it does carry is the
-/// sealed keyring inside each replacement wrapped key, which no other field
-/// holds.
-#[tokio::test]
-async fn the_membership_mutation_journal_carries_no_object_it_already_names() {
-    let fixture = MergeFixture::new("mutation-journal-names-its-objects").await;
-    let member = UserKeypair::generate();
-    fixture.admit_member(&member, MemberRole::Member).await;
-    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
-    fixture
-        .store
-        .activate_joined_device(
-            &fixture.db,
-            fixture.store_dir.clone(),
-            &member_db,
-            member_db_store_dir.clone(),
-            &member,
-            "2026-07-21T00:00:00Z",
-        )
-        .await
-        .expect("activate the member's device");
-
-    // Stop the removal before it publishes, leaving its plan durable to read.
-    fixture.home.fail_exact_create_before_call(1);
-    Box::pin(fixture.try_remove_member(&member))
-        .await
-        .expect_err("the interrupted removal cannot publish its membership authority");
-    let staged = fixture
-        .database
-        .outbound_membership_mutation()
-        .await
-        .expect("read the staged removal")
-        .expect("the interrupted removal stays durable");
-    let plan = String::from_utf8(staged.plan_bytes).expect("the plan is JSON");
-
-    for carried in [
-        "entry_object",
-        "head_object",
-        "resolution_object",
-        "prepared_head",
-    ] {
-        assert!(
-            !plan.contains(carried),
-            "the journal carries {carried}, whose bytes its own reference already names"
-        );
-    }
-    // One replacement wrapped key, for the one member who remains, and its
-    // sealed keyring is the only value in the plan without a sibling field the
-    // upload could rebuild it from.
-    assert_eq!(
-        plan.matches("stored_bytes").count(),
-        1,
-        "the journal's only carried payload is the replacement wrapped key"
-    );
-}
-
-#[tokio::test]
-async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
-    let fixture = MergeFixture::new("removal-loses-its-position").await;
-    let encryption = EncryptionService::from_key([42; 32]);
-    let member = UserKeypair::generate();
-    fixture.admit_member(&member, MemberRole::Member).await;
-    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
-    fixture
-        .store
-        .activate_joined_device(
-            &fixture.db,
-            fixture.store_dir.clone(),
-            &member_db,
-            member_db_store_dir.clone(),
-            &member,
-            "2026-07-21T00:00:00Z",
-        )
-        .await
-        .expect("activate the member's device");
-    Box::pin(fixture.store.promote_active_member_fixture(
-        &fixture.db,
-        fixture.store_dir.clone(),
-        &member_db,
-        member_db_store_dir.clone(),
-        &fixture.owner,
-        &member,
-        &encryption,
-    ))
-    .await
-    .expect("promote the member to Owner");
-
-    // A queued host write composes against the same next position the removal
-    // will, and takes it the moment it drains.
-    fixture
-        .db
-        .execute_test_host_write(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('contended-note', 'contended', NULL, 1, \
-                 '0000000001000-0000-owner', '2026-07-21')",
-        )
-        .await;
-    let loaded_store = fixture
-        .store
-        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.owner)
-        .await
-        .expect("load owner Store");
-    let mut writer = loaded_store
-        .authorize_writer()
-        .await
-        .expect("authorize owner writer");
-    assert!(Box::pin(writer.prepare_pending_store_write())
-        .await
-        .expect("queue a host write at the contended position"));
-
-    // Stop the removal before it publishes anything, leaving its candidate
-    // durable and bound to the position it composed against.
-    fixture.home.fail_exact_create_before_call(1);
-    Box::pin(fixture.try_remove_member(&member))
-        .await
-        .expect_err("the interrupted removal cannot publish its membership authority");
-    assert!(
-        fixture
-            .database
-            .outbound_membership_mutation()
-            .await
-            .expect("read the staged removal")
-            .is_some(),
-        "the interrupted removal stays durable",
-    );
-
-    assert_eq!(
-        Box::pin(writer.drain_store_writes())
-            .await
-            .expect("publish the queued host write"),
-        1,
-    );
-
-    let lost = Box::pin(fixture.try_remove_member(&member))
-        .await
-        .expect_err("a candidate whose position was taken can never activate");
-    assert!(
-        lost.to_string().contains("did not activate"),
-        "the removal ends on the verified winner: {lost}",
-    );
-    assert!(
-        fixture
-            .database
-            .outbound_membership_mutation()
-            .await
-            .expect("read the cleared removal")
-            .is_none(),
-        "the lost removal is cleared rather than left staged against a position that is gone",
-    );
-
-    Box::pin(fixture.try_remove_member(&member))
-        .await
-        .expect("the re-issued removal publishes at the position that follows");
-    assert!(!fixture.load().await.can_write_now(&pubkey_hex(&member)));
-}
-
-/// A membership stream is a hash-linked list, so its heads have to be verified
-/// in order — but they do not have to be *fetched* in order. Every head's slot
-/// is named by its coordinate, so the whole stream shares one provider prefix,
-/// and a reader that lists it fetches the stream at once instead of spending a
-/// round trip per head purely to learn where the next one lives.
-#[tokio::test]
-async fn a_membership_stream_is_listed_once_and_fetched_together() {
-    let fixture = MergeFixture::new("membership-list-then-fetch").await;
-    let mut admission = fixture
-        .admit_member(&UserKeypair::generate(), MemberRole::Member)
-        .await;
-    for _ in 0..3 {
-        admission = fixture
-            .admit_member(&UserKeypair::generate(), MemberRole::Member)
-            .await;
-    }
-    let expected = fixture.load().await;
-
-    fixture.home.clear_exact_reads();
-    fixture.home.clear_exact_listings();
-    fixture
-        .home
-        .delay_exact_full_reads(std::time::Duration::from_millis(20));
-    let mut history = crate::sync::store::HistoryConstructionAuthority::admission()
-        .open_pinned(&*fixture.storage, &admission.store_root)
-        .await
-        .expect("open admission history");
-    let walked = history
-        .load_exact_anchored_membership(
-            &admission.membership_floor.0,
-            Some(&admission.owner_pubkey),
-        )
-        .await
-        .expect("walk membership from the cloud");
-
-    assert_eq!(walked.head_refs(), expected.head_refs());
-    let founder = expected
-        .head_refs()
-        .first()
-        .expect("founder membership head")
-        .clone();
-    assert_eq!(
-        fixture.home.exact_listed_prefixes(),
-        vec![coven_protocol::store_commit::membership_head_stream_prefix(
-            &founder.coord.author_pubkey,
-            &founder.coord.author_owner_grant,
-            founder.coord.stream_id,
-        )],
-        "one listing per membership stream, naming only that stream's prefix"
-    );
-    let head_reads = fixture
-        .home
-        .exact_reads()
-        .into_iter()
-        .filter(|slot| slot.logical_key().starts_with("store-v1/membership/heads/"))
-        .collect::<Vec<_>>();
-    let distinct = head_reads
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
-    let stream_length = founder.coord.seq as usize;
-    assert!(
-        distinct > stream_length,
-        "every head in the stream is read, plus the absent slot that ends it; \
-         got {distinct} distinct slots for a stream of {stream_length}"
-    );
-    // One anchored-chain load walks the founder's stream several times. The
-    // heads it fetched the first time serve every later walk, so what repeats
-    // is the read of the one absent slot each walk ends on.
-    assert!(
-        head_reads.len() < 2 * distinct,
-        "a repeated walk re-reads no head it already fetched; \
-         got {} reads over {distinct} slots",
-        head_reads.len()
-    );
-    assert!(
-        fixture.home.exact_full_read_max_inflight() > 1,
-        "membership heads are fetched together, not each one gated on the last"
-    );
-}
-
-/// A published membership rollup carries the chain, so a reader takes it in one
-/// read — and reaches exactly the chain the full walk reaches.
-///
-/// This is the property the whole rollup rests on: it is a carrier, not an
-/// authority. The chain it produces is compared against one walked entirely off
-/// the provider over the same Store, and the Store is built so the comparison
-/// has something to say — a member admitted and then removed, which rotates the
-/// wrapped keys and retires that member's grant, plus a membership change
-/// published *after* the snapshot so the rollup is deliberately stale and the
-/// reader has a tail to walk.
-#[tokio::test]
-async fn a_membership_rollup_reaches_the_chain_the_full_walk_reaches() {
-    let fixture = MergeFixture::new("membership-rollup-equivalence").await;
-    let removed = UserKeypair::generate();
-    let kept = UserKeypair::generate();
-    fixture.admit_member(&removed, MemberRole::Member).await;
-    fixture.admit_member(&kept, MemberRole::Member).await;
-    fixture.remove_member(&removed).await;
-    fixture
-        .device
-        .ensure_device_join_snapshot_for_test()
-        .await
-        .expect("publish the snapshot the rollup rides");
-    // Published after the snapshot: the rollup cannot cover this, so the reader
-    // that adopts it still has to walk the tail to find it.
-    let after_snapshot = UserKeypair::generate();
-    let admission = fixture
-        .admit_member(&after_snapshot, MemberRole::Member)
-        .await;
-
-    let walked = walk_admission_membership(&fixture, &admission, false).await;
-    let rolled = walk_admission_membership(&fixture, &admission, true).await;
-
-    assert_eq!(
-        walked.head_refs(),
-        rolled.head_refs(),
-        "the rollup reader ends on another membership frontier"
-    );
-    assert_eq!(
-        walked.resolution_refs(),
-        rolled.resolution_refs(),
-        "the rollup reader ends on another resolution cut"
-    );
-    assert_eq!(
-        walked.status(),
-        rolled.status(),
-        "the rollup reader resolves another member set"
-    );
-    for (label, pubkey) in [
-        ("the owner", fixture.owner_pubkey.clone()),
-        ("the removed member", pubkey_hex(&removed)),
-        ("the kept member", pubkey_hex(&kept)),
-        (
-            "the member admitted after the snapshot",
-            pubkey_hex(&after_snapshot),
-        ),
-    ] {
-        assert_eq!(
-            walked.can_write_now(&pubkey),
-            rolled.can_write_now(&pubkey),
-            "the rollup reader disagrees about whether {label} can write"
-        );
-        assert_eq!(
-            walked.is_owner_now(&pubkey),
-            rolled.is_owner_now(&pubkey),
-            "the rollup reader disagrees about whether {label} is an owner"
-        );
-    }
-    assert!(
-        !walked.can_write_now(&pubkey_hex(&removed)),
-        "the fixture never removed anyone, so this proves nothing about revocation"
-    );
-    assert!(
-        walked.can_write_now(&pubkey_hex(&after_snapshot)),
-        "the member admitted after the snapshot is absent from both chains, \
-         so the tail walk is untested"
-    );
-}
-
-/// The reads a joining device spends on membership do not grow with the Store's
-/// membership history.
-///
-/// Every membership change used to cost a joining device two provider round
-/// trips — the head, then the entry it selects — back to the founding entry, on
-/// a chain nothing had touched in months. The rollup makes that one read
-/// whatever the history is; what is left is the probe that finds each stream's
-/// end, which is about the tail and not about the past.
-#[tokio::test]
-async fn membership_reads_on_a_fresh_reader_do_not_grow_with_the_chain() {
-    let shallow = membership_reads_after_admissions("rollup-reads-shallow", 1).await;
-    let deep = membership_reads_after_admissions("rollup-reads-deep", 9).await;
-
-    assert_eq!(
-        shallow, deep,
-        "a reader of a nine-change chain spent {deep} membership operations \
-         against {shallow} for a one-change chain, so the walk still follows history",
-    );
-    // Listing the snapshot prefix, the newest snapshot's metadata, the rollup,
-    // the newest covered head the rollup deliberately does not hold, and the
-    // absent slot that ends the stream. Written as a number rather than a bound
-    // because a budget nobody wrote down is one nobody notices doubling.
-    assert_eq!(
-        deep, 5,
-        "a fresh reader spends {deep} membership operations, not the read and a \
-         probe per stream the rollup exists to make it",
-    );
-}
-
-/// Provider operations one fresh reader spends reaching a Store's membership,
-/// over a chain of `admissions` changes with a snapshot published at the end.
-///
-/// Counted are the reads and listings under the membership, rollup, and
-/// snapshot-metadata prefixes: everything the reader spends deciding what the
-/// membership is. The snapshot *image* is not among them — a joining device
-/// downloads one of those on purpose, and it is the one large transfer the
-/// round-trip budget allows.
-async fn membership_reads_after_admissions(store_id: &str, admissions: usize) -> usize {
-    let fixture = MergeFixture::new(store_id).await;
-    let mut admission = fixture
-        .admit_member(&UserKeypair::generate(), MemberRole::Member)
-        .await;
-    for _ in 1..admissions {
-        admission = fixture
-            .admit_member(&UserKeypair::generate(), MemberRole::Member)
-            .await;
-    }
-    fixture
-        .device
-        .ensure_device_join_snapshot_for_test()
-        .await
-        .expect("publish the snapshot the rollup rides");
-
-    // Read the owner's own frontier before counting: resolving it walks the
-    // chain on a verifier of its own, and those reads are not the joiner's.
-    let expected = fixture.load().await;
-    fixture.home.clear_exact_reads();
-    fixture.home.clear_exact_listings();
-    let membership = walk_admission_membership(&fixture, &admission, true).await;
-    assert_eq!(
-        membership.head_refs(),
-        expected.head_refs(),
-        "the counted read ended on another frontier than the owner's own"
-    );
-    // The rollup holds every covered head but the newest, so the newest is read
-    // from its create-once slot. That read is what pins the whole covered
-    // prefix: it names its predecessor, which names its own, down to the
-    // sequence-one slot the signed Store root names. Without it a rollup could
-    // hand a reader one branch of a forked author stream while the provider
-    // holds the other.
-    let tip = expected
-        .head_refs()
-        .last()
-        .expect("the chain has a newest head")
-        .object
-        .slot()
-        .logical_key()
-        .to_string();
-    assert!(
-        fixture
-            .home
-            .exact_reads()
-            .iter()
-            .any(|slot| slot.logical_key() == tip),
-        "the newest covered membership head was not read from its own slot: {tip}"
-    );
-
-    let counted = |key: &str| {
-        key.starts_with("store-v1/membership/")
-            || key.starts_with("store-v1/membership-rollups/")
-            || key.starts_with("store-v1/snapshots/")
-    };
-    fixture
-        .home
-        .exact_reads()
-        .iter()
-        .filter(|slot| counted(slot.logical_key()))
-        .count()
-        + fixture
-            .home
-            .exact_listed_prefixes()
-            .iter()
-            .filter(|prefix| counted(prefix))
-            .count()
-}
+#[path = "publication_tests.rs"]
+mod publication;
 
 /// Open the Store the way an admitted device does — pinned root, nothing else
 /// — and resolve its membership, with or without the published rollup.
@@ -1468,7 +971,7 @@ async fn walk_admission_membership(
     admission: &crate::sync::store::MemberAdmission,
     adopt_rollup: bool,
 ) -> MembershipChain {
-    let mut history = crate::sync::store::HistoryConstructionAuthority::admission()
+    let history = crate::sync::store::HistoryConstructionAuthority::admission()
         .open_pinned(&*fixture.storage, &admission.store_root)
         .await
         .expect("open admission history");
@@ -1479,7 +982,7 @@ async fn walk_admission_membership(
         );
     }
     history
-        .load_exact_anchored_membership(
+        .load_accepted_anchored_membership(
             &admission.membership_floor.0,
             Some(&admission.owner_pubkey),
         )

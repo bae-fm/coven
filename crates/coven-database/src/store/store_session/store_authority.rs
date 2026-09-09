@@ -186,9 +186,7 @@ impl StoreSession<'_> {
                 "signed Store descriptor differs from its durable creation attempt".to_string(),
             ));
         }
-        if graph.registration.value.store_commits != graph_reservation.store_commits
-            || graph.registration.value.acknowledgements != graph_reservation.acknowledgements
-            || graph.registration.value.snapshots != graph_reservation.snapshots
+        if graph.registration.value.acknowledgements != graph_reservation.acknowledgements
             || graph.initial_ack.value.last_sync != authority.founder_timestamp
             || graph.initial_ack.value.successor.next_slot != graph_reservation.next_ack_slot
             || graph.membership.entry.value.created_at != authority.founder_timestamp
@@ -406,7 +404,9 @@ impl StoreSession<'_> {
                 }
                 let publication =
                     super::observed_store_publication::load_store_current_publication_on(&tx)?;
-                if publication != current_publication {
+                if publication.record() != current_publication.record()
+                    || publication.observed_version() != Some(current_publication.version())
+                {
                     return Err(DbError::Message(
                         "activated founder journal differs from its Store publication record"
                             .to_string(),

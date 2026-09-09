@@ -1,6 +1,4 @@
-use super::candidate_records::{
-    begin_candidate_nonactivation_targets_on, candidate_cleanup_targets_on,
-};
+use super::candidate_records::candidate_cleanup_targets_on;
 use super::*;
 use crate::store::StoreSession;
 use crate::*;
@@ -67,61 +65,19 @@ impl StoreSession<'_> {
         Ok(selected)
     }
 
-    fn stage_membership_mutation(
-        &mut self,
-        plan_bytes: Vec<u8>,
-        progress_bytes: Vec<u8>,
-        pending_rotation_generation: Option<u64>,
-    ) -> Result<ObjectHash, DbError> {
-        let conn = self.conn;
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        let intent_hash = ObjectHash::digest(&plan_bytes);
-        let existing = tx
-            .query_row(
-                "SELECT intent_hash, plan_bytes FROM outbound_membership_mutation \
-                 WHERE singleton = 1",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        if let Some((existing_hash, existing_plan)) = existing {
-            if existing_hash == intent_hash.to_string() && existing_plan == plan_bytes {
-                super::membership_rotation::stage_pending_rotation_on(
-                    &tx,
-                    pending_rotation_generation,
-                    intent_hash,
-                )?;
-                tx.commit().map_err(DbError::from)?;
-                return Ok(intent_hash);
-            }
-            return Err(DbError::Message(
-                "a different membership mutation is already pending".to_string(),
-            ));
-        }
-        tx.execute(
-            "INSERT INTO outbound_membership_mutation \
-             (singleton, intent_hash, plan_bytes, progress_bytes) \
-             VALUES (1, ?1, ?2, ?3)",
-            rusqlite::params![intent_hash.to_string(), plan_bytes, progress_bytes],
-        )
-        .map_err(DbError::from)?;
-        super::membership_rotation::stage_pending_rotation_on(
-            &tx,
-            pending_rotation_generation,
-            intent_hash,
-        )?;
-        tx.commit().map_err(DbError::from)?;
-        Ok(intent_hash)
-    }
-
     fn stage_membership_candidate_mutation(
         &mut self,
         plan_bytes: Vec<u8>,
         progress_bytes: Vec<u8>,
         remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
-        pending_rotation_generation: Option<u64>,
+        candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<ObjectHash, DbError> {
+        let publication = validate_membership_candidate_objects(&candidate, &remote_objects)?;
+        let pending_rotation_generation = membership_rotation_generation(&publication)?;
+        let active_publication = ActiveStorePublication::for_commit(
+            ActiveStorePublicationOwner::MembershipMutation,
+            &candidate,
+        )?;
         let conn = self.conn;
         let intent_hash = ObjectHash::digest(&plan_bytes);
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -148,6 +104,13 @@ impl StoreSession<'_> {
                     ));
                 }
             }
+            if !super::active_store_publication::load_active_store_publication_on(&tx)?
+                .is_some_and(|existing| existing.same_commit_reservation(&active_publication))
+            {
+                return Err(DbError::Message(
+                    "membership candidate differs from its active Store publication".to_string(),
+                ));
+            }
             super::membership_rotation::stage_pending_rotation_on(
                 &tx,
                 pending_rotation_generation,
@@ -156,18 +119,23 @@ impl StoreSession<'_> {
             tx.commit().map_err(DbError::from)?;
             return Ok(intent_hash);
         }
-        if remote_objects.is_empty() {
-            return Err(DbError::Message(
-                "membership candidate mutation has no remote ownership graph".to_string(),
-            ));
-        }
-        let mut object_ids = BTreeSet::new();
-        for remote in &remote_objects {
-            if !object_ids.insert(remote.object_id()) {
+        match super::active_store_publication::claim_active_store_publication_on(
+            &tx,
+            &active_publication,
+        )? {
+            super::active_store_publication::ActiveStorePublicationClaim::Acquired => {}
+            super::active_store_publication::ActiveStorePublicationClaim::AlreadyOwned => {
                 return Err(DbError::Message(
-                    "membership candidate mutation repeats a remote object".to_string(),
+                    "membership mutation owns publication before its journal".to_string(),
                 ));
             }
+            super::active_store_publication::ActiveStorePublicationClaim::Occupied(owner) => {
+                return Err(DbError::Message(format!(
+                    "another local Store operation owns publication: {owner:?}"
+                )));
+            }
+        }
+        for remote in &remote_objects {
             persist_exact_remote_object_on(
                 &tx,
                 self.store_dir,
@@ -212,112 +180,228 @@ impl StoreSession<'_> {
         Ok(())
     }
 
-    fn adopt_merge_membership_candidate_head(
+    fn stage_membership_candidate_abandonment(
         &mut self,
         intent_hash: ObjectHash,
-        plan_bytes: Vec<u8>,
-        previous: RemoteObjectRecord,
-        replacement: coven_protocol::remote_object::ClosedRemoteObject,
-        rotation_generation: Option<u64>,
-        replacement_hash: ObjectHash,
-    ) -> Result<ObjectHash, DbError> {
-        let conn = self.conn;
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        let previous_id = previous.object_id();
-        let current = load_remote_object_on(&tx, previous_id)?;
-        if current != previous {
-            return Err(DbError::Message(
-                "Merge membership candidate head changed before receipt adoption".to_string(),
-            ));
-        }
-        if !crate::remote_object_records::delete_remote_object_on(&tx, previous_id)? {
-            return Err(DbError::Message(
-                "prepared Merge membership head disappeared during receipt adoption".to_string(),
-            ));
-        }
-        persist_exact_remote_object_on(
-            &tx,
-            self.store_dir,
-            &replacement,
-            "adopted Merge membership candidate head",
-        )?;
-        if tx
-            .execute(
-                "UPDATE outbound_membership_mutation
-                 SET intent_hash = ?1, plan_bytes = ?2
-                 WHERE singleton = 1 AND intent_hash = ?3",
-                rusqlite::params![
-                    replacement_hash.to_string(),
-                    plan_bytes,
-                    intent_hash.to_string()
-                ],
-            )
-            .map_err(DbError::from)?
-            != 1
+        expected: ActiveStorePublication,
+        original: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        abandonment: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+    ) -> Result<ActiveStorePublication, DbError> {
+        original.validate_closed_shape()?;
+        abandonment.validate_closed_shape()?;
+        let original_target = coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
+            coord: original.reference.coord.clone(),
+            object: original.reference.object.clone(),
+            canonical_signed_bytes: original.commit.to_bytes(),
+        };
+        if expected.owner() != &ActiveStorePublicationOwner::MembershipMutation
+            || expected.commit_reservation()
+                != Some((
+                    &original.commit.write_id,
+                    &original.commit.author_registration,
+                    &original.reference.coord,
+                ))
+            || abandonment.commit.write_id != original.commit.write_id
+            || abandonment.commit.author_registration != original.commit.author_registration
+            || abandonment.reference.coord != original.reference.coord
+            || abandonment.commit.order.predecessor() != original.commit.order.predecessor()
+            || abandonment.commit.abandoned_candidates()
+                != [coven_protocol::store_commit::CandidateCleanupManifest {
+                    candidate: original_target,
+                }]
+            || expected.attempt()?.entry.payload
+                != coven_protocol::store_commit::StorePublicationPayload::Commit(
+                    original.reference.clone(),
+                )
+            || !expected.retired_candidates().is_empty()
         {
             return Err(DbError::Message(
-                "membership mutation changed before Merge head receipt adoption".to_string(),
+                "membership abandonment differs from its exact reserved candidate".into(),
             ));
         }
-        if let Some(generation) = rotation_generation {
-            super::membership_rotation::replace_rotation_candidate_mutation_on(
-                &tx,
-                intent_hash,
-                replacement_hash,
-                generation,
-            )?;
+        original.prepared_membership_publication()?;
+        let mut replacement = expected.begin_membership_abandonment(abandonment.clone())?;
+        replacement.retain_superseded_entry(expected.attempt()?.reference()?)?;
+        let bytes = abandonment.commit.to_bytes();
+        let remote =
+            RemoteObjectRecord::candidate_commit(abandonment.reference.clone(), &bytes, &bytes)?;
+        let tx = self.conn.unchecked_transaction()?;
+        require_membership_mutation_on(&tx, intent_hash)?;
+        let installed = super::observed_store_publication::load_store_current_publication_on(&tx)?;
+        if installed.record() != &abandonment.publication.previous
+            || installed.observed_version() != Some(&abandonment.publication.previous_version)
+        {
+            return Err(DbError::Message(
+                "membership abandonment does not extend the installed boundary".into(),
+            ));
         }
-        tx.commit().map_err(DbError::from)?;
-        Ok(replacement_hash)
+        let entries = super::observed_store_publication::load_store_publication_entries_on(&tx)?;
+        if entries.iter().any(|entry| {
+            matches!(&entry.value.payload,
+                coven_protocol::store_commit::StorePublicationPayload::Commit(candidate)
+                    if candidate.coord == original.reference.coord)
+        }) {
+            return Err(DbError::Message(
+                "accepted membership author position cannot be abandoned".into(),
+            ));
+        }
+        if super::materialized_commit_index::latest_position_for_device_on(
+            &tx,
+            &original.reference.coord.stream_id.to_string(),
+        )?
+        .is_some_and(|tip| tip.coord.sequence >= original.reference.coord.sequence)
+        {
+            return Err(DbError::Message(
+                "membership abandonment cannot consume a covered author position".into(),
+            ));
+        }
+        let previous_attempt = expected.attempt()?.reference()?;
+        let competing = entries.iter().any(|entry| {
+            entry.value.position == previous_attempt.position
+                && entry.prepared.reference() != &previous_attempt.object
+        });
+        let retired = installed
+            .record()
+            .latest_snapshot()
+            .is_some_and(|snapshot| snapshot.publication.position > previous_attempt.position);
+        if !competing && !retired {
+            return Err(DbError::Message(
+                "membership abandonment has no accepted supersession of its previous attempt"
+                    .into(),
+            ));
+        }
+        crate::remote_object_records::validate_remote_object_on(
+            &tx,
+            remote_object_id(&original.reference.object),
+            &original.reference.object,
+            &original.commit.to_bytes(),
+        )?;
+        persist_exact_remote_object_on(&tx, self.store_dir, &remote, "membership abandonment")?;
+        super::active_store_publication::update_active_store_publication_on(
+            &tx,
+            &expected,
+            &replacement,
+        )?;
+        tx.commit()?;
+        Ok(replacement)
     }
 
-    fn begin_membership_candidate_nonactivation(
+    fn replace_membership_candidate_mutation(
         &mut self,
         intent_hash: ObjectHash,
-        candidate: StoreBatchCommitRef,
-        candidate_objects: Vec<ExactObjectRef>,
-        retained_authorities: Vec<ExactObjectRef>,
+        expected: ActiveStorePublication,
+        candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        plan_bytes: Vec<u8>,
         progress_bytes: Vec<u8>,
-        nonactivation: coven_protocol::remote_object::CandidateNonactivation,
-    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        let conn = self.conn;
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        let exists: bool = tx
-            .query_row(
-                "SELECT EXISTS(
-                 SELECT 1 FROM outbound_membership_mutation
-                 WHERE singleton = 1 AND intent_hash = ?1
-             )",
-                [intent_hash.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
-        if !exists {
+        remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
+    ) -> Result<ObjectHash, DbError> {
+        if expected.owner() != &ActiveStorePublicationOwner::MembershipMutation
+            || !expected.is_awaiting_preparation()
+            || expected.commit_reservation()
+                != Some((
+                    &candidate.commit.write_id,
+                    &candidate.commit.author_registration,
+                    &candidate.reference.coord,
+                ))
+        {
             return Err(DbError::Message(
-                "membership candidate mutation changed before nonactivation".to_string(),
+                "replacement membership candidate lacks its exact completed reservation".into(),
             ));
         }
-        let owned = candidate_objects
-            .iter()
-            .chain(retained_authorities.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        let cleanup =
-            begin_candidate_nonactivation_targets_on(&tx, &candidate, &owned, &nonactivation)?;
-        let updated = tx
-            .execute(
-                "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
-                 WHERE singleton = 1 AND intent_hash = ?2",
-                rusqlite::params![progress_bytes, intent_hash.to_string()],
-            )
-            .map_err(DbError::from)?;
-        if updated != 1 {
+        let publication = validate_membership_candidate_objects(&candidate, &remote_objects)?;
+        let replacement_hash = ObjectHash::digest(&plan_bytes);
+        let tx = self.conn.unchecked_transaction()?;
+        require_membership_mutation_on(&tx, intent_hash)?;
+        let retired = require_retired_membership_candidate_on(&tx, &expected)?;
+        let RetiredStoreCandidateInputs::Membership(original) = &retired.inputs else {
+            unreachable!("retired membership candidate is validated")
+        };
+        use coven_protocol::membership::StoreAuthorityChange;
+        let same_request = match (&original.entry.change, &publication.entry.change) {
+            (
+                StoreAuthorityChange::RemoveMember {
+                    user_pubkey: before,
+                    ..
+                },
+                StoreAuthorityChange::RemoveMember {
+                    user_pubkey: after, ..
+                },
+            ) => before == after,
+            (
+                StoreAuthorityChange::SetMember {
+                    user_pubkey: before,
+                    provider_account_email: old_email,
+                    role: old_role,
+                    ..
+                },
+                StoreAuthorityChange::SetMember {
+                    user_pubkey: after,
+                    provider_account_email: new_email,
+                    role: new_role,
+                    ..
+                },
+            ) => before == after && old_email == new_email && old_role == new_role,
+            (
+                StoreAuthorityChange::ResolutionActivation { resolution: before },
+                StoreAuthorityChange::ResolutionActivation { resolution: after },
+            ) => before == after,
+            _ => false,
+        };
+        if !same_request {
             return Err(DbError::Message(
-                "membership candidate mutation changed during nonactivation".to_string(),
+                "replacement changes the retained membership request".into(),
             ));
         }
-        tx.commit().map_err(DbError::from)?;
-        Ok(cleanup)
+        let previous_rotation_generation = membership_rotation_generation(original)?;
+        let pending_rotation_generation = membership_rotation_generation(&publication)?;
+        let replacement = consume_retired_membership_candidate_on(&tx, &expected)?
+            .replace_attempt(candidate.publication.clone())?;
+        let installed = super::observed_store_publication::load_store_current_publication_on(&tx)?;
+        if installed.record() != &candidate.publication.previous
+            || installed.observed_version() != Some(&candidate.publication.previous_version)
+        {
+            return Err(DbError::Message(
+                "replacement membership candidate does not extend the installed boundary".into(),
+            ));
+        }
+        for remote in &remote_objects {
+            persist_exact_remote_object_on(
+                &tx,
+                self.store_dir,
+                remote,
+                "replacement membership candidate object",
+            )?;
+        }
+        if tx.execute(
+            "UPDATE outbound_membership_mutation SET intent_hash = ?1, plan_bytes = ?2, progress_bytes = ?3 \
+             WHERE singleton = 1 AND intent_hash = ?4",
+            rusqlite::params![
+                replacement_hash.to_string(),
+                plan_bytes,
+                progress_bytes,
+                intent_hash.to_string()
+            ],
+        )? != 1
+        {
+            return Err(DbError::Message(
+                "membership mutation changed during replacement".into(),
+            ));
+        }
+        if let Some(generation) = previous_rotation_generation {
+            super::membership_rotation::remove_rotation_candidate_on(&tx, intent_hash, generation)?;
+        }
+        super::membership_rotation::stage_pending_rotation_on(
+            &tx,
+            pending_rotation_generation,
+            replacement_hash,
+        )?;
+        super::active_store_publication::update_active_store_publication_on(
+            &tx,
+            &expected,
+            &replacement,
+        )?;
+        tx.commit()?;
+        Ok(replacement_hash)
     }
 
     fn complete_nonactivating_membership_candidate_mutation(
@@ -396,40 +480,6 @@ impl StoreSession<'_> {
             candidate_objects.iter().map(remote_object_id),
             "losing membership",
         )?;
-        for object in retained_authorities {
-            let object_id = remote_object_id(&object);
-            let removable = tx
-                .query_row(
-                    "SELECT state FROM remote_objects WHERE object_id = ?1",
-                    [object_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(DbError::from)?
-                .map(|encoded| {
-                    serde_json::from_str::<RemoteObjectRecord>(&encoded).map_err(|error| {
-                        DbError::context(
-                            format!("parse terminal membership authority {object_id}"),
-                            error,
-                        )
-                    })
-                })
-                .transpose()?
-                .is_some_and(|remote| {
-                    matches!(
-                        remote,
-                        RemoteObjectRecord::RetainedAuthority(
-                            coven_protocol::remote_object::RetainedAuthorityRecord {
-                                state: coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. },
-                                ..
-                            }
-                        )
-                    )
-                });
-            if removable {
-                crate::remote_object_records::delete_remote_object_on(&tx, object_id)?;
-            }
-        }
         if tx
             .execute(
                 "DELETE FROM outbound_membership_mutation \
@@ -474,31 +524,6 @@ impl StoreSession<'_> {
         candidate_cleanup_targets_on(conn, candidate, objects)
     }
 
-    fn record_direct_revoke_activation(
-        &mut self,
-        intent_hash: ObjectHash,
-        progress_bytes: Vec<u8>,
-        generation: u64,
-    ) -> Result<(), DbError> {
-        let conn = self.conn;
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        if tx
-            .execute(
-                "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
-                 WHERE singleton = 1 AND intent_hash = ?2",
-                rusqlite::params![progress_bytes, intent_hash.to_string()],
-            )
-            .map_err(DbError::from)?
-            != 1
-        {
-            return Err(DbError::Message(
-                "direct revoke mutation changed during activation".to_string(),
-            ));
-        }
-        super::membership_rotation::commit_rotation_candidate_on(&tx, intent_hash, generation)?;
-        tx.commit().map_err(DbError::from)
-    }
-
     fn complete_membership_mutation(&mut self, intent_hash: ObjectHash) -> Result<(), DbError> {
         let conn = self.conn;
         let deleted = conn
@@ -518,6 +543,46 @@ impl StoreSession<'_> {
 }
 
 impl StoreDatabase {
+    pub async fn stage_membership_candidate_abandonment(
+        &self,
+        intent_hash: ObjectHash,
+        expected: ActiveStorePublication,
+        original: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        abandonment: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+    ) -> Result<ActiveStorePublication, DbError> {
+        self.call_store(move |session| {
+            session.stage_membership_candidate_abandonment(
+                intent_hash,
+                expected,
+                original,
+                abandonment,
+            )
+        })
+        .await
+    }
+
+    pub async fn replace_membership_candidate_mutation(
+        &self,
+        intent_hash: ObjectHash,
+        expected: ActiveStorePublication,
+        candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        plan_bytes: Vec<u8>,
+        progress_bytes: Vec<u8>,
+        remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
+    ) -> Result<ObjectHash, DbError> {
+        self.call_store(move |session| {
+            session.replace_membership_candidate_mutation(
+                intent_hash,
+                expected,
+                candidate,
+                plan_bytes,
+                progress_bytes,
+                remote_objects,
+            )
+        })
+        .await
+    }
+
     pub async fn outbound_membership_mutation(
         &self,
     ) -> Result<Option<DurableMembershipMutation>, DbError> {
@@ -552,35 +617,19 @@ impl StoreDatabase {
         .await
     }
 
-    pub async fn stage_membership_mutation(
-        &self,
-        plan_bytes: Vec<u8>,
-        progress_bytes: Vec<u8>,
-        pending_rotation_generation: Option<u64>,
-    ) -> Result<ObjectHash, DbError> {
-        self.call_store(move |session| {
-            session.stage_membership_mutation(
-                plan_bytes,
-                progress_bytes,
-                pending_rotation_generation,
-            )
-        })
-        .await
-    }
-
     pub async fn stage_membership_candidate_mutation(
         &self,
         plan_bytes: Vec<u8>,
         progress_bytes: Vec<u8>,
         remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
-        pending_rotation_generation: Option<u64>,
+        candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<ObjectHash, DbError> {
         self.call_store(move |session| {
             session.stage_membership_candidate_mutation(
                 plan_bytes,
                 progress_bytes,
                 remote_objects,
-                pending_rotation_generation,
+                candidate,
             )
         })
         .await
@@ -593,100 +642,6 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         self.call_store(move |session| {
             session.update_membership_mutation_progress(intent_hash, progress_bytes)
-        })
-        .await
-    }
-
-    pub async fn adopt_merge_membership_candidate_head(
-        &self,
-        intent_hash: ObjectHash,
-        plan_bytes: Vec<u8>,
-        previous: RemoteObjectRecord,
-        replacement: coven_protocol::remote_object::ClosedRemoteObject,
-        rotation_generation: Option<u64>,
-    ) -> Result<ObjectHash, DbError> {
-        let (
-            RemoteObjectRecord::RetainedAuthority(previous_head),
-            RemoteObjectRecord::RetainedAuthority(replacement_head),
-        ) = (&previous, replacement.record())
-        else {
-            return Err(DbError::Message(
-                "Merge membership candidate head adoption received a non-authority object"
-                    .to_string(),
-            ));
-        };
-        let (
-            coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
-                reference: previous_ref,
-                ..
-            },
-            coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
-                reference: replacement_ref,
-                ..
-            },
-        ) = (
-            &previous_head.identity.domain,
-            &replacement_head.identity.domain,
-        )
-        else {
-            return Err(DbError::Message(
-                "Merge membership candidate head adoption received another authority domain"
-                    .to_string(),
-            ));
-        };
-        if previous_ref.object.slot() != replacement_ref.object.slot()
-            || previous_ref == replacement_ref
-        {
-            return Err(DbError::Message(
-                "adopted Merge membership head does not replace the same exact slot".to_string(),
-            ));
-        }
-        let replacement = replacement
-            .map_record(|mut record| {
-                record.mark_uploaded_verified()?;
-                Ok(record)
-            })
-            .map_err(|error| {
-                DbError::context("mark adopted Merge membership head uploaded", error)
-            })?;
-        let replacement_hash = ObjectHash::digest(&plan_bytes);
-        self.call_store(move |session| {
-            session.adopt_merge_membership_candidate_head(
-                intent_hash,
-                plan_bytes,
-                previous,
-                replacement,
-                rotation_generation,
-                replacement_hash,
-            )
-        })
-        .await
-    }
-
-    pub async fn begin_membership_candidate_nonactivation(
-        &self,
-        intent_hash: ObjectHash,
-        candidate: StoreBatchCommitRef,
-        candidate_objects: Vec<ExactObjectRef>,
-        retained_authorities: Vec<ExactObjectRef>,
-        progress_bytes: Vec<u8>,
-        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
-    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        if nonactivation.candidate_reference().map_err(DbError::from)? != candidate {
-            return Err(DbError::Message(
-                "verified nonactivation names another membership candidate".to_string(),
-            ));
-        }
-        let nonactivation = nonactivation.into_durable();
-        self.call_store(move |session| {
-            session.begin_membership_candidate_nonactivation(
-                intent_hash,
-                candidate,
-                candidate_objects,
-                retained_authorities,
-                progress_bytes,
-                nonactivation,
-            )
         })
         .await
     }
@@ -723,18 +678,6 @@ impl StoreDatabase {
         .await
     }
 
-    pub async fn record_direct_revoke_activation(
-        &self,
-        intent_hash: ObjectHash,
-        progress_bytes: Vec<u8>,
-        generation: u64,
-    ) -> Result<(), DbError> {
-        self.call_store(move |session| {
-            session.record_direct_revoke_activation(intent_hash, progress_bytes, generation)
-        })
-        .await
-    }
-
     pub async fn complete_membership_mutation(
         &self,
         intent_hash: ObjectHash,
@@ -744,30 +687,136 @@ impl StoreDatabase {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub(super) fn require_membership_mutation_on(
+    conn: &rusqlite::Connection,
+    intent_hash: ObjectHash,
+) -> Result<(), DbError> {
+    let stored: Vec<u8> = conn.query_row(
+        "SELECT plan_bytes FROM outbound_membership_mutation WHERE singleton = 1 AND intent_hash = ?1",
+        [intent_hash.to_string()],
+        |row| row.get(0),
+    )?;
+    if ObjectHash::digest(&stored) != intent_hash {
+        return Err(DbError::Message(
+            "membership mutation plan differs from its owner".into(),
+        ));
+    }
+    Ok(())
+}
 
-    /// The stream a key already selected is kept whenever it is still reusable,
-    /// so a caller that offers it back does not start a second stream.
-    #[tokio::test]
-    async fn a_reusable_selected_stream_is_returned_again() {
-        let fixture_store_dir = crate::synthetic_store::test_store_dir();
-        let fixture = crate::synthetic_store::open_test_db(fixture_store_dir.clone());
-        let database = StoreDatabase::new(&fixture);
-        let key = "circle_roster_author_stream/reselect".to_string();
+fn validate_membership_candidate_objects(
+    candidate: &coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+    remote_objects: &[coven_protocol::remote_object::ClosedRemoteObject],
+) -> Result<coven_protocol::membership_mutation::PreparedMembershipPublication, DbError> {
+    candidate.validate_closed_shape()?;
+    let publication = candidate.prepared_membership_publication()?;
+    let objects = publication.candidate_object_refs(&candidate.commit, &candidate.reference)?;
+    let supplied = remote_objects
+        .iter()
+        .map(|remote| remote.object().clone())
+        .collect::<BTreeSet<_>>();
+    if supplied.len() != remote_objects.len()
+        || supplied != objects.into_iter().collect::<BTreeSet<_>>()
+    {
+        return Err(DbError::Message(
+            "membership ownership differs from its exact candidate".into(),
+        ));
+    }
+    let owns_candidate = |ownership: &coven_protocol::remote_object::PendingCandidateOwnership| {
+        ownership.pending.len() == 1
+            && ownership.pending.contains(&candidate.reference)
+            && ownership.nonactivated.is_empty()
+    };
+    for remote in remote_objects {
+        use coven_protocol::remote_object::{
+            CandidateCommitState, CandidateObjectState, RetainedAuthorityObjectState,
+        };
+        let prepared_for_candidate = match remote.record() {
+            RemoteObjectRecord::CandidateCommit(record) => {
+                record.identity == candidate.reference
+                    && matches!(record.state, CandidateCommitState::Prepared)
+            }
+            RemoteObjectRecord::CandidateExclusive(record) => matches!(
+                &record.state,
+                CandidateObjectState::Prepared { ownership } if owns_candidate(ownership)
+            ),
+            RemoteObjectRecord::RetainedAuthority(record) => matches!(
+                &record.state,
+                RetainedAuthorityObjectState::Prepared { ownership } if owns_candidate(ownership)
+            ),
+            RemoteObjectRecord::SharedLiveSet(_) => false,
+        };
+        if !prepared_for_candidate {
+            return Err(DbError::Message(
+                "membership object is not prepared for its exact candidate".into(),
+            ));
+        }
+    }
+    Ok(publication)
+}
 
-        let selected = database
-            .select_causal_author_stream(key.clone(), std::collections::BTreeSet::new())
-            .await
-            .expect("mint an author stream for a key holding none");
-
-        assert_eq!(
-            database
-                .select_causal_author_stream(key, std::collections::BTreeSet::from([selected]))
-                .await
-                .expect("reselect the durable author stream"),
-            selected
-        );
+pub(super) fn membership_rotation_generation(
+    publication: &coven_protocol::membership_mutation::PreparedMembershipPublication,
+) -> Result<Option<u64>, DbError> {
+    match &publication.entry.change {
+        coven_protocol::membership::StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => {
+            let generation = wrapped_keys
+                .first()
+                .ok_or_else(|| {
+                    DbError::Message(
+                        "retained member removal has no replacement key generation".into(),
+                    )
+                })?
+                .generation;
+            Ok(Some(generation))
+        }
+        _ => Ok(None),
     }
 }
+
+pub(super) fn require_retired_membership_candidate_on<'a>(
+    conn: &rusqlite::Connection,
+    expected: &'a ActiveStorePublication,
+) -> Result<&'a RetiredStoreCandidate, DbError> {
+    let [retired] = expected.retired_candidates() else {
+        return Err(DbError::Message(
+            "membership continuation has no exact original candidate".into(),
+        ));
+    };
+    if expected.owner() != &ActiveStorePublicationOwner::MembershipMutation
+        || !expected.is_awaiting_preparation()
+        || !matches!(retired.inputs, RetiredStoreCandidateInputs::Membership(_))
+        || super::active_store_publication::load_active_store_publication_on(conn)?.as_ref()
+            != Some(expected)
+    {
+        return Err(DbError::Message(
+            "membership continuation differs from its durable owner".into(),
+        ));
+    }
+    super::candidate_records::require_candidate_cleanup_complete_on(
+        conn,
+        &retired.candidate()?,
+        &retired.objects()?,
+        "membership candidate cleanup is incomplete",
+    )?;
+    Ok(retired)
+}
+
+pub(super) fn consume_retired_membership_candidate_on(
+    tx: &rusqlite::Transaction<'_>,
+    expected: &ActiveStorePublication,
+) -> Result<ActiveStorePublication, DbError> {
+    let retired = require_retired_membership_candidate_on(tx, expected)?;
+    super::candidate_records::delete_remote_objects_on(
+        tx,
+        retired.objects()?.iter().map(remote_object_id),
+        "retired membership candidate",
+    )?;
+    let mut completed = expected.clone();
+    completed.complete_retired_candidate_cleanup()?;
+    Ok(completed)
+}
+
+#[cfg(test)]
+#[path = "membership_mutations_tests.rs"]
+mod tests;

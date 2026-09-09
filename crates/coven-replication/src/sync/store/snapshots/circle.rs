@@ -1,3 +1,5 @@
+mod packages;
+
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::circle::{CircleBootstrapRef, CircleControlCoord, CircleId};
@@ -170,15 +172,13 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
         store_frontier: &CommitFrontier,
         restorer_identity: &UserKeypair,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
-    ) -> Result<Vec<coven_database::StagedCircleInstall>, SnapshotError> {
+        local_membership: coven_protocol::membership::LocalStoreMembership,
+    ) -> Result<coven_database::StagedCircleRestore, SnapshotError> {
         use coven_database::StagedCircleInstall;
         let root = self.root().clone();
-        // The stream-activation index the control-stream authority resolves against is
-        // written by the pull, which has not run on a freshly restored device; seed it
-        // from the retained materializations selection reads anyway.
         let selection = self
             .database
-            .prepare_circle_restore_selection(root.clone())
+            .prepare_circle_restore_selection()
             .await
             .map_err(SnapshotError::from)?;
         let device_registrations = self
@@ -187,7 +187,8 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             .await
             .map_err(SnapshotError::from)?;
 
-        let mut installs = Vec::new();
+        let mut bases = Vec::new();
+        let mut recipient_access = Vec::new();
         let preserved_bootstraps = selection.preserved_bootstraps;
         for (circle_id, controls) in selection.circles {
             let head = self
@@ -209,14 +210,15 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                     &head_commit,
                 )
                 .await?;
-            let (epoch_encryption, leaf_bootstrap) = match access {
-                crate::sync::store::circles::activation::LocalCircleAccess::NoAccess => {
-                    continue;
-                }
-                crate::sync::store::circles::activation::LocalCircleAccess::Active {
-                    epoch_encryption,
-                    leaf_bootstrap,
-                } => (epoch_encryption, leaf_bootstrap),
+            let epoch_access = access
+                .activation
+                .snapshot_keyring()
+                .map_err(SnapshotError::from)?;
+            let head_activation = access.activation.clone();
+            let leaf_bootstrap = access.leaf_bootstrap.clone();
+            recipient_access.push(access);
+            let Some(epoch_access) = epoch_access else {
+                continue;
             };
 
             let mut candidates: Vec<StagedCircleImageCandidate> = Vec::new();
@@ -242,11 +244,12 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                         &coverage.activation_commit,
                     )
                     .await?;
-                let crate::sync::store::circles::activation::LocalCircleAccess::Active {
-                    epoch_encryption,
-                    ..
-                } = access
-                else {
+                let historical_epoch = access
+                    .activation
+                    .snapshot_keyring()
+                    .map_err(SnapshotError::from)?;
+                recipient_access.push(access);
+                let Some(historical_epoch) = historical_epoch else {
                     tracing::debug!(
                         %circle_id,
                         control = ?coverage.control,
@@ -257,7 +260,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 let image_context = ProtocolObjectContext::circle(
                     root.store_root_hash,
                     ProtocolObjectDomain::CircleBootstrapImage,
-                    epoch_encryption,
+                    historical_epoch,
                 );
                 let image_prefix = coven_protocol::store_commit::semantic_prefix_from_exact_object(
                     &coverage.bootstrap.image.object,
@@ -303,7 +306,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 .select_standalone_snapshot_candidate(
                     circle_id,
                     &head_control,
-                    &epoch_encryption,
+                    &epoch_access,
                     routing_key,
                     &device_registrations,
                 )
@@ -312,21 +315,139 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 candidates.push(candidate);
             }
 
-            match choose_maximal_installable_candidate(circle_id, store_frontier, candidates)? {
-                Some(candidate) => installs.push(StagedCircleInstall {
-                    activation_commit: candidate.activation_commit,
-                    image: candidate.image,
-                }),
-                None => {
-                    warn!(
-                        %circle_id,
-                        "restore selection: Circle has active access but no coverage image; \
-                         it replays from live history if retained"
-                    );
+            let founder = if candidates.is_empty() {
+                self.stage_ancestor_bases(
+                    restorer_identity,
+                    routing_key,
+                    &head_activation,
+                    &mut recipient_access,
+                    &mut candidates,
+                )
+                .await?
+            } else {
+                None
+            };
+
+            match (
+                choose_maximal_installable_candidate(circle_id, store_frontier, candidates)?,
+                founder,
+            ) {
+                (Some(candidate), _) => bases.push(coven_database::StagedCircleBase::Image(
+                    StagedCircleInstall {
+                        activation_commit: candidate.activation_commit,
+                        image: candidate.image,
+                    },
+                )),
+                (None, Some(control)) => {
+                    bases.push(coven_database::StagedCircleBase::Founder { circle_id, control })
+                }
+                (None, None) => {
+                    return Err(SnapshotError::BootstrapState(format!(
+                        "restore selection: Circle {circle_id} requires a recipient bootstrap image"
+                    )));
                 }
             }
         }
-        Ok(installs)
+        let mut restore = coven_database::StagedCircleRestore {
+            access: recipient_access,
+            bases,
+            packages: None,
+        };
+        restore.packages = self
+            .select_packages_after_bases(&restore, routing_key, local_membership)
+            .await?;
+        Ok(restore)
+    }
+
+    /// A leaf without an image continues its exact predecessor access. Follow
+    /// those accepted controls within this epoch until the recipient's seed or
+    /// its actual founding access supplies the base.
+    async fn stage_ancestor_bases(
+        &mut self,
+        restorer_identity: &UserKeypair,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+        head: &coven_protocol::circle_activation::VerifiedCircleReference,
+        recipient_access: &mut Vec<coven_database::StagedCircleAccess>,
+        candidates: &mut Vec<StagedCircleImageCandidate>,
+    ) -> Result<Option<CircleControlCoord>, SnapshotError> {
+        let circle_id = head.circle_id;
+        let epoch = head.control.value.epoch_id();
+        let mut pending = vec![head.control.clone()];
+        let mut visited = std::collections::BTreeSet::from([head.control.coord.clone()]);
+        let mut founder = None;
+        while let Some(control) = pending.pop() {
+            if control.value.is_founder() {
+                if founder
+                    .as_ref()
+                    .is_some_and(|prior| prior != &control.coord)
+                {
+                    return Err(SnapshotError::BootstrapState(format!(
+                        "restore selection: Circle {circle_id} has conflicting founding controls"
+                    )));
+                }
+                founder = Some(control.coord);
+                continue;
+            }
+            for predecessor in &control.value.access_epoch().covered_control_heads {
+                let (activation, commit) = self
+                    .database
+                    .verified_circle_activation_context(
+                        self.root().clone(),
+                        circle_id,
+                        predecessor.coord.clone(),
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        SnapshotError::BootstrapState(format!(
+                    "restore selection: Circle {circle_id} omits its exact predecessor {:?}",
+                    predecessor.coord,
+                ))
+                    })?;
+                if !self
+                    .database
+                    .verified_circle_control_covers(
+                        self.root().clone(),
+                        circle_id,
+                        control.clone(),
+                        predecessor.coord.clone(),
+                    )
+                    .await?
+                {
+                    return Err(SnapshotError::BootstrapState(format!(
+                        "restore selection: Circle {circle_id} predecessor is outside its accepted lineage"
+                    )));
+                }
+                if activation.control.value.epoch_id() != epoch
+                    || !visited.insert(predecessor.coord.clone())
+                {
+                    continue;
+                }
+                let access = self
+                    .resolve_restorer_access(
+                        restorer_identity,
+                        routing_key,
+                        circle_id,
+                        &predecessor.coord,
+                        &commit,
+                    )
+                    .await?;
+                let active = access.activation.snapshot_keyring()?.is_some();
+                if active {
+                    match &access.leaf_bootstrap {
+                        Some(image) => candidates.push(StagedCircleImageCandidate {
+                            activation_commit: commit,
+                            image: image.clone(),
+                        }),
+                        None => pending.push(access.activation.control.clone()),
+                    }
+                } else {
+                    tracing::debug!(%circle_id, control = ?predecessor.coord,
+                        "restore selection: recipient had no active access at this predecessor");
+                }
+                recipient_access.push(access);
+            }
+        }
+        Ok(founder)
     }
 
     async fn resolve_restorer_access(
@@ -336,7 +457,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
         circle_id: CircleId,
         control: &CircleControlCoord,
         activation_commit: &coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<crate::sync::store::circles::activation::LocalCircleAccess, SnapshotError> {
+    ) -> Result<coven_database::StagedCircleAccess, SnapshotError> {
         let commit_lookup = activation_commit.clone();
         let root = self.root().clone();
         let owned = self
@@ -344,7 +465,6 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             .retained_merge_materialization_by_ref(root, commit_lookup)
             .await
             .map_err(SnapshotError::from)?;
-        let commit = owned.commit().clone();
         let reference = owned
             .circle_activations()
             .circles()
@@ -364,7 +484,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             self.history,
         )
         .resolve_local_access(
-            &commit,
+            owned.verified_commit(),
             &reference.reference,
             &reference.control,
             restorer_identity,
@@ -556,8 +676,8 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     /// package access to, under the same owner/cadence gate the caller already
     /// applied for the Store snapshot. A Circle without active access is not
     /// enumerated (an inactive recipient holds no epoch key) and so is skipped
-    /// by construction; a capture or publication failure for one Circle is logged
-    /// and does not abort the others or the cycle.
+    /// by construction. Capture and publication failures reach the initiator;
+    /// any already prepared publication remains durable for retry.
     pub(crate) async fn push_circle_snapshots(
         &mut self,
         schema_version: u32,
@@ -591,17 +711,12 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                 .map_err(SnapshotError::from)?
             {
                 let publication = self.writer.snapshot_publication().await;
-                match publication.resume_circle(pending).await {
-                    Ok(meta) => tracing::info!(
-                        circle_id = %input.circle_id(),
-                        generation = meta.generation,
-                        "resumed pending Circle snapshot publication"
-                    ),
-                    Err(error) => tracing::warn!(
-                        circle_id = %input.circle_id(),
-                        "skip Circle snapshot: pending publication failed: {error}"
-                    ),
-                }
+                let meta = publication.publish_circle(pending).await?;
+                tracing::info!(
+                    circle_id = %input.circle_id(),
+                    generation = meta.generation,
+                    "resumed pending Circle snapshot publication"
+                );
                 continue;
             }
             // Retention: do not author a new generation until every active-access
@@ -624,21 +739,11 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                     continue;
                 }
             }
-            let cut = match self
+            let cut = self
                 .capture_circle_snapshot_cut(store_routing, input.circle_id())
-                .await
-            {
-                Ok(cut) => cut,
-                Err(error) => {
-                    tracing::warn!(
-                        circle_id = %input.circle_id(),
-                        "skip Circle snapshot: capture failed: {error}"
-                    );
-                    continue;
-                }
-            };
+                .await?;
             let (snapshot, coverage) = cut.into_parts();
-            match self
+            let meta = self
                 .push_circle_snapshot(
                     &input,
                     snapshot,
@@ -646,18 +751,12 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                     schema_version,
                     created_at.to_string(),
                 )
-                .await
-            {
-                Ok(meta) => tracing::info!(
-                    circle_id = %input.circle_id(),
-                    generation = meta.generation,
-                    "Circle snapshot created and pushed"
-                ),
-                Err(error) => tracing::warn!(
-                    circle_id = %input.circle_id(),
-                    "skip Circle snapshot: publication failed: {error}"
-                ),
-            }
+                .await?;
+            tracing::info!(
+                circle_id = %input.circle_id(),
+                generation = meta.generation,
+                "Circle snapshot created and pushed"
+            );
         }
         Ok(())
     }
@@ -701,7 +800,6 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         let db = &database;
         let root = &self.root;
         let publication = self.writer.snapshot_publication().await;
-        publication.drain_spool_cleanup().await?;
         // The image references only already-published Circle blobs, verified exact —
         // the same closure a member-addition bootstrap image carries.
         let blobs = self
@@ -810,13 +908,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             )
             .map_err(SnapshotError::Bucket)?;
         database
-            .stage_circle_snapshot_publication(
-                meta.clone(),
-                meta_prepared,
-                image,
-                image_prepared,
-                Vec::new(),
-            )
+            .stage_circle_snapshot_publication(meta.clone(), meta_prepared, image, image_prepared)
             .await
             .map_err(SnapshotError::from)?;
         let pending = database

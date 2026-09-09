@@ -1318,7 +1318,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
             &photo,
         )
         .await;
-    db_a.execute_test_sql(&format!(
+    db_a.execute_test_host_write(&format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coveraaa', 'n1', 13, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover-coveraaa.jpg')",
             coven_protocol::blob::content_hash(&cover),
@@ -1366,14 +1366,48 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     );
     assert!(
         exact_pinned_path(&lib_a, &cover_ref(&db_a, "coveraaa").await).exists(),
-        "the cover's local-store copy moved into the pinned cache",
+        "the uploaded cover has its requested pinned copy",
     );
+    assert!(
+        lib_a
+            .local_blob_path("covers", "coveraaa")
+            .unwrap()
+            .exists(),
+        "the private replay prefix still owns the cover's local bytes",
+    );
+    let founder = storage
+        .bind_founder_device(&db_a, lib_a.clone())
+        .await
+        .expect("bind the publishing device");
+    let snapshot = founder
+        .publish_snapshot_generation_for_test()
+        .await
+        .expect("publish a snapshot covering the complete sharing transition");
+    let standing = founder
+        .stand_on_accepted_snapshot()
+        .await
+        .expect("inspect the retired replay prefix");
+    assert!(matches!(
+        standing,
+        crate::sync::store::ReplayBaselineAdvance::Declined(
+            crate::sync::store::ReplayBaselineDecline::BaselineAtCoverage { snapshot: installed }
+        ) if installed == snapshot.reference
+    ));
+    let position = founder
+        .latest_local_store_position()
+        .await
+        .expect("read the publishing device's position")
+        .expect("the sharing transition has an accepted position");
+    owners_a
+        .drain_published_blob_drop_intents(position.coord.sequence())
+        .await
+        .expect("remove copies released by replay retirement");
     assert!(
         !lib_a
             .local_blob_path("covers", "coveraaa")
             .unwrap()
             .exists(),
-        "the cover is no longer in the local store (it is Remote now)",
+        "the retired private replay prefix no longer keeps a local cover copy",
     );
 
     // B pulls and its eager cache fills: the cover (CacheEager) lands in B's

@@ -1,6 +1,131 @@
 use super::*;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
+    pub(crate) async fn refresh_membership_publication(&mut self) -> Result<(), StoreError> {
+        let pulled = self
+            .writer
+            .install_current_publication(&mut self.history, &mut self.membership)
+            .await?;
+        if !pulled.held_positions.is_empty() {
+            return Err(StoreError::PublicationHeld(pulled.held_positions));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn abandon_membership_candidate(
+        &mut self,
+        intent_hash: store_commit::ObjectHash,
+        original: &commit_plan::PreparedStoreOperationCommit,
+        publication: &PreparedMembershipPublication,
+    ) -> Result<coven_database::ActiveStorePublication, MembershipMutationError> {
+        publication.candidate_object_refs(&original.commit, &original.reference)?;
+        let active = self
+            .database
+            .active_store_publication()
+            .await?
+            .ok_or_else(|| {
+                MembershipMutationError::InvalidDurableMutation(
+                    "membership abandonment has no reserved publication".into(),
+                )
+            })?;
+        if active.owner() != &coven_database::ActiveStorePublicationOwner::MembershipMutation {
+            return Err(MembershipMutationError::InvalidDurableMutation(
+                "membership abandonment found another publication owner".into(),
+            ));
+        }
+        if !active.is_awaiting_preparation() {
+            let abandonment = match active.membership_abandonment() {
+                Some(candidate) => candidate.clone(),
+                None => {
+                    self.refresh_membership_publication().await?;
+                    let plan = self.prepare_plan().await?;
+                    let abandonment = self
+                        .prepare_replacement_candidate(
+                            &plan,
+                            commit_plan::StoreOperationBatch::AbandonCandidates(vec![
+                                store_commit::CandidateCleanupManifest {
+                                    candidate: store_commit::StoreBatchCommitDeletionTarget {
+                                        coord: original.reference.coord.clone(),
+                                        object: original.reference.object.clone(),
+                                        canonical_signed_bytes: original.commit.to_bytes(),
+                                    },
+                                },
+                            ]),
+                            original,
+                        )
+                        .await?;
+                    self.database
+                        .stage_membership_candidate_abandonment(
+                            intent_hash,
+                            active,
+                            original.clone(),
+                            abandonment.clone(),
+                        )
+                        .await?;
+                    abandonment
+                }
+            };
+            let bytes = abandonment.commit.to_bytes();
+            let remote = coven_protocol::remote_object::RemoteObjectRecord::candidate_commit(
+                abandonment.reference.clone(),
+                &bytes,
+                &bytes,
+            )?
+            .into_record();
+            let database = self.database.clone();
+            let _authorship = database.author_own_stream().await;
+            self.publish_prepared(
+                Box::new(abandonment), None,
+                Some(coven_protocol::membership_mutation::StoreMembershipJournalCompletion::MembershipCandidateAbandoned {
+                    intent_hash,
+                    original: Box::new(original.clone()),
+                    publication: Box::new(publication.clone()),
+                    remote_objects: vec![remote],
+                }),
+            ).await?;
+        }
+        let active = self
+            .database
+            .active_store_publication()
+            .await?
+            .ok_or_else(|| {
+                MembershipMutationError::InvalidDurableMutation(
+                    "accepted abandonment lost its continuation reservation".into(),
+                )
+            })?;
+        if !active.is_awaiting_preparation() {
+            return Err(MembershipMutationError::InvalidDurableMutation(
+                "accepted abandonment did not advance its continuation reservation".into(),
+            ));
+        }
+        crate::sync::store::authorization::retire_store_write_candidates(
+            &self.database,
+            self.storage.as_ref(),
+            active,
+        )
+        .await?;
+        self.database
+            .active_store_publication()
+            .await?
+            .ok_or_else(|| {
+                MembershipMutationError::InvalidDurableMutation(
+                    "membership cleanup lost its continuation reservation".into(),
+                )
+            })
+    }
+
+    pub(crate) async fn prepare_authority_change(
+        &mut self,
+        chain: &MembershipChain,
+        change: StoreAuthorityChange,
+    ) -> Result<PreparedMembershipTransition, MembershipMutationError> {
+        let stream = self.select_membership_author_stream(chain).await?;
+        let entry =
+            self.writer
+                .sign_authority_change(chain, stream, change, self.database.stamp())?;
+        self.prepare_membership_transition(chain, entry).await
+    }
+
     pub(super) async fn outbound_membership_mutation(
         &self,
     ) -> Result<Option<coven_database::DurableMembershipMutation>, MembershipMutationError> {
@@ -14,26 +139,18 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         plan_bytes: Vec<u8>,
         progress_bytes: Vec<u8>,
-        remote_objects: Option<Vec<coven_protocol::remote_object::ClosedRemoteObject>>,
-        pending_rotation_generation: Option<u64>,
+        remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
+        candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<coven_protocol::store_commit::ObjectHash, MembershipMutationError> {
-        match remote_objects {
-            Some(remote_objects) => self
-                .database
-                .stage_membership_candidate_mutation(
-                    plan_bytes,
-                    progress_bytes,
-                    remote_objects,
-                    pending_rotation_generation,
-                )
-                .await
-                .map_err(MembershipMutationError::from),
-            None => self
-                .database
-                .stage_membership_mutation(plan_bytes, progress_bytes, pending_rotation_generation)
-                .await
-                .map_err(MembershipMutationError::from),
-        }
+        self.database
+            .stage_membership_candidate_mutation(
+                plan_bytes,
+                progress_bytes,
+                remote_objects,
+                candidate,
+            )
+            .await
+            .map_err(MembershipMutationError::from)
     }
 
     pub(super) fn membership_mutation_persistence(
@@ -47,196 +164,32 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         )
     }
 
-    pub(super) async fn publish_direct_membership_authority(
-        &mut self,
-        wraps: &[ReplacementWrappedKey],
-        publication: &PreparedMembershipPublication,
-    ) -> Result<(), MembershipMutationError> {
-        for wrapped in wraps {
-            self.storage
-                .as_ref()
-                .create_protocol_object(&wrapped.prepared.object)
-                .await
-                .map_err(MembershipMutationError::from)?;
-            load_wrapped_store_key(
-                self.storage.as_ref(),
-                self.store_root().store_root_hash,
-                &wrapped.prepared.reference,
-            )
-            .await?;
-        }
-        self.storage
-            .as_ref()
-            .create_protocol_object(&publication.prepared_entry()?)
-            .await
-            .map_err(MembershipMutationError::from)?;
-        self.membership_objects()
-            .load_entry(&publication.entry_ref)
-            .await
-            .map_err(MembershipMutationError::from)?;
-        Ok(())
-    }
-
-    pub(super) async fn publish_direct_membership_head(
-        &mut self,
-        publication: &PreparedMembershipPublication,
-        author: &coven_protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<(), MembershipMutationError> {
-        self.storage
-            .as_ref()
-            .create_protocol_object(&publication.prepared_head()?)
-            .await
-            .map_err(MembershipMutationError::from)?;
-        self.membership_objects()
-            .load_head_for_registration(&publication.head_ref, author)
-            .await
-            .map_err(MembershipMutationError::from)?;
-        Ok(())
-    }
-
     pub(crate) async fn prepare_membership_transition(
         &mut self,
         chain: &MembershipChain,
         entry: MembershipEntry,
     ) -> Result<PreparedMembershipTransition, MembershipMutationError> {
-        let root = self.store_root().clone();
-        let storage = self.storage.as_ref();
-        let (_, entry_ref) =
-            store_objects::prepare_membership_entry(storage, root.store_root_hash, &entry)
-                .await
-                .map_err(MembershipMutationError::from)?;
-        let coord = entry.coord();
-        let predecessor = chain
-            .head_ref_for_stream(
-                &coord.author_pubkey,
-                &coord.author_owner_grant,
-                coord.stream_id,
+        self.history
+            .prepare_membership_transition(
+                &self.writer.membership_publication_signer(),
+                chain,
+                entry,
             )
-            .cloned();
-        let current_slot = match predecessor.as_ref() {
-            Some(reference) => {
-                let loaded = self
-                    .writer
-                    .load_membership_head(self.membership_objects(), reference)
-                    .await
-                    .map_err(MembershipMutationError::from)?;
-                loaded.value.body.successor.next_slot.clone()
-            }
-            None => match chain.membership_anchor(&coord.author_owner_grant) {
-                Some(store_commit::GrantStreamAnchor::StoreMembership { first_slot }) => {
-                    first_slot.clone()
-                }
-                Some(
-                    store_commit::GrantStreamAnchor::OwnerRecovery { .. }
-                    | store_commit::GrantStreamAnchor::CircleControl { .. }
-                    | store_commit::GrantStreamAnchor::CircleRoster { .. }
-                    | store_commit::GrantStreamAnchor::CircleMetadata { .. },
-                ) => {
-                    return Err(MembershipMutationError::InvalidDurableMutation(format!(
-                        "Owner grant {} uses another domain's anchor as its membership stream",
-                        coord.author_owner_grant
-                    )));
-                }
-                None => {
-                    return Err(MembershipMutationError::InvalidDurableMutation(format!(
-                        "Owner grant {} has no activated membership stream anchor",
-                        coord.author_owner_grant
-                    )));
-                }
-            },
-        };
-        let context = ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::StoreMembershipHead,
-        );
-        let next_sequence = coord.seq.checked_add(1).ok_or_else(|| {
-            MembershipMutationError::InvalidDurableMutation(
-                "membership head sequence overflow".to_string(),
-            )
-        })?;
-        let next_prefix = membership_head_slot_prefix(
-            &coord.author_pubkey,
-            &coord.author_owner_grant,
-            coord.stream_id,
-            next_sequence,
-        );
-        let next_slot = storage
-            .allocate_protocol_slot(&context, &next_prefix, ".json")
-            .await?;
-        let anchor = chain
-            .membership_anchor(&coord.author_owner_grant)
-            .ok_or_else(|| {
-                MembershipMutationError::InvalidDurableMutation(format!(
-                    "Owner grant {} has no activated membership stream anchor",
-                    coord.author_owner_grant
-                ))
-            })?;
-        let transition = self.writer.build_membership_transition(
-            root.store_root_hash,
-            &entry,
-            entry_ref.clone(),
-            predecessor,
-            anchor.clone(),
-            next_slot,
-            current_slot,
-        )?;
-        Ok(PreparedMembershipTransition {
-            entry,
-            entry_ref,
-            transition,
-        })
-    }
-
-    pub(crate) async fn prepare_membership_publication(
-        &mut self,
-        chain: &MembershipChain,
-        entry: MembershipEntry,
-    ) -> Result<PreparedMembershipPublication, MembershipMutationError> {
-        let prepared = self.prepare_membership_transition(chain, entry).await?;
-        self.finish_membership_transition(prepared, membership::MembershipHeadActivation::Direct)
             .await
     }
 
-    pub(crate) async fn finish_membership_transition(
+    pub(crate) async fn finish_store_membership_transition(
         &mut self,
         prepared: PreparedMembershipTransition,
-        activation: membership::MembershipHeadActivation,
+        commit: store_commit::StoreBatchCommitRef,
     ) -> Result<PreparedMembershipPublication, MembershipMutationError> {
-        let root = self.store_root().clone();
-        let head =
-            self.writer
-                .sign_membership_head(&prepared.entry, &prepared.transition, activation)?;
-        let coord = prepared.entry.coord();
-        let context = ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::StoreMembershipHead,
-        );
-        let head_prefix = membership_head_slot_prefix(
-            &coord.author_pubkey,
-            &coord.author_owner_grant,
-            coord.stream_id,
-            coord.seq,
-        );
-        let head_bytes = serde_json::to_vec(&head).map_err(MembershipMutationError::Json)?;
-        let head_object = self.storage.as_ref().prepare_protocol_object(
-            &context,
-            prepared.transition.head_slot.clone(),
-            &head_prefix,
-            head_bytes,
-        )?;
-        let head_ref = MembershipHeadRef {
-            coord,
-            head_hash: head.head_hash(),
-            object: head_object.reference().clone(),
-        };
-        let publication = PreparedMembershipPublication {
-            entry: prepared.entry,
-            entry_ref: prepared.entry_ref,
-            head,
-            head_ref,
-        };
-        publication.validate()?;
-        Ok(publication)
+        self.history
+            .finish_store_membership_transition(
+                &self.writer.membership_publication_signer(),
+                prepared,
+                commit,
+            )
+            .await
     }
 
     pub(crate) async fn publish_membership_authority(
@@ -246,11 +199,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     ) -> Result<(), MembershipMutationError> {
         transition.validate()?;
         let expected_wraps: Vec<&WrappedStoreKeyRef> = match &transition.entry.change {
-            MembershipChange::SetMember { wrapped_key, .. } => vec![wrapped_key],
-            MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.iter().collect(),
-            MembershipChange::Founder { .. }
-            | MembershipChange::ProviderAdmin
-            | MembershipChange::ResolutionActivation { .. } => Vec::new(),
+            StoreAuthorityChange::SetMember { wrapped_key, .. } => vec![wrapped_key],
+            StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => {
+                wrapped_keys.iter().collect()
+            }
+            StoreAuthorityChange::Founder { .. }
+            | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+            | StoreAuthorityChange::DeviceExclusionProposal { .. }
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::ProviderAdmin
+            | StoreAuthorityChange::ResolutionActivation { .. } => Vec::new(),
         };
         if expected_wraps.len() != wraps.len()
             || expected_wraps
@@ -288,13 +246,48 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(())
     }
 
+    pub(super) async fn finalize_membership_head_acceptance(
+        &mut self,
+        commit: &store_commit::VerifiedStoreBatchCommit,
+        proof: &store_commit::RetainedMergeMembershipProof,
+        publication: &coven_database::StoreCommitPublicationOutcome,
+    ) -> Result<coven_protocol::remote_object::RemoteObjectRecord, StoreError> {
+        self.history
+            .finalize_membership_head_acceptance(
+                &self.writer.membership_publication_signer(),
+                commit,
+                proof,
+                publication,
+            )
+            .await
+    }
+
     pub(crate) async fn publish_membership_activation(
         &mut self,
         transition: &PreparedMembershipTransition,
         publication: &PreparedMembershipPublication,
         candidate: Box<commit_plan::PreparedStoreOperationCommit>,
         completion: coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
-    ) -> Result<commit_plan::StoreOperationPublicationOutcome, MembershipMutationError> {
+    ) -> Result<store_commit::StoreBatchCommitRef, MembershipMutationError> {
+        let authorship = self.database.author_own_stream().await;
+        self.publish_membership_activation_with_authorship(
+            transition,
+            publication,
+            candidate,
+            completion,
+            &authorship,
+        )
+        .await
+    }
+
+    pub(crate) async fn publish_membership_activation_with_authorship(
+        &mut self,
+        transition: &PreparedMembershipTransition,
+        publication: &PreparedMembershipPublication,
+        candidate: Box<commit_plan::PreparedStoreOperationCommit>,
+        completion: coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
+        _authorship: &coven_database::OwnStreamAuthorship,
+    ) -> Result<store_commit::StoreBatchCommitRef, MembershipMutationError> {
         transition.validate()?;
         publication.validate()?;
         candidate
@@ -309,7 +302,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 .matches_head(&publication.head, &publication.head_ref)
             || !matches!(
                 &publication.head.activation,
-                membership::MembershipHeadActivation::StoreCommit { commit }
+                membership::MembershipHeadActivation::StoreCommit { commit, .. }
                     if commit == &candidate.reference
             )
             || !self.writer.verify_membership_head(&publication.head)
@@ -343,9 +336,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             &publication.head,
             publication.head_ref.clone(),
         )?;
-        let _authorship = database.author_own_stream().await;
         self.publish_prepared(candidate, Some(membership_objects), Some(completion))
             .await
+            .map(|accepted| accepted.commit_ref().clone())
             .map_err(MembershipMutationError::from)
     }
 }

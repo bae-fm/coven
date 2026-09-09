@@ -1,15 +1,21 @@
 use super::*;
 use crate::sync::store::blob::StoreBlobCache;
-use crate::sync::store::merge_conflict;
-use coven_database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
-use coven_protocol::membership::MembershipStatus;
-use coven_protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
-use std::collections::BTreeMap;
+use coven_database::PreparedMergeMaterializationPackage;
+
+mod checkpoint;
+enum PullDatabase {
+    Installed(StoreDatabase),
+    Checkpoint {
+        receiver: StoreDatabase,
+        database: StoreDatabase,
+        expected: coven_database::StorePublicationBoundary,
+    },
+}
 
 /// The reads, verifications, and materializations a pull performs, over the
 /// five capabilities they need.
 pub(crate) struct PullHistory<'operation, 'storage> {
-    database: StoreDatabase,
+    database: PullDatabase,
     storage: &'storage dyn CloudSyncObjectStorage,
     history: &'operation mut MergeHistoryVerifier<'storage>,
     blob_cache: &'operation StoreBlobCache,
@@ -23,7 +29,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         blob_cache: &'operation StoreBlobCache,
     ) -> Self {
         Self {
-            database,
+            database: PullDatabase::Installed(database),
             storage,
             history,
             blob_cache,
@@ -41,8 +47,11 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
     pub(crate) fn circles(
         &mut self,
     ) -> crate::sync::store::circles::VerifiedCircleHistory<'_, 'storage> {
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
         crate::sync::store::circles::VerifiedCircleHistory::new(
-            self.database.clone(),
+            database.clone(),
             self.storage,
             self.history,
         )
@@ -52,11 +61,51 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         self.history.verified_root().reference()
     }
 
+    pub(crate) async fn load_store_publications_for_replay(
+        &mut self,
+    ) -> Result<
+        (
+            crate::sync::store::commit_verification::merge_history::VerifiedStorePublication,
+            StorePublicationReplayInstallation,
+        ),
+        StorePullError,
+    > {
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
+        let (publication, installation) = self
+            .history
+            .load_store_publications_for_replay(database)
+            .await?;
+        for selected in &publication.accepted_snapshots {
+            let snapshot_version = selected.snapshot.meta.schema_version;
+            if snapshot_version > database.schema_version() {
+                return Err(StorePullError::SnapshotRestoration(Box::new(
+                    crate::sync::store::snapshots::SnapshotError::SchemaTooNew {
+                        snapshot_version,
+                        supported: database.schema_version(),
+                    },
+                )));
+            }
+        }
+        Ok((publication, installation))
+    }
+
+    pub(crate) fn verified_predecessor_state(
+        &self,
+        commit: &StoreBatchCommit,
+    ) -> Result<ResolvedStoreDeviceState, StorePullError> {
+        self.history.verified_predecessor_state(commit)
+    }
+
     pub(crate) async fn package_schema(
         &self,
     ) -> Result<std::sync::Arc<coven_database::TableSchema>, coven_database::DbError> {
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
         Ok(std::sync::Arc::new(
-            self.database.table_schema_for_apply().await?,
+            database.table_schema_for_apply().await?,
         ))
     }
 
@@ -79,18 +128,21 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         schema: std::sync::Arc<coven_database::TableSchema>,
     ) -> Result<Result<PreparedMergeMaterializationPackage, HeldStorePositionReason>, StorePullError>
     {
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
         let changeset =
             match coven_database::ValidatedChangeset::new(package.changeset().to_vec(), schema) {
                 Ok(changeset) => changeset,
                 Err(coven_database::ChangesetIdentityError::Row(error)) => {
                     return Ok(Err(HeldStorePositionReason::InvalidRowIdentity(
                         error.into(),
-                    )))
+                    )));
                 }
                 Err(error) => {
                     return Ok(Err(HeldStorePositionReason::InvalidChangesetIdentity(
                         error.into(),
-                    )))
+                    )));
                 }
             };
         let changes = match coven_database::walk_changeset(changeset.bytes()) {
@@ -98,7 +150,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
             Err(error) => {
                 return Ok(Err(HeldStorePositionReason::ChangesetUnreadable(
                     error.into(),
-                )))
+                )));
             }
         };
         let old_changes = match coven_database::walk_old_changeset(changeset.bytes()) {
@@ -106,13 +158,10 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
             Err(error) => {
                 return Ok(Err(HeldStorePositionReason::ChangesetUnreadable(
                     error.into(),
-                )))
+                )));
             }
         };
-        if let Err(error) = self
-            .database
-            .validate_local_blob_cleanup_changes(&old_changes, &changes)
-        {
+        if let Err(error) = database.validate_local_blob_cleanup_changes(&old_changes, &changes) {
             return Ok(Err(HeldStorePositionReason::InvalidChangesetBlobDecl(
                 error.into(),
             )));
@@ -124,11 +173,17 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
     }
 
     pub(crate) fn has_scoped_graph(&self) -> bool {
-        self.database.has_scoped_graph()
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
+        database.has_scoped_graph()
     }
 
     pub(crate) fn schema_version(&self) -> u32 {
-        self.database.schema_version()
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
+        database.schema_version()
     }
 
     pub(crate) async fn unrepresented_device_join_bootstrap_commits(
@@ -141,34 +196,29 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         ),
         coven_database::DbError,
     > {
-        self.database
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
+        database
             .unrepresented_device_join_bootstrap_commits(plan)
             .await
     }
 
     pub(crate) fn receive_wall_ms(&self) -> u64 {
-        self.database.receive_wall_ms()
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
+        database.receive_wall_ms()
     }
 
     pub(crate) async fn materialized_frontier(
         &self,
     ) -> Result<std::collections::BTreeMap<String, StoreBatchCommitRef>, coven_database::DbError>
     {
-        self.database.materialized_frontier().await
-    }
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
 
-    pub(crate) async fn device_state_for_cut(
-        &self,
-        cut: &StoreHistoryCut,
-    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), coven_database::DbError> {
-        self.database.store_device_state_for_history_cut(cut).await
-    }
-
-    pub(crate) async fn device_state_for_order(
-        &self,
-        order: &coven_protocol::store_commit::StoreCommitOrder,
-    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), coven_database::DbError> {
-        self.database.store_device_state_for_order(order).await
+        database.materialized_frontier().await
     }
 
     pub(crate) async fn exact_materialized_ref(
@@ -176,50 +226,106 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         stream_id: &str,
         sequence: u64,
     ) -> Result<Option<StoreBatchCommitRef>, coven_database::DbError> {
-        self.database
-            .exact_materialized_ref(stream_id, sequence)
-            .await
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
+        database.exact_materialized_ref(stream_id, sequence).await
     }
 
     pub(crate) async fn snapshot_coverage(
         &self,
     ) -> Result<CommitFrontier, coven_database::DbError> {
-        self.database.snapshot_coverage_frontier().await
-    }
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
 
-    pub(crate) async fn exclusion_freezes(
-        &self,
-    ) -> Result<Vec<coven_protocol::store_commit::StoreDeviceProposalAck>, coven_database::DbError>
-    {
-        self.database.store_device_exclusion_freezes().await
+        database.snapshot_coverage_frontier().await
     }
 
     pub(crate) async fn record_circle_close_exclusions(
         &self,
         exclusions: Vec<coven_protocol::circle_activation::LocalCircleExclusion>,
     ) -> Result<(), coven_database::DbError> {
-        self.database
-            .record_circle_close_exclusions(exclusions)
-            .await
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
+        database.record_circle_close_exclusions(exclusions).await
     }
 
-    pub(crate) async fn commit_materialization(
-        &self,
-        materialization: PreparedMergeMaterialization,
-        retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
+    pub(crate) async fn commit_publication_interval(
+        &mut self,
+        materializations: Vec<coven_database::PreparedMergeMaterialization>,
+        accepted: coven_database::AcceptedStorePublicationInterval,
+        replay: store_commit::VerifiedStorePublicationInterval,
+        snapshots: Vec<coven_database::VerifiedStoreSnapshotAuthority>,
         local_store_membership: LocalStoreMembership,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         routing_key: Option<coven_protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
-    ) -> Result<coven_database::MaterializationOutcome, coven_database::DbError> {
-        self.database
-            .apply_received_merge_materialization(
-                materialization,
-                retractions,
-                local_store_membership,
-                routing_key,
-                receiver_wall_ms,
-            )
-            .await
+    ) -> Result<
+        (
+            coven_database::MaterializationOutcome,
+            Vec<StoreBatchCommitRef>,
+        ),
+        coven_database::DbError,
+    > {
+        let receiver = match &self.database {
+            PullDatabase::Installed(database)
+            | PullDatabase::Checkpoint {
+                receiver: database, ..
+            } => database.clone(),
+        };
+        let database = std::mem::replace(&mut self.database, PullDatabase::Installed(receiver));
+        let (outcome, installed) = match database {
+            PullDatabase::Installed(database) => {
+                database
+                    .apply_received_store_publication_interval(
+                        materializations,
+                        accepted,
+                        replay,
+                        snapshots,
+                        local_store_membership,
+                        routing_encryption,
+                        routing_key,
+                        receiver_wall_ms,
+                    )
+                    .await?
+            }
+            PullDatabase::Checkpoint {
+                receiver,
+                database,
+                expected,
+            } => {
+                let prepared = database.into_prepared_snapshot().await?;
+                receiver
+                    .install_received_snapshot(
+                        prepared,
+                        expected,
+                        materializations,
+                        accepted,
+                        snapshots,
+                        local_store_membership,
+                        routing_encryption,
+                        routing_key,
+                        receiver_wall_ms,
+                    )
+                    .await?
+            }
+        };
+        #[cfg(any(test, feature = "test-utils"))]
+        if matches!(outcome, coven_database::MaterializationOutcome::Applied(_)) {
+            let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+                &self.database;
+            for reference in &installed {
+                let coordinate = &reference.coord;
+                database
+                    .reach_test_point(coven_database::DatabaseTestPoint::PullAfterRemoteCommit {
+                        device_id: coordinate.stream_id.to_string(),
+                        seq: coordinate.sequence(),
+                    })
+                    .await;
+            }
+        }
+        Ok((outcome, installed))
     }
 
     pub(crate) async fn prepare_merge_history_successor(
@@ -227,15 +333,16 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         verified_commit: &VerifiedStoreBatchCommit,
         membership: &MembershipChain,
         recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
-        state_after: ResolvedStoreDeviceState,
+        predecessor_state: &ResolvedStoreDeviceState,
+        state_after: &ResolvedStoreDeviceState,
         evidence: MergeHistorySuccessorEvidence,
     ) -> Result<PreparedMergeHistorySuccessor, StorePullError> {
         crate::sync::store::authorization::history::retained::prepare_merge_history_successor(
-            &self.database,
             self.history,
             verified_commit,
             membership,
             recovery_author,
+            predecessor_state,
             state_after,
             evidence,
         )
@@ -259,99 +366,29 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
     pub(crate) async fn prepare_retained_history(
         &mut self,
     ) -> Result<Vec<coven_database::OwnedVerifiedMergeMaterialization>, StorePullError> {
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
         let retained =
             crate::sync::store::authorization::history::retained::seed_verifier_from_retained_history(
-                &self.database,
+                database,
                 self.history,
             )
             .await?;
-        self.resume_merge_retraction_cleanups().await?;
         Ok(retained)
     }
 
-    /// Retire the terminal nonactivations a retracted Merge candidate left
-    /// behind, then delete the objects it staged.
-    pub(crate) async fn resume_merge_retraction_cleanups(&mut self) -> Result<(), StorePullError> {
-        for candidate in self.database.pending_merge_retraction_cleanups().await? {
-            let root = self.history.verified_root().reference().clone();
-            let verification = self
-                .database
-                .merge_retraction_cleanup_verification(root, candidate.clone())
-                .await?;
-            merge_conflict::MergeConflictHistory::new(&self.database, self.storage, self.history)
-                .apply_terminal_nonactivation(
-                    merge_conflict::TerminalNonactivationCandidate::MergeRetraction {
-                        reference: candidate.clone(),
-                        verification,
-                    },
-                )
-                .await?;
-            let targets = self
-                .database
-                .merge_retraction_cleanup_targets(candidate.clone())
-                .await?;
-            crate::sync::store::authorization::delete_candidate_cleanup_targets::<StorePullError>(
-                self.storage,
-                &self.database,
-                targets,
-            )
-            .await?;
-            self.database
-                .finish_merge_retraction_cleanup(candidate)
-                .await?;
+    pub(crate) async fn prepare_device_join_history(
+        &mut self,
+        plan: &coven_database::DeviceJoinBootstrapPlan,
+    ) -> Result<(), StorePullError> {
+        self.prepare_retained_history().await?;
+        for prepared in &plan.commits {
+            let publication = plan.publication.accepted_commit(&prepared.commit)?;
+            self.history
+                .admit_published_commit(publication, prepared.commit.clone())?;
         }
         Ok(())
-    }
-
-    pub(crate) async fn load_active_registrations(
-        &self,
-    ) -> Result<Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>, StorePullError>
-    {
-        let durable = self
-            .database
-            .activated_store_device_registration_records()
-            .await?;
-        let mut verified = Vec::with_capacity(durable.len());
-        for expected in durable {
-            let reference = expected.reference();
-            let opened = self.history.load_registration(reference).await?;
-            if &opened.value != expected.value() {
-                return Err(StorePullError::InvalidState(format!(
-                    "activated Store registration {} differs from its exact remote bytes",
-                    reference.device_id
-                )));
-            }
-            if !matches!(
-                opened.value.store_commits,
-                coven_protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { .. }
-            ) {
-                return Err(StorePullError::InvalidState(format!(
-                    "activated Store registration {} has no Merge announcement anchor",
-                    reference.device_id
-                )));
-            }
-            verified.push(expected);
-        }
-        Ok(verified)
-    }
-
-    pub(crate) async fn discover_owner_recoveries(
-        &mut self,
-        membership: &MembershipChain,
-    ) -> Result<Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>, StorePullError>
-    {
-        self.history.discover_owner_recoveries(membership).await
-    }
-
-    pub(crate) async fn discover_stream(
-        &mut self,
-        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &StoreDeviceRegistration,
-        inactive_accepted_cut: Option<&StoreHistoryCut>,
-    ) -> Result<MergeStreamDiscovery, StorePullError> {
-        self.history
-            .discover_merge_stream(registration_ref, registration, inactive_accepted_cut)
-            .await
     }
 
     pub(crate) async fn verify_refs(
@@ -366,15 +403,6 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         reference: &StoreBatchCommitRef,
     ) -> Option<VerifiedPullCandidate> {
         self.history.verified_pull_candidate(reference)
-    }
-
-    pub(crate) fn verified_predecessor_membership(
-        &self,
-        reference: &StoreBatchCommitRef,
-    ) -> Option<MembershipChain> {
-        self.history
-            .verified_predecessor_membership(reference)
-            .cloned()
     }
 
     pub(crate) fn verified_membership_prefix(
@@ -410,16 +438,16 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         stream_id: &str,
         reference: &StoreBatchCommitRef,
     ) -> Result<MaterializedCheck, StorePullError> {
-        materialized_reference_status(&self.database, self.history, coverage, stream_id, reference)
-            .await
+        let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
+            &self.database;
+
+        materialized_reference_status(database, self.history, coverage, stream_id, reference).await
     }
 
     pub(crate) async fn readiness(
         &mut self,
         coverage: &CommitFrontier,
         frontier: &std::collections::BTreeMap<String, StoreBatchCommitRef>,
-        device_state: &ResolvedStoreDeviceState,
-        exclusion_freezes: &[coven_protocol::store_commit::StoreDeviceProposalAck],
         commit_ref: &StoreBatchCommitRef,
         commit: &StoreBatchCommit,
     ) -> Result<Readiness, StorePullError> {
@@ -435,12 +463,12 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
                         return Ok(Readiness::Held(HeldStorePosition::commit(
                             commit_ref,
                             HeldStorePositionReason::MissingCommit,
-                        )))
+                        )));
                     }
                     MaterializedCheck::Held(reason) => {
                         return Ok(Readiness::Held(HeldStorePosition::commit(
                             commit_ref, reason,
-                        )))
+                        )));
                     }
                 }
             }
@@ -476,68 +504,14 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
             )));
         }
 
-        for record in device_state.devices.values() {
-            let target_stream = StreamActivation::device_authorized_stream_id(
-                self.history.verified_root().reference().store_root_hash,
-                &record.registration,
-                StreamAnchorDomain::StoreAnnouncements,
-            );
-            if target_stream.to_string() != stream_id {
-                continue;
-            }
-            let StoreDeviceStatus::Inactive {
-                terminals,
-                accepted_cut,
-            } = &record.status
-            else {
-                break;
-            };
-            let target_cut = accepted_cut.commits();
-            let terminal_sequence = match target_cut.get(&target_stream) {
-                Some(reference) => reference.coord.sequence(),
-                None => 0,
-            };
-            if commit_ref.coord.sequence() > terminal_sequence {
-                return Ok(Readiness::Held(HeldStorePosition::commit(
-                    commit_ref,
-                    HeldStorePositionReason::InactiveDevice {
-                        terminals: terminals.clone(),
-                        accepted_cut: accepted_cut.clone(),
-                    },
-                )));
-            }
-            break;
-        }
-
-        for freeze in exclusion_freezes {
-            let target_stream = StreamActivation::device_authorized_stream_id(
-                self.history.verified_root().reference().store_root_hash,
-                &freeze.proposal.target,
-                StreamAnchorDomain::StoreAnnouncements,
-            );
-            if target_stream.to_string() != stream_id {
-                continue;
-            }
-            let target_cut = freeze.target_cut.commits();
-            let frozen_sequence = match target_cut.get(&target_stream) {
-                Some(reference) => reference.coord.sequence(),
-                None => 0,
-            };
-            if commit_ref.coord.sequence() > frozen_sequence {
-                return Ok(Readiness::Held(HeldStorePosition::commit(
-                    commit_ref,
-                    HeldStorePositionReason::DeviceExclusionFreeze {
-                        proposal: freeze.proposal.clone(),
-                        target_cut: freeze.target_cut.clone(),
-                    },
-                )));
-            }
-        }
-
+        let ready_frontier = CommitFrontier::from_refs(frontier.clone())?;
         for (required_stream, required_ref) in commit.merge_dependencies() {
             let required_stream = required_stream.to_string();
+            // The frontier includes commits prepared earlier in this atomic pull.
+            // Authenticate older dependencies by exact stored references or
+            // verified predecessor links, never by sequence numbers alone.
             match self
-                .materialized_reference_status(coverage, &required_stream, required_ref)
+                .materialized_reference_status(&ready_frontier, &required_stream, required_ref)
                 .await?
             {
                 MaterializedCheck::Yes => {}
@@ -550,7 +524,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
                             device_id: required_stream.clone(),
                             commit: required_ref.clone(),
                         },
-                    )))
+                    )));
                 }
                 MaterializedCheck::Held(reason) => {
                     return Ok(Readiness::Held(HeldStorePosition::dependency(
@@ -558,7 +532,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
                         &required_stream,
                         required_ref,
                         reason,
-                    )))
+                    )));
                 }
             }
         }
@@ -617,222 +591,5 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         self.history
             .remember(commit)
             .map_err(StorePullError::Protocol)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn verified_terminal_retractions(
-        &mut self,
-        activation_head: &StoreDeviceHead,
-        activation_head_object: &ExactObjectRef,
-        activation_commit: &VerifiedStoreBatchCommit,
-        activation_predecessor_state: &ResolvedStoreDeviceState,
-        activation_predecessor_membership: &MembershipChain,
-        device_operations: &VerifiedStoreDeviceOperations,
-        loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
-    ) -> Result<Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StorePullError>
-    {
-        let root = self.history.verified_root().reference().clone();
-        let retained = self
-            .database
-            .retained_merge_replay_inputs(root.clone())
-            .await?;
-        let mut verified_retained = BTreeMap::new();
-        for materialization in &retained {
-            let verified = self
-                .history
-                .authenticate_bytes(
-                    materialization.commit_ref(),
-                    &materialization.commit().to_bytes(),
-                )
-                .await?;
-            if verified.value() != materialization.commit() {
-                return Err(StorePullError::InvalidState(
-                    "retained Merge materialization differs from its authenticated commit"
-                        .to_string(),
-                ));
-            }
-            verified_retained.insert(materialization.commit_ref().clone(), verified);
-        }
-        let activation_commit_ref = activation_commit.reference();
-        let activation_commit_value = activation_commit.value();
-        let activation_head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
-            head_hash: activation_head.head_hash(),
-            object: activation_head_object.clone(),
-        };
-        let current_membership_ref = &activation_commit_value.membership_state;
-        let MembershipStatus::Resolved(current_resolved) =
-            activation_predecessor_membership.status()
-        else {
-            return Err(StorePullError::InvalidState(
-                "Merge terminal retraction witness membership is conflicted".to_string(),
-            ));
-        };
-        let mut retractions = Vec::new();
-        for materialization in &retained {
-            let candidate = verified_retained
-                .get(materialization.commit_ref())
-                .expect("every retained Merge materialization was authenticated");
-            let mut locator = self
-                .database
-                .author_exclusion_activation_for_candidate(
-                    root.clone(),
-                    materialization.commit_ref().clone(),
-                    candidate.value().author_registration.clone(),
-                )
-                .await?;
-            if locator.is_none() {
-                let expected_stream = StreamActivation::device_authorized_stream_id(
-                    root.store_root_hash,
-                    &candidate.value().author_registration,
-                    StreamAnchorDomain::StoreAnnouncements,
-                );
-                for (exclusion, accepted_cut) in device_operations.exclusions() {
-                    if exclusion.proposal.target != candidate.value().author_registration {
-                        continue;
-                    }
-                    let accepted_cut = &accepted_cut.0;
-                    let beyond_cutoff =
-                        accepted_cut.get(&expected_stream).is_none_or(|reference| {
-                            materialization.commit_ref().coord.sequence()
-                                > reference.coord.sequence()
-                        });
-                    if beyond_cutoff {
-                        locator = Some(coven_database::AuthorExclusionActivationLocator::verified(
-                            exclusion.clone(),
-                            accepted_cut.clone(),
-                            activation_commit_ref.clone(),
-                            activation_head_ref.clone(),
-                        ));
-                        break;
-                    }
-                }
-            }
-            let Some(locator) = locator else {
-                let Some(authority) = candidate.value().membership_authority.as_ref() else {
-                    continue;
-                };
-                let predecessor_membership =
-                    loaded_predecessor_memberships.membership_for(materialization.commit_ref())?;
-                let MembershipStatus::Resolved(predecessor_resolved) =
-                    predecessor_membership.status()
-                else {
-                    return Err(StorePullError::InvalidState(
-                        "retained candidate predecessor membership is conflicted".to_string(),
-                    ));
-                };
-                let mut matching = predecessor_resolved
-                    .active_grants()
-                    .filter(|(_, record)| &record.creation_authority == authority);
-                let Some((grant_id, _)) = matching.next() else {
-                    return Err(StorePullError::InvalidState(
-                        "retained candidate has no exact predecessor grant authority".to_string(),
-                    ));
-                };
-                if matching.next().is_some() {
-                    return Err(StorePullError::InvalidState(
-                        "retained candidate authority identifies multiple predecessor grants"
-                            .to_string(),
-                    ));
-                }
-                if !matches!(
-                    current_resolved.grants.get(grant_id),
-                    Some(coven_protocol::causal_grants::GrantState::Tombstoned { .. })
-                ) {
-                    continue;
-                }
-                let nonactivation = self
-                    .history
-                    .verify_membership_grant_revocation_nonactivation(
-                        grant_id,
-                        current_membership_ref,
-                        activation_commit_ref,
-                        &activation_head_ref,
-                        candidate,
-                        materialization.activation_head(),
-                        materialization.activation_head_object(),
-                    )
-                    .await?;
-                retractions.push(nonactivation);
-                continue;
-            };
-            let nonactivation = self
-                .history
-                .verify_author_exclusion_nonactivation(
-                    &locator,
-                    activation_head,
-                    activation_head_object,
-                    activation_commit,
-                    activation_predecessor_state,
-                    device_operations,
-                    candidate,
-                    materialization.activation_head(),
-                    materialization.activation_head_object(),
-                )
-                .await?;
-            retractions.push(nonactivation);
-        }
-        let mut verified_by_reference = retractions
-            .into_iter()
-            .map(|verified| {
-                let reference = verified
-                    .candidate_reference()
-                    .map_err(StorePullError::RemoteObject)?;
-                Ok((reference, verified))
-            })
-            .collect::<Result<BTreeMap<_, _>, StorePullError>>()?;
-        loop {
-            let mut additions = Vec::new();
-            for materialization in &retained {
-                if verified_by_reference.contains_key(materialization.commit_ref()) {
-                    continue;
-                }
-                let candidate = verified_retained
-                    .get(materialization.commit_ref())
-                    .expect("every retained Merge materialization was authenticated");
-                let dependency = commit_predecessor_references(candidate.value())
-                    .into_iter()
-                    .find_map(|reference| {
-                        verified_by_reference
-                            .get(&reference)
-                            .map(|verified| (reference, verified))
-                    });
-                let Some((_dependency_reference, dependency)) = dependency else {
-                    continue;
-                };
-                let verified = coven_protocol::remote_object::VerifiedCandidateNonactivation::dependency_retraction(
-                    dependency,
-                    coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
-                        coord: materialization.commit_ref().coord.clone(),
-                        object: materialization.commit_ref().object.clone(),
-                        canonical_signed_bytes: candidate.value().to_bytes(),
-                    },
-                    candidate.author(),
-                    materialization.activation_head_object().clone(),
-                )
-                .map_err(StorePullError::RemoteObject)?;
-                additions.push((materialization.commit_ref().clone(), verified));
-            }
-            if additions.is_empty() {
-                break;
-            }
-            for (reference, verified) in additions {
-                if verified_by_reference.insert(reference, verified).is_some() {
-                    return Err(StorePullError::InvalidState(
-                        "transitive Merge retraction constructed duplicate proof".to_string(),
-                    ));
-                }
-            }
-        }
-        Ok(verified_by_reference.into_values().collect())
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn reach_after_remote_commit_test_point(&self, device_id: String, seq: u64) {
-        self.database
-            .reach_test_point(coven_database::DatabaseTestPoint::PullAfterRemoteCommit {
-                device_id,
-                seq,
-            })
-            .await;
     }
 }

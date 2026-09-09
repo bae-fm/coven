@@ -279,10 +279,6 @@ impl<'storage> RestoringStore<'storage> {
                         registration: registration_ref.clone(),
                         store_cut,
                         device_state,
-                        snapshot: None,
-                        exclusions: StoreAckExclusionState {
-                            proposal_freezes: Vec::new(),
-                        },
                     },
                     published_at.to_string(),
                     SuccessorLink {
@@ -619,8 +615,19 @@ impl<'storage> RestoringStore<'storage> {
                     .into(),
             ));
         }
-        let already_activated = database
-            .stage_owner_recovery_registration(
+        let latest_ack_ref = match database
+            .activated_store_ack(registration_ref)
+            .await
+            .map_err(StoreRegistrationError::from)?
+        {
+            Some(activated) => activated.reference,
+            None => initial_ack_ref.clone(),
+        };
+        let latest_ack = history
+            .load_store_ack(&latest_ack_ref, registration.value())
+            .await?;
+        database
+            .install_adopted_owner_recovery(
                 coven_protocol::objects::ExactProtocolObject {
                     value: registration.value().clone(),
                     bytes: registration_bytes,
@@ -633,14 +640,10 @@ impl<'storage> RestoringStore<'storage> {
                     prepared: initial_ack_prepared,
                 },
                 registration.activation().clone(),
+                (latest_ack_ref, latest_ack),
             )
             .await
             .map_err(StoreRegistrationError::from)?;
-        if !already_activated {
-            return Err(StoreRegistrationError::Invalid(
-                "activated Owner recovery disappeared while installing its local journal".into(),
-            ));
-        }
         Ok(Some(registration.reference().clone()))
     }
 }

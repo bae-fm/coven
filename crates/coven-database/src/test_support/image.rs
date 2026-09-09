@@ -1,4 +1,4 @@
-use super::{author_exclusion_activation_evidence, table_row_count};
+use super::table_row_count;
 use crate::{Connection, DatabaseTestTable, DbError};
 
 pub struct DatabaseImageTest {
@@ -180,6 +180,22 @@ impl DatabaseImageTest {
             .map_err(DbError::from)
     }
 
+    /// Bind an image's exact commit to canonical device state, including when
+    /// constructing a signed image whose authority the receiver must reject.
+    pub fn replace_store_device_snapshot(
+        &self,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
+        state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
+    ) -> Result<(), DbError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM store_device_state_snapshots WHERE commit_ref = ?1",
+            [serde_json::to_string(reference).map_err(DbError::from)?],
+        )?;
+        crate::store::record_store_device_snapshot_on(&transaction, reference, state)?;
+        transaction.commit().map_err(DbError::from)
+    }
+
     pub fn store_device_state_snapshot_refs(&self) -> Result<Vec<String>, DbError> {
         self.query(
             "SELECT commit_ref FROM store_device_state_snapshots ORDER BY commit_ref",
@@ -206,10 +222,60 @@ impl DatabaseImageTest {
         ))
     }
 
-    pub fn author_exclusion_activation_evidence(
+    pub fn retained_materialization_bytes(&self) -> Result<Vec<Vec<u8>>, DbError> {
+        self.query(
+            "SELECT canonical_input FROM retained_merge_materializations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)
+    }
+
+    pub fn circle_states_containing(&self, text: &str) -> Result<i64, DbError> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*) FROM circle_current_state
+                 WHERE instr(CAST(state AS TEXT), ?1) > 0",
+                [text],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
+    }
+
+    pub fn remote_object(
         &self,
-    ) -> Result<(String, String, String, String), DbError> {
-        author_exclusion_activation_evidence(&self.connection)
+        object: &coven_protocol::objects::ExactObjectRef,
+    ) -> Result<coven_protocol::remote_object::RemoteObjectRecord, DbError> {
+        crate::load_remote_object_on(
+            &self.connection,
+            coven_protocol::remote_object::remote_object_id(object),
+        )
+    }
+
+    pub fn row_blob_remote_object(
+        &self,
+        table: &str,
+        row_id: &str,
+        column: &str,
+        row_stamp: &str,
+    ) -> Result<coven_protocol::remote_object::RemoteObjectRecord, DbError> {
+        let (object_id, encoded): (String, String) = self.connection.query_row(
+            "SELECT remote.object_id, remote.state FROM row_blob_locators AS binding
+             JOIN remote_objects AS remote ON remote.object_id = binding.remote_object_id
+             WHERE binding.table_name = ?1 AND binding.row_id = ?2
+               AND binding.column_name = ?3 AND binding.row_stamp = ?4",
+            [table, row_id, column, row_stamp],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let remote: coven_protocol::remote_object::RemoteObjectRecord =
+            serde_json::from_str(&encoded)
+                .map_err(|error| DbError::context("decode image row blob ownership", error))?;
+        if remote.object_id().to_string() != object_id {
+            return Err(DbError::Message(
+                "image row blob binding differs from its remote object identity".into(),
+            ));
+        }
+        Ok(remote)
     }
 
     pub fn snapshot_blob_graph(

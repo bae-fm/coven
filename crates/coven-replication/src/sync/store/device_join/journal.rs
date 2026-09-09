@@ -11,7 +11,7 @@ use coven_database::device_join_journal::validate_successor;
 pub(crate) use coven_protocol::store_commit::device_join_journal::attempt_key;
 pub(crate) use coven_protocol::store_commit::device_join_journal::{
     device_join_action, DeviceJoinRoleProgress, DeviceJoinRoleProgressKind, JoinerJoinProgress,
-    OwnerJoinProgress, PreparedDeviceJoinObject,
+    OwnerJoinProgress, OwnerJoinPublication, PreparedOwnerJoinPublication,
 };
 pub use coven_protocol::store_commit::device_join_journal::{
     DeviceJoinAction, DeviceJoinJournalRecord, DeviceJoinRole, DeviceJoinStatus,

@@ -16,16 +16,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn sign_device_head_for_test(
-        &self,
-        commit: coven_protocol::store_commit::StoreBatchCommitRef,
-        successor: coven_protocol::store_commit::SuccessorLink,
-    ) -> Result<coven_protocol::store_commit::StoreDeviceHead, StoreError> {
-        self.writer
-            .sign_device_head(self.store_root().store_root_hash, commit, successor)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn resign_snapshot_meta_for_test(
         &self,
         meta: coven_protocol::store_commit::SnapshotMeta,
@@ -67,17 +57,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         timestamp: &str,
         current_encryption: &coven_keys::encryption::EncryptionService,
         pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
-    ) -> Result<
-        coven_keys::encryption::EncryptionService,
-        crate::sync::store::membership::MembershipOpsError,
-    > {
+    ) -> Result<(), crate::sync::store::membership::MembershipOpsError> {
         self.revoke_member_without_local_adoption(
             public_key_hex,
             timestamp,
             current_encryption,
             pending_rotation,
         )
-        .await
+        .await?;
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-utils"))]

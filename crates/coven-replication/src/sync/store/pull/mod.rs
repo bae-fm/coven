@@ -15,20 +15,19 @@ use coven_protocol::circle_activation::{
     VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
 use coven_protocol::membership::MembershipChain;
+use coven_protocol::objects::StorageError;
 use coven_protocol::objects::StoreObjectError;
-use coven_protocol::objects::{ExactObjectRef, StorageError};
 use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CirclePackageRef, CommitFrontier, ObjectHash,
     ResolvedStoreDeviceState, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceStateRef, StoreHistoryCut,
-    StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
+    StoreDeviceRegistration, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolError,
+    StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
 use coven_protocol::{circle, store_commit};
 pub(crate) use history::PullHistory;
 
 mod device_join_bootstrap;
 mod device_lifecycle_state;
-mod discovery;
 mod join_activation;
 mod materialization;
 mod membership_control;
@@ -39,8 +38,7 @@ mod support;
 #[derive(Clone)]
 struct MergeCandidate {
     candidate: Candidate,
-    activation_head: StoreDeviceHead,
-    activation_head_object: ExactObjectRef,
+    publication: coven_database::AcceptedStoreCommitPublication,
     predecessor_membership: MembershipChain,
     device_operations: VerifiedStoreDeviceOperations,
     membership_control: Option<VerifiedCircleActivations>,
@@ -53,10 +51,6 @@ pub(crate) struct VerifiedPullCandidate {
     pub(crate) registrations: Vec<ActivatedStoreDeviceRegistration>,
     pub(crate) operations: VerifiedStoreDeviceOperations,
     pub(crate) membership_control: Option<VerifiedCircleActivations>,
-}
-
-pub(crate) struct LoadedMergePredecessorMemberships {
-    by_commit: BTreeMap<StoreBatchCommitRef, MembershipChain>,
 }
 
 pub(crate) enum MaterializedCheck {
@@ -102,19 +96,6 @@ pub(crate) async fn materialized_reference_status(
         .await)
 }
 
-impl LoadedMergePredecessorMemberships {
-    fn membership_for(
-        &self,
-        reference: &StoreBatchCommitRef,
-    ) -> Result<&MembershipChain, StorePullError> {
-        self.by_commit.get(reference).ok_or_else(|| {
-            StorePullError::InvalidState(format!(
-                "retained Merge commit {reference:?} has no loaded predecessor membership"
-            ))
-        })
-    }
-}
-
 #[derive(Debug)]
 #[doc(hidden)]
 pub(crate) struct StorePullExecution {
@@ -125,15 +106,12 @@ pub(crate) struct StorePullExecution {
 pub(crate) use crate::sync::store::commit_verification::commit::CommitCoverageError;
 pub(crate) use coven_protocol::membership::LocalStoreMembership;
 pub(crate) use device_lifecycle_state::*;
-pub(crate) use discovery::*;
 pub(crate) use join_activation::*;
 pub use materialization::Readiness;
 pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
 pub use model::LoadedCirclePackage;
-pub(crate) use model::{
-    commit_stream_id, ApplyOutcome, Candidate, StorePullMembershipError, VerifiedStoreDeviceHead,
-};
+pub(crate) use model::{commit_stream_id, Candidate, StorePullMembershipError};
 pub use model::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
 pub use model::{StorePullError, StorePullResult};
 pub(crate) use snapshot_evidence::*;
@@ -141,3 +119,30 @@ pub use support::PullError;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod publication_tests;
+
+#[cfg(test)]
+mod partial_publication_tests;
+
+#[cfg(test)]
+mod publication_replacement_tests;
+
+#[cfg(test)]
+mod publication_settlement_tests;
+
+#[cfg(test)]
+mod publication_replay_tests;
+
+#[cfg(test)]
+mod publication_authority_tests;
+
+#[cfg(test)]
+mod snapshot_membership_tests;
+
+#[cfg(test)]
+mod write_rebase_tests;
+
+#[cfg(test)]
+mod warm_snapshot_adoption_tests;

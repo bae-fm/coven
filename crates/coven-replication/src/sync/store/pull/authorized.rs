@@ -4,7 +4,7 @@ use super::*;
 use coven_database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
 use coven_foundation::stage_timing::StageTimings;
 use coven_protocol::membership::MembershipChain;
-use coven_protocol::store_commit::{CommitFrontier, StoreDeviceStatus, StoreHistoryCut};
+use coven_protocol::store_commit::CommitFrontier;
 use std::collections::BTreeMap;
 
 pub(crate) struct AuthorizedPull<'operation, 'storage> {
@@ -43,6 +43,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         // stages it did reach are still real elapsed time.
         let mut timings = StageTimings::counting("Store pull", self.history.provider_requests());
         let outcome = Box::pin(self.execute_stages(&mut timings)).await;
+        let outcome = self.history.finish_checkpoint_preparation(outcome).await;
         timings.report();
         outcome
     }
@@ -51,12 +52,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         &mut self,
         timings: &mut StageTimings,
     ) -> Result<StorePullExecution, StorePullError> {
-        let retained = timings
-            .stage(
-                "prepare retained history",
-                self.history.prepare_retained_history(),
-            )
-            .await?;
         let membership = self.membership;
         let routing_encryption = self.routing_encryption;
         let store_root_hash = self.history.root().store_root_hash;
@@ -77,113 +72,63 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         } else {
             None
         };
-        let local_frontier = timings
-            .stage("load frontier", self.history.materialized_frontier())
-            .await
-            .map_err(|error| {
-                StorePullError::Database(coven_database::DbError::context(
-                    "load discovery device-state frontier",
-                    error,
-                ))
-            })?;
-        let local_frontier = local_frontier
-            .into_values()
-            .map(|reference| (reference.coord.stream_id, reference))
-            .collect::<BTreeMap<_, _>>();
-        let (_, discovery_device_state) = timings
+        let (mut remote_publication, installation) = timings
             .stage(
-                "load device state",
-                self.history
-                    .device_state_for_cut(&StoreHistoryCut(local_frontier)),
+                "fetch accepted publications",
+                self.history.load_store_publications_for_replay(),
             )
             .await?;
-
-        let mut active = timings
-            .stage(
-                "load registrations",
-                self.history.load_active_registrations(),
-            )
-            .await
-            .map_err(|error| StorePullError::context("load active Merge registrations", error))?;
-        for recovered in timings
-            .stage(
-                "discover owner recoveries",
-                self.history.discover_owner_recoveries(membership),
-            )
-            .await?
-        {
-            if active
-                .iter()
-                .all(|registration| registration.reference() != recovered.reference())
-            {
-                active.push(recovered);
-            }
-        }
-        let mut candidates = BTreeMap::new();
-        let mut visible_heads = Vec::new();
-        let mut held = Vec::new();
-        let mut discovered_commits = Vec::new();
-        for registration in active {
-            let registration_ref = registration.reference();
-            let inactive_cut = match discovery_device_state
-                .devices
-                .get(&registration_ref.device_id)
-            {
-                Some(record) if record.registration != *registration_ref => {
-                    return Err(StorePullError::InvalidState(format!(
-                        "discovery device state names another registration for {}",
-                        registration_ref.device_id
-                    )));
-                }
-                Some(record) => match &record.status {
-                    StoreDeviceStatus::Active => None,
-                    StoreDeviceStatus::Inactive { accepted_cut, .. } => Some(accepted_cut),
-                },
-                None => None,
-            };
-            let discovered = self
-                .history
-                .discover_stream(registration_ref, registration.value(), inactive_cut)
-                .await
-                .map_err(|error| {
-                    StorePullError::context(
-                        format!(
-                            "discover Merge stream for {}",
-                            registration.value().device_id
-                        ),
-                        error,
+        let accepted_interval = match installation {
+            StorePublicationReplayInstallation::Retained(accepted) => accepted,
+            StorePublicationReplayInstallation::Checkpoint { expected, accepted } => {
+                let selected = remote_publication.accepted_snapshots.pop().ok_or_else(|| {
+                    StorePullError::InvalidState(
+                        "checkpoint replacement has no verified current snapshot".into(),
                     )
                 })?;
-            timings.record(
-                "fetch heads",
-                discovered.reads.heads,
-                discovered.reads.head_reads,
-            );
-            timings.record(
-                "fetch commits",
-                discovered.reads.commits,
-                discovered.reads.commit_reads,
-            );
-            if let Some(head) = discovered.latest_head {
-                visible_heads.push(VerifiedStoreDeviceHead {
-                    head,
-                    author: registration.value().clone(),
-                });
+                self.history
+                    .prepare_checkpoint(
+                        expected,
+                        selected,
+                        membership,
+                        self.identity,
+                        routing_encryption,
+                        routing_key.as_ref(),
+                    )
+                    .await?;
+                accepted
             }
-            if let Some(block) = discovered.block {
-                held.push(block.into_position());
-            }
-            discovered_commits.extend(discovered.commits);
-        }
-        // Which commits this pull has anything to do with is decided first, and
-        // decided without asking the provider anything: a coordinate that
-        // contradicts its own signature, a position already materialized, a
-        // schema this device cannot read. Only what survives is worth bytes.
-        let mut pending = Vec::with_capacity(discovered_commits.len());
-        for (activation_head_ref, activation_head, commit_ref, commit) in discovered_commits {
+        };
+        let mut candidates = BTreeMap::new();
+        let visible_commits = remote_publication
+            .commits
+            .values()
+            .map(|published| published.commit.clone())
+            .collect::<Vec<_>>();
+        let mut held = Vec::new();
+        let mut pending = Vec::with_capacity(remote_publication.commits.len());
+        for accepted in remote_publication.interval.entries() {
+            let coven_protocol::store_commit::StorePublicationPayload::Commit(commit_ref) =
+                &accepted.entry().payload
+            else {
+                continue;
+            };
+            let verified_commit = remote_publication.commits.get(commit_ref).ok_or_else(|| {
+                StorePullError::InvalidState(
+                    "accepted Store publication has no authenticated commit".to_string(),
+                )
+            })?;
+            let verified_commit = &verified_commit.commit;
+            let commit = verified_commit.value().clone();
+            let publication = coven_database::AcceptedStoreCommitPublication::from_verified(
+                remote_publication
+                    .interval
+                    .accepted_commit(verified_commit)
+                    .map_err(StorePullError::Protocol)?,
+            );
             if commit_ref.coord.sequence() != commit.seq() {
                 held.push(HeldStorePosition::commit(
-                    &commit_ref,
+                    commit_ref,
                     HeldStorePositionReason::InvalidObject(
                         "exact commit coordinate differs from signed sequence".to_string(),
                     ),
@@ -199,11 +144,11 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 )
                 .await?
             {
-                if materialized == commit_ref {
+                if materialized == *commit_ref {
                     continue;
                 }
                 held.push(HeldStorePosition::commit(
-                    &commit_ref,
+                    commit_ref,
                     HeldStorePositionReason::HashMismatch {
                         referenced_device_id: stream_id,
                         referenced_commit: commit_ref.clone(),
@@ -215,7 +160,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             if let Some(package) = commit.store_package() {
                 if package.schema_version > self.history.schema_version() {
                     held.push(HeldStorePosition::commit(
-                        &commit_ref,
+                        commit_ref,
                         HeldStorePositionReason::NewerSchema {
                             local: self.history.schema_version(),
                             required: package.schema_version,
@@ -224,7 +169,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                     continue;
                 }
             }
-            pending.push((activation_head_ref, activation_head, commit_ref, commit));
+            pending.push((publication, commit_ref.clone(), commit));
         }
         // A commit names its own package, so nothing orders these reads against
         // each other — only applying the commits is ordered, and it stays so.
@@ -237,11 +182,11 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 self.history.prefetch_store_packages(
                     pending
                         .iter()
-                        .map(|(_, _, commit_ref, commit)| (commit_ref, commit)),
+                        .map(|(_, commit_ref, commit)| (commit_ref, commit)),
                 ),
             )
             .await;
-        for (activation_head_ref, activation_head, commit_ref, commit) in pending {
+        for (publication, commit_ref, commit) in pending {
             if let Err(error) = timings
                 .stage(
                     "verify commits",
@@ -302,8 +247,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             candidates.insert(
                 key,
                 MergeCandidate {
-                    activation_head,
-                    activation_head_object: activation_head_ref.object,
+                    publication,
                     candidate: Candidate {
                         verified: verified_commit,
                         package,
@@ -316,31 +260,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 },
             );
         }
-        let mut loaded_predecessor_memberships = BTreeMap::new();
-        for materialization in retained {
-            if materialization.commit().membership_authority.is_none() {
-                continue;
-            }
-            let membership = self
-                .history
-                .verified_predecessor_membership(materialization.commit_ref())
-                .ok_or_else(|| {
-                    StorePullError::InvalidState(
-                        "retained Merge commit has no operation-verified predecessor membership"
-                            .to_string(),
-                    )
-                })?;
-            loaded_predecessor_memberships.insert(materialization.commit_ref().clone(), membership);
-        }
-        for candidate in candidates.values() {
-            loaded_predecessor_memberships.insert(
-                candidate.candidate.commit_ref().clone(),
-                candidate.predecessor_membership.clone(),
-            );
-        }
-        let loaded_predecessor_memberships = LoadedMergePredecessorMemberships {
-            by_commit: loaded_predecessor_memberships,
-        };
         let coverage = timings
             .stage("load frontier", self.history.snapshot_coverage())
             .await
@@ -360,9 +279,14 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 ))
             })?;
         let mut row_changes = Vec::new();
-        let mut changesets_applied = 0_u64;
+        let changesets_applied;
         let mut blocked = BTreeMap::new();
         let mut latest_membership = membership.clone();
+        let initial_membership = latest_membership.clone();
+        let receiver_wall_ms = self.history.receive_wall_ms();
+        let mut prepared_materializations = Vec::new();
+        let mut prepared_references = Vec::new();
+        let mut verified_prefix = VerifiedStreamActivationPrefix::empty();
 
         loop {
             let mut progressed = false;
@@ -381,26 +305,32 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                         "Merge candidate disappeared while evaluating readiness".to_string(),
                     )
                 })?;
-                let exclusion_freezes = timings
-                    .stage("readiness", self.history.exclusion_freezes())
-                    .await?;
-                let current_frontier = CommitFrontier::from_refs(frontier.clone())
-                    .map_err(StorePullError::Protocol)?;
-                let (_, current_device_state) = timings
-                    .stage(
-                        "readiness",
-                        self.history
-                            .device_state_for_cut(&StoreHistoryCut(current_frontier.0)),
-                    )
-                    .await?;
+                if let Some(missing) = missing_snapshot_predecessor(
+                    &remote_publication.interval,
+                    &candidate.publication,
+                    &CommitFrontier::from_refs(frontier.clone())?,
+                ) {
+                    let stream = commit_stream_id(&missing.coord);
+                    blocked.insert(
+                        key,
+                        HeldStorePosition::dependency(
+                            candidate.candidate.commit_ref(),
+                            &stream,
+                            &missing,
+                            HeldStorePositionReason::MissingDependency {
+                                device_id: stream.clone(),
+                                commit: missing.clone(),
+                            },
+                        ),
+                    );
+                    continue;
+                }
                 match timings
                     .stage(
                         "readiness",
                         self.history.readiness(
                             &coverage,
                             &frontier,
-                            &current_device_state,
-                            &exclusion_freezes,
                             candidate.candidate.commit_ref(),
                             candidate.candidate.commit(),
                         ),
@@ -426,33 +356,32 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                                 "ready Merge candidate disappeared before apply".to_string(),
                             )
                         })?;
-                        match Box::pin(self.apply_candidate(
+                        match Box::pin(self.prepare_candidate(
                             &candidate,
-                            &loaded_predecessor_memberships,
+                            &prepared_materializations,
+                            &verified_prefix,
                             &mut latest_membership,
                             routing_key.as_ref(),
+                            receiver_wall_ms,
                             timings,
                         ))
                         .await?
                         {
-                            ApplyOutcome::Applied(changes) => {
+                            Ok(prepared) => {
+                                verified_prefix
+                                    .include(prepared.circle_activations.stream_activations())?;
                                 let stream_id =
                                     commit_stream_id(&candidate.candidate.commit_ref().coord);
                                 frontier.insert(
                                     stream_id.clone(),
                                     candidate.candidate.commit_ref().clone(),
                                 );
-                                row_changes.extend(changes);
-                                changesets_applied =
-                                    changesets_applied.checked_add(1).ok_or_else(|| {
-                                        StorePullError::InvalidState(
-                                            "Store apply count exceeded u64".to_string(),
-                                        )
-                                    })?;
+                                prepared_references.push(candidate.candidate.commit_ref().clone());
+                                prepared_materializations.push(prepared);
                                 blocked.remove(&key);
                                 progressed = true;
                             }
-                            ApplyOutcome::Held(reason) => {
+                            Err(reason) => {
                                 let held_position = HeldStorePosition::commit(
                                     candidate.candidate.commit_ref(),
                                     reason,
@@ -470,6 +399,53 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         }
 
         held.extend(blocked.into_values());
+        {
+            let local_store_membership =
+                LocalStoreMembership::from_membership(&latest_membership, self.identity)
+                    .map_err(StorePullMembershipError::State)
+                    .map_err(StorePullError::Membership)?;
+            match timings
+                .stage(
+                    "materialize accepted interval",
+                    self.history.commit_publication_interval(
+                        prepared_materializations,
+                        accepted_interval,
+                        remote_publication.interval,
+                        remote_publication
+                            .accepted_snapshots
+                            .into_iter()
+                            .map(|selected| selected.verified)
+                            .collect(),
+                        local_store_membership,
+                        routing_encryption.cloned(),
+                        routing_key.clone(),
+                        receiver_wall_ms,
+                    ),
+                )
+                .await?
+            {
+                (coven_database::MaterializationOutcome::Applied(changes), installed) => {
+                    row_changes = changes;
+                    changesets_applied = u64::try_from(installed.len()).map_err(|_| {
+                        StorePullError::InvalidState("Store apply count exceeded u64".to_string())
+                    })?;
+                }
+                (coven_database::MaterializationOutcome::Held(reason), _) => {
+                    let reference = prepared_references.first().ok_or_else(|| {
+                        StorePullError::InvalidState(
+                            "empty Store publication interval was held during installation"
+                                .to_string(),
+                        )
+                    })?;
+                    held.push(HeldStorePosition::commit(
+                        reference,
+                        materialization_hold_reason(reason),
+                    ));
+                    changesets_applied = 0;
+                    latest_membership = initial_membership;
+                }
+            }
+        }
         held.sort_by(|left, right| {
             (left.coordinate.device_id(), left.coordinate.seq())
                 .cmp(&(right.coordinate.device_id(), right.coordinate.seq()))
@@ -490,24 +466,35 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             result: StorePullResult {
                 changesets_applied,
                 held_positions: held,
-                visible_heads,
+                visible_commits,
                 row_changes,
                 local_blob_cleanup_pending,
                 #[cfg(any(test, feature = "test-utils"))]
-                frontier,
+                frontier: self
+                    .history
+                    .materialized_frontier()
+                    .await
+                    .map_err(|error| {
+                        StorePullError::Database(coven_database::DbError::context(
+                            "read installed frontier after pull",
+                            error,
+                        ))
+                    })?,
             },
             membership: latest_membership,
         })
     }
 
-    async fn apply_candidate(
+    async fn prepare_candidate(
         &mut self,
         merge_candidate: &MergeCandidate,
-        loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
+        prepared: &[PreparedMergeMaterialization],
+        verified_prefix: &VerifiedStreamActivationPrefix,
         latest_membership: &mut MembershipChain,
         routing_key: Option<&super::circle::RowRoutingKey>,
+        receiver_wall_ms: u64,
         timings: &mut StageTimings,
-    ) -> Result<ApplyOutcome, StorePullError> {
+    ) -> Result<Result<PreparedMergeMaterialization, HeldStorePositionReason>, StorePullError> {
         let root = self.history.root().clone();
         let candidate = &merge_candidate.candidate;
         let commit = candidate.commit();
@@ -517,7 +504,16 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         if !commit.device_exclusion_proposals().is_empty()
             || !commit.device_exclusion_outcomes().is_empty()
         {
-            let (state_ref, _) = self.history.device_state_for_order(&commit.order).await?;
+            let predecessor_state = self.history.verified_predecessor_state(commit)?;
+            let predecessor_cut = commit
+                .order
+                .predecessor_cut()
+                .map_err(StorePullError::Protocol)?;
+            let state_ref = StoreDeviceStateRef::from_resolved(
+                CommitFrontier(predecessor_cut.0),
+                &predecessor_state,
+            )
+            .map_err(StorePullError::Protocol)?;
             if state_ref != commit.device_state {
                 return Err(StorePullError::InvalidState(
                     "Merge exclusion commit differs from its materialized predecessor device state"
@@ -536,7 +532,10 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 &merge_candidate.predecessor_membership,
                 membership_objects.as_ref(),
             )?;
-        let verified_prefix = VerifiedStreamActivationPrefix::empty();
+        let mut available_circles = prepared
+            .iter()
+            .map(|prepared| &prepared.circle_activations)
+            .collect::<Vec<_>>();
         let circle_activations = if commit.control().is_some() {
             merge_candidate.membership_control.clone().ok_or_else(|| {
                 super::CirclePackageReadError::Invalid(
@@ -553,8 +552,9 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                         self.identity
                             .filter(|_| local_store_membership.allows_circle_access()),
                         routing_key,
-                        &verified_prefix,
+                        verified_prefix,
                         &merge_candidate.membership_prefix,
+                        &available_circles,
                     ),
                 )
                 .await
@@ -564,9 +564,9 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             Ok(activations) => activations,
             Err(super::CirclePackageReadError::Database(error)) => return Err(error.into()),
             Err(error) => {
-                return Ok(ApplyOutcome::Held(
-                    HeldStorePositionReason::CirclePackageRead(error.into()),
-                ))
+                return Ok(Err(HeldStorePositionReason::CirclePackageRead(
+                    error.into(),
+                )));
             }
         };
         // An excluded device that cannot yet read its successor bootstrap records the
@@ -581,16 +581,18 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 .bootstrap_pending_exclusions()
                 .to_vec();
             self.history.record_circle_close_exclusions(pending).await?;
-            return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
+            return Ok(Err(HeldStorePositionReason::InvalidObject(
                 "excluded device awaiting its successor bootstrap to reset".to_string(),
             )));
         }
+        available_circles.push(&verified_circle_activations);
         let circle_packages = match timings
             .stage(
                 "load circle packages",
                 self.history.circles().packages().load_applicable(
                     &candidate.verified,
-                    verified_circle_activations.circles(),
+                    &available_circles,
+                    &[],
                     author,
                     local_store_membership,
                 ),
@@ -600,9 +602,9 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             Ok(packages) => packages,
             Err(super::CirclePackageReadError::Database(error)) => return Err(error.into()),
             Err(error) => {
-                return Ok(ApplyOutcome::Held(
-                    HeldStorePositionReason::CirclePackageRead(error.into()),
-                ))
+                return Ok(Err(HeldStorePositionReason::CirclePackageRead(
+                    error.into(),
+                )));
             }
         };
         let mut packages =
@@ -610,7 +612,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         if let Some(bytes) = candidate.package.as_ref() {
             let package = match candidate.parse_store_package(bytes) {
                 Ok(package) => package,
-                Err(reason) => return Ok(ApplyOutcome::Held(reason)),
+                Err(reason) => return Ok(Err(reason)),
             };
             match timings
                 .stage(
@@ -621,13 +623,13 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 .await?
             {
                 Ok(package) => packages.push(package),
-                Err(reason) => return Ok(ApplyOutcome::Held(reason)),
+                Err(reason) => return Ok(Err(reason)),
             }
         }
         for loaded in &circle_packages {
             let package = match candidate.parse_circle_package(loaded) {
                 Ok(package) => package,
-                Err(reason) => return Ok(ApplyOutcome::Held(reason)),
+                Err(reason) => return Ok(Err(reason)),
             };
             match timings
                 .stage(
@@ -638,37 +640,21 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 .await?
             {
                 Ok(package) => packages.push(package),
-                Err(reason) => return Ok(ApplyOutcome::Held(reason)),
+                Err(reason) => return Ok(Err(reason)),
             }
         }
-        let outcome = timings
-            .stage(
-                "materialize",
-                Box::pin(self.commit_candidate(
-                    merge_candidate,
-                    packages,
-                    device_operations,
-                    verified_circle_activations,
-                    membership_objects,
-                    loaded_predecessor_memberships,
-                    local_store_membership,
-                    routing_key,
-                )),
+        let materialization = self
+            .prepare_materialization(
+                merge_candidate,
+                packages,
+                device_operations,
+                verified_circle_activations,
+                membership_objects,
+                receiver_wall_ms,
             )
             .await?;
-        if matches!(outcome, ApplyOutcome::Applied(_)) {
-            *latest_membership = membership_after_candidate;
-        }
-        #[cfg(any(test, feature = "test-utils"))]
-        if matches!(outcome, ApplyOutcome::Applied(_)) {
-            self.history
-                .reach_after_remote_commit_test_point(
-                    commit_stream_id(&commit_ref.coord),
-                    commit.seq(),
-                )
-                .await;
-        }
-        Ok(outcome)
+        *latest_membership = membership_after_candidate;
+        Ok(Ok(materialization))
     }
 
     fn local_store_membership_after_candidate(
@@ -692,7 +678,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                     return Err(StorePullError::InvalidState(
                         "verified Merge membership proof has incomplete resolution evidence"
                             .to_string(),
-                    ))
+                    ));
                 }
             }
             successor
@@ -728,30 +714,29 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         ))
     }
 
-    async fn commit_candidate(
+    async fn prepare_materialization(
         &mut self,
         merge_candidate: &MergeCandidate,
         packages: Vec<PreparedMergeMaterializationPackage>,
         device_operations: VerifiedStoreDeviceOperations,
         verified_circle_activations: VerifiedCircleActivations,
         membership: Option<VerifiedMergeMembershipClosure>,
-        loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
-        local_store_membership: LocalStoreMembership,
-        routing_key: Option<&super::circle::RowRoutingKey>,
-    ) -> Result<ApplyOutcome, StorePullError> {
+        receiver_wall_ms: u64,
+    ) -> Result<PreparedMergeMaterialization, StorePullError> {
         let root = self.history.root().clone();
         let candidate = &merge_candidate.candidate;
         let commit = candidate.commit();
         let commit_ref = candidate.commit_ref();
         let author = candidate.author();
         let predecessor_membership = &merge_candidate.predecessor_membership;
-        let (_, predecessor_state) = self.history.device_state_for_order(&commit.order).await?;
+        let predecessor_state = self.history.verified_predecessor_state(commit)?;
         verify_merge_membership_state_ref(
             &commit.membership_state,
             predecessor_membership,
             &predecessor_state,
         )?;
         let (authorized_predecessor, recovery_author) = predecessor_state
+            .clone()
             .preactivate_recovery_author(commit, &candidate.registrations)
             .map_err(StorePullError::Protocol)?;
         let owner_recovery = self
@@ -759,7 +744,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             .verify_owner_recovery_activation(commit)
             .await?;
         let state_after = device_operations
-            .apply_to(authorized_predecessor.clone(), &commit.device_state)
+            .apply_to(authorized_predecessor.clone())
             .and_then(|state| {
                 state.apply_verified_lifecycle(
                     commit,
@@ -784,7 +769,8 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 &candidate.verified,
                 predecessor_membership,
                 recovery_author.as_ref(),
-                state_after.clone(),
+                &predecessor_state,
+                &state_after,
                 MergeHistorySuccessorEvidence {
                     registrations,
                     acknowledgement: retained_acknowledgement,
@@ -793,22 +779,10 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             )
             .await?;
         self.history.remember_commit(candidate.verified.clone())?;
-        let retractions = Box::pin(self.history.verified_terminal_retractions(
-            &merge_candidate.activation_head,
-            &merge_candidate.activation_head_object,
-            &candidate.verified,
-            &authorized_predecessor,
-            predecessor_membership,
-            &device_operations,
-            loaded_predecessor_memberships,
-        ))
-        .await?;
-        let receiver_wall_ms = self.history.receive_wall_ms();
-        let materialization = PreparedMergeMaterialization {
+        Ok(PreparedMergeMaterialization {
             root: root.clone(),
             verified_commit: candidate.verified.clone(),
-            activation_head: merge_candidate.activation_head.clone(),
-            activation_head_object: merge_candidate.activation_head_object.clone(),
+            acceptance: merge_candidate.publication.clone().into(),
             history_evidence: prepared_history.history_evidence,
             membership_objects: membership.as_ref().map(|closure| closure.objects().clone()),
             membership_remote_objects: membership
@@ -821,44 +795,53 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             packages,
             device_operations,
             circle_activations: verified_circle_activations,
-        };
-        let outcome = self
-            .history
-            .commit_materialization(
-                materialization,
-                retractions,
-                local_store_membership,
-                routing_key.cloned(),
-                receiver_wall_ms,
-            )
-            .await?;
-        self.history.resume_merge_retraction_cleanups().await?;
-        Ok(match outcome {
-            coven_database::MaterializationOutcome::Applied(changes) => {
-                ApplyOutcome::Applied(changes)
-            }
-            coven_database::MaterializationOutcome::Held(
-                coven_database::MaterializationHold::ForeignKeyDependency,
-            ) => ApplyOutcome::Held(HeldStorePositionReason::ForeignKeyDependency),
-            coven_database::MaterializationOutcome::Held(
-                coven_database::MaterializationHold::ConstraintConflict(tables),
-            ) => ApplyOutcome::Held(HeldStorePositionReason::ConstraintConflict(tables)),
-            coven_database::MaterializationOutcome::Held(
-                coven_database::MaterializationHold::PrivateSharedConflict {
-                    table,
-                    row_id,
-                    commit,
-                },
-            ) => ApplyOutcome::Held(HeldStorePositionReason::PrivateSharedConflict {
-                table,
-                row_id,
-                commit,
-            }),
-            coven_database::MaterializationOutcome::Held(
-                coven_database::MaterializationHold::InvalidLocalCircleContext { circle_id },
-            ) => {
-                ApplyOutcome::Held(HeldStorePositionReason::InvalidLocalCircleContext { circle_id })
-            }
         })
+    }
+}
+
+fn missing_snapshot_predecessor(
+    interval: &store_commit::VerifiedStorePublicationInterval,
+    candidate: &coven_database::AcceptedStoreCommitPublication,
+    ready: &CommitFrontier,
+) -> Option<StoreBatchCommitRef> {
+    let mut missing = None;
+    for entry in interval.entries() {
+        if entry.reference().position >= candidate.reference().position {
+            break;
+        }
+        match &entry.entry().payload {
+            store_commit::StorePublicationPayload::Commit(reference) => {
+                if missing.is_none() && !ready.covers_commit(reference) {
+                    missing = Some(reference.clone());
+                }
+            }
+            store_commit::StorePublicationPayload::Snapshot(_) if missing.is_some() => {
+                return missing
+            }
+            store_commit::StorePublicationPayload::Snapshot(_) => {}
+        }
+    }
+    None
+}
+
+fn materialization_hold_reason(
+    hold: coven_database::MaterializationHold,
+) -> HeldStorePositionReason {
+    match hold {
+        coven_database::MaterializationHold::ForeignKeyDependency => {
+            HeldStorePositionReason::ForeignKeyDependency
+        }
+        coven_database::MaterializationHold::ConstraintConflict(tables) => {
+            HeldStorePositionReason::ConstraintConflict(tables)
+        }
+        coven_database::MaterializationHold::PrivateSharedConflict {
+            table,
+            row_id,
+            commit,
+        } => HeldStorePositionReason::PrivateSharedConflict {
+            table,
+            row_id,
+            commit,
+        },
     }
 }

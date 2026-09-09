@@ -6,20 +6,21 @@ use coven_protocol::store_commit::{
 mod provider_probe;
 
 pub(crate) mod acknowledgements;
+pub(crate) mod active_store_publication;
 pub(crate) mod blob_bindings;
 pub(crate) mod blob_outbox;
 pub(crate) mod blob_transitions;
-pub(crate) mod candidate_lifecycle;
 pub mod candidate_records;
 pub(crate) mod circle_acknowledgements;
 pub(crate) mod circle_authority;
 pub(crate) mod circle_controls;
-pub(crate) mod circle_operation_discard;
 pub(crate) mod circle_operations;
 pub(crate) mod circle_snapshot_publication;
+mod clock_floor;
 pub(crate) mod device_continuation;
 pub(crate) mod device_exclusion;
 pub(crate) mod device_join_challenges;
+pub(crate) mod device_join_publication;
 pub(crate) mod device_registration_journal;
 pub(crate) mod device_streams;
 pub(crate) mod host_write_capture;
@@ -28,6 +29,7 @@ pub(crate) mod local_blob_cleanup;
 pub(crate) mod materialization;
 pub(crate) mod materialized_commit_index;
 pub(crate) mod membership_mutations;
+mod membership_request_completion;
 pub(crate) mod membership_rotation;
 pub(crate) mod merge_materialization_transaction;
 pub(crate) mod observed_store_publication;
@@ -39,12 +41,18 @@ pub(crate) mod preparation;
 pub(crate) mod prepared_remote_objects;
 pub(crate) mod publication;
 pub(crate) mod pull_replay;
+mod received_snapshot;
+pub use received_snapshot::PreparedStoreSnapshot;
+pub(crate) use received_snapshot::SnapshotPreparationDirectory;
 pub mod reclaim;
 pub(crate) mod replay_projection;
+mod replay_sql;
 pub(crate) use replay_projection::{ReplayProjectionResult, WatchedReplayOutcome};
 pub(crate) mod retained_merge_replay;
 pub(crate) mod retained_replay;
+mod snapshot_capture;
 pub(crate) mod snapshot_image;
+mod snapshot_retirement;
 use snapshot_image::snapshot_image_db_error;
 pub(crate) mod snapshot_publication;
 pub(crate) mod store_acknowledgements;
@@ -59,6 +67,7 @@ pub(crate) mod stream_activation_records;
 pub(crate) mod test_support;
 pub(crate) mod verified_store_authority;
 pub(crate) mod write_lifecycle;
+mod write_rebase;
 
 /// One Store transaction and its matching row-and-payload capability.
 ///
@@ -75,12 +84,14 @@ pub(crate) struct StoreTransaction<'store, 'connection> {
 ///
 /// StoreSession owns commit and rollback. Operations borrow this capability so
 /// no workflow can promote verified cache state independently from its rows.
-struct VerifiedStoreTransaction<'transaction, 'connection, 'authority> {
+struct VerifiedStoreTransaction<'transaction, 'connection, 'authority, 'clock> {
     store: StoreTransaction<'transaction, 'connection>,
     authority: &'authority mut verified_store_authority::VerifiedStoreAuthorityTransaction,
     gates: &'authority crate::Gates,
     synced_tables: &'authority [coven_protocol::synced_schema::SyncedTable],
     blob_decls: &'authority crate::BlobDecls,
+    clock_floor: Option<coven_protocol::hlc::Timestamp>,
+    clock: &'authority mut coven_protocol::hlc::HlcTransaction<'clock>,
     #[cfg(any(test, feature = "test-utils"))]
     merge_materialization_failure:
         &'authority std::sync::Mutex<Option<crate::MergeMaterializationFailurePoint>>,
@@ -118,12 +129,14 @@ pub(crate) fn install_verified_snapshot_bootstrap_on(
     schema_version: u32,
     routing_hash: coven_protocol::store_commit::ObjectHash,
     synced_tables: &[coven_protocol::synced_schema::SyncedTable],
+    receiver_wall_ms: u64,
 ) -> Result<(), DbError> {
     StoreTransaction::new(transaction, store_dir).install_verified_snapshot_bootstrap(
         install,
         schema_version,
         routing_hash,
         synced_tables,
+        receiver_wall_ms,
     )
 }
 
@@ -228,10 +241,11 @@ impl<'session> StoreSession<'session> {
     fn verified_store_transaction<R>(
         &mut self,
         operation: impl FnOnce(
-            &mut VerifiedStoreTransaction<'_, '_, '_>,
+            &mut VerifiedStoreTransaction<'_, '_, '_, '_>,
         ) -> Result<StoreTransactionOutcome<R>, DbError>,
     ) -> Result<R, DbError> {
         let mut committed_authority = None;
+        let mut clock = self.hlc.transaction();
         let value = StoreRecords::new(self.conn, self.store_dir).transaction(|store| {
             let mut authority =
                 store.begin_verified_authority_transaction(self.verified_store_authority)?;
@@ -241,11 +255,17 @@ impl<'session> StoreSession<'session> {
                 gates: self.gates,
                 synced_tables: self.synced_tables,
                 blob_decls: self.blob_decls,
+                clock_floor: None,
+                clock: &mut clock,
                 #[cfg(any(test, feature = "test-utils"))]
                 merge_materialization_failure: self.merge_materialization_failure,
             };
             match operation(&mut capability)? {
                 StoreTransactionOutcome::Commit(value) => {
+                    if let Some(floor) = capability.clock_floor.take() {
+                        capability.clock.advance_past(&floor);
+                        store.raise_clock_floor(&capability.clock.high_water())?;
+                    }
                     committed_authority = Some(authority);
                     Ok(StoreTransactionOutcome::Commit(value))
                 }
@@ -256,6 +276,7 @@ impl<'session> StoreSession<'session> {
         })?;
         if let Some(authority) = committed_authority {
             self.verified_store_authority.commit_transaction(authority);
+            clock.commit();
         }
         Ok(value)
     }
@@ -273,6 +294,16 @@ impl<'session> StoreSession<'session> {
 
     pub(super) fn set_protocol_state(&self, key: &str, value: &str) -> Result<(), DbError> {
         StoreRecords::new(self.conn, self.store_dir).set_protocol_state(key, value)
+    }
+
+    pub(super) fn persist_clock_floor(&self, raw: &str) -> Result<(), DbError> {
+        let floor = coven_protocol::hlc::Timestamp::parse(raw).ok_or_else(|| {
+            DbError::Message(format!("invalid captured HLC high-water mark: {raw:?}"))
+        })?;
+        StoreRecords::new(self.conn, self.store_dir).transaction(|store| {
+            store.raise_clock_floor(&floor)?;
+            Ok(StoreTransactionOutcome::Commit(()))
+        })
     }
 
     pub(super) fn write_status(

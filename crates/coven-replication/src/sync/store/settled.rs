@@ -1,31 +1,12 @@
-//! What a cycle already knows the answer to.
+//! Memoize completed reclamation evaluations against their local inputs.
 //!
-//! Two of a cycle's stages ask the provider a question whose answer is a
-//! function of local facts: whether any package may be reclaimed, and which
-//! snapshot this device could acknowledge next. Both are expensive — the
-//! reclaim one walks every candidate snapshot's stability and every device's
-//! acknowledgement chain — and both are asked every thirty seconds by a store
-//! where nothing has happened. A settled store spent thirty-one of its
-//! thirty-nine cycle seconds re-deriving "nothing to do".
-//!
-//! The facts those answers depend on all live in this database, because every
-//! way an answer can change arrives as a commit: a package-bearing commit, an
-//! acknowledgement, a membership control, a device registration. The one that
-//! does not is a snapshot this device publishes itself, which is recorded here
-//! directly. So a cycle whose [`CycleInputs`] match the ones an evaluation last
-//! ran against cannot reach a different answer, and asking again is asking a
-//! question already answered.
-//!
-//! Held in memory, not on disk. A restart re-asks once, which is a cost paid
-//! per launch rather than per cycle, and it means no durable state to keep
-//! correct — the memo can only ever be discarded, never wrong.
+//! A restart evaluates again. Failed evaluations are never recorded.
 
 use std::sync::Mutex;
 
 use coven_protocol::membership::MembershipHeadRef;
 use coven_protocol::store_commit::{
-    CommitFrontier, StoreDeviceProposalAck, StoreDeviceRegistrationRef, StoreSnapshotLocator,
-    StoreSnapshotRef,
+    AcceptedStoreSnapshotRef, CommitFrontier, StoreDeviceRegistrationRef,
 };
 
 /// The local facts a provider-side evaluation depends on.
@@ -33,21 +14,15 @@ use coven_protocol::store_commit::{
 pub(crate) struct CycleInputs {
     /// Every commit this device has materialized. Moves for a new package, a
     /// new acknowledgement, a membership control, a registration activation —
-    /// every arrival that can change what may be reclaimed or acknowledged.
+    /// every arrival that can change what may be reclaimed.
     frontier: CommitFrontier,
-    /// Membership, which decides who must acknowledge before anything is
-    /// deleted and who may still ask for the history behind it.
+    /// Membership determines current reclamation authority.
     membership_heads: Vec<MembershipHeadRef>,
-    /// Which devices are activated, which is the set whose snapshot streams an
-    /// evaluation reads and whose acknowledgements it counts.
+    /// Activated devices determine the remaining Circle acknowledgement requirements.
     registrations: Vec<StoreDeviceRegistrationRef>,
-    /// A snapshot this device published. The one input that arrives without a
-    /// commit: the device wrote the object itself, and its own acknowledgement
-    /// of it has not been made yet.
-    published_snapshot: Option<StoreSnapshotRef>,
-    /// Exclusion freezes, which an acknowledgement asserts and which are staged
-    /// locally before any commit carries them.
-    exclusion_freezes: Vec<StoreDeviceProposalAck>,
+    /// The accepted snapshot can change without advancing a commit frontier,
+    /// including when another owner publishes the same cut.
+    accepted_snapshot: Option<AcceptedStoreSnapshotRef>,
 }
 
 impl CycleInputs {
@@ -73,11 +48,12 @@ impl CycleInputs {
                 .iter()
                 .map(|record| record.reference().clone())
                 .collect(),
-            published_snapshot: database
-                .latest_local_store_snapshot()
+            accepted_snapshot: database
+                .store_current_publication()
                 .await?
-                .map(|snapshot| snapshot.reference),
-            exclusion_freezes: database.store_device_exclusion_freezes().await?,
+                .record()
+                .latest_snapshot()
+                .cloned(),
         })
     }
 }
@@ -85,19 +61,13 @@ impl CycleInputs {
 /// What each of a cycle's provider-side evaluations last ran against.
 #[derive(Default)]
 pub(crate) struct SettledCycle {
-    inner: Mutex<Settled>,
-}
-
-#[derive(Default)]
-struct Settled {
-    reclaim: Option<CycleInputs>,
-    acknowledgeable: Option<(CycleInputs, Option<StoreSnapshotLocator>)>,
+    reclaim: Mutex<Option<CycleInputs>>,
 }
 
 impl SettledCycle {
     /// Whether reclaim has already been evaluated against exactly these inputs.
     pub(crate) fn reclaim_evaluated(&self, inputs: &CycleInputs) -> bool {
-        self.locked().reclaim.as_ref() == Some(inputs)
+        self.locked().as_ref() == Some(inputs)
     }
 
     /// Record that a reclaim evaluation ran to completion against `inputs`.
@@ -106,33 +76,10 @@ impl SettledCycle {
     /// decision cannot change while the inputs do not, and every way it can
     /// change moves one of them.
     pub(crate) fn record_reclaim_evaluated(&self, inputs: CycleInputs) {
-        self.locked().reclaim = Some(inputs);
+        *self.locked() = Some(inputs);
     }
 
-    /// The snapshot this device could acknowledge next, if that was already
-    /// worked out against exactly these inputs. The inner `Option` is the
-    /// answer — `Some(None)` means "there is none", which is as much an answer
-    /// as a snapshot is.
-    pub(crate) fn acknowledgeable_snapshot(
-        &self,
-        inputs: &CycleInputs,
-    ) -> Option<Option<StoreSnapshotLocator>> {
-        self.locked()
-            .acknowledgeable
-            .as_ref()
-            .filter(|(recorded, _)| recorded == inputs)
-            .map(|(_, locator)| locator.clone())
-    }
-
-    pub(crate) fn record_acknowledgeable_snapshot(
-        &self,
-        inputs: CycleInputs,
-        locator: Option<StoreSnapshotLocator>,
-    ) {
-        self.locked().acknowledgeable = Some((inputs, locator));
-    }
-
-    fn locked(&self) -> std::sync::MutexGuard<'_, Settled> {
-        self.inner.lock().expect("settled cycle memo poisoned")
+    fn locked(&self) -> std::sync::MutexGuard<'_, Option<CycleInputs>> {
+        self.reclaim.lock().expect("settled cycle memo poisoned")
     }
 }

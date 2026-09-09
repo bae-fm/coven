@@ -1,6 +1,5 @@
 use coven_protocol::store_commit::{
-    StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposalRef,
-    StoreDeviceRegistration,
+    StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposalRef,
 };
 
 pub(crate) struct DeviceExclusionHistory<'operation, 'storage> {
@@ -35,17 +34,6 @@ impl<'operation, 'storage> DeviceExclusionHistory<'operation, 'storage> {
     > {
         self.history
             .load_device_exclusion_outcome(reference, proposal)
-            .await
-            .map_err(super::StoreDeviceExclusionError::from)
-    }
-
-    pub(super) async fn load_acknowledgement(
-        &mut self,
-        reference: &StoreAckRef,
-        registration: &StoreDeviceRegistration,
-    ) -> Result<StoreAck, super::StoreDeviceExclusionError> {
-        self.history
-            .load_store_ack(reference, registration)
             .await
             .map_err(super::StoreDeviceExclusionError::from)
     }

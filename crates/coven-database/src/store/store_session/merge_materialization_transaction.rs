@@ -2,12 +2,13 @@ mod changeset_application;
 mod conflict;
 mod private_shared;
 mod replay_effect;
+use replay_effect::replay_effect_local_rows;
 
 mod activation_records;
 mod application;
 mod authority_install;
 mod commit_records;
-mod retraction;
+mod snapshot_packages;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,28 +24,15 @@ use super::local_blob_cleanup::{
     exact_blob_bindings_on, record_obsolete_copy_intents_from_bindings_on,
 };
 use super::membership_rotation::commit_rotation_candidate_on;
-use super::owner_recovery_publication::complete_matching_owner_recovery_publication_on;
-use super::store_device_state::{
-    load_store_device_exclusion_freezes_on, replace_store_device_exclusion_freezes_on,
-    store_device_state_for_history_cut_on,
-};
 use super::{
-    apply_store_device_exclusion_freezes_on,
-    verified_store_authority::{
-        VerifiedRegistrationLookup, VerifiedStoreAuthorityTransaction, VerifiedStoreLookup,
-    },
+    verified_store_authority::{VerifiedRegistrationLookup, VerifiedStoreLookup},
     StoreDatabase,
 };
-use crate::blob_records::{
-    live_blob_row, validate_live_blob_row, validate_stored_locator_on,
-    validate_stored_row_binding_on,
-};
+use crate::blob_records::{live_blob_row, validate_live_blob_row, validate_stored_row_binding_on};
 use crate::local_blob_cleanup_intents::intents_from_changes as local_blob_cleanup_intents;
 use crate::remote_object_records::validate_remote_object_on;
 use crate::PreparedMergeMaterialization;
-use crate::ReclaimCommitActivation;
 use crate::{
-    candidate_graph_exact_objects, finish_remote_candidate_nonactivation_on,
     insert_store_reclaim_operation_on, load_remote_object_on, load_store_reclaim_operation_on,
     record_reclaimed_store_package_on, store_reclaim_journal_error, update_remote_object_on,
     update_store_reclaim_operation_on, BlobActivation, BlobDecls, Database, DbError,
@@ -56,16 +44,14 @@ use coven_protocol::audience_package::{AudiencePackage, PackageAudience};
 use coven_protocol::blob::locator::RemoteAudience;
 use coven_protocol::circle_activation::{VerifiedCircleActivations, VerifiedStreamActivations};
 use coven_protocol::membership::LocalStoreMembership;
-use coven_protocol::objects::ExactObjectRef;
-use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
+use coven_protocol::remote_object::RemoteObjectRecord;
 use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CircleAckRef, ObjectHash, StoreAckRef, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceProposalState,
-    StoreDeviceRegistrationRef, StoreHistoryCut, VerifiedStoreBatchCommit,
+    StoreBatchCommitRef, StoreDeviceRegistrationRef, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
 use coven_protocol::synced_schema::SyncedTable;
-use coven_protocol::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
+use coven_protocol::write::WriteId;
 
 pub(crate) use commit_records::derive_materialized_store_device_state_on;
 
@@ -81,16 +67,6 @@ pub(crate) struct AppliedMergeMaterialization {
 #[derive(Clone, Default)]
 pub(super) struct ReplayRows {
     private: BTreeMap<(String, String), private_shared::PrivateRowState>,
-    adopted_by: BTreeMap<(String, String), StoreBatchCommitRef>,
-}
-
-pub(super) fn retract_verified_merge_materializations(
-    transaction: &MergeMaterializationTransaction<'_, '_>,
-    root: &coven_protocol::store_commit::StoreRootRef,
-    retained_replay: &mut VerifiedStoreAuthorityTransaction,
-    retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
-) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
-    transaction.retract_verified_merge_materializations(root, retained_replay, retractions)
 }
 
 pub(super) fn deleted_rows(changes: &[RowChange]) -> std::collections::HashSet<(String, String)> {
@@ -184,6 +160,117 @@ pub(crate) struct MergeMaterializationTransaction<'transaction, 'connection> {
 }
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
+    pub(super) fn validate_recorded_replay_context(
+        &self,
+        authority: &mut dyn VerifiedStoreLookup,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        effect: &crate::MergeReplayWriteEffect,
+        gates: &crate::Gates,
+    ) -> Result<(), DbError> {
+        self.validate_unaccepted_circle_context(authority, root, effect)?;
+        let public_rows = replay_effect_public_rows(self.store.transaction, effect)?;
+        let local_rows = replay_effect_local_rows(effect)?;
+        if let Some((table, primary_key)) =
+            self.local_write_would_change_shared_row(gates, &public_rows, &local_rows)?
+        {
+            return Err(Self::local_shared_conflict(
+                &effect.write_id,
+                table,
+                primary_key,
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_recorded_foreign_keys(
+        &self,
+        write_id: &WriteId,
+        schema: &TableSchema,
+    ) -> Result<(), DbError> {
+        let connection = self.store.transaction;
+        let table = connection
+            .query_row(
+                "SELECT \"table\" FROM pragma_foreign_key_check LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(table) = table else {
+            return Ok(());
+        };
+        let columns = schema.columns(&table).ok_or_else(|| {
+            DbError::Message(format!(
+                "recorded write {write_id} violates a foreign key in undeclared table {table:?}",
+            ))
+        })?;
+        let primary_key = columns.first().ok_or_else(|| {
+            DbError::Message(format!(
+                "recorded write {write_id} has no row identity column in {table:?}",
+            ))
+        })?;
+        let edges = crate::foreign_key_edges(connection, &table).map_err(|error| {
+            DbError::context(
+                "read recorded foreign-key constraint",
+                crate::gate::GateError::ForeignKeySchema(error),
+            )
+        })?;
+        for edge in edges {
+            let present = edge
+                .columns
+                .iter()
+                .map(|column| format!("child.{} IS NOT NULL", crate::quote_ident(&column.child),))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            // Unary plus removes child affinity: SQLite applies the parent's
+            // affinity and collation when checking a foreign key. The query
+            // names the declared primary key, including WITHOUT ROWID tables.
+            let matching = edge
+                .columns
+                .iter()
+                .map(|column| {
+                    format!(
+                        "parent.{} = +child.{}",
+                        crate::quote_ident(&column.parent),
+                        crate::quote_ident(&column.child),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let identity = connection
+                .query_row(
+                    &format!(
+                        "SELECT child.{} FROM {} AS child WHERE {present} AND NOT EXISTS \
+                     (SELECT 1 FROM {} AS parent WHERE {matching}) LIMIT 1",
+                        crate::quote_ident(primary_key),
+                        crate::quote_ident(&table),
+                        crate::quote_ident(&edge.parent_table),
+                    ),
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(primary_key) = identity {
+                return Err(coven_protocol::write::WriteRebaseConflict {
+                    write_id: write_id.clone(),
+                    affected_rows: vec![coven_protocol::write::AffectedRow {
+                        table: table.clone(),
+                        primary_key,
+                    }],
+                    reason: coven_protocol::write::WriteRebaseConflictReason::Constraint {
+                        message: format!(
+                            "recorded write leaves {table} foreign key {:?} without a parent in {}",
+                            edge.columns, edge.parent_table,
+                        ),
+                    },
+                }
+                .into());
+            }
+        }
+        Err(DbError::Message(format!(
+            "foreign-key check reports {table:?}, but its declared constraints have no violating row",
+        )))
+    }
+
     pub(crate) fn from_store(
         store: crate::store::store_session::StoreTransaction<'transaction, 'connection>,
     ) -> Self {
@@ -348,7 +435,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             if binding.column() != declaration.id_column {
                 return Err(DbError::Message(format!(
                     "blob binding column {:?} does not match declared blob-id column {:?} on table {:?}",
-                    binding.column(), declaration.id_column, binding.table()
+                    binding.column(),
+                    declaration.id_column,
+                    binding.table()
                 )));
             }
 
@@ -410,15 +499,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 binding.blob().object(),
                 &locator.to_bytes(),
             )?;
-            conn.execute(
-                "INSERT INTO blob_locators
-                 (remote_object_id, locator_hash)
-                 VALUES (?1, ?2)
-                 ON CONFLICT(remote_object_id) DO NOTHING",
-                rusqlite::params![object_id.to_string(), locator_hash.to_string()],
-            )
-            .map_err(DbError::from)?;
-            validate_stored_locator_on(conn, binding.blob())?;
+            crate::blob_records::record_stored_locator_on(conn, binding.blob())?;
 
             let audience_authority =
                 serde_json::to_string(package.audience()).map_err(|error| {
@@ -475,19 +556,6 @@ pub(crate) fn test_apply_changeset<B: AsRef<[u8]>>(
 }
 
 #[cfg(test)]
-pub(crate) fn test_retire_circle_bootstrap_coverage(
-    transaction: &rusqlite::Transaction<'_>,
-    store_dir: &coven_foundation::store_dir::StoreDir,
-    activation: &coven_protocol::store_commit::StoreBatchCommitRef,
-) -> Result<usize, DbError> {
-    MergeMaterializationTransaction::from_store(crate::store::store_session::StoreTransaction::new(
-        transaction,
-        store_dir,
-    ))
-    .retire_circle_bootstrap_coverage(activation)
-}
-
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn test_install_winning_blob_bindings(
     transaction: &rusqlite::Transaction<'_>,
@@ -505,5 +573,56 @@ pub(crate) fn test_install_winning_blob_bindings(
     .install_winning_blob_bindings(gates, synced_tables, package, activation, winning_rows)
 }
 
-#[cfg(test)]
-mod retraction_tests;
+pub(super) fn replay_effect_public_rows(
+    connection: &rusqlite::Connection,
+    effect: &crate::MergeReplayWriteEffect,
+) -> Result<BTreeSet<(String, String)>, DbError> {
+    let changes = effect
+        .partitions
+        .store
+        .iter()
+        .chain(effect.partitions.circles.iter())
+        .map(|partition| crate::walk_changeset(&partition.changeset))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let routes = changes
+        .iter()
+        .filter(|change| change.table == "_coven_row_routes")
+        .filter_map(|change| {
+            Some((
+                change.pk()?.to_string(),
+                (change.col(1)?.to_string(), change.col(2)?.to_string()),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut represented = changes
+        .iter()
+        .filter(|change| !crate::is_routing_table(&change.table))
+        .filter_map(|change| Some((change.table.clone(), change.pk()?.to_string())))
+        .collect::<BTreeSet<_>>();
+    for routing_id in changes
+        .iter()
+        .filter(|change| change.table == "_coven_audience")
+        .filter_map(|change| change.pk())
+    {
+        if let Some(row) = routes.get(routing_id) {
+            represented.insert(row.clone());
+            continue;
+        }
+        let rows = crate::query_mapped_rows(
+            connection,
+            "SELECT table_name, row_id FROM _coven_row_routes WHERE routing_id = ?1",
+            [routing_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let [row] = rows.as_slice() else {
+            return Err(DbError::Message(format!(
+                "local replay public audience row {routing_id} has no exact row route"
+            )));
+        };
+        represented.insert(row.clone());
+    }
+    Ok(represented)
+}

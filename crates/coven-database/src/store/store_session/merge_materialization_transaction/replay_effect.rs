@@ -10,16 +10,14 @@ impl MergeMaterializationTransaction<'_, '_> {
         gates: &crate::Gates,
         replay_rows: &mut ReplayRows,
     ) -> Result<Option<crate::MaterializationHold>, DbError> {
-        if let Some(hold) = self.validate_unaccepted_circle_context(authority, root, &effect)? {
-            return Ok(Some(hold));
-        }
+        self.validate_unaccepted_circle_context(authority, root, &effect)?;
         let public_rows = replay_effect_public_rows(self.store.transaction, &effect)?;
         let local_rows = replay_effect_local_rows(&effect)?;
         let changed_rows = replay_effect_rows(&effect)?;
         if let Some((table, row_id)) =
             self.local_write_would_change_shared_row(gates, &public_rows, &local_rows)?
         {
-            return self.local_shared_conflict(replay_rows, &effect.write_id, table, row_id);
+            return Err(Self::local_shared_conflict(&effect.write_id, table, row_id));
         }
         let partitions = effect
             .partitions
@@ -32,9 +30,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         {
             return Ok(Some(crate::MaterializationHold::ConstraintConflict(tables)));
         }
-        if self.has_foreign_key_violations()? {
-            return Ok(Some(crate::MaterializationHold::ForeignKeyDependency));
-        }
+        self.validate_recorded_foreign_keys(&effect.write_id, &schema)?;
         if let Some((table, row_id)) = self.update_replay_rows_after_unaccepted_effect(
             gates,
             &schema,
@@ -42,17 +38,17 @@ impl MergeMaterializationTransaction<'_, '_> {
             &changed_rows,
             &local_rows,
         )? {
-            return self.local_shared_conflict(replay_rows, &effect.write_id, table, row_id);
+            return Err(Self::local_shared_conflict(&effect.write_id, table, row_id));
         }
         Ok(None)
     }
 
-    fn validate_unaccepted_circle_context(
+    pub(super) fn validate_unaccepted_circle_context(
         &self,
         authority: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
         effect: &crate::MergeReplayWriteEffect,
-    ) -> Result<Option<crate::MaterializationHold>, DbError> {
+    ) -> Result<(), DbError> {
         for partition in &effect.partitions.circles {
             let coven_protocol::circle::Audience::Circle(circle_id) = partition.audience else {
                 return Err(DbError::Message(format!(
@@ -67,9 +63,7 @@ impl MergeMaterializationTransaction<'_, '_> {
                 )));
             }
             let Some(state) = self.replay_circle_current_state(circle_id)? else {
-                return Ok(Some(
-                    crate::MaterializationHold::InvalidLocalCircleContext { circle_id },
-                ));
+                return invalid_circle_context(effect, partition, circle_id);
             };
             let current = match &state {
                 coven_protocol::circle_activation::CircleCurrentState::Active(_) => {
@@ -89,9 +83,7 @@ impl MergeMaterializationTransaction<'_, '_> {
                 | coven_protocol::circle_activation::CircleCurrentState::ControlConflict {
                     ..
                 } => {
-                    return Ok(Some(
-                        crate::MaterializationHold::InvalidLocalCircleContext { circle_id },
-                    ));
+                    return invalid_circle_context(effect, partition, circle_id);
                 }
             };
             if !StoreDatabase::verified_circle_control_covers_on(
@@ -109,12 +101,10 @@ impl MergeMaterializationTransaction<'_, '_> {
                     .expect("captured Circle control checked above")
                     .coordinate(),
             )? {
-                return Ok(Some(
-                    crate::MaterializationHold::InvalidLocalCircleContext { circle_id },
-                ));
+                return invalid_circle_context(effect, partition, circle_id);
             }
         }
-        Ok(None)
+        Ok(())
     }
 
     fn update_replay_rows_after_unaccepted_effect(
@@ -122,49 +112,35 @@ impl MergeMaterializationTransaction<'_, '_> {
         gates: &crate::Gates,
         schema: &TableSchema,
         replay_rows: &mut ReplayRows,
-        changed_rows: &[(String, String, coven_foundation::changeset::ChangeOp)],
-        local_rows: &[(String, String, coven_foundation::changeset::ChangeOp)],
+        changed_rows: &BTreeSet<(String, String)>,
+        local_rows: &BTreeSet<(String, String)>,
     ) -> Result<Option<(String, String)>, DbError> {
         let shared_after = gates.shared_rows(self.store.transaction)?;
-        for (table, row_id, op) in local_rows {
-            if !matches!(op, coven_foundation::changeset::ChangeOp::Delete)
-                && shared_after.contains(table, row_id)?
-            {
+        for (table, row_id) in local_rows {
+            if shared_after.contains(table, row_id)? {
                 return Ok(Some((table.clone(), row_id.clone())));
             }
         }
-        for (table, row_id, op) in changed_rows {
-            let key = (table.clone(), row_id.clone());
-            if matches!(op, coven_foundation::changeset::ChangeOp::Delete) {
-                replay_rows.private.remove(&key);
-                replay_rows.adopted_by.remove(&key);
-            } else {
-                self.record_private_row(schema, replay_rows, table, row_id)?;
-            }
+        for (table, row_id) in changed_rows {
+            self.record_replayed_row(schema, replay_rows, table, row_id)?;
         }
         Ok(None)
     }
 
-    fn local_shared_conflict(
-        &self,
-        replay_rows: &ReplayRows,
+    pub(super) fn local_shared_conflict(
         write_id: &WriteId,
         table: String,
         row_id: String,
-    ) -> Result<Option<crate::MaterializationHold>, DbError> {
-        let commit = replay_rows
-            .adopted_by
-            .get(&(table.clone(), row_id.clone()))
-            .ok_or_else(|| {
-                DbError::Message(format!(
-                    "local replay write {write_id} would change shared row {table}/{row_id} without an accepted adoption"
-                ))
-            })?;
-        Ok(Some(crate::MaterializationHold::PrivateSharedConflict {
-            table,
-            row_id,
-            commit: commit.clone(),
-        }))
+    ) -> DbError {
+        coven_protocol::write::WriteRebaseConflict {
+            write_id: write_id.clone(),
+            affected_rows: vec![coven_protocol::write::AffectedRow {
+                table,
+                primary_key: row_id,
+            }],
+            reason: coven_protocol::write::WriteRebaseConflictReason::PrivateShared,
+        }
+        .into()
     }
 
     pub(super) fn apply_local_replay_effect(
@@ -197,7 +173,6 @@ impl MergeMaterializationTransaction<'_, '_> {
             replay_rows,
             &public_rows,
             &local_rows,
-            commit,
         )? {
             return Ok(Some(crate::MaterializationHold::PrivateSharedConflict {
                 table,
@@ -208,14 +183,14 @@ impl MergeMaterializationTransaction<'_, '_> {
         Ok(None)
     }
 
-    fn local_write_would_change_shared_row(
+    pub(super) fn local_write_would_change_shared_row(
         &self,
         gates: &crate::Gates,
         public_rows: &BTreeSet<(String, String)>,
-        local_rows: &[(String, String, coven_foundation::changeset::ChangeOp)],
+        local_rows: &BTreeSet<(String, String)>,
     ) -> Result<Option<(String, String)>, DbError> {
         let shared_before = gates.shared_rows(self.store.transaction)?;
-        for (table, row_id, _) in local_rows {
+        for (table, row_id) in local_rows {
             let key = (table.clone(), row_id.clone());
             if !public_rows.contains(&key) && shared_before.contains(table, row_id)? {
                 return Ok(Some(key));
@@ -230,25 +205,17 @@ impl MergeMaterializationTransaction<'_, '_> {
         schema: &TableSchema,
         replay_rows: &mut ReplayRows,
         public_rows: &BTreeSet<(String, String)>,
-        local_rows: &[(String, String, coven_foundation::changeset::ChangeOp)],
-        commit: &StoreBatchCommitRef,
+        local_rows: &BTreeSet<(String, String)>,
     ) -> Result<Option<(String, String)>, DbError> {
         for key in public_rows {
             replay_rows.private.remove(key);
-            replay_rows.adopted_by.insert(key.clone(), commit.clone());
         }
         let shared_after = gates.shared_rows(self.store.transaction)?;
-        for (table, row_id, op) in local_rows {
-            let key = (table.clone(), row_id.clone());
-            if matches!(op, coven_foundation::changeset::ChangeOp::Delete) {
-                replay_rows.private.remove(&key);
-                replay_rows.adopted_by.remove(&key);
-            } else {
-                if shared_after.contains(table, row_id)? {
-                    return Ok(Some(key));
-                }
-                self.record_private_row(schema, replay_rows, table, row_id)?;
+        for (table, row_id) in local_rows {
+            if shared_after.contains(table, row_id)? {
+                return Ok(Some((table.clone(), row_id.clone())));
             }
+            self.record_replayed_row(schema, replay_rows, table, row_id)?;
         }
         Ok(None)
     }
@@ -289,69 +256,34 @@ impl MergeMaterializationTransaction<'_, '_> {
     }
 }
 
-fn replay_effect_public_rows(
-    connection: &rusqlite::Connection,
+fn invalid_circle_context(
     effect: &crate::MergeReplayWriteEffect,
-) -> Result<BTreeSet<(String, String)>, DbError> {
-    let changes = effect
-        .partitions
-        .store
-        .iter()
-        .chain(effect.partitions.circles.iter())
-        .map(|partition| crate::walk_changeset(&partition.changeset))
-        .collect::<Result<Vec<_>, _>>()?
+    partition: &crate::AudiencePartition,
+    circle_id: coven_protocol::circle::CircleId,
+) -> Result<(), DbError> {
+    let affected_rows = replay_partition_rows(std::iter::once(partition))?
         .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    let routes = changes
-        .iter()
-        .filter(|change| change.table == "_coven_row_routes")
-        .filter_map(|change| {
-            Some((
-                change.pk()?.to_string(),
-                (change.col(1)?.to_string(), change.col(2)?.to_string()),
-            ))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut represented = changes
-        .iter()
-        .filter(|change| !crate::is_routing_table(&change.table))
-        .filter_map(|change| Some((change.table.clone(), change.pk()?.to_string())))
-        .collect::<BTreeSet<_>>();
-    for routing_id in changes
-        .iter()
-        .filter(|change| change.table == "_coven_audience")
-        .filter_map(|change| change.pk())
-    {
-        if let Some(row) = routes.get(routing_id) {
-            represented.insert(row.clone());
-            continue;
-        }
-        let rows = crate::query_mapped_rows(
-            connection,
-            "SELECT table_name, row_id FROM _coven_row_routes WHERE routing_id = ?1",
-            [routing_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        let [row] = rows.as_slice() else {
-            return Err(DbError::Message(format!(
-                "local replay public audience row {routing_id} has no exact row route"
-            )));
-        };
-        represented.insert(row.clone());
+        .map(|(table, primary_key)| coven_protocol::write::AffectedRow { table, primary_key })
+        .collect();
+    Err(coven_protocol::write::WriteRebaseConflict {
+        write_id: effect.write_id.clone(),
+        affected_rows,
+        reason: coven_protocol::write::WriteRebaseConflictReason::InvalidCircleContext {
+            circle_id,
+        },
     }
-    Ok(represented)
+    .into())
 }
 
-fn replay_effect_local_rows(
+pub(super) fn replay_effect_local_rows(
     effect: &crate::MergeReplayWriteEffect,
-) -> Result<Vec<(String, String, coven_foundation::changeset::ChangeOp)>, DbError> {
+) -> Result<BTreeSet<(String, String)>, DbError> {
     replay_partition_rows(effect.partitions.local.iter())
 }
 
 fn replay_effect_rows(
     effect: &crate::MergeReplayWriteEffect,
-) -> Result<Vec<(String, String, coven_foundation::changeset::ChangeOp)>, DbError> {
+) -> Result<BTreeSet<(String, String)>, DbError> {
     replay_partition_rows(
         effect
             .partitions
@@ -364,7 +296,7 @@ fn replay_effect_rows(
 
 fn replay_partition_rows<'a>(
     partitions: impl Iterator<Item = &'a crate::AudiencePartition>,
-) -> Result<Vec<(String, String, coven_foundation::changeset::ChangeOp)>, DbError> {
+) -> Result<BTreeSet<(String, String)>, DbError> {
     let rows = partitions
         .map(|partition| crate::walk_changeset(&partition.changeset))
         .collect::<Result<Vec<_>, _>>()?
@@ -375,8 +307,12 @@ fn replay_partition_rows<'a>(
                 return None;
             }
             let row_id = change.pk()?.to_string();
-            Some((change.table, row_id, change.op))
+            Some((change.table, row_id))
         })
-        .collect::<Vec<_>>();
+        .collect();
     Ok(rows)
 }
+
+#[cfg(test)]
+#[path = "replay_effect_tests.rs"]
+mod tests;

@@ -7,86 +7,34 @@ pub(crate) use circle_coverage::{
 mod materialization_io;
 mod retained_objects;
 pub(crate) use retained_objects::{
-    canonical_retained_merge_packages, pin_retained_merge_objects_on,
-    remove_retained_replay_ownership_from_snapshot_on, validate_retained_merge_pin_closure_on,
+    canonical_retained_merge_packages, remove_retained_replay_ownership_from_snapshot_on,
+    replace_retained_merge_object_ownership_on, validate_retained_merge_pin_closure_on,
+    RetainedReplayObjectCoverage,
 };
+mod pending_device_join;
 mod snapshot_retention;
 
 use crate::{RetainedReplayAuthority, RetainedReplayBaseline};
 use coven_protocol::audience_package::AudiencePackage;
 use coven_protocol::blob::locator::{RemoteAudience, StoredBlobRef};
-use coven_protocol::circle_activation::VerifiedCircleActivations;
-use coven_protocol::membership::{AuthorHead, MembershipEntry};
 use coven_protocol::remote_object::{
     remote_object_id, RemoteObjectRecord, RetainedReplayOwner, SharedLiveSetObjectDomain,
 };
 use coven_protocol::store_commit::{
     CommitFrontier, ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceHead, StoreDeviceRegistrationRef,
 };
 use coven_protocol::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::candidate_records::PreparedMergeCandidate;
-use super::materialization_models::{
-    MergeRetractionCleanupInput, RetainedAudiencePackage, RetainedMergeMaterializationInput,
-};
+use super::materialization_models::{RetainedAudiencePackage, RetainedMergeMaterializationInput};
 use super::verified_store_authority::{VerifiedRegistrationLookup, VerifiedStoreLookup};
 use super::*;
-use crate::store::candidate_records::{
-    load_author_exclusion_activation_locator_on, parse_prepared_merge_candidate_parts_on,
-    verify_prepared_merge_candidate_parts,
-};
+use crate::store::candidate_records::load_device_exclusion_activation_on;
 
-pub(super) enum RetainedCommitAuthority<'a> {
-    StoredBytes,
-    Operation(&'a coven_protocol::store_commit::VerifiedStoreBatchCommit),
-}
-
-pub(super) fn load_merge_retraction_cleanup_objects_on(
-    conn: &Connection,
-    candidate: &StoreBatchCommitRef,
-) -> Result<(DurablePreparedProtocolObject, DurablePreparedProtocolObject), DbError> {
-    let StoreCommitCoord {
-        stream_id,
-        sequence,
-    } = &candidate.coord;
-    let stream_id = stream_id.to_string();
-    let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
-    let encoded_ref = serde_json::to_string(candidate)
-        .map_err(|error| DbError::context("serialize Merge retraction cleanup ref", error))?;
-    let (stored_hash, canonical_cleanup): (String, Vec<u8>) = conn
-        .query_row(
-            "SELECT cleanup_hash, canonical_cleanup
-             FROM merge_retraction_cleanups
-             WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3",
-            rusqlite::params![&stream_id, sequence_sql, &encoded_ref],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(DbError::from)?;
-    if stored_hash != ObjectHash::digest(&canonical_cleanup).to_string() {
-        return Err(DbError::Message(
-            "Merge retraction cleanup hash differs from its bytes".to_string(),
-        ));
-    }
-    let input: MergeRetractionCleanupInput = serde_json::from_slice(&canonical_cleanup)
-        .map_err(|error| DbError::context("parse Merge retraction cleanup", error))?;
-    if serde_json::to_vec(&input)
-        .map_err(|error| DbError::context("serialize Merge retraction cleanup", error))?
-        != canonical_cleanup
-    {
-        return Err(DbError::Message(
-            "Merge retraction cleanup is not canonical".to_string(),
-        ));
-    }
-    let commit =
-        DurablePreparedProtocolObject::new(input.commit.stored_bytes().to_vec(), input.commit);
-    let head = DurablePreparedProtocolObject::new(
-        input.activation_head.stored_bytes().to_vec(),
-        input.activation_head,
-    );
-    Ok((commit, head))
+pub(super) enum RetainedCommitAuthority<'a, 'materialization> {
+    StoredBytes(Option<crate::AcceptedStoreCommitEvidence>),
+    Operation(&'a crate::VerifiedMergeMaterialization<'materialization>),
 }
 
 pub struct CircleReplayEpochIndex {
@@ -199,8 +147,6 @@ impl CircleReplayEpochIndex {
         }
     }
 }
-
-impl StoreDatabase {}
 
 #[cfg(test)]
 mod circle_epoch_cutoff_tests;

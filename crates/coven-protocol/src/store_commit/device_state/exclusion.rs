@@ -120,7 +120,6 @@ pub struct StoreDeviceExclusionProposalBody {
     pub store_root_hash: ObjectHash,
     pub proposal_id: StoreDeviceExclusionProposalId,
     pub target: StoreDeviceRegistrationRef,
-    pub frozen_device_state: StoreDeviceStateRef,
     pub outcome_slot: ObjectSlot,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
@@ -163,7 +162,6 @@ pub struct StoreDeviceExclusionBody {
     pub store_root_hash: ObjectHash,
     pub proposal: StoreDeviceExclusionProposalRef,
     pub target: StoreDeviceRegistrationRef,
-    pub proof: StoreDeviceExclusionProof,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
 }
@@ -174,14 +172,6 @@ impl SignedBody for StoreDeviceExclusionBody {
 
 pub type StoreDeviceExclusion = Signed<StoreDeviceExclusionBody>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreDeviceExclusionProof {
-    pub frozen_device_state: StoreDeviceStateRef,
-    pub remaining_device_acks: Vec<StoreAckRef>,
-    pub cutoff: StoreHistoryCut,
-}
-
 impl StoreDeviceExclusionProposal {
     #[allow(clippy::too_many_arguments)]
     pub fn signed(
@@ -189,7 +179,6 @@ impl StoreDeviceExclusionProposal {
         proposal_id: StoreDeviceExclusionProposalId,
         target: StoreDeviceRegistrationRef,
         target_registration: &StoreDeviceRegistration,
-        frozen_device_state: StoreDeviceStateRef,
         outcome_slot: ObjectSlot,
         owner_registration: StoreDeviceRegistrationRef,
         owner_grant: MembershipGrantId,
@@ -214,13 +203,11 @@ impl StoreDeviceExclusionProposal {
                 actual: outcome_slot.logical_key().to_string(),
             });
         }
-        validate_store_device_state_ref(&frozen_device_state)?;
         Ok(Signed::sign(
             StoreDeviceExclusionProposalBody {
                 store_root_hash,
                 proposal_id,
                 target,
-                frozen_device_state,
                 outcome_slot,
                 owner_registration,
                 owner_grant,
@@ -243,7 +230,6 @@ impl StoreDeviceExclusionProposal {
         expected.verify_proposal(&proposal)?;
         proposal.target.verify_registration(target)?;
         proposal.owner_registration.verify_registration(owner)?;
-        validate_store_device_state_ref(&proposal.frozen_device_state)?;
         let expected_outcome = format!(
             "{}.json",
             device_exclusion_outcome_semantic_prefix(
@@ -355,7 +341,6 @@ impl StoreDeviceExclusion {
         proposal_value: &StoreDeviceExclusionProposal,
         target: StoreDeviceRegistrationRef,
         target_registration: &StoreDeviceRegistration,
-        proof: StoreDeviceExclusionProof,
         owner_registration: StoreDeviceRegistrationRef,
         owner_grant: MembershipGrantId,
         owner: &StoreDeviceRegistration,
@@ -371,13 +356,11 @@ impl StoreDeviceExclusion {
         {
             return Err(StoreProtocolError::InvalidSignature);
         }
-        validate_device_exclusion_proof(&proof)?;
         Ok(Signed::sign(
             StoreDeviceExclusionBody {
                 store_root_hash: owner.store_root.store_root_hash,
                 proposal,
                 target,
-                proof,
                 owner_registration,
                 owner_grant,
             },
@@ -430,7 +413,6 @@ impl StoreDeviceExclusionOutcome {
             Self::Excluded(exclusion) => {
                 exclusion.target.verify_registration(target)?;
                 exclusion.owner_registration.verify_registration(owner)?;
-                validate_device_exclusion_proof(&exclusion.proof)?;
                 if exclusion.store_root_hash != proposal.store_root_hash
                     || exclusion.store_root_hash != target.store_root.store_root_hash
                     || exclusion.target != proposal.target
@@ -449,18 +431,4 @@ impl StoreDeviceExclusionOutcome {
         }
         Ok(outcome)
     }
-}
-
-fn validate_device_exclusion_proof(
-    proof: &StoreDeviceExclusionProof,
-) -> Result<(), StoreProtocolError> {
-    if proof
-        .remaining_device_acks
-        .windows(2)
-        .any(|pair| pair[0] >= pair[1])
-    {
-        return Err(StoreProtocolError::DeviceStateMismatch);
-    }
-    validate_store_device_state_ref(&proof.frozen_device_state)?;
-    validate_store_history_cut(&proof.cutoff)
 }

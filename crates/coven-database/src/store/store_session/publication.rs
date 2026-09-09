@@ -1,32 +1,25 @@
 use super::{
-    candidate_records::begin_merge_candidate_nonactivation_on,
-    publication_state::{MergeAbandonmentOutcome, PreparedStoreWriteState},
-    MergeMaterializationTransaction, StoreDatabase, StoreSession, StoreTransactionOutcome,
-    VerifiedStoreTransaction,
+    publication_state::PreparedStoreWriteState, MergeMaterializationTransaction, StoreDatabase,
+    StoreSession, StoreTransactionOutcome, VerifiedStoreTransaction,
 };
 use crate::{
     candidate_graph_exact_objects, load_prepared_audience_objects_on, load_remote_object_on,
-    update_remote_object_on, CloudOutboxRecords, CompletePreparedStoreWriteOutcome, Database,
-    DbError, PreparedAudienceBlob, RetainedPackageApplication, LOCAL_DEVICE_ID_STATE_KEY,
+    CloudOutboxRecords, Database, DbError, OwnedVerifiedMergeMaterialization, PreparedAudienceBlob,
+    RetainedPackageApplication, LOCAL_DEVICE_ID_STATE_KEY,
 };
-use coven_protocol::remote_object::{remote_object_id, CandidateNonactivation};
-use coven_protocol::store_commit::{
-    StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead, StoreDeviceHeadRef,
-    VerifiedStoreBatchCommit,
-};
-use coven_protocol::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
+use coven_protocol::remote_object::remote_object_id;
+use coven_protocol::store_commit::{StoreBatchCommit, VerifiedStoreBatchCommit};
+use coven_protocol::write::{PublishedPosition, PublishedWrite, WriteId, WriteStatus};
 
-impl VerifiedStoreTransaction<'_, '_, '_> {
+impl VerifiedStoreTransaction<'_, '_, '_, '_> {
     fn complete_prepared_store_write(
         &mut self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        accepted: StoreBatchCommitRef,
-        nonactivations: std::collections::BTreeMap<StoreBatchCommitRef, CandidateNonactivation>,
+        accepted_publication: crate::StoreCommitPublicationOutcome,
         routing_key: Option<coven_protocol::circle::RowRoutingKey>,
     ) -> Result<
         (
-            CompletePreparedStoreWriteOutcome,
-            Option<(WriteId, WriteStatus)>,
+            Option<OwnedVerifiedMergeMaterialization>,
+            (WriteId, WriteStatus),
         ),
         DbError,
     > {
@@ -58,225 +51,35 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             .map_err(DbError::from)?;
         let current_status: WriteStatus = serde_json::from_str(&raw_status)
             .map_err(|error| DbError::context("prepared Store write status", error))?;
+        if current_status != WriteStatus::Publishing {
+            return Err(DbError::Message(format!(
+                "prepared Store write has non-publishing status {current_status:?}"
+            )));
+        }
         let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
             .map_err(|error| DbError::context("prepared Store write", error))?;
-        let exclusion_candidate = state.prepared_merge_candidate_on(
-            crate::store::store_session::StoreRecords::new(
-                self.store.transaction,
-                self.store.store_dir,
-            ),
-            &prepared,
-        )?;
-        if store_transaction
-            .author_exclusion_activation_for_candidate(
-                state,
-                &root,
-                &exclusion_candidate.reference,
-                &exclusion_candidate.commit.author_registration,
-            )?
-            .is_some()
-        {
-            let device_id = exclusion_candidate.commit.author_registration.device_id;
-            let write_id = WriteId::from_generated(stored_write_id.clone());
-            if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = &current_status {
-                witness.validate().map_err(DbError::from)?;
-                if witness.original_position().commit() != &exclusion_candidate.reference {
-                    return Err(DbError::Message(
-                        "terminal write retraction names another prepared candidate".to_string(),
-                    ));
-                }
-                tx.execute(
-                    "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
-                    [write_id.as_str()],
-                )
-                .map_err(DbError::from)?;
-                tx.execute(
-                    "DELETE FROM store_write_packages WHERE write_id = ?1",
-                    [write_id.as_str()],
-                )
-                .map_err(DbError::from)?;
-                tx.execute(
-                    "DELETE FROM store_write_blobs WHERE write_id = ?1",
-                    [write_id.as_str()],
-                )
-                .map_err(DbError::from)?;
-                let updated = tx
-                    .execute(
-                        "UPDATE store_writes SET prepared = NULL
-                             WHERE write_id = ?1 AND status = ?2 AND prepared = ?3",
-                        rusqlite::params![write_id.as_str(), &raw_status, &raw_prepared],
-                    )
-                    .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(
-                        "terminally retracted Store write changed during completion".to_string(),
-                    ));
-                }
-                return Ok((
-                    CompletePreparedStoreWriteOutcome::AuthorExcluded { device_id },
-                    None,
-                ));
-            }
-            let status =
-                WriteStatus::Blocked(coven_protocol::write::WriteBlock::InvalidProtocolState {
-                    reason: format!(
-                        "Store author {device_id} was excluded before candidate activation"
-                    ),
-                });
-            Database::set_write_status_on(tx, &write_id, &status)?;
-            return Ok((
-                CompletePreparedStoreWriteOutcome::AuthorExcluded { device_id },
-                Some((write_id, status)),
-            ));
-        }
-        if let PreparedStoreWriteState::MergeAbandonment {
-            candidate_commit,
-            candidate_head,
-            authority_commit,
-            authority_head,
-            authority_history_evidence,
-            ..
-        } = &prepared
-        {
-            let root = state.root().clone();
-            let candidate = state.prepared_merge_candidate_parts_on(
-                crate::store::store_session::StoreRecords::new(
-                    self.store.transaction,
-                    self.store.store_dir,
-                ),
-                candidate_commit.semantic_bytes(),
-                candidate_commit.prepared().reference(),
-                candidate_head.semantic_bytes(),
-                candidate_head.prepared().reference(),
-            )?;
-            let authority = state.prepared_merge_candidate_parts_on(
-                crate::store::store_session::StoreRecords::new(
-                    self.store.transaction,
-                    self.store.store_dir,
-                ),
-                authority_commit.semantic_bytes(),
-                authority_commit.prepared().reference(),
-                authority_head.semantic_bytes(),
-                authority_head.prepared().reference(),
-            )?;
-            if authority.commit.write_id.as_str() != stored_write_id
-                || accepted != authority.reference
-                || !matches!(
-                    &authority.commit.body,
-                    coven_protocol::store_commit::StoreCommitBody::AbandonCandidates { .. }
-                )
-            {
-                return Err(DbError::Message(
-                    "accepted Merge abandonment differs from its durable authority".to_string(),
-                ));
-            }
-            let registration = super::verified_store_authority::VerifiedRegistrationLookup::activated_registration_on(
-                state,
-                crate::store::store_session::StoreRecords::new(self.store.transaction, self.store.store_dir),
-                &root,
-                &authority.commit.author_registration,
-            )?;
-            StoreDeviceHead::parse_at(
-                &authority.head.to_bytes(),
-                root.store_root_hash,
-                &registration,
-                &accepted,
-            )
-            .map_err(|error| DbError::context("verify accepted Merge abandonment head", error))?;
-            for object in [
-                authority_commit.prepared().reference(),
-                authority_head.prepared().reference(),
-            ] {
-                let object_id = remote_object_id(object);
-                let remote = load_remote_object_on(tx, object_id)?
-                    .into_activated(&accepted)
-                    .map_err(|error| {
-                        DbError::context(
-                            format!("activate Merge abandonment object {object_id}"),
-                            error,
-                        )
-                    })?;
-                update_remote_object_on(tx, object_id, &remote)?;
-            }
-            let nonactivation = nonactivations.get(&candidate.reference).ok_or_else(|| {
-                DbError::Message(
-                    "accepted Merge abandonment has no verified candidate nonactivation"
-                        .to_string(),
-                )
-            })?;
-            begin_merge_candidate_nonactivation_on(
-                tx,
-                &WriteId::from_generated(stored_write_id.clone()),
-                &candidate,
-                nonactivation,
-                true,
-                &[],
-            )?;
-            let retained = MergeMaterializationTransaction::from_store(self.store)
-                .record_materialized_merge_commit(
-                    state,
-                    &root,
-                    &authority.commit,
-                    &[],
-                    &authority.head,
-                    &authority.head_object,
-                    authority_history_evidence,
-                    &[],
-                    None,
-                )?;
-            state.insert_verified(retained)?;
-            let mut completed_preparation = prepared.clone();
-            let PreparedStoreWriteState::MergeAbandonment { outcome, .. } =
-                &mut completed_preparation
-            else {
-                unreachable!("matched Merge abandonment")
-            };
-            *outcome = MergeAbandonmentOutcome::Accepted {
-                authority: accepted.clone(),
-            };
-            let completed_preparation = serde_json::to_string(&completed_preparation)
-                .map_err(|error| DbError::context("serialize accepted Merge abandonment", error))?;
-            let updated = tx
-                .execute(
-                    "UPDATE store_writes SET prepared = ?2
-                         WHERE write_id = ?1 AND prepared = ?3",
-                    rusqlite::params![
-                        stored_write_id.as_str(),
-                        completed_preparation,
-                        raw_prepared
-                    ],
-                )
-                .map_err(DbError::from)?;
-            if updated != 1 {
-                return Err(DbError::Message(
-                    "Merge abandonment changed during activation".to_string(),
-                ));
-            }
-            let blocked =
-                WriteStatus::Blocked(coven_protocol::write::WriteBlock::InvalidProtocolState {
-                    reason: format!(
-                        "candidate abandonment {} is accepted; exact cleanup is pending",
-                        authority.head.head_hash()
-                    ),
-                });
-            let write_id = authority.commit.write_id.clone();
-            Database::set_write_status_on(tx, &write_id, &blocked)?;
-            return Ok((
-                CompletePreparedStoreWriteOutcome::Published,
-                Some((write_id, blocked)),
-            ));
-        }
-        let PreparedStoreWriteState::Publication {
+        let PreparedStoreWriteState {
             commit,
-            head,
             history_evidence,
             local_cleanup,
             ..
-        } = prepared
-        else {
-            return Err(DbError::Message(
-                "Merge abandonment reached ordinary publication completion".to_string(),
-            ));
+        } = prepared;
+        let active = super::active_store_publication::load_active_store_publication_on(tx)?
+            .ok_or_else(|| {
+                DbError::Message(format!(
+                    "publishing write {stored_write_id} has no active Store publication"
+                ))
+            })?;
+        let publication = active.attempt()?.clone();
+        let accepted = match &publication.entry.payload {
+            coven_protocol::store_commit::StorePublicationPayload::Commit(reference) => {
+                reference.clone()
+            }
+            coven_protocol::store_commit::StorePublicationPayload::Snapshot(_) => {
+                return Err(DbError::Message(
+                    "prepared Store write contains a snapshot publication".to_string(),
+                ));
+            }
         };
         let root = state.root().clone();
         let unverified: StoreBatchCommit = serde_json::from_slice(commit.semantic_bytes())
@@ -301,7 +104,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             || accepted.object != *commit.prepared().reference()
         {
             return Err(DbError::Message(
-                "accepted Merge head differs from the exact prepared commit".to_string(),
+                "accepted Store publication differs from the exact prepared commit".to_string(),
             ));
         }
         let commit_value = VerifiedStoreBatchCommit::parse(
@@ -311,20 +114,38 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             &registration,
         )
         .map_err(|error| DbError::context("outbound commit", error))?;
-        let head_value = StoreDeviceHead::parse_at(
-            head.semantic_bytes(),
-            root.store_root_hash,
-            &registration,
-            &accepted,
-        )
-        .map_err(|error| DbError::context("outbound Store head", error))?;
+        if active.owner()
+            != &crate::ActiveStorePublicationOwner::StoreWrite(commit_value.write_id.clone())
+            || active.commit_reservation()
+                != Some((
+                    &commit_value.write_id,
+                    &commit_value.author_registration,
+                    &commit_value.reference().coord,
+                ))
+        {
+            return Err(DbError::Message(format!(
+                "prepared write {stored_write_id} differs from active Store publication {:?}",
+                active.owner()
+            )));
+        }
+        let accepted_publication =
+            accepted_publication.resolve_installed_on(store_transaction, &commit_value)?;
+        let materialize = accepted_publication.requires_materialization();
+        let publication: crate::AcceptedStoreCommitEvidence = match &accepted_publication {
+            crate::StoreCommitPublicationOutcome::Accepted { interval, .. } => {
+                install_accepted_commit_publication_on(tx, &publication, &commit_value, interval)?
+                    .into()
+            }
+            crate::StoreCommitPublicationOutcome::Installed(_) => {
+                accepted_publication.install_on(store_transaction, &commit_value)?
+            }
+        };
         if commit_value.write_id.as_str() != stored_write_id {
             return Err(DbError::Message(
                 "prepared write id differs from signed commit".to_string(),
             ));
         }
         let write_id = commit_value.write_id.clone();
-        let head_object_id = remote_object_id(head.prepared().reference());
         let commit = commit_value.value();
         let commit_ref = commit_value.reference();
         let remaining_spools: i64 = tx
@@ -365,7 +186,6 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 .iter()
                 .map(PreparedAudienceBlob::remote_object_id),
         );
-        object_ids.insert(head_object_id);
         for object_id in object_ids {
             let remote = load_remote_object_on(tx, object_id)?
                 .into_activated(commit_ref)
@@ -386,138 +206,208 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 )));
             }
         }
-        let merge_transaction = MergeMaterializationTransaction::from_store(self.store);
-        let retained = merge_transaction.record_materialized_merge_commit(
-            state,
-            &root,
-            &commit_value,
-            &[],
-            &head_value,
-            head.prepared().reference(),
-            &history_evidence,
-            &retained_packages,
-            (!retained_packages.is_empty()).then_some(RetainedPackageApplication::LocallyAuthored),
-        )?;
-        state.insert_verified(retained)?;
-        let replayed = state.replay_projection_watching_on(
+        for package in &retained_packages {
+            for binding in package.blob_bindings() {
+                crate::blob_records::record_stored_locator_on(tx, binding.blob())?;
+            }
+        }
+        let retained = if materialize {
+            let merge_transaction = MergeMaterializationTransaction::from_store(self.store);
+            let retained = merge_transaction.record_materialized_merge_commit(
+                state,
+                &root,
+                &commit_value,
+                &[],
+                &publication,
+                &history_evidence,
+                &retained_packages,
+                (!retained_packages.is_empty())
+                    .then_some(RetainedPackageApplication::LocallyAuthored),
+            )?;
+            state.insert_verified(retained.clone())?;
+            let replayed = state.replay_projection_watching_on(
+                store_transaction,
+                self.blob_decls,
+                gates,
+                synced_tables,
+                routing_key.as_ref(),
+                &std::collections::BTreeSet::new(),
+                crate::ReplayJournal::Owed,
+                coven_protocol::membership::LocalStoreMembership::Current,
+                commit_ref,
+            )?;
+            match replayed.watched_outcome() {
+                Some(super::WatchedReplayOutcome::Applied) => {}
+                Some(super::WatchedReplayOutcome::Held(reason)) => {
+                    return Err(DbError::Message(format!(
+                        "accepted local Store publication held during replay: {reason:?}"
+                    )));
+                }
+                None => {
+                    return Err(DbError::Message(
+                        "accepted local Store publication was absent from replay".to_string(),
+                    ));
+                }
+            }
+            replayed.install_on(self)?;
+            Some(retained)
+        } else {
+            None
+        };
+        let status = finish_store_write_publication_on(
             store_transaction,
-            self.blob_decls,
-            gates,
-            synced_tables,
-            routing_key.as_ref(),
-            &std::collections::BTreeSet::new(),
-            crate::ReplayJournal::Owed,
-            coven_protocol::membership::LocalStoreMembership::Current,
-            commit_ref,
+            &write_id,
+            &audiences,
+            local_cleanup,
+            PublishedWrite::Commit(PublishedPosition {
+                device_id: local_device_id,
+                commit: accepted,
+            }),
+            &active,
         )?;
-        match replayed.watched_outcome() {
-            Some(super::WatchedReplayOutcome::Applied { .. }) => {}
-            Some(super::WatchedReplayOutcome::Held(reason)) => {
-                return Err(DbError::Message(format!(
-                    "accepted local Store publication held during replay: {reason:?}"
-                )))
-            }
-            None => {
-                return Err(DbError::Message(
-                    "accepted local Store publication was absent from replay".to_string(),
-                ))
-            }
-        }
-        replayed.install_on(self, &root)?;
-        let cloud_outbox = CloudOutboxRecords::new(tx);
-        let mut consumed_uploads = 0;
-        for package in &audiences.packages {
-            for binding in package.package().blob_bindings() {
-                if cloud_outbox.consume_created_upload_handoff(package.package(), binding)? {
-                    consumed_uploads += 1;
-                }
-            }
-        }
-        match Database::make_remote_publication_root_on(tx, &write_id)? {
-            Some((root_table, root_id)) => {
-                if consumed_uploads == 0 {
-                    return Err(DbError::Message(format!(
-                                "make_remote publication {write_id} for {root_table:?}/{root_id:?} contains no Created upload handoff"
-                            )));
-                }
-                let remaining: i64 = tx
-                    .query_row(
-                        "SELECT COUNT(*) FROM cloud_outbox
-                                 WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
-                        (&root_table, &root_id),
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                if remaining != 0 {
-                    return Err(DbError::Message(format!(
-                                "make_remote publication {write_id} left {remaining} upload handoff(s) for {root_table:?}/{root_id:?}"
-                            )));
-                }
-                Database::complete_make_remote_publication_on(tx, &write_id)?;
-            }
-            None if consumed_uploads != 0 => {
-                return Err(DbError::Message(format!(
-                            "Store write {write_id} consumed Created upload handoffs without a make_remote publication intent"
-                        )));
-            }
-            None => {}
-        }
-        for drop in local_cleanup.drops {
-            tx.execute(
-                "INSERT INTO published_blob_drop_intents
-                         (seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                         ON CONFLICT(seq, namespace, blob_id, locator_hash) DO NOTHING",
-                rusqlite::params![
-                    Database::sequence_to_sqlite(
-                        &commit_ref.coord.stream_id.to_string(),
-                        commit_ref.coord.sequence(),
-                    )?,
-                    drop.namespace,
-                    drop.id,
-                    i64::try_from(drop.size).map_err(|_| DbError::Message(
-                        "outbound local cleanup size exceeds SQLite integer".to_string()
-                    ))?,
-                    drop.plaintext_hash.to_string(),
-                    drop.locator_hash.to_string(),
-                    drop.disposition.as_db(),
-                ],
-            )
-            .map_err(DbError::from)?;
-        }
-        tx.execute(
-            "DELETE FROM store_write_packages WHERE write_id = ?1",
-            [write_id.as_str()],
-        )
-        .map_err(DbError::from)?;
-        tx.execute(
-            "DELETE FROM store_write_blobs WHERE write_id = ?1",
-            [write_id.as_str()],
-        )
-        .map_err(DbError::from)?;
-        retain_local_replay_blob_leases(tx, self.store.store_dir, &write_id)?;
-        let cleared = tx
-            .execute(
-                "UPDATE store_writes SET prepared = NULL
-                     WHERE write_id = ?1 AND prepared IS NOT NULL",
-                [stored_write_id.as_str()],
-            )
-            .map_err(DbError::from)?;
-        if cleared != 1 {
-            return Err(DbError::Message(
-                "prepared Store write disappeared".to_string(),
-            ));
-        }
-        let status = WriteStatus::Published(Box::new(PublishedPosition {
-            device_id: local_device_id,
-            commit: accepted.clone(),
-        }));
-        Database::set_write_status_on(tx, &write_id, &status)?;
-        Ok((
-            CompletePreparedStoreWriteOutcome::Published,
-            Some((write_id, status)),
-        ))
+        Ok((retained, (write_id, status)))
     }
+}
+
+pub(super) fn finish_store_write_publication_on(
+    store: super::StoreTransaction<'_, '_>,
+    write_id: &WriteId,
+    audiences: &crate::PreparedAudienceObjects,
+    local_cleanup: crate::StoreBatchLocalCleanup,
+    published: PublishedWrite,
+    active: &crate::ActiveStorePublication,
+) -> Result<WriteStatus, DbError> {
+    let tx = store.transaction;
+    let coord = published.coord();
+    let cloud_outbox = CloudOutboxRecords::new(tx);
+    let mut consumed_uploads = 0;
+    for package in &audiences.packages {
+        for binding in package.package().blob_bindings() {
+            if cloud_outbox.consume_created_upload_handoff(package.package(), binding)? {
+                consumed_uploads += 1;
+            }
+        }
+    }
+    match Database::make_remote_publication_root_on(tx, write_id)? {
+        Some((root_table, root_id)) => {
+            if consumed_uploads == 0 {
+                return Err(DbError::Message(format!(
+                    "make_remote publication {write_id} for {root_table:?}/{root_id:?} contains no Created upload handoff"
+                )));
+            }
+            let remaining: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM cloud_outbox
+                             WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
+                    (&root_table, &root_id),
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if remaining != 0 {
+                return Err(DbError::Message(format!(
+                    "make_remote publication {write_id} left {remaining} upload handoff(s) for {root_table:?}/{root_id:?}"
+                )));
+            }
+            Database::complete_make_remote_publication_on(tx, write_id)?;
+        }
+        None if consumed_uploads != 0 => {
+            return Err(DbError::Message(format!(
+                "Store write {write_id} consumed Created upload handoffs without a make_remote publication intent"
+            )));
+        }
+        None => {}
+    }
+    for drop in local_cleanup.drops {
+        tx.execute(
+            "INSERT INTO published_blob_drop_intents
+                     (seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(seq, namespace, blob_id, locator_hash) DO NOTHING",
+            rusqlite::params![
+                Database::sequence_to_sqlite(&coord.stream_id.to_string(), coord.sequence(),)?,
+                drop.namespace,
+                drop.id,
+                i64::try_from(drop.size).map_err(|_| DbError::Message(
+                    "outbound local cleanup size exceeds SQLite integer".to_string()
+                ))?,
+                drop.plaintext_hash.to_string(),
+                drop.locator_hash.to_string(),
+                drop.disposition.as_db(),
+            ],
+        )
+        .map_err(DbError::from)?;
+    }
+    tx.execute(
+        "DELETE FROM store_write_packages WHERE write_id = ?1",
+        [write_id.as_str()],
+    )
+    .map_err(DbError::from)?;
+    tx.execute(
+        "DELETE FROM store_write_blobs WHERE write_id = ?1",
+        [write_id.as_str()],
+    )
+    .map_err(DbError::from)?;
+    retain_local_replay_blob_leases(tx, store.store_dir, write_id)?;
+    let cleared = tx
+        .execute(
+            "UPDATE store_writes SET prepared = NULL
+                 WHERE write_id = ?1 AND prepared IS NOT NULL",
+            [write_id.as_str()],
+        )
+        .map_err(DbError::from)?;
+    if cleared != 1 {
+        return Err(DbError::Message(
+            "prepared Store write disappeared".to_string(),
+        ));
+    }
+    super::active_store_publication::clear_active_store_publication_on(tx, active)?;
+    let status = WriteStatus::Published(Box::new(published));
+    Database::set_write_status_on(tx, write_id, &status)?;
+    Ok(status)
+}
+
+fn install_accepted_commit_publication_on(
+    transaction: &rusqlite::Transaction<'_>,
+    attempt: &coven_protocol::prepared_commit::PreparedStorePublication,
+    commit: &VerifiedStoreBatchCommit,
+    accepted: &crate::AcceptedStorePublicationInterval,
+) -> Result<crate::AcceptedStoreCommitPublication, DbError> {
+    let previous =
+        super::observed_store_publication::load_store_current_publication_on(transaction)?;
+    if previous.record() != &attempt.previous
+        || previous.observed_version() != Some(&attempt.previous_version)
+    {
+        return Err(DbError::Message(
+            "accepted Store commit extends a stale local publication boundary".to_string(),
+        ));
+    }
+    if accepted.interval().previous() != &*attempt.previous
+        || accepted.interval().current() != &attempt.replacement
+    {
+        return Err(DbError::Message(
+            "accepted Store publication interval differs from its prepared boundaries".to_string(),
+        ));
+    }
+    let unverified = attempt.entry.clone();
+    let reference = coven_protocol::store_commit::StorePublicationRef::from_entry(
+        &unverified,
+        attempt.entry_object.clone(),
+    )
+    .map_err(|error| DbError::context("accepted Store publication reference", error))?;
+    let publication = accepted
+        .accepted_commit(commit)
+        .map_err(|error| DbError::context("accepted Store commit publication", error))?;
+    if publication.entry() != &attempt.entry || publication.reference() != &reference {
+        return Err(DbError::Message(
+            "accepted Store publication differs from the prepared entry".to_string(),
+        ));
+    }
+    super::observed_store_publication::install_store_publication_interval_on(
+        transaction,
+        &previous,
+        accepted,
+    )?;
+    Ok(publication)
 }
 
 fn retain_local_replay_blob_leases(
@@ -585,245 +475,35 @@ fn retain_local_replay_blob_leases(
 impl StoreSession<'_> {
     fn complete_prepared_store_write(
         &mut self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        accepted: StoreBatchCommitRef,
-        nonactivations: std::collections::BTreeMap<StoreBatchCommitRef, CandidateNonactivation>,
+        accepted_publication: crate::StoreCommitPublicationOutcome,
         routing_key: Option<coven_protocol::circle::RowRoutingKey>,
     ) -> Result<
         (
-            CompletePreparedStoreWriteOutcome,
-            Option<(WriteId, WriteStatus)>,
+            Option<OwnedVerifiedMergeMaterialization>,
+            (WriteId, WriteStatus),
         ),
         DbError,
     > {
         self.verified_store_transaction(move |transaction| {
-            let result = transaction.complete_prepared_store_write(
-                root,
-                accepted,
-                nonactivations,
-                routing_key,
-            )?;
+            let result =
+                transaction.complete_prepared_store_write(accepted_publication, routing_key)?;
             Ok(StoreTransactionOutcome::Commit(result))
         })
-    }
-
-    fn mark_merge_candidate_conflict(
-        &mut self,
-        write_id: WriteId,
-        winner_commit: StoreBatchCommitRef,
-        winner_head: StoreDeviceHeadRef,
-        nonactivations: std::collections::BTreeMap<StoreBatchCommitRef, CandidateNonactivation>,
-    ) -> Result<WriteStatus, DbError> {
-        let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.conn;
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        let (raw_status, raw_prepared): (String, String) = tx
-            .query_row(
-                "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
-                [write_id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(DbError::from)?;
-        let status: WriteStatus = serde_json::from_str(&raw_status)
-            .map_err(|error| DbError::context("Merge candidate status", error))?;
-        if !matches!(status, WriteStatus::Publishing) {
-            return Err(DbError::Message(format!(
-                "Merge candidate {write_id} is not publishing"
-            )));
-        }
-        let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-            .map_err(|error| DbError::context("prepared Merge candidate", error))?;
-        let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
-        let prepared_candidate =
-            store_transaction.prepared_merge_candidate(verified_authority, &prepared)?;
-        let publication =
-            store_transaction.prepared_merge_publication(verified_authority, &prepared)?;
-        if winner_head.object.slot() != publication.head_object.slot()
-            || winner_head.object == publication.head_object
-        {
-            return Err(DbError::Message(
-                "Merge winner does not replace the prepared exact head slot".to_string(),
-            ));
-        }
-        if prepared_candidate.commit.write_id != write_id {
-            return Err(DbError::Message(
-                "prepared Merge graph differs from its write identity".to_string(),
-            ));
-        }
-        if matches!(&prepared, PreparedStoreWriteState::MergeAbandonment { .. }) {
-            let publication_nonactivation =
-                nonactivations.get(&publication.reference).ok_or_else(|| {
-                    DbError::Message(
-                        "Merge abandonment authority has no verified nonactivation".to_string(),
-                    )
-                })?;
-            begin_merge_candidate_nonactivation_on(
-                &tx,
-                &write_id,
-                &publication,
-                publication_nonactivation,
-                false,
-                &[],
-            )?;
-            if winner_commit != prepared_candidate.reference {
-                let candidate_nonactivation = nonactivations
-                    .get(&prepared_candidate.reference)
-                    .ok_or_else(|| {
-                        DbError::Message(
-                            "Merge abandonment candidate has no verified nonactivation".to_string(),
-                        )
-                    })?;
-                begin_merge_candidate_nonactivation_on(
-                    &tx,
-                    &write_id,
-                    &prepared_candidate,
-                    candidate_nonactivation,
-                    true,
-                    &[],
-                )?;
-            }
-            let mut lost_preparation = prepared.clone();
-            let PreparedStoreWriteState::MergeAbandonment { outcome, .. } = &mut lost_preparation
-            else {
-                unreachable!("matched Merge abandonment")
-            };
-            *outcome = MergeAbandonmentOutcome::Lost {
-                winner_commit: winner_commit.clone(),
-                winner_head: winner_head.clone(),
-            };
-            let lost_preparation = serde_json::to_string(&lost_preparation)
-                .map_err(|error| DbError::context("serialize lost Merge abandonment", error))?;
-            let updated = tx
-                .execute(
-                    "UPDATE store_writes SET prepared = ?2
-                     WHERE write_id = ?1 AND prepared = ?3",
-                    rusqlite::params![write_id.as_str(), lost_preparation, raw_prepared],
-                )
-                .map_err(DbError::from)?;
-            if updated != 1 {
-                return Err(DbError::Message(
-                    "Merge abandonment changed while recording its winner".to_string(),
-                ));
-            }
-        } else {
-            let candidate_nonactivation = nonactivations
-                .get(&prepared_candidate.reference)
-                .ok_or_else(|| {
-                    DbError::Message("Merge candidate has no verified nonactivation".to_string())
-                })?;
-            begin_merge_candidate_nonactivation_on(
-                &tx,
-                &write_id,
-                &prepared_candidate,
-                candidate_nonactivation,
-                true,
-                &[],
-            )?;
-        }
-        let blocked =
-            WriteStatus::Blocked(coven_protocol::write::WriteBlock::InvalidProtocolState {
-                reason: format!(
-                    "Merge successor slot is occupied by signed head {}",
-                    winner_head.head_hash
-                ),
-            });
-        Database::set_write_status_on(&tx, &write_id, &blocked)?;
-        tx.commit().map_err(DbError::from)?;
-        Ok(blocked)
     }
 }
 
 impl StoreDatabase {
     pub async fn complete_prepared_store_write(
         &self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        accepted: StoreBatchCommitRef,
-        nonactivations: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
+        accepted_publication: crate::StoreCommitPublicationOutcome,
         routing_key: Option<coven_protocol::circle::RowRoutingKey>,
-    ) -> Result<CompletePreparedStoreWriteOutcome, DbError> {
-        let nonactivations = nonactivations
-            .into_iter()
-            .map(|verified| {
-                verified
-                    .candidate_reference()
-                    .map(|reference| (reference, verified.into_durable()))
-                    .map_err(DbError::from)
-            })
-            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
-        let (outcome, notification) = self
+    ) -> Result<Option<OwnedVerifiedMergeMaterialization>, DbError> {
+        let (materialization, (write_id, status)) = self
             .call_store(move |session| {
-                session.complete_prepared_store_write(root, accepted, nonactivations, routing_key)
+                session.complete_prepared_store_write(accepted_publication, routing_key)
             })
             .await?;
-        if let Some((write_id, status)) = notification {
-            self.notify_write_status(write_id, status);
-        }
-        Ok(outcome)
-    }
-
-    pub async fn mark_merge_candidate_conflict(
-        &self,
-        write_id: WriteId,
-        nonactivations: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
-    ) -> Result<(), DbError> {
-        let first = nonactivations.first().ok_or_else(|| {
-            DbError::Message("Merge candidate conflict has no verified candidates".to_string())
-        })?;
-        let winner_commit = first
-            .merge_winner_commit()
-            .cloned()
-            .map_err(DbError::from)?;
-        let winner_head = match first.proof() {
-            coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
-                winner_head,
-            } => winner_head.clone(),
-            coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. } => {
-                return Err(DbError::Message(
-                    "Merge slot conflict cannot carry author-exclusion evidence".to_string(),
-                ));
-            }
-            coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. } => {
-                return Err(DbError::Message(
-                    "Merge slot conflict cannot carry membership-grant revocation evidence"
-                        .to_string(),
-                ));
-            }
-            coven_protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
-                return Err(DbError::Message(
-                    "Merge slot conflict cannot carry dependent-retraction evidence".to_string(),
-                ));
-            }
-        };
-        let winner_proof = first.proof().clone();
-        let nonactivations = nonactivations
-            .into_iter()
-            .map(|verified| {
-                if verified.merge_winner_commit().map_err(DbError::from)? != &winner_commit
-                    || verified.proof() != &winner_proof
-                {
-                    return Err(DbError::Message(
-                        "Merge candidate conflict observations name different winners".to_string(),
-                    ));
-                }
-                verified
-                    .candidate_reference()
-                    .map(|reference| (reference, verified.into_durable()))
-                    .map_err(DbError::from)
-            })
-            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
-        let notified_write_id = write_id.clone();
-        let blocked = self
-            .call_store(move |session| {
-                session.mark_merge_candidate_conflict(
-                    write_id,
-                    winner_commit,
-                    winner_head,
-                    nonactivations,
-                )
-            })
-            .await?;
-        self.notify_write_status(notified_write_id, blocked);
-        Ok(())
+        self.notify_write_status(write_id, status);
+        Ok(materialization)
     }
 }

@@ -17,7 +17,6 @@ struct Fixture {
     commit: StoreBatchCommit,
     commit_ref: StoreBatchCommitRef,
     package: Vec<u8>,
-    membership: crate::membership::MembershipChain,
 }
 
 impl Fixture {
@@ -67,14 +66,8 @@ impl Fixture {
                     access_key_id_hash: ObjectHash::digest(label.as_bytes()),
                 },
             },
-            DeviceStreamAnchor::StoreAnnouncements {
-                first_slot: slot(format!("store-v1/tests/{label}/announcements/1.json")),
-            },
             DeviceStreamAnchor::StoreAcknowledgements {
                 first_slot: slot(format!("store-v1/tests/{label}/acks/1.json")),
-            },
-            DeviceStreamAnchor::StoreSnapshots {
-                first_slot: slot(format!("store-v1/tests/{label}/snapshots/1.json")),
             },
             identity,
         )
@@ -91,37 +84,6 @@ impl Fixture {
             ),
         );
         (registration, reference)
-    }
-
-    fn signed_ack(&self, last_sync: &str) -> StoreAck {
-        StoreAck::signed(
-            self.root_ref.store_root_hash,
-            1,
-            StoreAckAssertion {
-                registration: self.registration_ref.clone(),
-                store_cut: StoreHistoryCut(BTreeMap::new()),
-                device_state: self.commit.device_state.clone(),
-                snapshot: None,
-                exclusions: StoreAckExclusionState {
-                    proposal_freezes: Vec::new(),
-                },
-            },
-            last_sync.to_string(),
-            SuccessorLink {
-                activation: self
-                    .registration
-                    .store_acknowledgement_activation(&self.registration_ref)
-                    .expect("derive acknowledgement activation")
-                    .activation_id(),
-                predecessor: None,
-                next_slot: slot("store-v1/acks/founder/2.json".to_string()),
-            },
-            &self
-                .registration
-                .device_signer(&self.signer)
-                .expect("derive device signer"),
-        )
-        .expect("sign Store acknowledgement")
     }
 
     fn resign(&self, commit: &mut StoreBatchCommit) {
@@ -327,6 +289,12 @@ fn owner_promotion_request_and_acceptance_bind_both_exact_devices() {
             seq: 2,
             previous_hash: Some(fixture.commit.commit_hash()),
         },
+        slot(format!(
+            "{}.json",
+            owner_promotion_request_publication_semantic_prefix(OwnerPromotionId::from_generated(
+                "promotion-1".to_string()
+            ),)
+        )),
         &fixture.signer,
     )
     .expect("sign promotion request");
@@ -337,11 +305,13 @@ fn owner_promotion_request_and_acceptance_bind_both_exact_devices() {
         request.clone(),
         OwnerPromotionRequestActivation {
             commit: fixture.commit_ref.clone(),
-            head: StoreDeviceHeadRef {
-                head_hash: ObjectHash::digest(b"promotion activation head"),
+            publication: StorePublicationRef {
+                store_root_hash: request.store_root_hash,
+                position: StorePublicationPosition::new(1).unwrap(),
+                entry_hash: ObjectHash::digest(b"promotion activation publication"),
                 object: exact(
-                    "store-v1/tests/promotion-activation-head.json".to_string(),
-                    b"promotion activation head",
+                    "store-v1/tests/promotion-activation-publication.json".to_string(),
+                    b"promotion activation publication",
                 ),
             },
         },
@@ -384,11 +354,13 @@ fn owner_promotion_request_and_acceptance_bind_both_exact_devices() {
         request.clone(),
         OwnerPromotionRequestActivation {
             commit: fixture.commit_ref.clone(),
-            head: StoreDeviceHeadRef {
-                head_hash: ObjectHash::digest(b"promotion activation head"),
+            publication: StorePublicationRef {
+                store_root_hash: request.store_root_hash,
+                position: StorePublicationPosition::new(1).unwrap(),
+                entry_hash: ObjectHash::digest(b"promotion activation publication"),
                 object: exact(
-                    "store-v1/tests/promotion-activation-head.json".to_string(),
-                    b"promotion activation head",
+                    "store-v1/tests/promotion-activation-publication.json".to_string(),
+                    b"promotion activation publication",
                 ),
             },
         },
@@ -728,14 +700,8 @@ fn fixture() -> Fixture {
                 access_key_id_hash: ObjectHash::digest(b"test access key"),
             },
         },
-        DeviceStreamAnchor::StoreAnnouncements {
-            first_slot: slot("store-v1/announcements/founder/1.json".to_string()),
-        },
         DeviceStreamAnchor::StoreAcknowledgements {
             first_slot: slot("store-v1/acks/founder/1.json".to_string()),
-        },
-        DeviceStreamAnchor::StoreSnapshots {
-            first_slot: slot("store-v1/snapshots/founder/1.json".to_string()),
         },
         &signer,
     )
@@ -790,10 +756,11 @@ fn fixture() -> Fixture {
         predecessor: None,
         dependencies: BTreeMap::new(),
     };
-    let stream_id = registration
-        .store_announcement_activation(&registration_ref)
-        .expect("derive founder Store announcement activation")
-        .author_stream_id();
+    let stream_id = StreamActivation::device_authorized_stream_id(
+        root_ref.store_root_hash,
+        &registration_ref,
+        StreamAnchorDomain::StoreAnnouncements,
+    );
     let candidate_family = CandidateFamilyId::derive(
         root_ref.store_root_hash,
         &registration_ref,
@@ -873,7 +840,6 @@ fn fixture() -> Fixture {
         commit,
         commit_ref,
         package,
-        membership,
     }
 }
 
@@ -998,34 +964,6 @@ fn unknown_fields_and_versions_are_rejected() {
         ),
         Err(StoreProtocolError::UnsupportedVersion(2))
     ));
-}
-
-#[test]
-fn store_ack_semantic_hash_is_distinct_from_its_stored_json_hash() {
-    let ack = fixture().signed_ack("2026-07-16T00:00:00Z");
-    let bytes = ack.to_bytes();
-    let semantic_hash = StoreAck::semantic_hash_from_bytes(&bytes).unwrap();
-
-    assert_eq!(semantic_hash, ack.ack_hash());
-    assert_ne!(semantic_hash, ObjectHash::digest(&bytes));
-}
-
-#[test]
-fn store_ack_wire_shape_binds_activation_state_without_a_parallel_predecessor_ref() {
-    let ack = fixture().signed_ack("2026-07-18T00:00:00Z");
-    let envelope = serde_json::to_value(ack).unwrap();
-    let value = envelope
-        .get("body")
-        .expect("a signed acknowledgement carries its body");
-
-    assert!(value.get("registration").is_some());
-    assert!(value.get("sequence").is_some());
-    assert!(value.get("device_state").is_some());
-    assert!(value.get("snapshot").is_some());
-    assert!(value.get("exclusions").is_some());
-    assert!(value.get("author_registration").is_none());
-    assert!(value.get("revision").is_none());
-    assert!(value.get("predecessor").is_none());
 }
 
 #[test]
@@ -1507,172 +1445,11 @@ fn commit_reference_constructor_rejects_relocated_exact_object() {
 #[path = "tests/device_state.rs"]
 mod device_state_tests;
 
-/// A standing acknowledgement forgives exactly one advance in the Store's
-/// history: the commit that published it. Everything else is news.
-mod standing_acknowledgement {
-    use super::*;
+#[path = "tests/snapshot_candidates.rs"]
+mod snapshot_candidates;
 
-    fn commit(stream: &str, sequence: u64) -> StoreBatchCommitRef {
-        let stream_id = AuthorStreamId::from_digest(ObjectHash::digest(stream.as_bytes()));
-        let commit_hash = ObjectHash::digest(format!("{stream}/{sequence}").as_bytes());
-        StoreBatchCommitRef {
-            coord: StoreCommitCoord {
-                stream_id,
-                sequence,
-            },
-            commit_hash,
-            object: exact(
-                format!("store-v1/commits/{stream}/{sequence}.json"),
-                format!("{stream}/{sequence}").as_bytes(),
-            ),
-        }
-    }
-
-    fn cut(commits: &[StoreBatchCommitRef]) -> StoreHistoryCut {
-        StoreHistoryCut(
-            commits
-                .iter()
-                .map(|commit| (commit.coord.stream_id, commit.clone()))
-                .collect(),
-        )
-    }
-
-    /// A device that acknowledged `mine@1` and `theirs@1`, whose acknowledgement
-    /// landed at `mine@2`.
-    fn standing(fixture: &Fixture) -> StandingStoreAck {
-        StandingStoreAck {
-            assertion: StoreAckAssertion {
-                registration: fixture.registration_ref.clone(),
-                store_cut: cut(&[commit("mine", 1), commit("theirs", 1)]),
-                device_state: fixture.commit.device_state.clone(),
-                snapshot: None,
-                exclusions: StoreAckExclusionState {
-                    proposal_freezes: Vec::new(),
-                },
-            },
-            activating_commit: Some(commit("mine", 2)),
-        }
-    }
-
-    fn assertion_over(
-        standing: &StandingStoreAck,
-        store_cut: StoreHistoryCut,
-    ) -> StoreAckAssertion {
-        StoreAckAssertion {
-            store_cut,
-            ..standing.assertion.clone()
-        }
-    }
-
-    #[test]
-    fn holds_when_the_only_new_commit_is_the_one_that_published_it() {
-        let fixture = fixture();
-        let standing = standing(&fixture);
-        assert!(standing.still_holds(&assertion_over(
-            &standing,
-            cut(&[commit("mine", 2), commit("theirs", 1)]),
-        )));
-    }
-
-    #[test]
-    fn does_not_hold_once_this_device_commits_anything_further() {
-        let fixture = fixture();
-        let standing = standing(&fixture);
-        assert!(!standing.still_holds(&assertion_over(
-            &standing,
-            cut(&[commit("mine", 3), commit("theirs", 1)]),
-        )));
-    }
-
-    #[test]
-    fn does_not_hold_once_another_device_commits() {
-        let fixture = fixture();
-        let standing = standing(&fixture);
-        assert!(!standing.still_holds(&assertion_over(
-            &standing,
-            cut(&[commit("mine", 2), commit("theirs", 2)]),
-        )));
-    }
-
-    #[test]
-    fn does_not_hold_once_a_new_device_appears_in_the_history() {
-        let fixture = fixture();
-        let standing = standing(&fixture);
-        assert!(!standing.still_holds(&assertion_over(
-            &standing,
-            cut(&[commit("mine", 2), commit("theirs", 1), commit("third", 1)]),
-        )));
-    }
-
-    /// The case reclamation depends on. A snapshot becomes stable only once every
-    /// active device has an acknowledgement naming it, so a device that has
-    /// nothing else to say still has to say this — otherwise a snapshot published
-    /// onto a quiet Store never stabilizes and nothing is ever reclaimed.
-    #[test]
-    fn does_not_hold_once_there_is_a_snapshot_to_name() {
-        let fixture = fixture();
-        let standing = standing(&fixture);
-        let snapshot = StoreSnapshotLocator {
-            author_registration: fixture.registration_ref.clone(),
-            snapshot: StoreSnapshotRef {
-                generation: 1,
-                snapshot_hash: ObjectHash::digest(b"snapshot"),
-                object: exact("store-v1/snapshots/mine/1.json".to_string(), b"snapshot"),
-            },
-        };
-        assert!(!standing.still_holds(&StoreAckAssertion {
-            store_cut: cut(&[commit("mine", 2), commit("theirs", 1)]),
-            snapshot: Some(snapshot),
-            ..standing.assertion.clone()
-        }));
-    }
-
-    #[test]
-    fn does_not_hold_once_an_exclusion_proposal_is_frozen() {
-        let fixture = fixture();
-        let standing = standing(&fixture);
-        let freeze = StoreDeviceProposalAck {
-            proposal: StoreDeviceExclusionProposalRef {
-                proposal_id: StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
-                    b"exclusion proposal",
-                )),
-                target: fixture.registration_ref.clone(),
-                proposal_hash: ObjectHash::digest(b"exclusion proposal body"),
-                object: exact(
-                    "store-v1/exclusions/proposal.json".to_string(),
-                    b"exclusion proposal body",
-                ),
-            },
-            target_cut: cut(&[commit("theirs", 1)]),
-        };
-        assert!(!standing.still_holds(&StoreAckAssertion {
-            store_cut: cut(&[commit("mine", 2), commit("theirs", 1)]),
-            exclusions: StoreAckExclusionState {
-                proposal_freezes: vec![freeze],
-            },
-            ..standing.assertion.clone()
-        }));
-    }
-
-    /// An acknowledgement that activated no commit — it lost the race to another
-    /// device's — forgives nothing at all.
-    #[test]
-    fn a_losing_acknowledgement_forgives_no_commit() {
-        let fixture = fixture();
-        let standing = StandingStoreAck {
-            activating_commit: None,
-            ..standing(&fixture)
-        };
-        assert!(standing.still_holds(&assertion_over(
-            &standing,
-            cut(&[commit("mine", 1), commit("theirs", 1)]),
-        )));
-        assert!(!standing.still_holds(&assertion_over(
-            &standing,
-            cut(&[commit("mine", 2), commit("theirs", 1)]),
-        )));
-    }
-}
+#[path = "tests/acknowledgements.rs"]
+mod acknowledgements;
 
 /// A frontier covering nothing is covered by every frontier, including itself.
 /// The device-join bootstrap leans on this: it offers a joining device only a
@@ -1698,56 +1475,5 @@ fn a_frontier_covers_one_that_names_no_commits() {
     assert!(
         !empty.covers(&populated),
         "a frontier that names no commit on a stream cannot cover one that does",
-    );
-}
-
-#[test]
-fn replay_retirement_requires_every_current_writer() {
-    let fixture = fixture();
-    let (joined, joined_ref) =
-        fixture.joined_registration(&fixture.signer, "second-current-writer");
-    let current_state = ResolvedStoreDeviceState::founder(
-        &fixture.root_ref,
-        fixture.registration_ref.clone(),
-        &fixture.registration.author_pubkey,
-        fixture.root.descriptor.founder_grant.clone(),
-        &fixture.root.descriptor.founder_recovery,
-    )
-    .expect("founder device state")
-    .activate_registration(joined_ref.clone(), None)
-    .expect("activate joined writer");
-    let founder = ReferencedStoreDeviceRegistration::verified(
-        fixture.registration_ref.clone(),
-        fixture.registration.clone(),
-    )
-    .expect("verify founder registration");
-    let joined = ReferencedStoreDeviceRegistration::verified(joined_ref.clone(), joined)
-        .expect("verify joined registration");
-
-    let omitted = BTreeMap::from([(fixture.registration_ref.device_id, founder.clone())]);
-    assert!(
-        super::retained_history::replay_retirement_writer_ids(
-            fixture.root_ref.store_root_hash,
-            &current_state,
-            &omitted,
-            &fixture.membership,
-        )
-        .is_err(),
-        "the receiving boundary must reject an omitted active writer",
-    );
-
-    let complete = BTreeMap::from([
-        (fixture.registration_ref.device_id, founder),
-        (joined_ref.device_id, joined),
-    ]);
-    assert_eq!(
-        super::retained_history::replay_retirement_writer_ids(
-            fixture.root_ref.store_root_hash,
-            &current_state,
-            &complete,
-            &fixture.membership,
-        )
-        .expect("derive current writers"),
-        BTreeSet::from([fixture.registration_ref.device_id, joined_ref.device_id]),
     );
 }

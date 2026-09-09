@@ -150,6 +150,7 @@ impl Database {
                 rusqlite::params![object_id.to_string(), state],
             )
             .map_err(DbError::from)?;
+            crate::blob_records::record_stored_locator_on(conn, stored)?;
         }
         Ok(())
     }
@@ -428,7 +429,8 @@ impl Database {
                 if package_authority.remote_audience() != remote_audience {
                     return Err(DbError::Message(format!(
                         "remote blob row {:?}/{row_id:?} has audience authority {:?}, expected {remote_audience:?}",
-                        table.name(), package_authority
+                        table.name(),
+                        package_authority
                     )));
                 }
                 validate_live_blob_locator(

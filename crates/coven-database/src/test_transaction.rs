@@ -83,15 +83,7 @@ impl DatabaseTestTransaction<'_, '_> {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn retire_circle_bootstrap_coverage(
-        &self,
-        store_dir: &coven_foundation::store_dir::StoreDir,
-        activation: &coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<usize, DbError> {
-        crate::store::test_retire_circle_bootstrap_coverage(self.transaction, store_dir, activation)
-    }
-
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn enqueue_blob_upload(
         &self,
         root_table: &str,

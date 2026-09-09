@@ -1,7 +1,6 @@
 use crate::*;
 use coven_protocol::store_commit::{
-    SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreSnapshotRef,
+    StoreAck, StoreAckRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
 };
 
 use super::*;
@@ -74,10 +73,6 @@ impl StoreDatabase {
             initial_ack_prepared: durable.initial_ack.prepared,
             activation: authority,
             latest_ack: latest_ack.reference,
-            latest_snapshot: self
-                .latest_local_store_snapshot()
-                .await?
-                .map(|snapshot| snapshot.reference),
             latest_position: self
                 .latest_local_store_position(announcement_stream_id)
                 .await?,
@@ -90,7 +85,6 @@ impl StoreDatabase {
         identity_signer: &coven_keys::keys::UserKeypair,
         device_signer: &coven_keys::keys::UserKeypair,
         ack_chain: Vec<(StoreAckRef, StoreAck)>,
-        latest_snapshot: Option<(StoreSnapshotRef, SnapshotMeta)>,
     ) -> Result<(), DbError> {
         let root = self
             .local_store_root_ref()
@@ -155,44 +149,11 @@ impl StoreDatabase {
             ));
         }
         let latest_successor_slot = latest_ack.successor.next_slot.clone();
-        // `latest_snapshot` is the head of the device's published stream as
-        // the restore found it on the provider; the code's cursor is where the
-        // stream stood when the code was exported, so the head is at or past
-        // it, never behind it.
-        match (&continuation.latest_snapshot, &latest_snapshot) {
-            (None, None) => {}
-            (expected, Some((reference, meta)))
-                if expected
-                    .as_ref()
-                    .is_none_or(|expected| expected.generation <= reference.generation) =>
-            {
-                let verified = SnapshotMeta::parse_stream_entry_at(
-                    &meta.to_bytes(),
-                    &root,
-                    &continuation.registration,
-                    &registration,
-                    reference,
-                )
-                .map_err(DbError::from)?;
-                if verified != *meta {
-                    return Err(DbError::Message(
-                        "continued snapshot changed during exact verification".into(),
-                    ));
-                }
-            }
-            _ => {
-                return Err(DbError::Message(
-                    "continued snapshot stream differs from its exact authority".into(),
-                ));
-            }
-        }
-
         self.call_store(move |session| {
             session.install_activated_device_continuation(
                 continuation,
                 registration,
                 ack_chain,
-                latest_snapshot,
                 latest_successor_slot,
             )
         })
@@ -206,7 +167,6 @@ impl StoreSession<'_> {
         continuation: coven_protocol::recovery::ActivatedContinuation,
         registration: StoreDeviceRegistration,
         ack_chain: Vec<(StoreAckRef, StoreAck)>,
-        latest_snapshot: Option<(StoreSnapshotRef, SnapshotMeta)>,
         latest_successor_slot: coven_protocol::objects::ObjectSlot,
     ) -> Result<(), DbError> {
         let activated = self.activated_registration(&continuation.registration)?;
@@ -260,7 +220,6 @@ impl StoreSession<'_> {
                 row.get(0)
             })
             .map_err(DbError::from)?;
-        let existing_snapshot = load_published_store_snapshot_on(&tx, &activated)?;
         let existing_device = crate::get_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
         let state = serde_json::to_string(&LocalDeviceRegistrationState::Activated {
             authority: continuation.activation.clone(),
@@ -367,47 +326,6 @@ impl StoreSession<'_> {
             _ => {
                 return Err(DbError::Message(
                     "restored database carries multiple local acknowledgements".into(),
-                ));
-            }
-        }
-        match (existing_snapshot, latest_snapshot.as_ref()) {
-            (None, None) => {}
-            (None, Some((reference, meta))) => {
-                let generation = i64::try_from(reference.generation).map_err(|_| {
-                    DbError::Message(
-                        "continued Store snapshot generation exceeds SQLite INTEGER".to_string(),
-                    )
-                })?;
-                tx.execute(
-                    "INSERT INTO published_store_snapshot \
-                         (generation, snapshot_ref, successor_slot, meta_bytes) \
-                         VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![
-                        generation,
-                        serde_json::to_string(reference).map_err(|error| {
-                            DbError::context("serialize continued Store snapshot ref", error)
-                        })?,
-                        serde_json::to_string(&meta.successor.next_slot).map_err(|error| {
-                            DbError::context("serialize continued Store snapshot successor", error)
-                        })?,
-                        meta.to_bytes(),
-                    ],
-                )
-                .map_err(DbError::from)?;
-            }
-            (Some(actual), Some((reference, meta))) => {
-                if actual.reference != *reference
-                    || actual.successor_slot != meta.successor.next_slot
-                    || actual.meta != *meta
-                {
-                    return Err(DbError::Message(
-                        "restored local snapshot stream differs from continuation".into(),
-                    ));
-                }
-            }
-            (Some(_), None) => {
-                return Err(DbError::Message(
-                    "restored database carries a snapshot outside the continuation".into(),
                 ));
             }
         }

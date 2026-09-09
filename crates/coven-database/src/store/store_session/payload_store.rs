@@ -344,18 +344,20 @@ impl<'store> PayloadStore<'store> {
                     payload_size: payload_size as u64,
                 }))
             }
-            Some((storage, payload_size, compressed, compressed_size)) => Err(PayloadStoreError::Storage {
-                hash,
-                error: format!(
-                    "tag {storage:?}, payload size {payload_size}, compressed bytes {}, compressed size {compressed_size}",
-                    compressed
-                        .as_ref()
-                        .map_or("absent".to_string(), |bytes| format!(
-                            "{} bytes",
-                            bytes.len()
-                        ))
-                ),
-            }),
+            Some((storage, payload_size, compressed, compressed_size)) => {
+                Err(PayloadStoreError::Storage {
+                    hash,
+                    error: format!(
+                        "tag {storage:?}, payload size {payload_size}, compressed bytes {}, compressed size {compressed_size}",
+                        compressed
+                            .as_ref()
+                            .map_or("absent".to_string(), |bytes| format!(
+                                "{} bytes",
+                                bytes.len()
+                            ))
+                    ),
+                })
+            }
         }
     }
 
@@ -415,10 +417,7 @@ impl<'store> PayloadStore<'store> {
                     rusqlite::params![hash.to_string(), payload_size, compressed_size],
                 )
                 .map(|_| ())
-                .map_err(|source| PayloadStoreError::Database {
-                    hash,
-                    source,
-                }),
+                .map_err(|source| PayloadStoreError::Database { hash, source }),
             Some(StoredPayload::File {
                 payload_size: stored_payload_size,
                 ..
@@ -426,14 +425,11 @@ impl<'store> PayloadStore<'store> {
                 let updated = self
                     .conn
                     .execute(
-                    "UPDATE payload_storage SET compressed_size = ?2
+                        "UPDATE payload_storage SET compressed_size = ?2
                      WHERE payload_hash = ?1 AND storage = 'file'",
-                    rusqlite::params![hash.to_string(), compressed_size],
-                )
-                .map_err(|source| PayloadStoreError::Database {
-                    hash,
-                    source,
-                })?;
+                        rusqlite::params![hash.to_string(), compressed_size],
+                    )
+                    .map_err(|source| PayloadStoreError::Database { hash, source })?;
                 if updated != 1 {
                     return Err(PayloadStoreError::Storage {
                         hash,

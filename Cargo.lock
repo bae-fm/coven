@@ -1245,6 +1245,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "hex",
+ "rand",
  "rusqlite",
  "serde",
  "serde_json",

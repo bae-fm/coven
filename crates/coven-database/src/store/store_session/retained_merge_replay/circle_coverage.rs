@@ -4,13 +4,8 @@ use crate::query_mapped_rows;
 use crate::store::store_session::StoreRecords;
 
 impl StoreSession<'_> {
-    fn prepare_circle_restore_selection(
-        &mut self,
-        root: &coven_protocol::store_commit::StoreRootRef,
-    ) -> Result<CircleRestoreSelectionIndex, DbError> {
+    fn prepare_circle_restore_selection(&self) -> Result<CircleRestoreSelectionIndex, DbError> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
-            .seed_stream_activation_index_from_retained(self.verified_store_authority, root)?;
         let rows = query_mapped_rows(
             &tx,
             "SELECT circle_id, control_coord FROM circle_control_activations
@@ -187,11 +182,58 @@ fn decode_circle_bootstrap_coverage_ref(
 }
 
 impl StoreDatabase {
+    pub(crate) fn snapshot_circle_packages_after(
+        snapshot: &coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+        epochs: &CircleReplayEpochIndex,
+        cuts: &BTreeMap<coven_protocol::circle::CircleId, CommitFrontier>,
+    ) -> Result<Vec<coven_protocol::store_commit::RetainedPackageActivation>, DbError> {
+        let mut packages = Vec::new();
+        for retained in snapshot.metadata.history_summary.reclaim.packages.values() {
+            let coven_protocol::reclaim::AudienceBlobBindingPackage::Circle(package) =
+                &retained.package
+            else {
+                continue;
+            };
+            let Some(cut) = cuts.get(&package.circle_id) else {
+                continue;
+            };
+            if !cut.covers_commit(&retained.activation)
+                && epochs.permits(&retained.activation, package.circle_id, &package.control)?
+            {
+                packages.push(retained.clone());
+            }
+        }
+        Ok(packages)
+    }
+
+    pub async fn circle_snapshot_package_inputs(
+        &self,
+        cuts: BTreeMap<coven_protocol::circle::CircleId, CommitFrontier>,
+    ) -> Result<Vec<coven_protocol::store_commit::RetainedPackageActivation>, DbError> {
+        self.call_store(move |session| {
+            let root = session.required_root_authority()?;
+            let baseline = session
+                .verified_store_authority
+                .retained_replay_baseline_on(crate::store::store_session::StoreRecords::new(
+                    session.conn,
+                    session.store_dir,
+                ))?
+                .clone();
+            let RetainedReplayAuthority::InstalledSnapshot(snapshot) = &baseline.authority else {
+                return Err(DbError::Message(
+                    "Circle package restoration requires an installed snapshot".into(),
+                ));
+            };
+            let epochs = session.circle_replay_epoch_index(&root)?;
+            Self::snapshot_circle_packages_after(snapshot, &epochs, &cuts)
+        })
+        .await
+    }
+
     pub async fn prepare_circle_restore_selection(
         &self,
-        root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleRestoreSelectionIndex, DbError> {
-        self.call_store(move |session| session.prepare_circle_restore_selection(&root))
+        self.call_store(|session| session.prepare_circle_restore_selection())
             .await
     }
 

@@ -15,9 +15,7 @@ pub enum StoreCreationAttempt {
     MembershipReserved(MembershipReservation),
     CurrentPublicationReserved(CurrentPublicationReservation),
     DescriptorReserved(DescriptorReservation),
-    FounderStoreCommitsReserved(FounderStoreCommitsReservation),
     FounderAcknowledgementsReserved(FounderAcknowledgementsReservation),
-    FounderSnapshotsReserved(FounderSnapshotsReservation),
     FounderNextAckReserved(FounderNextAckReservation),
     FounderGraphReserved(FounderGraphReservation),
 }
@@ -99,37 +97,21 @@ pub struct FounderMembershipPublicationReservation {
 #[serde(deny_unknown_fields)]
 pub struct FounderGraphReservation {
     pub descriptor: DescriptorReservation,
-    pub store_commits: DeviceStreamAnchor,
     pub acknowledgements: DeviceStreamAnchor,
-    pub snapshots: DeviceStreamAnchor,
     pub next_ack_slot: crate::objects::ObjectSlot,
     pub membership: FounderMembershipPublicationReservation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FounderStoreCommitsReservation {
-    pub descriptor: DescriptorReservation,
-    pub store_commits: DeviceStreamAnchor,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FounderAcknowledgementsReservation {
-    pub store_commits: FounderStoreCommitsReservation,
+    pub descriptor: DescriptorReservation,
     pub acknowledgements: DeviceStreamAnchor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FounderSnapshotsReservation {
-    pub acknowledgements: FounderAcknowledgementsReservation,
-    pub snapshots: DeviceStreamAnchor,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FounderNextAckReservation {
-    pub snapshots: FounderSnapshotsReservation,
+    pub acknowledgements: FounderAcknowledgementsReservation,
     pub next_ack_slot: crate::objects::ObjectSlot,
 }

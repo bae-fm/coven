@@ -8,10 +8,8 @@ use coven_protocol::reclaim::{
     ReclaimAuthorization, ReclaimAuthorizationRef, ReclaimEvidence, ReclaimEvidenceRef,
     ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
 };
-use coven_protocol::remote_object::{
-    CandidateNonactivationProof, RemoteObjectRecord, RemoteObjectRecordError,
-};
-use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreDeviceHeadRef};
+use coven_protocol::remote_object::{RemoteObjectRecord, RemoteObjectRecordError};
+use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -150,55 +148,24 @@ impl DurableStoreReclaimObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReclaimCommitActivation {
-    pub commit: StoreBatchCommitRef,
-    pub head: StoreDeviceHeadRef,
-}
-
-impl ReclaimCommitActivation {
-    pub fn new(
-        commit: StoreBatchCommitRef,
-        head: StoreDeviceHeadRef,
-    ) -> Result<Self, StoreReclaimJournalError> {
-        let activation = Self { commit, head };
-        activation.validate()?;
-        Ok(activation)
-    }
-
-    pub fn commit(&self) -> &StoreBatchCommitRef {
-        &self.commit
-    }
-
-    pub fn validate(&self) -> Result<(), StoreReclaimJournalError> {
-        if self.commit.object == self.head.object {
-            return Err(StoreReclaimJournalError::Invalid(
-                "reclaim activation has aliased commit and head identities".to_string(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReclaimedStorePackage {
     AbsentVerified {
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: ReclaimCommitActivation,
+        authorization_activation: StoreBatchCommitRef,
     },
     Receipted {
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: ReclaimCommitActivation,
+        authorization_activation: StoreBatchCommitRef,
         receipt: ReclaimReceiptRef,
-        receipt_activation: ReclaimCommitActivation,
+        receipt_activation: StoreBatchCommitRef,
     },
 }
 
 impl ReclaimedStorePackage {
     pub fn absent_verified(
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: ReclaimCommitActivation,
+        authorization_activation: StoreBatchCommitRef,
     ) -> Result<Self, StoreReclaimJournalError> {
         let value = Self::AbsentVerified {
             authorization,
@@ -210,9 +177,9 @@ impl ReclaimedStorePackage {
 
     pub fn receipted(
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: ReclaimCommitActivation,
+        authorization_activation: StoreBatchCommitRef,
         receipt: ReclaimReceiptRef,
-        receipt_activation: ReclaimCommitActivation,
+        receipt_activation: StoreBatchCommitRef,
     ) -> Result<Self, StoreReclaimJournalError> {
         let value = Self::Receipted {
             authorization,
@@ -232,7 +199,7 @@ impl ReclaimedStorePackage {
         }
     }
 
-    pub fn authorization_activation(&self) -> &ReclaimCommitActivation {
+    pub fn authorization_activation(&self) -> &StoreBatchCommitRef {
         match self {
             Self::AbsentVerified {
                 authorization_activation,
@@ -257,7 +224,7 @@ impl ReclaimedStorePackage {
         let target_activation = authorization.target_activation();
         if *target.object() == authorization.object
             || *target.object() == authorization.evidence.object
-            || target.object() == target_activation.object()
+            || target_activation.names_authority_object(target.object())
         {
             return Err(StoreReclaimJournalError::Invalid(
                 "reclaimed package aliases authority or crosses Store histories".to_string(),
@@ -269,10 +236,9 @@ impl ReclaimedStorePackage {
             ..
         } = self
         {
-            receipt_activation.validate()?;
             if &receipt.authorization != authorization
                 || receipt.object == *authorization.target().object()
-                || receipt_activation.commit() == authorization_activation.commit()
+                || receipt_activation == authorization_activation
             {
                 return Err(StoreReclaimJournalError::Invalid(
                     "reclaim receipt does not close its exact authorization history".to_string(),
@@ -285,13 +251,15 @@ impl ReclaimedStorePackage {
 
 fn validate_reclaim_identity(
     authorization: &ReclaimAuthorizationRef,
-    authorization_activation: &ReclaimCommitActivation,
+    authorization_activation: &StoreBatchCommitRef,
 ) -> Result<(), StoreReclaimJournalError> {
-    authorization_activation.validate()?;
     // The commit carrying the authorization must follow whatever activated the
     // target, never be it — an Owner cannot authorize a reclaim in the same signed
     // statement that published the object.
-    if authorization.target_activation().object() == &authorization_activation.commit().object {
+    if authorization
+        .target_activation()
+        .names_authority_object(&authorization_activation.object)
+    {
         return Err(StoreReclaimJournalError::Invalid(
             "reclaim authorization does not follow its target in one Store history".to_string(),
         ));
@@ -308,36 +276,24 @@ pub enum DurableStoreReclaimOperation {
     },
     Authorized {
         authorization: ReclaimAuthorizationRef,
-        activation: ReclaimCommitActivation,
+        activation: StoreBatchCommitRef,
     },
     AbsentVerified {
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: ReclaimCommitActivation,
+        authorization_activation: StoreBatchCommitRef,
         target: ReclaimTarget,
     },
     ReceiptCandidate {
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: ReclaimCommitActivation,
+        authorization_activation: StoreBatchCommitRef,
         object: Box<DurableStoreReclaimObject>,
         candidate: Box<PreparedStoreOperationCommit>,
-    },
-    AuthorizationReplacing {
-        object: Box<DurableStoreReclaimObject>,
-        candidate: Box<PreparedStoreOperationCommit>,
-        losing: Box<StoreReclaimCandidateLoss>,
-    },
-    ReceiptReplacing {
-        authorization: ReclaimAuthorizationRef,
-        authorization_activation: ReclaimCommitActivation,
-        object: Box<DurableStoreReclaimObject>,
-        candidate: Box<PreparedStoreOperationCommit>,
-        losing: Box<StoreReclaimCandidateLoss>,
     },
     Completed {
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: ReclaimCommitActivation,
+        authorization_activation: StoreBatchCommitRef,
         receipt: ReclaimReceiptRef,
-        receipt_activation: ReclaimCommitActivation,
+        receipt_activation: StoreBatchCommitRef,
     },
 }
 
@@ -354,13 +310,6 @@ pub struct StuckReclaimOperation {
     pub error: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreReclaimCandidateLoss {
-    pub candidate: Box<PreparedStoreOperationCommit>,
-    pub proof: CandidateNonactivationProof,
-}
-
 impl DurableStoreReclaimOperation {
     pub fn operation_id(&self) -> ObjectHash {
         self.authorization().authorization_hash
@@ -369,11 +318,9 @@ impl DurableStoreReclaimOperation {
     pub fn authorization(&self) -> &ReclaimAuthorizationRef {
         match self {
             Self::AuthorizationCandidate { object, .. } => object.authorization_ref(),
-            Self::AuthorizationReplacing { object, .. } => object.authorization_ref(),
             Self::Authorized { authorization, .. }
             | Self::AbsentVerified { authorization, .. }
             | Self::ReceiptCandidate { authorization, .. }
-            | Self::ReceiptReplacing { authorization, .. }
             | Self::Completed { authorization, .. } => authorization,
         }
     }
@@ -381,29 +328,17 @@ impl DurableStoreReclaimOperation {
     pub fn candidate(&self) -> Option<&PreparedStoreOperationCommit> {
         match self {
             Self::AuthorizationCandidate { candidate, .. }
-            | Self::ReceiptCandidate { candidate, .. }
-            | Self::AuthorizationReplacing { candidate, .. }
-            | Self::ReceiptReplacing { candidate, .. } => Some(candidate),
+            | Self::ReceiptCandidate { candidate, .. } => Some(candidate),
             Self::Authorized { .. } | Self::AbsentVerified { .. } | Self::Completed { .. } => None,
         }
     }
 
     pub fn object(&self) -> Option<&DurableStoreReclaimObject> {
         match self {
-            Self::AuthorizationCandidate { object, .. }
-            | Self::ReceiptCandidate { object, .. }
-            | Self::AuthorizationReplacing { object, .. }
-            | Self::ReceiptReplacing { object, .. } => Some(object),
-            Self::Authorized { .. } | Self::AbsentVerified { .. } | Self::Completed { .. } => None,
-        }
-    }
-
-    pub fn losing_candidate(&self) -> Option<&StoreReclaimCandidateLoss> {
-        match self {
-            Self::AuthorizationReplacing { losing, .. } | Self::ReceiptReplacing { losing, .. } => {
-                Some(losing)
+            Self::AuthorizationCandidate { object, .. } | Self::ReceiptCandidate { object, .. } => {
+                Some(object)
             }
-            _ => None,
+            Self::Authorized { .. } | Self::AbsentVerified { .. } | Self::Completed { .. } => None,
         }
     }
 
@@ -462,29 +397,6 @@ impl DurableStoreReclaimOperation {
                     ));
                 }
             }
-            Self::AuthorizationReplacing {
-                object,
-                candidate,
-                losing,
-            } => validate_replacement(object, candidate, losing)?,
-            Self::ReceiptReplacing {
-                authorization,
-                authorization_activation,
-                object,
-                candidate,
-                losing,
-                ..
-            } => {
-                validate_reclaim_identity(authorization, authorization_activation)?;
-                validate_replacement(object, candidate, losing)?;
-                if object.authorization_ref() != authorization
-                    || !matches!(&**object, DurableStoreReclaimObject::Receipt { .. })
-                {
-                    return Err(StoreReclaimJournalError::Invalid(
-                        "replacement reclaim receipt changes its authorization".to_string(),
-                    ));
-                }
-            }
             Self::Completed {
                 authorization,
                 authorization_activation,
@@ -501,37 +413,6 @@ impl DurableStoreReclaimOperation {
         }
         Ok(())
     }
-}
-
-fn validate_replacement(
-    object: &DurableStoreReclaimObject,
-    candidate: &PreparedStoreOperationCommit,
-    losing: &StoreReclaimCandidateLoss,
-) -> Result<(), StoreReclaimJournalError> {
-    object.validate()?;
-    candidate
-        .reference
-        .verify_commit(&candidate.commit)
-        .map_err(StoreReclaimJournalError::from)?;
-    losing
-        .candidate
-        .reference
-        .verify_commit(&losing.candidate.commit)
-        .map_err(StoreReclaimJournalError::from)?;
-    coven_protocol::remote_object::CandidateNonactivation::validate_durable_shape(
-        &losing.candidate.reference,
-        &losing.candidate.commit,
-        losing.proof.clone(),
-    )?;
-    if candidate.reference == losing.candidate.reference
-        || !object.commit_names_object(candidate)
-        || !object.commit_names_object(&losing.candidate)
-    {
-        return Err(StoreReclaimJournalError::Invalid(
-            "replacement reclaim candidate changes its signed object".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

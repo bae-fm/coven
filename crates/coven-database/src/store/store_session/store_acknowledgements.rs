@@ -12,11 +12,12 @@ impl StoreSession<'_> {
         load_published_store_ack_on(self.conn)
     }
 
-    fn activated_store_ack(
-        &self,
+    pub(super) fn activated_store_ack(
+        &mut self,
         registration: &StoreDeviceRegistrationRef,
     ) -> Result<Option<ActivatedStoreAck>, DbError> {
-        self.conn
+        let activated = self
+            .conn
             .query_row(
                 "SELECT ack_ref, activating_commit FROM activated_store_acks WHERE device_id = ?1",
                 [registration.device_id.to_string()],
@@ -45,7 +46,50 @@ impl StoreSession<'_> {
                     )?,
                 })
             })
-            .transpose()
+            .transpose()?;
+        let baseline = self
+            .verified_store_authority
+            .retained_replay_baseline_on(StoreRecords::new(self.conn, self.store_dir))?;
+        let RetainedReplayAuthority::InstalledSnapshot(snapshot) = &baseline.authority else {
+            return Ok(activated);
+        };
+        let Some(chain) = snapshot
+            .metadata
+            .history_summary
+            .acknowledgements
+            .get(&registration.device_id)
+        else {
+            return Ok(activated);
+        };
+        let (reference, _) = chain.latest().ok_or_else(|| {
+            DbError::Message("installed snapshot acknowledgement chain is empty".into())
+        })?;
+        if &reference.registration != registration {
+            return Err(DbError::Message(
+                "snapshot acknowledgement names another registration".into(),
+            ));
+        }
+        if let Some(current) = &activated {
+            if current.reference.sequence > reference.sequence {
+                return Ok(activated);
+            }
+            if chain
+                .chain
+                .get(&current.reference.sequence)
+                .map(|(reference, _)| reference)
+                != Some(&current.reference)
+                || (current.reference.sequence == reference.sequence
+                    && current.activating_commit != chain.activating_commit)
+            {
+                return Err(DbError::Message(
+                    "activated acknowledgement conflicts with the installed snapshot".into(),
+                ));
+            }
+        }
+        Ok(Some(ActivatedStoreAck {
+            reference: reference.clone(),
+            activating_commit: chain.activating_commit.clone(),
+        }))
     }
 
     fn stage_store_ack(
@@ -102,6 +146,10 @@ impl StoreSession<'_> {
                 "acknowledgement slot collision has no prepared activation candidate".to_string(),
             ));
         };
+        let active_publication = ActiveStorePublication::for_commit(
+            crate::ActiveStorePublicationOwner::StoreAcknowledgement,
+            candidate,
+        )?;
         if candidate.commit.acknowledgement() != Some(expected) {
             return Err(DbError::Message(
                 "prepared activation candidate names another acknowledgement".to_string(),
@@ -117,10 +165,26 @@ impl StoreSession<'_> {
         }
         let (winner_reference, _) =
             verify_next_local_store_ack_on(&tx, &authority, &winner_bytes, &winner_prepared)?;
-        let expected_records = candidate
+        let mut expected_records = candidate
             .acknowledgement_remote_objects(&outbound.ack)
             .map_err(DbError::from)?;
-        for expected_record in &expected_records {
+        for reference in candidate.commit.circle_acknowledgements() {
+            let circle = outbound
+                .circle_acknowledgements
+                .iter()
+                .find(|circle| &circle.reference == reference)
+                .ok_or_else(|| {
+                    DbError::Message(
+                        "losing acknowledgement candidate lost its queued Circle statement".into(),
+                    )
+                })?;
+            expected_records.extend(candidate.circle_acknowledgement_remote_objects(&circle.ack)?);
+        }
+        let expected_records = expected_records
+            .into_iter()
+            .map(|record| (record.object_id(), record))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for expected_record in expected_records.values() {
             let object_id = expected_record.object_id();
             let stored = load_remote_object_on(&tx, object_id)?;
             if stored != **expected_record {
@@ -129,7 +193,7 @@ impl StoreSession<'_> {
                 ));
             }
         }
-        for expected_record in expected_records {
+        for expected_record in expected_records.into_values() {
             if !crate::remote_object_records::delete_remote_object_on(
                 &tx,
                 expected_record.object_id(),
@@ -139,8 +203,8 @@ impl StoreSession<'_> {
                 ));
             }
         }
-        let activation = serde_json::to_string(&OutboundStoreAckActivation::AwaitingCandidate)
-            .map_err(|error| {
+        let activation =
+            serde_json::to_string(&OutboundStoreAckActivation::Created).map_err(|error| {
                 DbError::context("serialize adopted Store acknowledgement activation", error)
             })?;
         let winner_ref = serde_json::to_string(&winner_reference).map_err(|error| {
@@ -170,6 +234,10 @@ impl StoreSession<'_> {
                 "outbound Store acknowledgement changed during winner adoption".to_string(),
             ));
         }
+        super::active_store_publication::clear_active_store_publication_on(
+            &tx,
+            &active_publication,
+        )?;
         tx.commit().map_err(DbError::from)
     }
 
@@ -184,6 +252,15 @@ impl StoreSession<'_> {
         activating_commit: &StoreBatchCommitRef,
     ) -> Result<(), DbError> {
         let authority = self.local_store_authority()?;
+        let activated = self.activated_store_ack(&accepted.registration)?;
+        if !activated.is_some_and(|activated| {
+            &activated.reference == accepted && &activated.activating_commit == activating_commit
+        }) {
+            return Err(DbError::Message(
+                "Store acknowledgement completion requires its exact installed activation"
+                    .to_string(),
+            ));
+        }
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let outbound = load_expected_outbound_store_ack_on(
             &tx,
@@ -191,6 +268,21 @@ impl StoreSession<'_> {
             accepted,
             "accepted Store acknowledgement differs from the prepared exact object",
         )?;
+        let candidate = match &outbound.activation {
+            OutboundStoreAckActivation::Prepared(candidate) => Some(candidate),
+            OutboundStoreAckActivation::Created => None,
+            OutboundStoreAckActivation::AwaitingCandidate => {
+                return Err(DbError::Message(
+                    "accepted Store acknowledgement has no prepared activation".to_string(),
+                ));
+            }
+        };
+        if candidate.is_some_and(|candidate| &candidate.reference != activating_commit) {
+            return Err(DbError::Message(
+                "accepted Store acknowledgement differs from its prepared activating commit"
+                    .to_string(),
+            ));
+        }
         finish_outbound_store_ack_on(
             &tx,
             accepted,
@@ -200,7 +292,14 @@ impl StoreSession<'_> {
                 activating_commit: Some(activating_commit.clone()),
             },
         )?;
-        for circle in &outbound.circle_acknowledgements {
+        for circle in outbound.circle_acknowledgements.iter().filter(|circle| {
+            candidate.is_some_and(|candidate| {
+                candidate
+                    .commit
+                    .circle_acknowledgements()
+                    .contains(&circle.reference)
+            })
+        }) {
             let circle_id = circle.reference.circle_id.to_string();
             let removed = tx
                 .execute(
@@ -241,6 +340,15 @@ impl StoreSession<'_> {
                 ],
             )
             .map_err(DbError::from)?;
+        }
+        // A peer may have won the original publication position. The exact
+        // commit stays fixed while its publication entry is replaced.
+        if candidate.is_some() {
+            super::active_store_publication::clear_active_store_commit_for_owner_on(
+                &tx,
+                &crate::ActiveStorePublicationOwner::StoreAcknowledgement,
+                activating_commit,
+            )?;
         }
         tx.commit().map_err(DbError::from)
     }

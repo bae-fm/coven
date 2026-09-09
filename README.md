@@ -68,6 +68,10 @@ The receipt identifies this transaction in coven's durable write ledger.
 locally and waiting for their Store commit. Separate `write` calls always receive
 separate write ids and Store commits.
 
+If accepted shared history conflicts with retained private intent, that private
+write becomes `LocalOnlyBlocked`. Its rows remain local, and retrying it never
+creates a publication obligation.
+
 Pure reads go through `handle.read`, which uses a bounded pool of read-only
 connections. Independent reads can run concurrently with each other and the
 writer; each operation sees one consistent database snapshot. For expensive

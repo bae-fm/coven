@@ -420,7 +420,7 @@ pub fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEn
             return Err(invalid(
                 1,
                 std::io::Error::other(format!("invalid cloud outbox operation {tag:?}")),
-            ))
+            ));
         }
     };
     Ok(OutboxEntry {

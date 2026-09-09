@@ -3,52 +3,46 @@ use super::commit::{
 };
 use crate::sync::store::pull;
 use crate::sync::store::pull::*;
-use crate::sync::store::StoreError;
-use coven_database::{
-    DeviceJoinBootstrapActivation, DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan,
-};
-use coven_database::{VerifiedAcknowledgedStoreSnapshot, VerifiedStoreSnapshotAuthority};
+use coven_database::VerifiedStoreSnapshotAuthority;
+use coven_database::{DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan};
 use coven_protocol::circle_activation::VerifiedCircleActivations;
 use coven_protocol::circle_control::StoreMembershipStateRef;
 use coven_protocol::membership::{MembershipChain, MembershipStatus};
-use coven_protocol::objects::{
-    ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
-};
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::objects::{StoreObjectError, VerifiedObject};
 use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, ActivatedStoreDeviceRegistrationRef, CommitFrontier,
-    DeviceJoinAttemptDecisionRef, DeviceStreamAnchor, ObjectHash,
-    OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
-    ReferencedStoreDeviceRegistration, ResolvedStoreDeviceState,
+    DeviceJoinAttemptDecisionRef, OpenedRetainedMergeHistorySummary, OwnerRecoveryNode,
+    OwnerRecoveryNodeRef, ReferencedStoreDeviceRegistration, ResolvedStoreDeviceState,
     RetainedVerifiedMergeHistorySummary, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceHead, StoreDeviceId, StoreDeviceProposalState, StoreDeviceRegistration,
-    StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
-    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
-    StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit,
-    VerifiedStoreDeviceOperations,
+    StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
+    StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut,
+    StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
 use coven_protocol::store_commit::{
     SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef,
-    StoreDeviceExclusionProposalRef, StoreDeviceHeadRef, StoreSnapshotRef,
-    VerifiedDeviceExclusionOutcome, VerifiedDeviceExclusionProposal,
+    StoreDeviceExclusionProposalRef, StoreSnapshotRef, VerifiedDeviceExclusionOutcome,
+    VerifiedDeviceExclusionProposal,
 };
-use coven_protocol::{
-    causal_grants, membership as protocol_membership, provider, remote_object, store_commit,
-};
+use coven_protocol::{membership as protocol_membership, provider, store_commit};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::commit::DeviceStateResolver;
 use crate::sync::store::device_join;
 
+mod acknowledgements;
 mod device_join_verification;
 mod loaders;
 mod membership_control;
+mod nonactivation;
 mod predecessor;
 use predecessor::{
     predecessor_verifies_provider_administrator, predecessor_verifies_provider_administrator_grant,
 };
 mod promotion;
+mod publication;
 mod rollup;
+mod snapshot_retirement;
 mod snapshots;
 mod stream;
 mod successor;
@@ -58,16 +52,14 @@ pub(crate) use membership_control::{
     verify_merge_membership_state_ref, VerifiedMergeMembershipControl,
     VerifiedMergeMembershipHeadActivation, VerifiedMergePrefixHeadStatus,
 };
-pub(crate) use predecessor::{
-    predecessor_verifies_owner, PredecessorSearch, VerifiedMergePredecessorHistory,
-};
+pub(crate) use predecessor::{predecessor_verifies_owner, VerifiedMergePredecessorHistory};
 pub(crate) use promotion::{
     VerifiedMergeConflictResolutionActivation, VerifiedOwnerPromotionRequestActivation,
 };
-pub(crate) use snapshots::{
-    weigh_every_snapshot, SelectedAcknowledgedStoreSnapshot, SelectedInstallableStoreSnapshot,
-    SelectedReplayBaselineRetirement, SelectedStoreSnapshot, StoreSnapshotDescentStep,
+pub(crate) use publication::{
+    AcceptedStoreSnapshot, StorePublicationReplayInstallation, VerifiedStorePublication,
 };
+pub(crate) use snapshots::SelectedStoreSnapshot;
 pub use successor::MergeHistorySuccessorEvidence;
 pub use successor::PreparedMergeHistorySuccessor;
 pub(crate) use successor::{
@@ -78,12 +70,14 @@ pub(crate) use successor::{
 pub(crate) use successor::{insert_latest_acknowledgement, merge_retained_merge_history};
 pub(super) mod join_validation;
 mod membership;
+pub use membership::AcceptedMembershipAuthority;
 use membership::VerifiedPrefixMembershipActivation;
 pub(crate) mod registration;
 use join_validation::*;
 pub(crate) use registration::RegistrationLoadError;
 use registration::*;
 
+#[derive(Clone)]
 pub(crate) struct VerifiedMergeHistoryCommit {
     pub(crate) verified: VerifiedStoreBatchCommit,
     pub(crate) predecessor_membership: MembershipChain,
@@ -91,10 +85,7 @@ pub(crate) struct VerifiedMergeHistoryCommit {
     pub(crate) state_after: ResolvedStoreDeviceState,
     pub(crate) registrations: Vec<ActivatedStoreDeviceRegistration>,
     pub(crate) operations: VerifiedStoreDeviceOperations,
-    pub(crate) acknowledgement: Option<(store_commit::StoreAckRef, store_commit::StoreAck)>,
     pub(crate) membership_control: Option<VerifiedMergeMembershipControl>,
-    pub(crate) activation_head: StoreDeviceHead,
-    pub(crate) activation_head_object: ExactObjectRef,
     pub(crate) history_evidence: store_commit::RetainedMergeCommitEvidence,
 }
 
@@ -181,12 +172,12 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(store_commit::RetainedVerifiedActivatedAck {
             acknowledgement: (reference, value),
             activating_commit: activating_commit.clone(),
+            predecessors: Vec::new(),
         })
     }
 
-    pub(crate) async fn load_local_device_operations_with_resolver(
+    pub(crate) async fn load_local_device_operations(
         &mut self,
-        resolver: &DeviceStateResolver<'_>,
         verified_commit: &VerifiedStoreBatchCommit,
         membership: &MembershipChain,
         state_ref: &StoreDeviceStateRef,
@@ -212,7 +203,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         }
         verify_merge_membership_state_ref(&commit.membership_state, membership, &state)?;
         Box::pin(self.commit_verifier.load_commit_device_operations(
-            Some(resolver),
             commit,
             &state,
             Some(membership),
@@ -236,7 +226,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .verify_owner_recovery_activation(commit)
             .await?;
         device_operations
-            .apply_to(authorized_predecessor, &commit.device_state)
+            .apply_to(authorized_predecessor)
             .and_then(|state| {
                 state.apply_verified_lifecycle(
                     commit,
@@ -293,6 +283,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             root,
             commit_verifier,
             founder: founder_ref,
+            accepted_publications: BTreeMap::new(),
             history: VerifiedMergeHistory {
                 genesis,
                 baseline: coven_database::InstalledReplayBaseline::default(),
@@ -376,25 +367,6 @@ impl<'a> MergeHistoryVerifier<'a> {
                 "Store acknowledgement differs from its activating commit predecessor".to_string(),
             ));
         }
-        if let Some(snapshot) = &ack.snapshot {
-            let snapshot_author = self
-                .load_registration(&snapshot.author_registration)
-                .await
-                .map_err(RegistrationLoadError::Object)?;
-            let (_, metadata) = self
-                .load_store_snapshot(
-                    &snapshot.author_registration,
-                    &snapshot_author.value,
-                    &snapshot.snapshot,
-                )
-                .await
-                .map_err(RegistrationLoadError::from)?;
-            if !ack.store_cut.frontier().covers(&metadata.coverage) {
-                return Err(RegistrationLoadError::Invalid(
-                    "Store acknowledgement does not cover its exact snapshot".to_string(),
-                ));
-            }
-        }
         Ok(Some((reference.clone(), ack)))
     }
 
@@ -405,108 +377,28 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.commit_verifier.remember(commit)
     }
 
-    /// Admit the commits, announcement heads, and accepted announcement path
-    /// this device has already verified, from the retained materialization rows
-    /// that recorded them.
+    /// Use the database's committed replay baseline as the floor of history walks.
     ///
-    /// The verifier's reuse memos (`commits`, `verified_heads`,
-    /// `accepted_announcements`) exist so one cycle never reads the same
-    /// protocol object twice, and they work — but they are built fresh with the
-    /// verifier, which every cycle rebuilds. Retained history therefore paid one
-    /// provider read per commit and one per activation head on every single
-    /// cycle, for commits this device verified and materialized long ago.
-    ///
-    /// The durable half of that reuse already exists one layer down: a retained
-    /// materialization row holds the commit's canonical bytes and its activation
-    /// head's, pinned by an input hash, written by the transaction that verified
-    /// and applied them, and re-parsed and signature-checked against the
-    /// activated registration every time the row is opened. This seeds the
-    /// per-cycle memos from that durable authority, so the verification below
-    /// runs unchanged and reaches the provider only for what this device has not
-    /// already verified.
-    ///
-    /// Nothing here is taken on trust: every value admitted came back through
-    /// the same signature check a provider read would have run, and the
-    /// `remember_*` entry points reject a value that disagrees with its
-    /// reference or with an entry already admitted.
-    /// Adopt the announcement position the installed Store snapshot restates
-    /// for each stream, as the point a chain walk resumes from.
-    ///
-    /// Admitted before [`admit_retained_history`](Self::admit_retained_history)
-    /// because it decides where the accepted path starts. Without it a device
-    /// whose retained rows stop above the snapshot cut has no accepted prefix
-    /// at all, and every walk falls back to the stream anchor and re-reads
-    /// every head and commit under the cut, on every pull, for as long as the
-    /// store exists.
-    ///
-    /// The authority is the one the baseline itself rests on: the owner signed
-    /// this announcement into the snapshot's history summary alongside the
-    /// state it restates, and the database refuses a frontier naming a commit
-    /// its own coverage does not.
-    pub(crate) fn admit_snapshot_announcements(
-        &mut self,
-        frontier: &BTreeMap<
-            coven_protocol::causal_grants::AuthorStreamId,
-            store_commit::RetainedAcceptedStoreAnnouncement,
-        >,
-    ) -> Result<(), StorePullError> {
-        for announcement in frontier.values() {
-            let head = &announcement.value;
-            let head_ref = StoreDeviceHeadRef {
-                head_hash: head.head_hash(),
-                object: announcement.reference.object.clone(),
-            };
-            if announcement.reference != head_ref {
-                return Err(StorePullError::InvalidState(
-                    "snapshot announcement differs from its own head reference".to_string(),
-                ));
-            }
-            self.commit_verifier
-                .remember_verified_head(
-                    &head_ref,
-                    VerifiedObject {
-                        value: head.clone(),
-                        bytes: head.to_bytes(),
-                        semantic_hash: head_ref.head_hash,
-                        object: head_ref.object.clone(),
-                    },
-                )
-                .map_err(StorePullError::Protocol)?;
-            self.commit_verifier
-                .remember_covered_announcement(
-                    &head.author_registration,
-                    crate::sync::store::commit_verification::commit::CoveredStoreAnnouncement {
-                        sequence: head.commit.coord.sequence(),
-                        commit: head.commit.clone(),
-                        head: head_ref,
-                        next_slot: head.successor.next_slot.clone(),
-                    },
-                )
-                .map_err(StorePullError::Protocol)?;
-        }
-        Ok(())
-    }
-
-    /// Adopt the replay baseline this device stands on as the floor of every
-    /// history walk this verifier runs.
-    ///
-    /// Admitted before the retained rows, for the same reason
-    /// [`admit_snapshot_announcements`](Self::admit_snapshot_announcements) is:
-    /// it decides where a walk stops, and a walk that starts before knowing
-    /// that runs to genesis over commits the baseline retired.
-    ///
-    /// Refuses to replace a baseline already admitted with a different one. One
-    /// verifier serves one operation, and a coverage that moves under it would
-    /// silently change what the walks it already ran were allowed to skip.
+    /// A writer can advance that baseline while keeping this verifier alive.
+    /// When it changes, discard conclusions derived from the previous baseline;
+    /// retained inputs are admitted and verified against the replacement next.
+    /// Independently authenticated object bytes remain reusable.
     pub(crate) fn admit_installed_baseline(
         &mut self,
         baseline: coven_database::InstalledReplayBaseline,
     ) -> Result<(), StorePullError> {
-        let installed = self.history.baseline.coverage();
-        if !installed.commits().is_empty() && installed != baseline.coverage() {
-            return Err(StorePullError::InvalidState(
-                "installed replay baseline coverage moved under its history verifier".to_string(),
-            ));
+        let baseline_changed = self.history.baseline.coverage() != baseline.coverage()
+            || self
+                .history
+                .baseline
+                .snapshot()
+                .map(|snapshot| &snapshot.reference)
+                != baseline.snapshot().map(|snapshot| &snapshot.reference);
+        if baseline_changed {
+            self.history.retained.clear();
+            self.history.commits.clear();
+            self.accepted_publications.clear();
+            self.verified_memberships.clear();
         }
         // Every acknowledgement the baseline's signed summary states, admitted
         // before anything walks a chain. A chain walk demands contiguity from
@@ -517,6 +409,14 @@ impl<'a> MergeHistoryVerifier<'a> {
         // this baseline stands on: covered positions resolve to the coverage,
         // here as everywhere else.
         if let Some(summary) = baseline.history_summary() {
+            for proof in summary.summary.membership_proofs.values() {
+                self.membership_objects().remember_retained_proof(proof)?;
+            }
+            for reference in summary.summary.causal_cut.values() {
+                self.accepted_publications
+                    .entry(reference.clone())
+                    .or_insert(AcceptedStoreCommitEvidence::SnapshotCovered);
+            }
             for chain in summary.summary.acknowledgements.values() {
                 for (reference, value) in chain.chain.values() {
                     self.commit_verifier
@@ -529,109 +429,25 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(())
     }
 
-    /// The coverage this device's installed replay baseline stands at.
-    ///
-    /// A snapshot covering no more than this has nothing this device can verify
-    /// it against — the history behind it was retired — and nothing to offer
-    /// it, because the baseline restates at least as much.
-    pub(crate) fn replay_baseline_coverage(&self) -> &CommitFrontier {
-        self.history.baseline.coverage()
-    }
-
-    /// Whether this device's replay baseline was installed from `snapshot`.
-    ///
-    /// The local answer to "am I already standing on that?", which keeps a
-    /// settled cycle from reading back the snapshot it already stands on.
-    pub(crate) fn replay_baseline_stands_on(
-        &self,
-        snapshot: &store_commit::StoreSnapshotRef,
-    ) -> bool {
-        self.history.baseline.stands_on(snapshot)
-    }
-
-    /// The newest snapshot `registration` has published an acknowledgement of.
-    pub(crate) fn newest_acknowledged_snapshot(
-        &self,
-        registration: &StoreDeviceRegistrationRef,
-    ) -> Option<store_commit::StoreSnapshotLocator> {
-        self.commit_verifier
-            .newest_acknowledged_snapshot(registration)
-    }
-
-    /// The published snapshot `locator` names, read at the coordinate it names.
-    ///
-    /// The locator comes out of an acknowledgement this device published, so it
-    /// carries the snapshot's exact object and semantic hash already — there is
-    /// nothing about it left to establish by following the stream that leads to
-    /// it, and following one costs a read per generation published under it.
-    /// The object is authenticated exactly as a stream walk authenticates it,
-    /// against this Store's root, its author's registration and signature, and
-    /// the generation its own key claims.
-    ///
-    /// `None` when the provider no longer holds it: an acknowledged snapshot is
-    /// a claim about what this device stands on, not a promise that the cloud
-    /// still has it.
-    pub(crate) async fn load_acknowledged_snapshot(
-        &mut self,
-        locator: &store_commit::StoreSnapshotLocator,
-        author: &StoreDeviceRegistration,
-    ) -> Result<
-        Option<coven_database::PublishedStoreSnapshot>,
-        crate::sync::store::snapshots::SnapshotError,
-    > {
-        let (reference, meta) = match self
-            .commit_verifier
-            .load_store_snapshot(&locator.author_registration, author, &locator.snapshot)
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(StoreObjectError::Storage(StorageError::NotFound(_))) => return Ok(None),
-            Err(error) => return Err(crate::sync::store::snapshots::SnapshotError::from(error)),
-        };
-        Ok(Some(coven_database::PublishedStoreSnapshot {
-            successor_slot: meta.successor.next_slot.clone(),
-            reference,
-            meta,
-        }))
-    }
-
-    /// Adopt this device's own published snapshots as the walked prefix of its
-    /// snapshot stream, so reclaim's choice does not re-read every generation
-    /// it has ever published.
-    pub(crate) fn admit_published_snapshots(
-        &mut self,
-        snapshots: Vec<coven_database::PublishedStoreSnapshot>,
-    ) -> Result<(), StorePullError> {
-        let Some(author) = snapshots
-            .first()
-            .map(|snapshot| snapshot.meta.author_registration.clone())
-        else {
-            return Ok(());
-        };
-        if snapshots
-            .iter()
-            .any(|snapshot| snapshot.meta.author_registration != author)
-        {
-            return Err(StorePullError::InvalidState(
-                "one Store snapshot stream carries two authors".to_string(),
-            ));
-        }
-        self.commit_verifier
-            .remember_published_snapshot_stream(&author, snapshots)
-            .map_err(StorePullError::Protocol)
-    }
-
     pub(crate) fn admit_retained_history(
         &mut self,
         retained: &[coven_database::OwnedVerifiedMergeMaterialization],
     ) -> Result<(), StorePullError> {
-        let mut announced = BTreeMap::<StoreDeviceRegistrationRef, u64>::new();
         for materialization in retained {
-            let commit = materialization.commit();
+            if let Some(proof) = &materialization.history_evidence().membership_proof {
+                self.membership_objects().remember_retained_proof(proof)?;
+            }
             let commit_ref = materialization.commit_ref();
             self.history
                 .retained
                 .insert(commit_ref.clone(), materialization.registrations().to_vec());
+            self.accepted_publications.insert(
+                commit_ref.clone(),
+                match materialization.acceptance().exact_publication() {
+                    Some(publication) => AcceptedStoreCommitEvidence::Exact(publication.clone()),
+                    None => AcceptedStoreCommitEvidence::SnapshotCovered,
+                },
+            );
             self.commit_verifier
                 .remember(materialization.verified_commit().clone())
                 .map_err(StorePullError::Protocol)?;
@@ -640,58 +456,12 @@ impl<'a> MergeHistoryVerifier<'a> {
             // what the chain walk used to re-read from the provider per commit —
             // the rows hold it between them rather than each holding all of it.
             if let Some(activated) = &materialization.history_evidence().acknowledgement {
-                let (reference, value) = activated.acknowledgement();
-                self.commit_verifier
-                    .remember_acknowledgement(reference, value)
-                    .map_err(StorePullError::Protocol)?;
+                for (reference, value) in activated.proof_objects() {
+                    self.commit_verifier
+                        .remember_acknowledgement(reference, value)
+                        .map_err(StorePullError::Protocol)?;
+                }
             }
-            let head = materialization.activation_head();
-            let head_ref = StoreDeviceHeadRef {
-                head_hash: head.head_hash(),
-                object: materialization.activation_head_object().clone(),
-            };
-            self.commit_verifier
-                .remember_verified_head(
-                    &head_ref,
-                    VerifiedObject {
-                        value: head.clone(),
-                        bytes: head.to_bytes(),
-                        semantic_hash: head_ref.head_hash,
-                        object: head_ref.object.clone(),
-                    },
-                )
-                .map_err(StorePullError::Protocol)?;
-            // The accepted path is a dense sequence above the snapshot
-            // coverage, which is where `admit_snapshot_announcements` has
-            // already put its floor. Admit each stream's contiguous prefix from
-            // there and leave the rest to the discovery walk, which resumes at
-            // the first sequence the path does not cover.
-            let sequence = commit_ref.coord.sequence();
-            // The contiguous run starts one above the snapshot's coverage, not
-            // at sequence one: rows at or under the coverage are the closure
-            // the image keeps for its own reasons, not a prefix of the accepted
-            // path, and treating one of them as the start would leave the run
-            // stuck at a position the path does not hold.
-            let expected = match announced.get(&commit.author_registration) {
-                Some(previous) => previous.saturating_add(1),
-                None => self
-                    .commit_verifier
-                    .covered_announcement_floor(&commit.author_registration)
-                    .saturating_add(1),
-            };
-            if sequence != expected {
-                continue;
-            }
-            self.commit_verifier
-                .remember_accepted_announcement(
-                    &commit.author_registration,
-                    sequence,
-                    commit_ref.clone(),
-                    head_ref,
-                    head.successor.next_slot.clone(),
-                )
-                .map_err(StorePullError::Protocol)?;
-            announced.insert(commit.author_registration.clone(), sequence);
         }
         Ok(())
     }
@@ -701,78 +471,22 @@ impl<'a> MergeHistoryVerifier<'a> {
         materialization: coven_database::OwnedVerifiedMergeMaterialization,
     ) -> Result<(), StorePullError> {
         let reference = materialization.commit_ref().clone();
-        self.verify_refs(commit_predecessor_references(materialization.commit()))
-            .await?;
-        if let Some(existing) = self.history.commits.get(&reference) {
-            if existing.verified.value() == materialization.commit()
-                && existing.verified.author() == materialization.verified_commit().author()
-            {
-                return Ok(());
-            }
-            return Err(StorePullError::InvalidState(
-                "local join activation conflicts with its already-verified Store commit"
-                    .to_string(),
-            ));
-        }
-        let commit = materialization.commit();
-        if commit.control().is_some()
-            || commit.acknowledgement().is_some()
-            || commit.device_join_attempt_decisions().len() != 1
-            || commit.device_registrations().len() != 1
-            || materialization.registrations().len() != 1
-        {
-            return Err(StorePullError::InvalidState(
-                "local same-principal activation is not one exact join operation".to_string(),
-            ));
-        }
-        let predecessor_cut = commit
-            .order
-            .predecessor_cut()
-            .map_err(StorePullError::Protocol)?;
-        let authority = self.verify_merge_history_authority_from_verified_history(
-            &predecessor_cut.0,
-            &commit.membership_state,
-        )?;
-        let predecessor_state = authority.device_state;
-        let registrations = materialization.registrations().to_vec();
-        let operations = materialization.device_operations().clone();
-        let state_after = self
-            .derive_local_post_device_state(
-                commit,
-                predecessor_state.clone(),
-                &registrations,
-                operations.clone(),
-            )
-            .await?;
-        let verified = materialization.verified_commit().clone();
-        let activation_head = materialization.activation_head().clone();
-        let activation_head_object = materialization.activation_head_object().clone();
-        let history_evidence = materialization.history_evidence().clone();
-        self.history.commits.insert(
-            reference,
-            VerifiedMergeHistoryCommit {
-                verified,
-                predecessor_membership: authority.membership,
-                predecessor_state,
-                state_after,
-                registrations,
-                operations,
-                acknowledgement: None,
-                membership_control: None,
-                activation_head,
-                activation_head_object,
-                history_evidence,
-            },
-        );
-        Ok(())
+        self.admit_retained_history(std::slice::from_ref(&materialization))?;
+        self.verify_refs([reference]).await
     }
 
     pub(crate) fn verified_predecessor_state(
         &self,
         commit: &StoreBatchCommit,
     ) -> Result<ResolvedStoreDeviceState, StorePullError> {
-        let states = self.history.resolved_states();
-        verified_merge_predecessor_state(&self.history.genesis, &states, commit)
+        let frontier = commit.order.predecessor_cut()?.frontier();
+        let state = self.history.state_at_frontier(&frontier)?;
+        if commit.device_state != StoreDeviceStateRef::from_resolved(frontier, &state)? {
+            return Err(StorePullError::InvalidState(
+                "Merge commit names another predecessor device state".into(),
+            ));
+        }
+        Ok(state)
     }
 
     pub(crate) fn verified_membership_prefix(
@@ -801,37 +515,26 @@ impl<'a> MergeHistoryVerifier<'a> {
             })
     }
 
-    pub(crate) fn accepted_commit_membership_state(
+    pub(crate) fn verify_commit_acceptance(
         &self,
         reference: &StoreBatchCommitRef,
-    ) -> Option<&StoreMembershipStateRef> {
-        self.history
-            .commits
-            .get(reference)
-            .map(|commit| &commit.verified.value().membership_state)
+    ) -> Result<(), StorePullError> {
+        if !self.accepted_publications.contains_key(reference) {
+            return Err(StorePullError::InvalidState(
+                "Store commit has no verified acceptance evidence".to_string(),
+            ));
+        }
+        Ok(())
     }
 
-    pub(crate) fn verified_predecessor_membership(
+    pub(crate) fn accepted_publication(
         &self,
         reference: &StoreBatchCommitRef,
-    ) -> Option<&MembershipChain> {
-        self.history
-            .commits
-            .get(reference)
-            .map(|commit| &commit.predecessor_membership)
-    }
-
-    pub(super) fn verifies_membership_head_activation(
-        &self,
-        reference: &protocol_membership::MembershipHeadRef,
-        head: &protocol_membership::AuthorHead,
-        activation: &StoreBatchCommitRef,
-    ) -> bool {
-        self.history
-            .commits
-            .get(activation)
-            .and_then(|commit| commit.membership_control.as_ref())
-            .is_some_and(|control| control.verifies_head_activation(reference, head, activation))
+    ) -> Option<&coven_database::AcceptedStoreCommitPublication> {
+        match self.accepted_publications.get(reference) {
+            Some(AcceptedStoreCommitEvidence::Exact(publication)) => Some(publication),
+            Some(AcceptedStoreCommitEvidence::SnapshotCovered) | None => None,
+        }
     }
 
     pub(super) async fn verify_membership_head_activation(
@@ -840,39 +543,15 @@ impl<'a> MergeHistoryVerifier<'a> {
         head: &protocol_membership::AuthorHead,
         activation: &StoreBatchCommitRef,
     ) -> Result<bool, StorePullError> {
-        let verified = self.load_ref(activation).await?;
-        let commit = verified.value();
-        let author = verified.author();
-        let transition = commit
-            .control()
-            .map(|control| &control.transition)
-            .ok_or_else(|| {
-                StorePullError::InvalidState(
-                    "membership head activation commit has no Merge membership transition"
-                        .to_string(),
-                )
-            })?;
-        if !transition.matches_head(head, reference)
-            || transition.body.author_registration != commit.author_registration
-        {
-            return Err(StorePullError::InvalidState(
-                "membership head differs from its exact activating Store transition".to_string(),
-            ));
-        }
-        let activation_observation = self
-            .exact_next_announcement_slot(&commit.author_registration, author, Some(&verified))
-            .await;
-        match activation_observation {
-            Ok((_, Some(_))) => {}
-            Ok((_, None)) => return Ok(false),
-            Err(StoreError::MergeAnnouncementOccupied { .. })
-            | Err(StoreError::Object(coven_protocol::objects::StoreObjectError::Storage(
-                StorageError::NotFound(_),
-            ))) => return Ok(false),
-            Err(error) => return Err(StorePullError::Store(Box::new(error))),
+        if !self.accepted_publications.contains_key(activation) {
+            return Ok(false);
         }
         self.verify_refs([activation.clone()]).await?;
-        if !self.verifies_membership_head_activation(reference, head, activation) {
+        let prefix = verified_merge_membership_prefix(&self.history, [activation.clone()])?;
+        if !prefix
+            .head_activation(activation)
+            .is_some_and(|proof| proof.verifies(reference, head, activation))
+        {
             return Err(StorePullError::InvalidState(
                 "membership head activation differs from its verified Merge membership control"
                     .to_string(),
@@ -912,51 +591,13 @@ impl<'a> MergeHistoryVerifier<'a> {
         })
     }
 
-    pub(crate) fn verify_merge_history_authority_from_verified_history(
-        &self,
-        frontier: &BTreeMap<protocol_membership::AuthorStreamId, StoreBatchCommitRef>,
-        membership_state: &StoreMembershipStateRef,
-    ) -> Result<VerifiedMergeHistoryAuthority, StorePullError> {
-        let (device_state, verified_membership_activations) =
-            self.verified_merge_history_authority_parts(frontier)?;
-        let membership = self
-            .cached_verified_membership(membership_state, &verified_membership_activations)
-            .ok_or_else(|| {
-                StorePullError::InvalidState(
-                    "Merge membership authority is absent from the already-verified history"
-                        .to_string(),
-                )
-            })?;
-        verified_membership_activations.validate_complete_membership(&membership)?;
-        verify_merge_membership_state_ref(membership_state, &membership, &device_state)?;
-        Ok(VerifiedMergeHistoryAuthority {
-            device_state,
-            membership,
-        })
-    }
-
     fn verified_merge_history_authority_parts(
         &self,
         frontier: &BTreeMap<protocol_membership::AuthorStreamId, StoreBatchCommitRef>,
     ) -> Result<(ResolvedStoreDeviceState, VerifiedMergeMembershipPrefix), StorePullError> {
-        let device_state = if frontier.is_empty() {
-            self.history.genesis.clone()
-        } else {
-            ResolvedStoreDeviceState::merge(
-                frontier
-                    .values()
-                    .map(|reference| {
-                        self.history.state_after(reference).cloned().ok_or_else(|| {
-                            StorePullError::InvalidState(
-                                "Merge history frontier is absent from its verified graph"
-                                    .to_string(),
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-            .map_err(StorePullError::Protocol)?
-        };
+        let device_state = self
+            .history
+            .state_at_frontier(&CommitFrontier(frontier.clone()))?;
         let membership =
             verified_merge_membership_prefix(&self.history, frontier.values().cloned())?;
         Ok((device_state, membership))
@@ -997,7 +638,6 @@ fn merge_device_state_from_verified_history(
     history: &VerifiedMergeHistory,
     allowed_tips: impl IntoIterator<Item = StoreBatchCommitRef>,
 ) -> Result<ResolvedStoreDeviceState, StorePullError> {
-    let genesis = &history.genesis;
     let frontier = reference.frontier();
     let allowed = verified_merge_commit_closure(history, allowed_tips)?;
     if frontier
@@ -1009,25 +649,7 @@ fn merge_device_state_from_verified_history(
             "Merge device state names a commit outside its causal predecessor history".to_string(),
         ));
     }
-    let state = if frontier.commits().is_empty() {
-        genesis.clone()
-    } else {
-        ResolvedStoreDeviceState::merge(
-            frontier
-                .commits()
-                .values()
-                .map(|reference| {
-                    history.state_after(reference).cloned().ok_or_else(|| {
-                        StorePullError::InvalidState(
-                            "Merge device-state frontier is absent from its verified history"
-                                .to_string(),
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )
-        .map_err(StorePullError::Protocol)?
-    };
+    let state = history.state_at_frontier(frontier)?;
     let expected = StoreDeviceStateRef::from_resolved(frontier.clone(), &state)
         .map_err(StorePullError::Protocol)?;
     if &expected != reference {
@@ -1038,6 +660,7 @@ fn merge_device_state_from_verified_history(
     Ok(state)
 }
 
+#[derive(Clone)]
 pub(crate) struct VerifiedMergeHistory {
     pub(crate) genesis: ResolvedStoreDeviceState,
     /// Where a walk down this history stops, and what it reads there.
@@ -1096,23 +719,76 @@ impl VerifiedMergeHistory {
             .or_else(|| self.baseline.covered_state(reference))
     }
 
-    /// Every position this history can answer a device state for: the commits
-    /// it verified, plus the covered positions the baseline restates.
-    pub(crate) fn resolved_states(
-        &self,
-    ) -> BTreeMap<StoreBatchCommitRef, ResolvedStoreDeviceState> {
+    fn is_baseline_tip(&self, reference: &StoreBatchCommitRef) -> bool {
         self.baseline
-            .covered_states()
-            .map(|(reference, state)| (reference.clone(), state.clone()))
-            .chain(
-                self.commits
-                    .iter()
-                    .map(|(reference, verified)| (reference.clone(), verified.state_after.clone())),
-            )
-            .collect()
+            .coverage()
+            .commits()
+            .get(&reference.coord.stream_id)
+            == Some(reference)
+    }
+
+    /// Resolve an exact cut from retained commit states or from the whole
+    /// installed checkpoint and a verified suffix. The checkpoint's aggregate
+    /// state is never attributed to an individual historical commit.
+    fn state_at_frontier(
+        &self,
+        frontier: &CommitFrontier,
+    ) -> Result<ResolvedStoreDeviceState, StorePullError> {
+        if frontier.commits().is_empty() {
+            return Ok(self.genesis.clone());
+        }
+        if frontier
+            .commits()
+            .values()
+            .all(|reference| self.state_after(reference).is_some())
+        {
+            return ResolvedStoreDeviceState::merge(frontier.commits().values().map(|reference| {
+                self.state_after(reference)
+                    .expect("every exact frontier state was checked")
+                    .clone()
+            }))
+            .map_err(StorePullError::Protocol);
+        }
+        let baseline = self.baseline.history_summary().ok_or_else(|| {
+            StorePullError::InvalidState("Merge history has an unresolved predecessor state".into())
+        })?;
+        let mut pending = frontier.commits().values().cloned().collect::<Vec<_>>();
+        let mut reached = BTreeSet::new();
+        while let Some(reference) = pending.pop() {
+            if !reached.insert(reference.clone()) || self.is_baseline_tip(&reference) {
+                continue;
+            }
+            let commit = self.commits.get(&reference).ok_or_else(|| {
+                StorePullError::InvalidState(
+                    "Merge device-state cut lacks exact checkpoint ancestry".into(),
+                )
+            })?;
+            pending.extend(commit_predecessor_references(commit.verified.value()));
+        }
+        if self
+            .baseline
+            .coverage()
+            .commits()
+            .values()
+            .any(|reference| !reached.contains(reference))
+        {
+            return Err(StorePullError::InvalidState(
+                "Merge device-state cut does not include its complete checkpoint".into(),
+            ));
+        }
+        ResolvedStoreDeviceState::merge(
+            std::iter::once(baseline.post_state.clone()).chain(
+                frontier
+                    .commits()
+                    .values()
+                    .filter_map(|reference| self.state_after(reference).cloned()),
+            ),
+        )
+        .map_err(StorePullError::Protocol)
     }
 }
 
+#[derive(Clone)]
 struct VerifiedMembershipChain {
     authority: VerifiedMergeMembershipPrefix,
     membership: MembershipChain,
@@ -1125,8 +801,15 @@ pub struct MergeHistoryVerifier<'a> {
     /// the founder this verifier validated against the root; the registration it
     /// names is held by `commit_verifier`, not again here.
     founder: StoreDeviceRegistrationRef,
+    accepted_publications: BTreeMap<StoreBatchCommitRef, AcceptedStoreCommitEvidence>,
     history: VerifiedMergeHistory,
     verified_memberships: Vec<VerifiedMembershipChain>,
+}
+
+#[derive(Clone)]
+enum AcceptedStoreCommitEvidence {
+    Exact(coven_database::AcceptedStoreCommitPublication),
+    SnapshotCovered,
 }
 
 type PredecessorCommitPredicate<'a> = Box<dyn FnMut(&VerifiedStoreBatchCommit) -> bool + Send + 'a>;

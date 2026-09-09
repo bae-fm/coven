@@ -140,6 +140,24 @@ pub(crate) fn validate_live_blob_locator(
     Ok(())
 }
 
+/// Index accepted blob provenance independently of whether its row version wins.
+/// The index remains until exact object retirement removes it with the remote record.
+pub(crate) fn record_stored_locator_on(
+    conn: &Connection,
+    stored: &StoredBlobRef,
+) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO blob_locators (remote_object_id, locator_hash) VALUES (?1, ?2)
+         ON CONFLICT(remote_object_id) DO NOTHING",
+        rusqlite::params![
+            remote_object_id(stored.object()).to_string(),
+            stored.locator().locator_hash().to_string(),
+        ],
+    )
+    .map_err(DbError::from)?;
+    validate_stored_locator_on(conn, stored)
+}
+
 pub(crate) fn validate_stored_locator_on(
     conn: &Connection,
     expected: &StoredBlobRef,

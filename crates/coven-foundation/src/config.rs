@@ -7,6 +7,7 @@
 //! owner graph, not configuration, so callers supply it to those operations.
 
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 
 use crate::store_dir::StoreDir;
 
@@ -157,17 +158,23 @@ pub struct Config {
     /// Unique device identifier for sync changeset namespacing.
     pub device_id: String,
     pub store_name: String,
+    /// Accepted Store commits across all authors before an owner attempts a
+    /// snapshot. This is a soft trigger; publication may continue beyond it.
+    pub snapshot_commit_threshold: NonZeroU64,
     /// Cloud home provider + its settings.
     pub cloud_home: CloudHomeConfig,
 }
 
 impl Config {
+    pub const DEFAULT_SNAPSHOT_COMMIT_THRESHOLD: NonZeroU64 = NonZeroU64::new(100).unwrap();
+
     /// Construct a config with defaults for a new or joined store.
     pub fn with_defaults(store_id: String, device_id: String, store_name: String) -> Self {
         Self {
             store_id,
             device_id,
             store_name,
+            snapshot_commit_threshold: Self::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
             cloud_home: CloudHomeConfig::default(),
         }
     }
@@ -211,6 +218,7 @@ pub(crate) struct ConfigYaml {
     pub(crate) store_id: String,
     pub(crate) store_name: String,
     pub(crate) device_id: String,
+    pub(crate) snapshot_commit_threshold: NonZeroU64,
     #[serde(flatten)]
     pub(crate) cloud_home: CloudHomeConfig,
 }
@@ -221,6 +229,7 @@ impl From<&Config> for ConfigYaml {
             store_id: config.store_id.clone(),
             store_name: config.store_name.clone(),
             device_id: config.device_id.clone(),
+            snapshot_commit_threshold: config.snapshot_commit_threshold,
             cloud_home: config.cloud_home.clone(),
         }
     }
@@ -233,6 +242,7 @@ impl ConfigYaml {
             store_id: self.store_id,
             device_id: self.device_id,
             store_name: self.store_name,
+            snapshot_commit_threshold: self.snapshot_commit_threshold,
             cloud_home: self.cloud_home,
         }
     }
@@ -270,11 +280,13 @@ mod tests {
             storage: HomeStorage::Opaque,
             ..CloudHomeConfig::default()
         };
+        config.snapshot_commit_threshold = NonZeroU64::new(7).unwrap();
 
         config.save_to_config_yaml(&store_dir).expect("save");
         let config_yaml =
             std::fs::read_to_string(store_dir.config_path()).expect("read saved local config");
         assert!(config_yaml.contains("exact_upload_verification: readback"));
+        assert!(config_yaml.contains("snapshot_commit_threshold: 7"));
         let loaded = Config::load_from_config_yaml(&store_dir).expect("load");
 
         assert_eq!(loaded, config);
@@ -313,7 +325,7 @@ mod tests {
         let store_dir = StoreDir::new_ephemeral(dir.path());
         std::fs::write(
             store_dir.config_path(),
-            "store_id: store-1\nstore_name: My Store\ndevice_id: device-1\nexact_upload_verification: metadata_hash\nstorage: opaque\n",
+            "store_id: store-1\nstore_name: My Store\ndevice_id: device-1\nsnapshot_commit_threshold: 100\nexact_upload_verification: metadata_hash\nstorage: opaque\n",
         )
         .expect("write config.yaml");
 
@@ -326,12 +338,29 @@ mod tests {
     }
 
     #[test]
+    fn load_requires_a_positive_snapshot_commit_threshold() {
+        for threshold in ["", "snapshot_commit_threshold: 0\n"] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let store_dir = StoreDir::new_ephemeral(dir.path());
+            std::fs::write(
+                store_dir.config_path(),
+                format!("store_id: store-1\nstore_name: My Store\ndevice_id: device-1\n{threshold}exact_upload_verification: metadata_hash\nstorage: opaque\n"),
+            )
+            .expect("write config.yaml");
+            let error = Config::load_from_config_yaml(&store_dir)
+                .expect_err("snapshot threshold must be present and positive");
+            assert!(matches!(error, ConfigError::Parse { .. }));
+            assert!(error.to_string().contains("snapshot_commit_threshold"));
+        }
+    }
+
+    #[test]
     fn load_with_missing_upload_verification_errors() {
         let dir = tempfile::tempdir().expect("temp dir");
         let store_dir = StoreDir::new_ephemeral(dir.path());
         std::fs::write(
             store_dir.config_path(),
-            "store_id: store-1\nstore_name: My Store\ndevice_id: device-1\nstorage: opaque\n",
+            "store_id: store-1\nstore_name: My Store\ndevice_id: device-1\nsnapshot_commit_threshold: 100\nstorage: opaque\n",
         )
         .expect("write config.yaml");
 

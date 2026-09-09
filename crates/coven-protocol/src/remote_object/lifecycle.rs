@@ -3,34 +3,6 @@ use super::nonactivation::*;
 use super::ownership::*;
 use super::*;
 
-/// A Store head names the commit it publishes. The record carries that commit
-/// reference, extracted from the head's bytes once when the record was built,
-/// so a load can check that the head still belongs to a candidate that owns it
-/// without parsing anything.
-fn validate_head_commit_ownership(
-    head_commit: &StoreBatchCommitRef,
-    state: &RetainedAuthorityObjectState,
-) -> Result<(), RemoteObjectRecordError> {
-    let owns_head_commit = match state {
-        RetainedAuthorityObjectState::Prepared { ownership } => {
-            ownership.pending.len() == 1 && ownership.pending.contains(head_commit)
-        }
-        RetainedAuthorityObjectState::UploadedVerified { ownership } => {
-            ownership.pending.contains(head_commit) || ownership.activated.contains(head_commit)
-        }
-        RetainedAuthorityObjectState::CleanupPending { former_candidates }
-        | RetainedAuthorityObjectState::AbsentVerified { former_candidates }
-        | RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
-            ensure_candidate_nonactivation(former_candidates, head_commit).is_ok()
-        }
-    };
-    if owns_head_commit {
-        Ok(())
-    } else {
-        Err(RemoteObjectRecordError::CandidateOwnerMismatch)
-    }
-}
-
 impl RemoteObjectRecord {
     /// Everything this record asserts about itself that does not need its
     /// payloads: where those payloads live, that the identity is the one the
@@ -69,11 +41,6 @@ impl RemoteObjectRecord {
                     RetainedAuthorityObjectDomain::StoreMembershipResolution { .. }
                 ) {
                     return Err(RemoteObjectRecordError::DomainMismatch);
-                }
-                if let RetainedAuthorityObjectDomain::DeviceHead { head_commit, .. } =
-                    &record.identity.domain
-                {
-                    validate_head_commit_ownership(head_commit, &record.state)?;
                 }
                 record.state.validate()?;
             }
@@ -396,8 +363,7 @@ impl RemoteObjectRecord {
                 }
                 RetainedAuthorityObjectState::UploadedVerified { .. } => {}
                 RetainedAuthorityObjectState::CleanupPending { .. }
-                | RetainedAuthorityObjectState::AbsentVerified { .. }
-                | RetainedAuthorityObjectState::UncreatedVerified { .. } => {
+                | RetainedAuthorityObjectState::AbsentVerified { .. } => {
                     return Err(RemoteObjectRecordError::InvalidUploadTransition);
                 }
             },
@@ -518,106 +484,8 @@ impl RemoteObjectRecord {
         &mut self,
         nonactivation: CandidateNonactivation,
     ) -> Result<Option<ProtocolInertObject>, RemoteObjectRecordError> {
-        self.begin_candidate_nonactivation_with_head_evidence(
-            nonactivation,
-            CandidateHeadEvidence::OccupiedByProof,
-        )
-    }
-
-    pub fn begin_candidate_nonactivation_with_verified_head_nonactivation(
-        &mut self,
-        nonactivation: CandidateNonactivation,
-        head_nonactivation: &VerifiedCandidateHeadNonactivation,
-    ) -> Result<Option<ProtocolInertObject>, RemoteObjectRecordError> {
-        if matches!(
-            self,
-            Self::RetainedAuthority(RetainedAuthorityRecord {
-                state: RetainedAuthorityObjectState::UncreatedVerified { .. },
-                ..
-            })
-        ) {
-            return self.reconcile_verified_candidate_head_nonactivation(
-                &nonactivation,
-                head_nonactivation,
-            );
-        }
-        self.begin_candidate_nonactivation_with_head_evidence(
-            nonactivation,
-            CandidateHeadEvidence::Verified(head_nonactivation),
-        )
-    }
-
-    fn reconcile_verified_candidate_head_nonactivation(
-        &mut self,
-        nonactivation: &CandidateNonactivation,
-        head_nonactivation: &VerifiedCandidateHeadNonactivation,
-    ) -> Result<Option<ProtocolInertObject>, RemoteObjectRecordError> {
         nonactivation.validate()?;
         let candidate = nonactivation.reference()?;
-        let Self::RetainedAuthority(record) = self else {
-            return Err(RemoteObjectRecordError::DomainMismatch);
-        };
-        if !matches!(
-            record.identity.domain,
-            RetainedAuthorityObjectDomain::DeviceHead { .. }
-        ) || head_nonactivation.candidate != candidate
-            || head_nonactivation.head.object() != &record.identity.object
-        {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "fresh excluded-author head evidence names another prepared object".to_string(),
-            ));
-        }
-        let RetainedAuthorityObjectState::UncreatedVerified { former_candidates } = &record.state
-        else {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "fresh excluded-author head evidence reached a nonterminal head state".to_string(),
-            ));
-        };
-        let mut stored = None;
-        for former_candidate in former_candidates {
-            if former_candidate.reference()? == candidate {
-                stored = Some(former_candidate);
-                break;
-            }
-        }
-        let stored = stored.ok_or(RemoteObjectRecordError::CandidateOwnerMismatch)?;
-        if stored != nonactivation {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "fresh excluded-author head evidence differs from its durable proof".to_string(),
-            ));
-        }
-        match &head_nonactivation.head {
-            VerifiedCandidateHead::ExactCandidateAbsent { .. } => Ok(None),
-            VerifiedCandidateHead::ExactLateCandidate { .. } => {
-                ProtocolInertObject::new(record.identity.clone(), former_candidates.clone())
-                    .map(Some)
-            }
-        }
-    }
-
-    fn begin_candidate_nonactivation_with_head_evidence(
-        &mut self,
-        nonactivation: CandidateNonactivation,
-        head_evidence: CandidateHeadEvidence<'_>,
-    ) -> Result<Option<ProtocolInertObject>, RemoteObjectRecordError> {
-        nonactivation.validate()?;
-        let candidate = nonactivation.reference()?;
-        if matches!(head_evidence, CandidateHeadEvidence::Verified(_))
-            && !matches!(
-                self,
-                Self::RetainedAuthority(RetainedAuthorityRecord {
-                    identity: RetainedAuthorityObjectRef {
-                        domain: RetainedAuthorityObjectDomain::DeviceHead { .. },
-                        ..
-                    },
-                    ..
-                })
-            )
-        {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "candidate head absence evidence reached a non-head object".to_string(),
-            ));
-        }
         match self {
             Self::CandidateCommit(record) => {
                 if record.identity != candidate {
@@ -652,90 +520,10 @@ impl RemoteObjectRecord {
                 }
             },
             Self::RetainedAuthority(record) => match &mut record.state {
-                RetainedAuthorityObjectState::Prepared { ownership } => {
-                    let RetainedAuthorityObjectDomain::DeviceHead { .. } = &record.identity.domain
-                    else {
-                        return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
-                    };
-                    match &head_evidence {
-                        CandidateHeadEvidence::OccupiedByProof => {
-                            let CandidateNonactivationProof::MergeWinner { winner_head } =
-                                &nonactivation.proof
-                            else {
-                                return Err(RemoteObjectRecordError::InvalidProof(
-                                    "a prepared Store head requires winner or verified-absence evidence"
-                                        .to_string(),
-                                ));
-                            };
-                            if winner_head.object.slot() != record.identity.object.slot()
-                                || winner_head.object == record.identity.object
-                            {
-                                return Err(RemoteObjectRecordError::InvalidProof(
-                                    "Merge winner does not occupy the prepared head's exact slot"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                        CandidateHeadEvidence::Verified(head_nonactivation) => {
-                            if !matches!(
-                                nonactivation.proof,
-                                CandidateNonactivationProof::AuthorExclusion { .. }
-                                    | CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
-                            ) || head_nonactivation.candidate != candidate
-                                || head_nonactivation.head.object() != &record.identity.object
-                            {
-                                return Err(RemoteObjectRecordError::InvalidProof(
-                                    "excluded-author head observation names another prepared object"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                    }
-                    if !ownership.pending.remove(&candidate) {
-                        return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
-                    }
-                    ownership.nonactivated.push(nonactivation);
-                    if ownership.pending.is_empty() {
-                        match head_evidence {
-                            CandidateHeadEvidence::Verified(
-                                VerifiedCandidateHeadNonactivation {
-                                    head: VerifiedCandidateHead::ExactLateCandidate { .. },
-                                    ..
-                                },
-                            ) => {
-                                return ProtocolInertObject::new(
-                                    record.identity.clone(),
-                                    ownership.nonactivated.clone(),
-                                )
-                                .map(Some);
-                            }
-                            CandidateHeadEvidence::OccupiedByProof
-                            | CandidateHeadEvidence::Verified(
-                                VerifiedCandidateHeadNonactivation {
-                                    head: VerifiedCandidateHead::ExactCandidateAbsent { .. },
-                                    ..
-                                },
-                            ) => {
-                                record.state = RetainedAuthorityObjectState::UncreatedVerified {
-                                    former_candidates: ownership.nonactivated.clone(),
-                                };
-                            }
-                        }
-                    }
+                RetainedAuthorityObjectState::Prepared { .. } => {
+                    return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
                 }
                 RetainedAuthorityObjectState::UploadedVerified { .. } => {
-                    if matches!(
-                        head_evidence,
-                        CandidateHeadEvidence::Verified(VerifiedCandidateHeadNonactivation {
-                            head: VerifiedCandidateHead::ExactCandidateAbsent { .. },
-                            ..
-                        })
-                    ) {
-                        return Err(RemoteObjectRecordError::InvalidProof(
-                            "excluded-author head was verified absent but is marked uploaded"
-                                .to_string(),
-                        ));
-                    }
                     let RetainedAuthorityObjectState::UploadedVerified { ownership } =
                         &record.state
                     else {
@@ -767,20 +555,6 @@ impl RemoteObjectRecord {
                                 RetainedAuthorityObjectState::UploadedVerified { ownership };
                         }
                     }
-                }
-                RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
-                    if matches!(
-                        head_evidence,
-                        CandidateHeadEvidence::Verified(VerifiedCandidateHeadNonactivation {
-                            head: VerifiedCandidateHead::ExactLateCandidate { .. },
-                            ..
-                        })
-                    ) {
-                        return Err(RemoteObjectRecordError::InvalidProof(
-                            "excluded-author head is present but is marked uncreated".to_string(),
-                        ));
-                    }
-                    ensure_candidate_nonactivation(former_candidates, &candidate)?;
                 }
                 RetainedAuthorityObjectState::CleanupPending { former_candidates }
                 | RetainedAuthorityObjectState::AbsentVerified { former_candidates } => {
@@ -915,9 +689,6 @@ impl RemoteObjectRecord {
                 RetainedAuthorityObjectState::AbsentVerified { former_candidates } => {
                     contains(former_candidates)
                 }
-                RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
-                    contains(former_candidates)
-                }
             },
             Self::SharedLiveSet(record) => match &record.state {
                 OwnedObjectState::Prepared { ownership } => Ok(!ownership
@@ -933,61 +704,6 @@ impl RemoteObjectRecord {
                 }
                 OwnedObjectState::RetirementPending { former_candidates } => {
                     contains(former_candidates)
-                }
-            },
-        }
-    }
-
-    pub fn candidate_nonactivation_proof(
-        &self,
-        candidate: &StoreBatchCommitRef,
-    ) -> Result<Option<&CandidateNonactivationProof>, RemoteObjectRecordError> {
-        self.validate()?;
-        match self {
-            Self::CandidateCommit(record) => {
-                if &record.identity != candidate {
-                    return Ok(None);
-                }
-                match &record.state {
-                    CandidateCommitState::CleanupPending { proof }
-                    | CandidateCommitState::AbsentVerified { proof } => Ok(Some(proof)),
-                    CandidateCommitState::Prepared | CandidateCommitState::UploadedVerified => {
-                        Ok(None)
-                    }
-                }
-            }
-            Self::CandidateExclusive(record) => match &record.state {
-                CandidateObjectState::Prepared { ownership }
-                | CandidateObjectState::UploadedVerified { ownership } => {
-                    find_nonactivation_proof(&ownership.nonactivated, candidate)
-                }
-                CandidateObjectState::CleanupPending { former_candidates }
-                | CandidateObjectState::AbsentVerified { former_candidates } => {
-                    find_nonactivation_proof(former_candidates, candidate)
-                }
-            },
-            Self::RetainedAuthority(record) => match &record.state {
-                RetainedAuthorityObjectState::Prepared { ownership } => {
-                    find_nonactivation_proof(&ownership.nonactivated, candidate)
-                }
-                RetainedAuthorityObjectState::UploadedVerified { ownership } => {
-                    find_nonactivation_proof(&ownership.nonactivated, candidate)
-                }
-                RetainedAuthorityObjectState::CleanupPending { former_candidates }
-                | RetainedAuthorityObjectState::AbsentVerified { former_candidates }
-                | RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
-                    find_nonactivation_proof(former_candidates, candidate)
-                }
-            },
-            Self::SharedLiveSet(record) => match &record.state {
-                OwnedObjectState::Prepared { ownership } => {
-                    find_nonactivation_proof(&ownership.nonactivated, candidate)
-                }
-                OwnedObjectState::UploadedVerified { ownership } => {
-                    find_nonactivation_proof(&ownership.nonactivated, candidate)
-                }
-                OwnedObjectState::RetirementPending { former_candidates } => {
-                    find_nonactivation_proof(former_candidates, candidate)
                 }
             },
         }

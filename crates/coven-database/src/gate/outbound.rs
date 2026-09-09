@@ -947,7 +947,11 @@ impl<'a> DeletedAudiences<'a> {
                     Some(row) => match row.old.get(gate_col.index) {
                         Some(value) => value.as_deref().is_some_and(truthy),
                         None => {
-                            warn!(table, id, "gate: deleted root's old gate value absent from the changeset row; treating as never shared");
+                            warn!(
+                                table,
+                                id,
+                                "gate: deleted root's old gate value absent from the changeset row; treating as never shared"
+                            );
                             false
                         }
                     },
@@ -961,7 +965,7 @@ impl<'a> DeletedAudiences<'a> {
                                     table: key.0.clone(),
                                     row_id: key.1.clone(),
                                 },
-                            )
+                            );
                         }
                     },
                 };
@@ -1227,7 +1231,9 @@ pub(crate) fn resolve_root(
         }) => match fk_parent_row(conn, table, id, &fk_col.name, parent, &parent_col.name)? {
             FkParentRow::Found(parent_id) => resolve_root(conn, gates, parent, &parent_id),
             FkParentRow::ParentAbsent => {
-                warn!("gate: {table}.{id} names a {parent} row absent from the live db; cannot resolve gate");
+                warn!(
+                    "gate: {table}.{id} names a {parent} row absent from the live db; cannot resolve gate"
+                );
                 Ok(None)
             }
             FkParentRow::RowAbsent | FkParentRow::NullForeignKey => {

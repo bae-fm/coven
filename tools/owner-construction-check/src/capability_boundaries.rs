@@ -289,10 +289,9 @@ const FILESYSTEM_HOMES: &[&str] = &[
 /// them from cloud storage belongs to the owners that record the verification
 /// durably. A new caller of the raw protocol-object read is how a
 /// re-download-and-re-verify path gets written, so it fails here instead of
-/// shipping. Consolidation of these homes toward one owner is
-/// `plans/verified-reuse-consolidation.md`.
+/// shipping.
 pub(crate) const VERIFICATION_ARTIFACT_BOUNDARY: &[GatedCapability] = &[GatedCapability {
-    kind: "verification-artifact storage read (read_protocol_object / _with_progress / read_protocol_slot; see plans/verified-reuse-consolidation.md)",
+    kind: "verification-artifact storage read (read_protocol_object / _with_progress / read_protocol_slot)",
     crates: &[],
     path_patterns: &[
         &["read_protocol_object"],
@@ -302,9 +301,8 @@ pub(crate) const VERIFICATION_ARTIFACT_BOUNDARY: &[GatedCapability] = &[GatedCap
     // Matched exactly, so each way of asking the provider for a protocol
     // artifact has to be named. `read_protocol_object_with_progress` is the same
     // read with a callback — gating one without the other leaves the alias open
-    // to anything the gate would otherwise stop. `read_protocol_slot` is how the
-    // announcement walk fetches a head, which is where half the measured
-    // retained-history cost was, unseen by this boundary the whole time.
+    // to anything the gate would otherwise stop. `read_protocol_slot` resolves
+    // an object from a signed successor slot and belongs to the same boundary.
     method_patterns: &[
         "read_protocol_object",
         "read_protocol_object_with_progress",
@@ -315,9 +313,9 @@ pub(crate) const VERIFICATION_ARTIFACT_BOUNDARY: &[GatedCapability] = &[GatedCap
 
 /// Reviewed homes for raw protocol-object reads: the storage implementations
 /// whose subject is the object store itself, and the verification owners that
-/// pair each read with the durable record of its outcome. This list only
-/// shrinks; a new home means a new unverified-read path and needs the design
-/// conversation in the plan above.
+/// pair each read with the durable record of its outcome. File moves preserve
+/// the exact verification owner; another owner requires reviewing where its
+/// verification outcome is retained.
 const VERIFICATION_ARTIFACT_HOMES: &[&str] = &[
     // The object store itself: the trait's own read and the one provider that
     // overrides it. Providers implement the byte-level reads beneath these, not
@@ -336,18 +334,18 @@ const VERIFICATION_ARTIFACT_HOMES: &[&str] = &[
     "crates/coven-replication/src/sync/store/circles/exact_object.rs",
     "crates/coven-replication/src/sync/store/circles/packages.rs",
     "crates/coven-replication/src/sync/store/commit_verification/commit/acknowledgements_snapshots.rs",
-    "crates/coven-replication/src/sync/store/commit_verification/commit/announcements.rs",
     "crates/coven-replication/src/sync/store/commit_verification/commit/commits.rs",
     "crates/coven-replication/src/sync/store/commit_verification/commit/device_lifecycle.rs",
     "crates/coven-replication/src/sync/store/commit_verification/commit/membership.rs",
+    "crates/coven-replication/src/sync/store/commit_verification/commit/owner_promotion_publication.rs",
     "crates/coven-replication/src/sync/store/commit_verification/commit/registrations.rs",
     "crates/coven-replication/src/sync/store/commit_verification/merge_history/device_join_verification.rs",
     "crates/coven-replication/src/sync/store/commit_verification/merge_history/membership_control.rs",
+    "crates/coven-replication/src/sync/store/commit_verification/merge_history/publication.rs",
     "crates/coven-replication/src/sync/store/commit_verification/merge_history/stream.rs",
     "crates/coven-replication/src/sync/store/device_join/authorized_join.rs",
     "crates/coven-replication/src/sync/store/device_join/joiner.rs",
     "crates/coven-replication/src/sync/store/device_join/transport.rs",
-    "crates/coven-replication/src/sync/store/merge_conflict/observation.rs",
     "crates/coven-replication/src/sync/store/protocol_root.rs",
     "crates/coven-replication/src/sync/store/reclaim/candidates.rs",
     "crates/coven-replication/src/sync/store/reclaim/claims.rs",
@@ -814,5 +812,18 @@ mod tests {
         )];
         assert!(find_capability_boundary_violations(&files, NETWORK_BOUNDARY).is_empty());
         assert!(find_capability_boundary_violations(&files, RUNTIME_BOUNDARY).is_empty());
+    }
+    #[test]
+    fn publication_verification_reads_remain_inside_their_exact_owners() {
+        let source = "async fn verify(reader: Reader) { reader.read_protocol_object().await; }";
+        let files = vec![
+            file("crates/coven-replication/src/sync/store/commit_verification/commit/owner_promotion_publication.rs", source),
+            file("crates/coven-replication/src/sync/store/commit_verification/merge_history/publication.rs", source),
+            file("crates/coven-replication/src/sync/store/owner_role_promotion/publication.rs", source),
+        ];
+        let violations =
+            find_capability_boundary_violations(&files, VERIFICATION_ARTIFACT_BOUNDARY);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].path, files[2].relative_path);
     }
 }

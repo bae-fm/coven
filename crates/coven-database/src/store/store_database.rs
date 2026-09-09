@@ -11,6 +11,90 @@ pub struct StoreDatabase {
 }
 
 impl StoreDatabase {
+    /// Prepare an independently owned snapshot database with this receiver's
+    /// registered schema migrations. Preparation does not advance the live
+    /// register clock or replace the receiving connection.
+    pub async fn prepare_snapshot_database(
+        &self,
+        plaintext: Vec<u8>,
+        install: crate::VerifiedSnapshotBootstrapInstall,
+    ) -> Result<Self, crate::OpenError> {
+        self.database
+            .prepare_snapshot_database(plaintext, install)
+            .await
+            .map(Self::from_database)
+    }
+
+    /// Stop the preparation worker and transfer its verified image to the
+    /// checkpoint installer. Every borrowed query handle must have been released.
+    pub async fn into_prepared_snapshot(self) -> Result<crate::PreparedStoreSnapshot, DbError> {
+        self.database.into_prepared_snapshot().await
+    }
+
+    /// Close and release an abandoned checkpoint preparation and its payloads.
+    pub async fn discard_snapshot_preparation(self) -> Result<(), DbError> {
+        self.database.discard_snapshot_preparation().await
+    }
+
+    /// Resolve this preparation's recipient Circle images before its accepted tail.
+    pub async fn prepare_received_snapshot_circles(
+        &self,
+        selection: crate::StagedCircleRestore,
+        receiver_wall_ms: u64,
+    ) -> Result<(), DbError> {
+        self.database
+            .prepare_received_snapshot_circles(selection, receiver_wall_ms)
+            .await
+    }
+
+    /// Install an independently prepared checkpoint and its accepted tail in
+    /// one receiving transaction, preserving the local write journal.
+    pub async fn install_received_snapshot(
+        &self,
+        prepared: crate::PreparedStoreSnapshot,
+        expected: crate::StorePublicationBoundary,
+        materializations: Vec<crate::PreparedMergeMaterialization>,
+        accepted: crate::AcceptedStorePublicationInterval,
+        snapshots: Vec<crate::VerifiedStoreSnapshotAuthority>,
+        membership: coven_protocol::membership::LocalStoreMembership,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
+        routing_key: Option<coven_protocol::circle::RowRoutingKey>,
+        receiver_wall_ms: u64,
+    ) -> Result<
+        (
+            crate::MaterializationOutcome,
+            Vec<coven_protocol::store_commit::StoreBatchCommitRef>,
+        ),
+        DbError,
+    > {
+        #[cfg(any(test, feature = "test-utils"))]
+        self.reach_test_point(crate::DatabaseTestPoint::ReceivedSnapshotInstallRequested)
+            .await;
+        let snapshots = snapshots
+            .into_iter()
+            .map(crate::VerifiedStoreSnapshotAuthority::into_authority)
+            .collect();
+        let (applied, installed) = self
+            .call_store(move |receiver| {
+                prepared.install_on(
+                    receiver,
+                    expected,
+                    materializations,
+                    accepted,
+                    snapshots,
+                    membership,
+                    routing_encryption.as_ref(),
+                    routing_key,
+                    receiver_wall_ms,
+                )
+            })
+            .await?;
+        for (write_id, status) in applied.write_status_notifications {
+            self.notify_write_status(write_id, status);
+        }
+        Ok((applied.outcome, installed))
+    }
+
     #[doc(hidden)]
     pub fn from_database(database: Database) -> Self {
         Self { database }
@@ -23,15 +107,21 @@ impl StoreDatabase {
         self.database.subscribe_committed_changes()
     }
 
-    pub(super) async fn call_store<F, R>(&self, operation: F) -> Result<R, DbError>
+    pub(super) fn call_store<F, R>(
+        &self,
+        operation: F,
+    ) -> impl std::future::Future<Output = Result<R, DbError>> + Send + '_
     where
         F: for<'session> FnOnce(&mut StoreSession<'session>) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
-        self.database.call_store(operation).await
+        self.database.call_store(operation)
     }
 
-    pub(super) async fn call_database<F, R>(&self, operation: F) -> Result<R, DbError>
+    pub(super) fn call_database<F, R>(
+        &self,
+        operation: F,
+    ) -> impl std::future::Future<Output = Result<R, DbError>> + Send + '_
     where
         F: for<'session> FnOnce(
                 &mut crate::database_session::DatabaseSession<'session>,
@@ -40,20 +130,43 @@ impl StoreDatabase {
             + 'static,
         R: Send + 'static,
     {
-        self.database.call_database(operation).await
+        self.database.call_database(operation)
     }
 
-    pub async fn read<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
+    pub fn read<F, R, E>(
+        &self,
+        read: F,
+    ) -> impl std::future::Future<Output = Result<Result<R, E>, DbError>> + Send + '_
     where
         F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
         E: Send + 'static,
     {
-        self.database.read_store(read).await
+        self.database.read_store(read)
     }
 
     pub fn schema_version(&self) -> u32 {
         self.database.store_schema_version()
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn synced_tables_for_test(&self) -> Vec<coven_protocol::synced_schema::SyncedTable> {
+        self.database.synced_tables_for_test()
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn replace_with_database_image_for_test(
+        &self,
+        image: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.database
+            .replace_with_database_image_for_test(image)
+            .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn database_image_for_test(&self) -> Result<Vec<u8>, DbError> {
+        self.database.database_image_for_test().await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -100,11 +213,9 @@ impl StoreDatabase {
     }
 
     pub async fn persist_hlc_high_water(&self) -> Result<(), DbError> {
-        self.set_protocol_state(
-            coven_protocol::hlc::HIGHWATER_STATE_KEY,
-            &self.database.store_hlc_high_water(),
-        )
-        .await
+        let floor = self.database.store_hlc_high_water();
+        self.call_store(move |session| session.persist_clock_floor(&floor))
+            .await
     }
 
     pub fn blob_ref_from_change(
@@ -174,8 +285,22 @@ impl StoreDatabase {
 
     pub async fn store_current_publication(
         &self,
-    ) -> Result<crate::ObservedStorePublication, DbError> {
+    ) -> Result<crate::StorePublicationBoundary, DbError> {
         self.call_store(|session| session.store_current_publication())
+            .await
+    }
+
+    pub async fn store_publication_entries(
+        &self,
+    ) -> Result<
+        Vec<
+            coven_protocol::objects::ExactProtocolObject<
+                coven_protocol::store_commit::StorePublicationEntry,
+            >,
+        >,
+        DbError,
+    > {
+        self.call_store(|session| session.store_publication_entries())
             .await
     }
 
@@ -220,7 +345,10 @@ impl StoreDatabase {
     /// candidate is either activated or durably persisted, and a publisher of an
     /// already-persisted candidate takes it for that publication alone.
     pub async fn author_own_stream(&self) -> OwnStreamAuthorship {
-        self.database.author_own_store_stream().await
+        OwnStreamAuthorship {
+            _guard: self.database.author_own_store_stream().await,
+            database: self.clone(),
+        }
     }
 
     /// Wait for this drain's exclusive turn over the blob upload queue.
@@ -408,6 +536,53 @@ mod tests {
     use super::*;
     use coven_protocol::blob::{TransferLimits, BLOB_TOMBSTONE_GRACE};
     use std::{collections::BTreeSet, sync::Arc};
+
+    #[tokio::test]
+    async fn store_calls_dispatch_in_poll_order_and_ignore_unpolled_calls() {
+        let store = StoreDatabase::from_database(crate::tests::fixtures::open_outbox_database(
+            "poll-order",
+        ));
+        let unpolled = store.call_store(|session| session.set_protocol_state("dropped", "written"));
+        drop(unpolled);
+        assert_eq!(store.get_protocol_state("dropped").await.unwrap(), None);
+
+        let first = store.call_store(|session| session.set_protocol_state("order", "first"));
+        let second = store.call_store(|session| session.set_protocol_state("order", "second"));
+        second.await.unwrap();
+        first.await.unwrap();
+        assert_eq!(
+            store.get_protocol_state("order").await.unwrap().as_deref(),
+            Some("first")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_dispatched_store_call_preserves_its_commit() {
+        let store = StoreDatabase::from_database(crate::tests::fixtures::open_outbox_database(
+            "cancel-dispatched",
+        ));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut call = Box::pin(store.call_store(move |session| {
+            started_tx.send(()).expect("signal dispatched operation");
+            release_rx.recv().expect("release dispatched operation");
+            session.set_protocol_state("cancelled", "committed")
+        }));
+        tokio::select! {
+            result = started_rx => result.expect("operation started"),
+            result = &mut call => panic!("operation completed before release: {result:?}"),
+        }
+        drop(call);
+        release_tx.send(()).expect("release database worker");
+        assert_eq!(
+            store
+                .get_protocol_state("cancelled")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("committed")
+        );
+    }
 
     #[tokio::test]
     async fn read_only_store_reads_leave_writer_payload_cleanup_owed() {

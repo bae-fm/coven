@@ -1130,10 +1130,10 @@ async fn reserved_protocol_slot_read_returns_its_completed_exact_reference() {
         UserKeypair::generate(),
     );
     let root = coven_protocol::store_commit::ObjectHash::digest(b"reserved slot root");
-    let semantic = "store-v1/heads/device-a/1".to_string();
+    let semantic = "store-v1/acks/device-a/1".to_string();
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
-        ProtocolObjectDomain::StoreHead,
+        ProtocolObjectDomain::StoreAck,
     );
     let slot = storage
         .allocate_protocol_slot(&context, &semantic, ".json")
@@ -1173,9 +1173,9 @@ async fn protocol_publication_verifies_local_bytes_without_a_provider_body_read(
     );
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         ObjectHash::digest(b"local protocol verification root"),
-        ProtocolObjectDomain::StoreHead,
+        ProtocolObjectDomain::StoreAck,
     );
-    let semantic = "store-v1/heads/device-a/1";
+    let semantic = "store-v1/acks/device-a/1";
     let slot = storage
         .allocate_protocol_slot(&context, semantic, ".json")
         .await
@@ -1207,9 +1207,9 @@ async fn protocol_publication_refuses_local_semantic_mismatch_before_upload() {
     );
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         ObjectHash::digest(b"local protocol mismatch root"),
-        ProtocolObjectDomain::StoreHead,
+        ProtocolObjectDomain::StoreAck,
     );
-    let semantic = "store-v1/heads/device-a/1";
+    let semantic = "store-v1/acks/device-a/1";
     let slot = storage
         .allocate_protocol_slot(&context, semantic, ".json")
         .await
@@ -1267,7 +1267,7 @@ fn protocol_object_prepare_rejects_a_path_outside_its_domain() {
     );
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         ObjectHash::digest(b"prepare domain root"),
-        ProtocolObjectDomain::StoreHead,
+        ProtocolObjectDomain::StoreAck,
     );
     let invalid_semantic = "store-v1/commits/device-a/1";
     let slot =
@@ -1291,10 +1291,10 @@ async fn exact_delete_refuses_to_remove_different_bytes_in_the_same_slot() {
         UserKeypair::generate(),
     );
     let root = ObjectHash::digest(b"exact delete root");
-    let semantic = "store-v1/heads/device-a/1";
+    let semantic = "store-v1/acks/device-a/1";
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
-        ProtocolObjectDomain::StoreHead,
+        ProtocolObjectDomain::StoreAck,
     );
     let slot = storage
         .allocate_protocol_slot(&context, semantic, ".json")
@@ -1332,10 +1332,10 @@ async fn reserved_protocol_slot_rejects_a_mismatched_semantic_path_before_read()
     let root = coven_protocol::store_commit::ObjectHash::digest(b"reserved slot root");
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
-        ProtocolObjectDomain::StoreHead,
+        ProtocolObjectDomain::StoreAck,
     );
-    let original = "store-v1/heads/device-a/1".to_string();
-    let relocated = "store-v1/heads/device-b/1".to_string();
+    let original = "store-v1/acks/device-a/1".to_string();
+    let relocated = "store-v1/acks/device-b/1".to_string();
     let slot = storage
         .allocate_protocol_slot(&context, &original, ".json")
         .await
@@ -1414,7 +1414,7 @@ async fn protocol_object_read_rejects_domain_and_path_substitution() {
 
     let other_domain_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
-        ProtocolObjectDomain::StoreHead,
+        ProtocolObjectDomain::StoreAck,
     );
     assert!(matches!(
         storage
@@ -1442,30 +1442,30 @@ async fn signed_control_is_readable_across_store_key_rotations_but_packages_are_
         UserKeypair::generate(),
     );
     let root = ObjectHash::digest(b"control plane root");
-    let head_semantic = "store-v1/heads/device-a/1";
-    let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let ack_semantic = "store-v1/acks/device-a/1";
+    let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
-        ProtocolObjectDomain::StoreHead,
+        ProtocolObjectDomain::StoreAck,
     );
-    let head_slot = writer
-        .allocate_protocol_slot(&head_context, head_semantic, ".json")
+    let ack_slot = writer
+        .allocate_protocol_slot(&ack_context, ack_semantic, ".json")
         .await
-        .expect("allocate signed head");
-    let head = writer
+        .expect("allocate signed ack");
+    let ack = writer
         .prepare_protocol_object(
-            &head_context,
-            head_slot,
-            head_semantic,
+            &ack_context,
+            ack_slot,
+            ack_semantic,
             b"signed control bytes".to_vec(),
         )
-        .expect("prepare signed head");
+        .expect("prepare signed ack");
     writer
-        .create_protocol_object(&head)
+        .create_protocol_object(&ack)
         .await
-        .expect("create signed head");
+        .expect("create signed ack");
     assert_eq!(
         stale_reader
-            .read_protocol_object(&head_context, head.reference(), head_semantic)
+            .read_protocol_object(&ack_context, ack.reference(), ack_semantic)
             .await
             .expect("read signed control with a different Store key"),
         b"signed control bytes",

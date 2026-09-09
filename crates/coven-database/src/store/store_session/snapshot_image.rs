@@ -39,16 +39,7 @@ impl CreatedSnapshot {
 #[derive(Debug, Clone)]
 pub struct SnapshotBlobFact {
     pub fact: crate::StoreWriteBlobFact,
-    pub audience: SnapshotBlobAudience,
-}
-
-#[derive(Debug, Clone)]
-pub enum SnapshotBlobAudience {
-    Store,
-    Circle {
-        circle_id: coven_protocol::circle::CircleId,
-        control: crate::CirclePartitionControl,
-    },
+    pub audience: RemoteAudience,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -175,14 +166,16 @@ impl SnapshotDatabaseImage {
         Self::prepare(path)?.write_new(plaintext)
     }
 
-    fn prepare_snapshot(temp_dir: &Path) -> Result<Self, SnapshotImageError> {
+    pub(super) fn prepare_snapshot(temp_dir: &Path) -> Result<Self, SnapshotImageError> {
         Self::prepare(temp_dir.join("snapshot.db"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn capture_on(
         self,
-        connection: &rusqlite::Connection,
+        connection: &Connection,
         store_dir: &coven_foundation::store_dir::StoreDir,
+        mut authority: VerifiedStoreAuthority,
         root: &coven_protocol::store_commit::StoreRootRef,
         tables: &[SyncedTable],
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
@@ -236,6 +229,7 @@ impl SnapshotDatabaseImage {
         if let Err(error) = Self::project(
             &mut snapshot,
             store_dir,
+            &mut authority,
             root,
             tables,
             routing_key.as_ref(),
@@ -291,8 +285,133 @@ impl SnapshotDatabaseImage {
         Ok(self)
     }
 
+    /// Read the exact image's replay state without installing it in a live database.
+    /// The replication owner must authenticate acceptance and membership before admission.
+    pub fn read_replay_baseline(
+        plaintext: &[u8],
+        snapshot: PublishedStoreSnapshot,
+        genesis: &coven_protocol::store_commit::ResolvedStoreDeviceState,
+    ) -> Result<InstalledReplayBaseline, SnapshotImageError> {
+        if coven_protocol::store_commit::ObjectHash::digest(plaintext)
+            != snapshot.meta.image.image_hash
+        {
+            return Err(SnapshotImageError::Projection(
+                "snapshot image differs from its signed hash".into(),
+            ));
+        }
+        snapshot
+            .meta
+            .history_summary
+            .validate_snapshot_baseline()
+            .map_err(DbError::from)?;
+        let mut connection = Connection::open_in_memory()?;
+        crate::connection_io::deserialize_database_image_into(&mut connection, plaintext)?;
+        let coverage = snapshot.meta.coverage.clone();
+        let (reference, state) = if coverage.commits().is_empty() {
+            genesis.validate_canonical().map_err(DbError::from)?;
+            (
+                coven_protocol::store_commit::StoreDeviceStateRef::from_resolved(
+                    coverage.clone(),
+                    genesis,
+                )
+                .map_err(DbError::from)?,
+                genesis.clone(),
+            )
+        } else {
+            crate::store::store_device_state::store_device_state_for_history_cut_on(
+                &connection,
+                &coven_protocol::store_commit::StoreHistoryCut(coverage.commits().clone()),
+            )?
+        };
+        if state != snapshot.meta.state.devices
+            || reference != snapshot.meta.history_summary.post_state
+        {
+            return Err(SnapshotImageError::Projection(
+                "snapshot image device state differs from its signed cut".into(),
+            ));
+        }
+        let states = crate::store::store_device_state::load_covered_store_device_snapshots_on(
+            &connection,
+            &coverage,
+        )?;
+        if states.keys().any(|reference| {
+            snapshot
+                .meta
+                .history_summary
+                .causal_cut
+                .get(&reference.coord)
+                != Some(reference)
+        }) {
+            return Err(SnapshotImageError::Projection(
+                "snapshot image carries a device state outside its exact accepted history".into(),
+            ));
+        }
+        Ok(InstalledReplayBaseline::new(
+            coverage,
+            states,
+            Some(
+                coven_protocol::store_commit::OpenedRetainedMergeHistorySummary {
+                    summary: snapshot.meta.history_summary.clone(),
+                    post_state: state,
+                },
+            ),
+            Some(snapshot),
+        ))
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The caller authenticates this snapshot's accepted publication. Its image
+    /// carries exact Store blob provenance after source packages are retired.
+    pub fn contains_reclaimable_store_blob(
+        plaintext: &[u8],
+        snapshot: &coven_protocol::store_commit::SnapshotMeta,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<bool, SnapshotImageError> {
+        if ObjectHash::digest(plaintext) != snapshot.image.image_hash {
+            return Err(SnapshotImageError::Projection(
+                "snapshot blob inventory differs from its signed image hash".into(),
+            ));
+        }
+        if stored.locator().audience() != RemoteAudience::Store {
+            return Err(SnapshotImageError::Projection(
+                "Store snapshot inventory cannot authorize a Circle blob".into(),
+            ));
+        }
+        let mut connection = Connection::open_in_memory()?;
+        crate::connection_io::deserialize_database_image_into(&mut connection, plaintext)?;
+        let id = coven_protocol::remote_object::remote_object_id(stored.object());
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM blob_locators WHERE remote_object_id = ?1)",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+        crate::blob_records::validate_stored_locator_on(&connection, stored)?;
+        let remote = crate::remote_object_records::load_remote_object_on(&connection, id)?;
+        remote.validate_reclaimable_stored_blob(stored)?;
+        let owners = remote.stored_blob_commit_owners();
+        if owners.is_empty()
+            || owners
+                .iter()
+                .any(|owner| snapshot.history_summary.causal_cut.get(&owner.coord) != Some(owner))
+        {
+            return Err(SnapshotImageError::Projection(
+                "snapshot blob inventory has no exact accepted publication owner".into(),
+            ));
+        }
+        let live: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM row_blob_locators WHERE remote_object_id = ?1)",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(!live
+            && remote.snapshot_owners().next().is_none()
+            && remote.retained_replay_owners().next().is_none())
     }
 
     pub async fn read(&self) -> Result<Vec<u8>, SnapshotImageError> {
@@ -370,6 +489,7 @@ impl SnapshotDatabaseImage {
     fn project(
         connection: &mut Connection,
         store_dir: &coven_foundation::store_dir::StoreDir,
+        authority: &mut VerifiedStoreAuthority,
         root: &coven_protocol::store_commit::StoreRootRef,
         synced: &[SyncedTable],
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
@@ -403,12 +523,19 @@ impl SnapshotDatabaseImage {
         if matches!(audience, coven_protocol::circle::Audience::Store) {
             let records =
                 crate::store::store_session::StoreTransaction::new(&transaction, store_dir);
-            let mut authority = super::VerifiedStoreAuthority::default();
             records
-                .retain_snapshot_replay_inputs(&mut authority, root)
+                .project_shared_snapshot_replay_inputs(authority, root)
                 .map_err(SnapshotImageError::from)?;
             records
-                .retain_snapshot_device_states(&mut authority, root, coverage)
+                .retain_snapshot_replay_inputs(
+                    authority,
+                    root,
+                    &coven_protocol::store_commit::CommitFrontier::from_refs(coverage.clone())
+                        .map_err(DbError::from)?,
+                )
+                .map_err(SnapshotImageError::from)?;
+            records
+                .retain_snapshot_device_states(authority, root, coverage)
                 .map_err(SnapshotImageError::from)?;
         }
         let preserved_non_synced_tables = match audience {
@@ -461,7 +588,7 @@ impl SnapshotDatabaseImage {
                 .map_err(SnapshotImageError::from)?;
         }
 
-        scope_authenticated_blob_graph(&transaction, synced)?;
+        scope_authenticated_blob_graph(&transaction, synced, audience)?;
         transaction.commit().map_err(SnapshotImageError::from)?;
         if matches!(audience, coven_protocol::circle::Audience::Store) {
             connection.execute_batch("VACUUM").map_err(|error| {
@@ -505,7 +632,9 @@ impl SnapshotDatabaseImage {
 
     pub fn install_blob_graph(
         self,
+        owner: &coven_protocol::remote_object::SnapshotObjectOwner,
         blobs: &[crate::PreparedSnapshotBlob],
+        pending_store_snapshots: &BTreeSet<coven_protocol::objects::ObjectSlot>,
     ) -> Result<Self, SnapshotImageError> {
         let result = (|| {
             let source = std::fs::read(self.path()).map_err(SnapshotImageError::Io)?;
@@ -520,7 +649,8 @@ impl SnapshotDatabaseImage {
             let transaction = connection.transaction().map_err(SnapshotImageError::from)?;
             for blob in blobs {
                 blob.remote.validate().map_err(SnapshotImageError::from)?;
-                if blob.bindings.is_empty()
+                if blob.remote.snapshot_owners().collect::<Vec<_>>() != [owner]
+                    || blob.bindings.is_empty()
                     || blob
                         .bindings
                         .iter()
@@ -537,6 +667,12 @@ impl SnapshotDatabaseImage {
                     }
                 })?;
             }
+            crate::snapshot_objects::replace_snapshot_object_owners_on(
+                &transaction,
+                owner,
+                blobs,
+                pending_store_snapshots,
+            )?;
             transaction.commit().map_err(SnapshotImageError::from)?;
             connection.execute_batch("VACUUM").map_err(|error| {
                 SnapshotImageError::ProjectionSqlite {
@@ -627,13 +763,9 @@ impl SnapshotDatabaseImage {
             )
             .map_err(SnapshotImageError::from)?
             {
-                coven_protocol::circle::Audience::Store => SnapshotBlobAudience::Store,
+                coven_protocol::circle::Audience::Store => RemoteAudience::Store,
                 coven_protocol::circle::Audience::Circle(circle_id) => {
-                    SnapshotBlobAudience::Circle {
-                        circle_id,
-                        control: crate::active_circle_control(live, circle_id)
-                            .map_err(SnapshotImageError::from)?,
-                    }
+                    RemoteAudience::Circle(circle_id)
                 }
                 coven_protocol::circle::Audience::Local => {
                     return Err(SnapshotImageError::Projection(format!(
@@ -692,357 +824,8 @@ impl Drop for SnapshotDatabaseImage {
     }
 }
 
-impl StoreSession<'_> {
-    fn capture_snapshot_cut(
-        &self,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        temp_dir: &Path,
-        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-        audience: coven_protocol::circle::Audience,
-    ) -> Result<
-        (
-            CreatedSnapshot,
-            coven_protocol::store_commit::CommitFrontier,
-        ),
-        DbError,
-    > {
-        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
-        require_no_unpublished_store_writes(self.conn)?;
-        let snapshot = SnapshotDatabaseImage::prepare_snapshot(temp_dir)
-            .and_then(|image| {
-                records.capture_snapshot(
-                    image,
-                    root,
-                    self.synced_tables,
-                    routing_encryption,
-                    &audience,
-                )
-            })
-            .map_err(snapshot_image_db_error)?;
-        let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-            crate::store::materialized_commit_index::materialized_frontier_on(self.conn, None)?,
-        )
-        .map_err(|error| DbError::context("snapshot coverage", error))?;
-        Ok((snapshot, coverage))
-    }
-
-    /// Reconstruct the Store as of `cut` and serialize it as a replay baseline,
-    /// alongside the write-journal prefix the image now states.
-    ///
-    /// The live database is left exactly as it was: the projection is built
-    /// inside a transaction that is rolled back, the same way a Circle close
-    /// captures its cutoff image. What comes back is a database whose frontier
-    /// is `cut` — checked, not assumed — which is the one property a baseline
-    /// image must have, because replay applies the retained commits the cut
-    /// does not cover on top of it.
-    ///
-    /// It also folds in the local partitions of the writes settled at `cut`.
-    /// A local partition is stated nowhere else — no commit carries one, and an
-    /// image projected for an audience may not — so without this the journal is
-    /// the durable home of every local row a device has ever written, replayed
-    /// in full on every rebuild and never shorter. Folding them in is what lets
-    /// the advance adopting this image delete them, and the returned write ids
-    /// are exactly what it may delete.
-    pub(super) fn capture_replay_baseline_at_cut(
-        &mut self,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        cut: &coven_protocol::store_commit::CommitFrontier,
-        current_cut: &coven_protocol::store_commit::CommitFrontier,
-        snapshot_hash: crate::ObjectHash,
-        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-    ) -> Result<(Vec<u8>, Vec<crate::SettledStoreWrite>), DbError> {
-        let routing_key = if self.gates.has_scoped_graph() {
-            let encryption = routing_encryption.ok_or_else(|| {
-                DbError::Message(
-                    "scoped replay baseline capture requires Store routing encryption".to_string(),
-                )
-            })?;
-            Some(
-                coven_protocol::circle::derive_row_routing_key(encryption, root.store_root_hash)
-                    .map_err(DbError::from)?,
-            )
-        } else {
-            None
-        };
-        let folded = crate::StoreDatabase::settled_store_write_prefix_on(
-            crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
-            cut,
-        )?;
-        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let records =
-            crate::store::store_session::StoreTransaction::new(&transaction, self.store_dir);
-        let current_replay = self
-            .verified_store_authority
-            .replay_projection_result_for_root_on(
-                records,
-                root,
-                self.blob_decls,
-                self.gates,
-                self.synced_tables,
-                routing_key.as_ref(),
-                current_cut,
-            )?;
-        if current_replay.materialized_frontier()? != *current_cut {
-            return Err(DbError::Message(
-                "replay retirement proof does not cover the current Store frontier".to_string(),
-            ));
-        }
-        let mut crossed_cut = false;
-        for reference in current_replay.applied_order() {
-            if cut.covers_commit(reference) {
-                if crossed_cut {
-                    return Err(DbError::ReplayRetirementCutNotPrefix);
-                }
-            } else {
-                crossed_cut = true;
-            }
-        }
-        let replay = records.replay_projection_with_authority(
-            self.verified_store_authority,
-            root,
-            self.blob_decls,
-            self.gates,
-            self.synced_tables,
-            routing_key.as_ref(),
-            &std::collections::BTreeSet::new(),
-            Some(cut),
-            crate::ReplayJournal::Folded(&folded),
-            coven_protocol::membership::LocalStoreMembership::Current,
-        )?;
-        transaction.rollback().map_err(DbError::from)?;
-        let replay_frontier = replay.materialized_frontier()?;
-        if replay_frontier != *cut {
-            return Err(DbError::Message(
-                "retained replay baseline cut is not an exact Store frontier".to_string(),
-            ));
-        }
-        Ok((
-            replay.capture_replay_baseline(root, cut, snapshot_hash)?,
-            folded,
-        ))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn capture_circle_snapshot_at_cutoff(
-        &mut self,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        temp_dir: &Path,
-        routing_encryption: &coven_keys::encryption::EncryptionService,
-        routing_key: &coven_protocol::circle::RowRoutingKey,
-        circle_id: coven_protocol::circle::CircleId,
-        cutoff: &coven_protocol::store_commit::CommitFrontier,
-    ) -> Result<CreatedSnapshot, DbError> {
-        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let replay =
-            crate::store::store_session::StoreTransaction::new(&transaction, self.store_dir)
-                .replay_projection_with_authority(
-                    self.verified_store_authority,
-                    root,
-                    self.blob_decls,
-                    self.gates,
-                    self.synced_tables,
-                    Some(routing_key),
-                    &std::collections::BTreeSet::new(),
-                    Some(cutoff),
-                    crate::ReplayJournal::Omit,
-                    coven_protocol::membership::LocalStoreMembership::Current,
-                )?;
-        transaction.rollback().map_err(DbError::from)?;
-        let replay_frontier = replay.materialized_frontier()?;
-        if replay_frontier != *cutoff {
-            return Err(DbError::Message(
-                "Circle close cutoff is not an exact retained Store frontier".to_string(),
-            ));
-        }
-        SnapshotDatabaseImage::prepare_snapshot(temp_dir)
-            .and_then(|image| {
-                replay.capture_snapshot(
-                    image,
-                    root,
-                    self.synced_tables,
-                    Some(routing_encryption),
-                    &coven_protocol::circle::Audience::Circle(circle_id),
-                )
-            })
-            .map_err(snapshot_image_db_error)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    fn capture_snapshot_image_for_test(
-        &self,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        temp_dir: &Path,
-        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-        audience: coven_protocol::circle::Audience,
-    ) -> Result<Vec<u8>, DbError> {
-        SnapshotDatabaseImage::prepare_snapshot(temp_dir)
-            .and_then(|image| {
-                crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
-                    .capture_snapshot(
-                        image,
-                        root,
-                        self.synced_tables,
-                        routing_encryption,
-                        &audience,
-                    )
-            })
-            .and_then(|snapshot| snapshot.into_parts().0.read_and_discard())
-            .map_err(snapshot_image_db_error)
-    }
-}
-
-impl StoreDatabase {
-    pub async fn capture_store_snapshot_cut(
-        &self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        temp_dir: PathBuf,
-        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
-    ) -> Result<
-        (
-            CreatedSnapshot,
-            coven_protocol::store_commit::CommitFrontier,
-        ),
-        DbError,
-    > {
-        self.call_store(move |session| {
-            session.capture_snapshot_cut(
-                &root,
-                &temp_dir,
-                routing_encryption.as_ref(),
-                coven_protocol::circle::Audience::Store,
-            )
-        })
-        .await
-    }
-
-    pub async fn capture_circle_snapshot_cut(
-        &self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        temp_dir: PathBuf,
-        routing_encryption: coven_keys::encryption::EncryptionService,
-        circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<
-        (
-            CreatedSnapshot,
-            coven_protocol::store_commit::CommitFrontier,
-        ),
-        DbError,
-    > {
-        self.call_store(move |session| {
-            session.capture_snapshot_cut(
-                &root,
-                &temp_dir,
-                Some(&routing_encryption),
-                coven_protocol::circle::Audience::Circle(circle_id),
-            )
-        })
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn capture_circle_snapshot_at_cutoff(
-        &self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        temp_dir: PathBuf,
-        routing_encryption: coven_keys::encryption::EncryptionService,
-        routing_key: coven_protocol::circle::RowRoutingKey,
-        circle_id: coven_protocol::circle::CircleId,
-        cutoff: coven_protocol::store_commit::CommitFrontier,
-    ) -> Result<CreatedSnapshot, DbError> {
-        self.call_store(move |session| {
-            session.capture_circle_snapshot_at_cutoff(
-                &root,
-                &temp_dir,
-                &routing_encryption,
-                &routing_key,
-                circle_id,
-                &cutoff,
-            )
-        })
-        .await
-    }
-
-    pub async fn verify_circle_bootstrap_image(
-        &self,
-        image: Vec<u8>,
-        reference: coven_protocol::circle::CircleBootstrapRef,
-        circle_id: coven_protocol::circle::CircleId,
-        routing_key: Option<coven_protocol::circle::RowRoutingKey>,
-    ) -> Result<Vec<u8>, SnapshotImageError> {
-        self.call_store(move |session| {
-            let verification = verify_circle_bootstrap_image(
-                &image,
-                &reference,
-                circle_id,
-                session.synced_tables,
-                routing_key.as_ref(),
-            );
-            Ok(verification.map(|()| image))
-        })
-        .await
-        .map_err(SnapshotImageError::from)?
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn capture_snapshot_image_for_test(
-        &self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        temp_dir: PathBuf,
-        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
-    ) -> Result<Vec<u8>, DbError> {
-        self.call_store(move |session| {
-            session.capture_snapshot_image_for_test(
-                &root,
-                &temp_dir,
-                routing_encryption.as_ref(),
-                coven_protocol::circle::Audience::Store,
-            )
-        })
-        .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn capture_circle_snapshot_image_for_test(
-        &self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        temp_dir: PathBuf,
-        routing_encryption: coven_keys::encryption::EncryptionService,
-        circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<Vec<u8>, DbError> {
-        self.call_store(move |session| {
-            session.capture_snapshot_image_for_test(
-                &root,
-                &temp_dir,
-                Some(&routing_encryption),
-                coven_protocol::circle::Audience::Circle(circle_id),
-            )
-        })
-        .await
-    }
-}
-
 pub(super) fn snapshot_image_db_error(error: SnapshotImageError) -> DbError {
     DbError::from(error)
-}
-
-fn require_no_unpublished_store_writes(connection: &Connection) -> Result<(), DbError> {
-    let pending: i64 = connection
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM store_writes
-                WHERE status != '\"local_only\"'
-                  AND json_extract(status, '$.published') IS NULL
-            )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
-    if pending != 0 {
-        return Err(DbError::Message(
-            "snapshot cut refused while unpublished Store writes exist".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
@@ -1055,6 +838,11 @@ const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
     "store_device_state_snapshots",
     "store_device_states",
     "store_author_exclusion_activations",
+    "store_publication_current",
+    "store_publication_entries",
+    // Successor Circle heads locate their signed activation through this index.
+    // Keep it in both the shared image and the recipient's replay baseline.
+    "stream_activations",
     "circle_control_activations",
     "circle_access_cache",
     "circle_bootstrap_coverage",
@@ -1076,6 +864,7 @@ const CIRCLE_IMAGE_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
 fn scope_authenticated_blob_graph(
     connection: &Connection,
     synced: &[SyncedTable],
+    audience: &coven_protocol::circle::Audience,
 ) -> Result<(), SnapshotImageError> {
     connection
         .execute_batch(
@@ -1114,21 +903,54 @@ fn scope_authenticated_blob_graph(
     }
     // As above: the projection prunes the copy's rows, never this device's
     // payload claims.
-    connection
-        .execute_batch(
-            "DELETE FROM row_blob_locators
+    connection.execute_batch(
+        "DELETE FROM row_blob_locators
              WHERE NOT EXISTS (
                  SELECT 1 FROM snapshot_live_blob_bindings AS live
                  WHERE live.table_name = row_blob_locators.table_name
                    AND live.row_id = row_blob_locators.row_id
                    AND live.column_name = row_blob_locators.column_name
                    AND live.row_stamp = row_blob_locators.row_stamp
-             );
-             DELETE FROM blob_locators
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM row_blob_locators AS binding
-                 WHERE binding.remote_object_id = blob_locators.remote_object_id
-             );
+             );",
+    )?;
+    // Accepted Store blobs stay in the encrypted inventory until their exact
+    // deletion receipt. Their source packages may already have been retired.
+    // Circle images carry only their live row bindings and strip transport
+    // state after collecting the bootstrap closure.
+    let mut statement = connection.prepare(
+        "SELECT remote_object_id FROM blob_locators
+         WHERE NOT EXISTS (SELECT 1 FROM row_blob_locators AS binding
+                           WHERE binding.remote_object_id = blob_locators.remote_object_id)",
+    )?;
+    let orphan_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for object_id in orphan_ids {
+        let id = object_id
+            .parse()
+            .map_err(|error| DbError::context("snapshot inventory object id", error))?;
+        let remote = crate::remote_object_records::load_remote_object_on(connection, id)?;
+        let keep = if matches!(audience, coven_protocol::circle::Audience::Store)
+            && remote.is_activated_stored_blob()
+        {
+            let locator =
+                crate::blob_records::carried_blob_locator(&remote, "snapshot blob inventory")?;
+            locator.audience() == RemoteAudience::Store
+                && !remote.stored_blob_commit_owners().is_empty()
+        } else {
+            false
+        };
+        if !keep {
+            connection.execute(
+                "DELETE FROM blob_locators WHERE remote_object_id = ?1",
+                [&object_id],
+            )?;
+        }
+    }
+    connection
+        .execute_batch(
+            "
              DELETE FROM remote_objects
              WHERE NOT EXISTS (
                  SELECT 1 FROM blob_locators AS locator

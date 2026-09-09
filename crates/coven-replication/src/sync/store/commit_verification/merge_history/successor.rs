@@ -1,9 +1,8 @@
 use super::*;
+use coven_protocol::membership::AuthorStreamId;
 
 pub struct PreparedMergeHistorySuccessor {
     pub(crate) history_evidence: store_commit::RetainedMergeCommitEvidence,
-    pub(crate) head_slot: coven_protocol::objects::ObjectSlot,
-    pub(crate) predecessor_head: Option<store_commit::StoreDeviceHeadRef>,
 }
 
 pub struct MergeHistorySuccessorEvidence {
@@ -109,51 +108,56 @@ pub(crate) fn extend_acknowledgement_chain(
     }
 }
 
-fn insert_latest_announcement(
-    target: &mut BTreeMap<
-        protocol_membership::AuthorStreamId,
-        store_commit::RetainedAcceptedStoreAnnouncement,
-    >,
-    stream_id: protocol_membership::AuthorStreamId,
-    value: store_commit::RetainedAcceptedStoreAnnouncement,
-) -> Result<(), StorePullError> {
-    match target.entry(stream_id) {
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(value);
-            Ok(())
-        }
-        std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &value => Ok(()),
-        std::collections::btree_map::Entry::Occupied(mut entry)
-            if entry.get().value.commit.coord.sequence() < value.value.commit.coord.sequence() =>
-        {
-            entry.insert(value);
-            Ok(())
-        }
-        std::collections::btree_map::Entry::Occupied(entry)
-            if entry.get().value.commit.coord.sequence() > value.value.commit.coord.sequence() =>
-        {
-            Ok(())
-        }
-        std::collections::btree_map::Entry::Occupied(_) => Err(StorePullError::InvalidState(
-            "Merge predecessor checkpoints contain conflicting announcement heads at one sequence"
-                .to_string(),
-        )),
-    }
-}
-
 pub(crate) struct MergedRetainedMergeHistory {
+    reclaim: store_commit::RetainedReclaimState,
     causal_cut: BTreeMap<StoreCommitCoord, StoreBatchCommitRef>,
+    last_non_acknowledgement_commits: BTreeMap<AuthorStreamId, StoreBatchCommitRef>,
     registrations: BTreeMap<store_commit::StoreDeviceId, ReferencedStoreDeviceRegistration>,
     acknowledgements:
         BTreeMap<store_commit::StoreDeviceId, store_commit::RetainedAcknowledgementChain>,
     membership_proofs: BTreeMap<StoreBatchCommitRef, store_commit::RetainedMergeMembershipProof>,
-    announcement_frontier: BTreeMap<
-        protocol_membership::AuthorStreamId,
-        store_commit::RetainedAcceptedStoreAnnouncement,
+    pending_owner_promotions:
+        BTreeMap<store_commit::OwnerPromotionId, store_commit::RetainedOwnerPromotionRequest>,
+    pending_device_joins: BTreeMap<
+        StoreBatchCommitRef,
+        store_commit::device_join_exchange::DeviceJoinBootstrapClosure,
     >,
 }
 
 impl MergedRetainedMergeHistory {
+    fn include_non_acknowledgement_commit(
+        &mut self,
+        reference: StoreBatchCommitRef,
+    ) -> Result<(), StorePullError> {
+        match self
+            .last_non_acknowledgement_commits
+            .entry(reference.coord.stream_id)
+        {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(reference);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                match reference
+                    .coord
+                    .sequence()
+                    .cmp(&entry.get().coord.sequence())
+                {
+                    std::cmp::Ordering::Greater => {
+                        entry.insert(reference);
+                    }
+                    std::cmp::Ordering::Equal if entry.get() != &reference => {
+                        return Err(StorePullError::InvalidState(
+                            "Merge acknowledgement summaries disagree on an exact publication"
+                                .into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn insert_membership_proof(
         &mut self,
         reference: StoreBatchCommitRef,
@@ -183,15 +187,29 @@ pub(crate) fn merge_retained_merge_history(
     membership: &MembershipChain,
     predecessors: Vec<OpenedRetainedMergeHistorySummary>,
 ) -> Result<MergedRetainedMergeHistory, StorePullError> {
+    let reclaim = match predecessors.first() {
+        Some(previous) => previous.summary.reclaim.clone(),
+        None => store_commit::RetainedReclaimState::genesis(),
+    };
+    if predecessors
+        .iter()
+        .any(|previous| previous.summary.reclaim != reclaim)
+    {
+        return Err(StorePullError::InvalidState(
+            "snapshot predecessors disagree on live reclamation authority".to_string(),
+        ));
+    }
     let mut merged = MergedRetainedMergeHistory {
+        reclaim,
         causal_cut: BTreeMap::new(),
+        last_non_acknowledgement_commits: BTreeMap::new(),
         registrations: BTreeMap::new(),
         acknowledgements: BTreeMap::new(),
         membership_proofs: BTreeMap::new(),
-        announcement_frontier: BTreeMap::new(),
+        pending_owner_promotions: BTreeMap::new(),
+        pending_device_joins: BTreeMap::new(),
     };
     for predecessor in predecessors {
-        let predecessor_cut = predecessor.summary.causal_cut.clone();
         if predecessor.summary.store_root_hash != root.store_root_hash {
             return Err(StorePullError::InvalidState(
                 "Merge predecessor checkpoint belongs to another Store".to_string(),
@@ -227,6 +245,13 @@ pub(crate) fn merge_retained_merge_history(
                 "Merge predecessor checkpoints disagree on a Store coordinate",
             )?;
         }
+        for reference in predecessor
+            .summary
+            .last_non_acknowledgement_commits
+            .into_values()
+        {
+            merged.include_non_acknowledgement_commit(reference)?;
+        }
         for (key, value) in predecessor.summary.registrations {
             insert_exact(
                 &mut merged.registrations,
@@ -238,21 +263,24 @@ pub(crate) fn merge_retained_merge_history(
         for (key, value) in predecessor.summary.acknowledgements {
             insert_latest_acknowledgement(&mut merged.acknowledgements, key, value)?;
         }
-        for (key, mut value) in predecessor.summary.membership_proofs {
-            if predecessor_cut.get(&value.commit.coord) == Some(&value.commit)
-                && value.announcement.is_none()
-            {
-                let stream_id = value.commit.coord.stream_id;
-                value.announcement = predecessor
-                    .announcement_frontier
-                    .get(&stream_id)
-                    .filter(|announcement| announcement.value.commit == value.commit)
-                    .cloned();
-            }
-            merged.insert_membership_proof(key, value)?;
+        for (key, value) in predecessor.summary.pending_owner_promotions {
+            insert_exact(
+                &mut merged.pending_owner_promotions,
+                key,
+                value,
+                "Merge predecessor checkpoints disagree on an accepted promotion request",
+            )?;
         }
-        for (key, value) in predecessor.announcement_frontier {
-            insert_latest_announcement(&mut merged.announcement_frontier, key, value)?;
+        for (key, value) in predecessor.summary.pending_device_joins {
+            insert_exact(
+                &mut merged.pending_device_joins,
+                key,
+                value,
+                "Merge predecessor checkpoints disagree on an unconsumed device join",
+            )?;
+        }
+        for (key, value) in predecessor.summary.membership_proofs {
+            merged.insert_membership_proof(key, value)?;
         }
     }
     Ok(merged)
@@ -265,7 +293,7 @@ pub(crate) fn compose_merge_snapshot_history_summary(
     state: &ResolvedStoreDeviceState,
     author_ref: &StoreDeviceRegistrationRef,
     author: &StoreDeviceRegistration,
-    predecessors: Vec<coven_database::RetainedMergeHistoryCheckpoint>,
+    predecessors: &[coven_database::RetainedMergeHistoryCheckpoint],
 ) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
     let frontier = &coverage.0;
     let snapshot_predecessors = predecessors
@@ -278,6 +306,20 @@ pub(crate) fn compose_merge_snapshot_history_summary(
         })
         .collect();
     let mut merged = merge_retained_merge_history(root, membership, snapshot_predecessors)?;
+    let mut reclaim = merged.reclaim.clone();
+    reclaim
+        .extend(
+            predecessors
+                .iter()
+                .filter_map(|checkpoint| match checkpoint {
+                    coven_database::RetainedMergeHistoryCheckpoint::Commit(input) => {
+                        Some((input.commit_ref(), input.commit()))
+                    }
+                    coven_database::RetainedMergeHistoryCheckpoint::Snapshot(_) => None,
+                }),
+        )
+        .map_err(StorePullError::Protocol)?;
+    merged.reclaim = reclaim;
     for checkpoint in predecessors {
         let coven_database::RetainedMergeHistoryCheckpoint::Commit(materialization) = checkpoint
         else {
@@ -291,16 +333,17 @@ pub(crate) fn compose_merge_snapshot_history_summary(
             materialization.verified_commit().author(),
             materialization.registrations(),
             materialization.history_evidence(),
-            materialization.activation_head(),
-            materialization.activation_head_object(),
         )?;
     }
     let MergedRetainedMergeHistory {
+        reclaim,
         causal_cut,
+        last_non_acknowledgement_commits,
         mut registrations,
         acknowledgements,
         membership_proofs,
-        announcement_frontier,
+        pending_owner_promotions,
+        pending_device_joins,
     } = merged;
     author_ref
         .verify_registration(author)
@@ -313,16 +356,19 @@ pub(crate) fn compose_merge_snapshot_history_summary(
         "Merge snapshot author registration conflicts with retained authority",
     )?;
     let summary = RetainedVerifiedMergeHistorySummary {
+        reclaim,
         version: store_commit::STORE_PROTOCOL_VERSION,
         store_root_hash: root.store_root_hash,
         causal_cut,
+        last_non_acknowledgement_commits,
         post_state: StoreDeviceStateRef::from_resolved(coverage.clone(), state)
             .map_err(StorePullError::Protocol)?,
         membership_floor: store_commit::MembershipCausalFloor::from_membership(membership),
         registrations,
         acknowledgements,
         membership_proofs,
-        announcement_frontier,
+        pending_owner_promotions,
+        pending_device_joins,
     };
     // Assembled, not yet valid — see
     // `validate_composed_snapshot_history_summary`, which the caller runs once
@@ -340,8 +386,6 @@ fn insert_snapshot_commit(
     author: &StoreDeviceRegistration,
     registrations: &[ActivatedStoreDeviceRegistration],
     evidence: &store_commit::RetainedMergeCommitEvidence,
-    activation_head: &StoreDeviceHead,
-    activation_head_object: &ExactObjectRef,
 ) -> Result<(), StorePullError> {
     if commit.store_root_hash != root.store_root_hash {
         return Err(StorePullError::InvalidState(
@@ -354,6 +398,12 @@ fn insert_snapshot_commit(
         commit_ref.clone(),
         "retained Merge commits disagree on a Store coordinate",
     )?;
+    if !commit
+        .operations()
+        .is_some_and(store_commit::StoreCommitOperations::is_acknowledgement_only)
+    {
+        merged.include_non_acknowledgement_commit(commit_ref.clone())?;
+    }
     for registration in registrations {
         insert_exact(
             &mut merged.registrations,
@@ -382,23 +432,10 @@ fn insert_snapshot_commit(
             commit,
         )?;
     }
-    let announcement = store_commit::RetainedAcceptedStoreAnnouncement {
-        reference: store_commit::StoreDeviceHeadRef {
-            head_hash: activation_head.head_hash(),
-            object: activation_head_object.clone(),
-        },
-        value: activation_head.clone(),
-    };
     if let Some(proof) = &evidence.membership_proof {
-        let mut proof = proof.clone();
-        proof.announcement = Some(announcement.clone());
-        merged.insert_membership_proof(commit_ref.clone(), *proof)?;
+        merged.insert_membership_proof(commit_ref.clone(), *proof.clone())?;
     }
-    insert_latest_announcement(
-        &mut merged.announcement_frontier,
-        commit_ref.coord.stream_id,
-        announcement,
-    )
+    Ok(())
 }
 
 /// Recompose a snapshot's history summary from the commits it covers, resuming
@@ -422,6 +459,15 @@ pub(crate) fn compose_verified_merge_snapshot_history_summary<'a>(
 ) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
     let mut merged =
         merge_retained_merge_history(root, membership, baseline.into_iter().collect())?;
+    let commits = commits.into_iter().collect::<Vec<_>>();
+    merged
+        .reclaim
+        .extend(
+            commits
+                .iter()
+                .map(|verified| (verified.verified.reference(), verified.verified.value())),
+        )
+        .map_err(StorePullError::Protocol)?;
     for verified in commits {
         insert_snapshot_commit(
             &mut merged,
@@ -431,16 +477,17 @@ pub(crate) fn compose_verified_merge_snapshot_history_summary<'a>(
             verified.verified.author(),
             &verified.registrations,
             &verified.history_evidence,
-            &verified.activation_head,
-            &verified.activation_head_object,
         )?;
     }
     let MergedRetainedMergeHistory {
+        reclaim,
         causal_cut,
+        last_non_acknowledgement_commits,
         mut registrations,
         acknowledgements,
         membership_proofs,
-        announcement_frontier,
+        pending_owner_promotions,
+        pending_device_joins,
     } = merged;
     author_ref
         .verify_registration(author)
@@ -453,16 +500,19 @@ pub(crate) fn compose_verified_merge_snapshot_history_summary<'a>(
         "Merge snapshot author registration conflicts with retained authority",
     )?;
     let summary = RetainedVerifiedMergeHistorySummary {
+        reclaim,
         version: store_commit::STORE_PROTOCOL_VERSION,
         store_root_hash: root.store_root_hash,
         causal_cut,
+        last_non_acknowledgement_commits,
         post_state: StoreDeviceStateRef::from_resolved(coverage.clone(), state)
             .map_err(StorePullError::Protocol)?,
         membership_floor: store_commit::MembershipCausalFloor::from_membership(membership),
         registrations,
         acknowledgements,
         membership_proofs,
-        announcement_frontier,
+        pending_owner_promotions,
+        pending_device_joins,
     };
     // Assembled, not yet valid: each device's acknowledgement chain still has to
     // be completed back to sequence one, which needs a walker this function does

@@ -10,14 +10,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .sign_device_admission_approval(request, admission, &self.verified_root)
     }
 
-    async fn activate(
-        &mut self,
-        batch: crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch,
-    ) -> Result<StoreBatchCommitRef, crate::sync::store::StoreError> {
-        let plan = self.writer.prepare_plan().await?;
-        self.writer.activate(plan, batch).await
-    }
-
     async fn publish_cross_principal_challenge(
         &mut self,
         authorization: &DeviceJoinChallengePublicationAuthorization,
@@ -99,7 +91,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }
             _ => current,
         };
-        let initial = durable.clone();
         if provider_admin.provider == request.peer_provider {
             return match &*durable.progress {
                 DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ApprovalPrepared(approval)) => {
@@ -123,16 +114,37 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 _ => Err(DeviceJoinError::JournalConflict),
             };
         }
-        let (grant, prepared, prepared_progress) = match &*durable.progress {
+        let (grant, grant_ref, activation, activated_progress) = match &*durable.progress {
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ApprovalPrepared(approval)) => {
                 return Ok(approval.clone())
             }
-            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AccessGrantPrepared {
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AccessGrantActivated {
                 request: durable_request,
                 grant,
+                grant_ref,
+                activation,
+            }) if durable_request == &request => (
+                grant.clone(),
+                grant_ref.clone(),
+                activation.clone(),
+                durable.clone(),
+            ),
+            DeviceJoinRoleProgress::Owner(OwnerJoinProgress::StorePublicationPrepared(
                 prepared,
-            }) if durable_request == &request => {
-                (grant.clone(), prepared.restore()?, durable.clone())
+            )) if matches!(&prepared.operation, OwnerJoinPublication::ProviderAccessGrant { request: durable, .. } if durable == &request) =>
+            {
+                let OwnerJoinPublication::ProviderAccessGrant { grant, .. } = &prepared.operation
+                else {
+                    unreachable!("matched provider access grant publication")
+                };
+                let grant_ref = prepared.candidate.commit.provider_access_grants()[0].clone();
+                let activation = self.publish_owner_publication(prepared.clone()).await?;
+                (
+                    grant.clone(),
+                    grant_ref,
+                    activation,
+                    journal.current().await?,
+                )
             }
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AccessRequested(durable_request))
                 if durable_request == &request =>
@@ -180,47 +192,29 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     &prefix,
                     grant.to_bytes(),
                 )?;
-                let prepared_progress = journal
-                    .advance(
-                        &initial,
-                        OwnerJoinProgress::AccessGrantPrepared {
+                let grant_ref = StoreMemberProviderAccessGrantRef::from_grant(
+                    &grant,
+                    prepared.reference().clone(),
+                );
+                let plan = self.writer.prepare_plan().await?;
+                let publication = self
+                    .prepare_owner_publication(
+                        durable.clone(),
+                        OwnerJoinPublication::ProviderAccessGrant {
                             request: request.clone(),
                             grant: grant.clone(),
-                            prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
                         },
+                        plan,
+                        crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ProviderAccessGrant(
+                            grant_ref.clone(),
+                        ),
                     )
                     .await?;
-                (grant, prepared, prepared_progress)
+                let activation = self.publish_owner_publication(publication).await?;
+                (grant, grant_ref, activation, journal.current().await?)
             }
             _ => return Err(DeviceJoinError::JournalConflict),
         };
-        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            request.offer.store_root.store_root_hash,
-            ProtocolObjectDomain::ProviderAccessGrant,
-        );
-        let prefix =
-            coven_protocol::store_commit::provider_access_grant_semantic_prefix(&grant.grant_id);
-        self.storage
-            .create_verified_protocol_object(&context, &prepared, &prefix, &grant.to_bytes())
-            .await
-            .map_err(|error| {
-                DeviceJoinError::prepared_object(
-                    error,
-                    DeviceJoinError::Provider(
-                        "provider access grant prepared object differs from its signed bytes"
-                            .to_string(),
-                    ),
-                )
-            })?;
-        let grant_ref =
-            StoreMemberProviderAccessGrantRef::from_grant(&grant, prepared.reference().clone());
-        let activation = self
-            .activate(
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ProviderAccessGrant(
-                    grant_ref.clone(),
-                ),
-            )
-            .await?;
         let challenge_context = request.cross_challenge_context();
         let probe_id = coven_protocol::provider::ProviderProbeId::from_bytes(
             *ObjectHash::digest(database.new_store_write_id().as_str().as_bytes()).as_bytes(),
@@ -249,7 +243,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         )?;
         journal
             .advance(
-                &prepared_progress,
+                &activated_progress,
                 OwnerJoinProgress::ApprovalPrepared(approval.clone()),
             )
             .await?;

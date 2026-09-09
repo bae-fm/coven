@@ -118,14 +118,7 @@ impl StoreSecurity {
             SyncKeyCustody::Current => self.master_keys.clone(),
             SyncKeyCustody::Prepared(master_keys) => master_keys,
         };
-        let routing_encryption = if storage.is_plaintext() {
-            None
-        } else {
-            let keyring = master_keys
-                .unlock()?
-                .ok_or(coven_keys::keys::RoutingEncryptionError::NotEstablished)?;
-            Some(EncryptionService::from(keyring))
-        };
+        let routing_encryption = routing_encryption(&storage, master_keys.as_ref())?;
         coven_replication::sync::cycle::PreparedSyncComponents::prepare(
             database,
             self.store_dir.clone(),
@@ -142,13 +135,15 @@ impl StoreSecurity {
     pub(crate) async fn load_store(
         &self,
         database: coven_database::StoreDatabase,
-        storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
+        storage: Arc<CloudSyncConnection>,
     ) -> Result<coven_replication::sync::Store, crate::store_sync::SyncError> {
+        let routing_encryption = routing_encryption(&storage, self.master_keys.as_ref())?;
         coven_replication::sync::Store::load(
             database,
             storage,
             self.store_dir.clone(),
             self.required_identity()?,
+            routing_encryption,
         )
         .await
         .map_err(crate::store_sync::SyncError::from)
@@ -245,13 +240,6 @@ impl StoreSecurity {
 
     pub(crate) fn required_identity_public_key_hex(&self) -> Result<String, KeyError> {
         Ok(coven_keys::keys::public_key_hex(&self.required_identity()?))
-    }
-
-    pub(crate) fn identity_public_key(&self) -> Result<Option<[u8; 32]>, KeyError> {
-        Ok(self
-            .identity
-            .unlock()?
-            .map(|identity| identity.public_key()))
     }
 
     pub(crate) fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
@@ -466,6 +454,19 @@ impl StoreSecurity {
             authority,
         }))
     }
+}
+
+fn routing_encryption(
+    storage: &CloudSyncConnection,
+    master_keys: &dyn MasterKeyCustody,
+) -> Result<Option<EncryptionService>, crate::store_sync::SyncError> {
+    if storage.is_plaintext() {
+        return Ok(None);
+    }
+    let keyring = master_keys
+        .unlock()?
+        .ok_or(coven_keys::keys::RoutingEncryptionError::NotEstablished)?;
+    Ok(Some(EncryptionService::from(keyring)))
 }
 
 #[cfg(test)]

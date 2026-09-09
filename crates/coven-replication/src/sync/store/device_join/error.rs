@@ -78,20 +78,6 @@ impl From<crate::sync::store::AnchoredChainError> for DeviceJoinError {
     }
 }
 
-impl DeviceJoinError {
-    /// A retained prepared object that opens to different bytes is the caller's
-    /// `mismatch` verdict; every other failure is the storage failure itself.
-    pub(crate) fn prepared_object(
-        error: coven_protocol::objects::StorageError,
-        mismatch: Self,
-    ) -> Self {
-        match error {
-            coven_protocol::objects::StorageError::PreparedObjectMismatch(_) => mismatch,
-            error => Self::Storage(error),
-        }
-    }
-}
-
 impl From<coven_protocol::store_commit::device_join_exchange::DeviceJoinExchangeError>
     for DeviceJoinError
 {

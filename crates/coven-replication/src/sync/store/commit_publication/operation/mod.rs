@@ -4,23 +4,16 @@ use crate::sync::store::commit_verification::commit::StoreMembershipObjectVerifi
 use crate::sync::store::membership::MembershipMutationError;
 use coven_database::VerifiedMergeMembershipObjects;
 use coven_protocol::membership::{
-    self, MembershipChain, MembershipChange, MembershipEntry, MembershipError, MembershipHeadRef,
+    self, MembershipChain, MembershipEntry, MembershipError, StoreAuthorityChange,
 };
 use coven_protocol::membership_mutation::{
     PreparedMembershipPublication, PreparedMembershipTransition,
 };
-use coven_protocol::objects::{
-    ProtocolObjectContext, ProtocolObjectDomain, StorageError, StoreObjectError,
-};
-use coven_protocol::store_commit::{
-    self, commit_semantic_prefix, head_slot_prefix, membership_head_slot_prefix,
-    StoreBatchCommitDeletionTarget, StoreDeviceHeadRef,
-};
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::store_commit::{self, commit_semantic_prefix, membership_head_slot_prefix};
 use coven_protocol::wrapped_store_key::{PreparedWrappedStoreKey, WrappedStoreKeyRef};
-use coven_storage as store_objects;
 use std::sync::Arc;
 
-mod abandonment;
 mod blob_lifecycle;
 pub(crate) use blob_lifecycle::TombstoneGcError;
 mod blob_preparation;
@@ -31,6 +24,7 @@ pub(super) mod membership_mutation_journal;
 mod preparation;
 
 mod commit_publication;
+pub(crate) use commit_publication::StoreOperationPublicationOutcome;
 mod facades;
 mod membership_commands;
 mod membership_publication;
@@ -43,8 +37,8 @@ pub(crate) use blob_preparation::prepare_partition_blob_locator;
 
 use membership_mutation_journal::{
     decode_membership_mutation, exact_owned_remote, AdmissionMutationPlan, MembershipMutationPlan,
-    MembershipMutationProgress, MutationPersistence, ReplacementWrappedKey, ResolveMutationPlan,
-    RevokeMembershipPublication, RevokeMutationPlan,
+    MembershipMutationProgress, MutationPersistence, PreparedMembershipActivation,
+    ReplacementWrappedKey, ResolveMutationPlan, RevokeMutationPlan,
 };
 
 pub(crate) struct MergeConflictResolutionCommitPlan {
@@ -53,6 +47,7 @@ pub(crate) struct MergeConflictResolutionCommitPlan {
     root: coven_protocol::store_commit::StoreRootRef,
     coord: coven_protocol::store_commit::StoreCommitCoord,
     order: coven_protocol::store_commit::StoreCommitOrder,
+    publication_previous: coven_database::ObservedStorePublication,
     membership: coven_protocol::membership::MembershipChain,
     device_state: coven_protocol::store_commit::StoreDeviceStateRef,
     device_state_value: coven_protocol::store_commit::ResolvedStoreDeviceState,
@@ -66,6 +61,7 @@ impl MergeConflictResolutionCommitPlan {
         root: coven_protocol::store_commit::StoreRootRef,
         coord: coven_protocol::store_commit::StoreCommitCoord,
         order: coven_protocol::store_commit::StoreCommitOrder,
+        publication_previous: coven_database::ObservedStorePublication,
         authorization: crate::sync::store::merge_conflict::MergeConflictResolutionAuthorization,
     ) -> Self {
         Self {
@@ -74,6 +70,7 @@ impl MergeConflictResolutionCommitPlan {
             root,
             coord,
             order,
+            publication_previous,
             membership: authorization.membership,
             device_state: authorization.device_state_ref,
             device_state_value: authorization.device_state,
@@ -193,6 +190,7 @@ impl MergeConflictResolutionCommitPlan {
             self.root,
             self.coord,
             self.order,
+            self.publication_previous,
             membership_state,
             self.device_state,
             coven_protocol::store_commit::StoreOperationMembershipAuthority {

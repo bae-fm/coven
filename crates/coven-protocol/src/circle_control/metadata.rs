@@ -111,6 +111,8 @@ impl CircleMetadata {
                 .map(CircleMetadataCoord::stream_key),
         );
         !self.name.trim().is_empty()
+            && crate::hlc::Timestamp::parse(&self.metadata_stamp)
+                .is_some_and(|stamp| stamp.to_string() == self.metadata_stamp)
             && position_is_valid
             && self
                 .dependencies

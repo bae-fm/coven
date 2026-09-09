@@ -2,20 +2,14 @@ use super::*;
 
 impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
-    pub(crate) async fn install_device_join_bootstrap_for_test(
-        &mut self,
-        plan: coven_database::DeviceJoinBootstrapPlan,
-    ) -> Result<(), StoreError> {
-        let membership = self.membership.clone();
-        let identity = self.identity.clone();
-        let resolved = self
-            .history
-            .resolve_device_join_bootstrap(plan, &membership, &identity, None)
-            .await?;
+    pub(crate) async fn circle_publication_context_for_test(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+        control: coven_protocol::circle::CircleControlCoord,
+    ) -> Result<coven_protocol::circle_activation::CircleEpochAccess, coven_database::DbError> {
         self.database
-            .install_device_join_bootstrap(self.root.clone(), resolved)
+            .circle_publication_context(circle_id, control)
             .await
-            .map_err(StoreError::from)
     }
 
     #[cfg(test)]
@@ -105,85 +99,5 @@ impl<'storage> RestoringStore<'storage> {
         coven_database::DbError,
     > {
         self.database.circle_bootstrap_replay_inputs().await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn transfer_prepared_write_from_for_test(
-        &self,
-        source: &StoreDatabase,
-        write_id: &coven_protocol::write::WriteId,
-    ) -> Result<(), coven_database::DbError> {
-        source
-            .transfer_prepared_write_to_for_test(&self.database, write_id)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn blocked_merge_candidate_for_test(
-        &self,
-        write_id: coven_protocol::write::WriteId,
-    ) -> Result<Option<coven_database::BlockedMergeCandidate>, coven_database::DbError> {
-        self.database.blocked_merge_candidate(write_id).await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn tamper_author_exclusion_locator_for_test(
-        &self,
-        exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
-        candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
-        tamper: coven_database::AuthorExclusionLocatorTamper,
-    ) -> Result<(), coven_database::DbError> {
-        self.database
-            .tamper_author_exclusion_locator_for_test(exclusion, candidate, tamper)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn author_exclusion_activation_for_candidate_for_test(
-        &self,
-        candidate: coven_protocol::store_commit::StoreBatchCommitRef,
-        author: coven_protocol::store_commit::StoreDeviceRegistrationRef,
-    ) -> Result<Option<coven_database::AuthorExclusionActivationLocator>, coven_database::DbError>
-    {
-        self.database
-            .author_exclusion_activation_for_candidate(self.root.clone(), candidate, author)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn author_exclusion_activation_evidence_for_test(
-        &self,
-        exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
-    ) -> Result<(String, String), coven_database::DbError> {
-        self.database
-            .author_exclusion_activation_evidence_for_test(exclusion)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn merge_candidate_cleanup_pending_for_test(
-        &self,
-        write_id: &coven_protocol::write::WriteId,
-    ) -> Result<bool, coven_database::DbError> {
-        self.database
-            .merge_candidate_cleanup_pending(write_id)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn abandon_merge_candidate_for_test(
-        &mut self,
-        write_id: coven_protocol::write::WriteId,
-    ) -> Result<crate::sync::store::merge_conflict::MergeCandidateAbandonment, StoreError> {
-        self.history
-            .abandon_excluded_merge_candidate(write_id)
-            .await
-            .and_then(|result| {
-                result.ok_or_else(|| {
-                    StoreError::InvalidOutbound(
-                        "restored candidate has no verified exclusion authority".to_string(),
-                    )
-                })
-            })
     }
 }

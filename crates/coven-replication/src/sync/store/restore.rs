@@ -7,15 +7,14 @@ use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{PreparedExactObject, ProtocolObjectDomain};
 use coven_protocol::store_commit::StoreRootRef;
 use coven_protocol::store_commit::{
-    ack_slot_prefix, commit_semantic_prefix, head_slot_prefix, owner_recovery_semantic_prefix,
-    registration_semantic_prefix, snapshot_slot_prefix, ActivatedStoreDeviceRegistrationRef,
-    CommitFrontier, DeviceRecoveryId, DeviceRecoveryReadiness, DeviceStreamAnchor, ObjectHash,
-    OwnerRecoveryNode, OwnerRecoveryNodeRef, OwnerRecoveryPosition, StoreAck,
-    StoreAckExclusionState, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
-    StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut,
-    StoreOperationMembershipAuthority, SuccessorLink,
+    ack_slot_prefix, commit_semantic_prefix, owner_recovery_semantic_prefix,
+    registration_semantic_prefix, ActivatedStoreDeviceRegistrationRef, CommitFrontier,
+    DeviceRecoveryId, DeviceRecoveryReadiness, DeviceStreamAnchor, ObjectHash, OwnerRecoveryNode,
+    OwnerRecoveryNodeRef, OwnerRecoveryPosition, StoreAck, StoreAckRef, StoreBatchCommit,
+    StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder, StoreDeviceRegistration,
+    StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
+    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
+    StoreHistoryCut, StoreOperationMembershipAuthority, SuccessorLink,
 };
 
 /// A snapshot-installed Store that retains the exact remote authority used to
@@ -23,6 +22,7 @@ use coven_protocol::store_commit::{
 /// instead of reconstructing it from database rows and cloud objects.
 mod continuation;
 mod history;
+mod membership_publication;
 use recovery_preparation::*;
 mod recovery_preparation;
 mod restore_test_support;
@@ -44,101 +44,21 @@ impl<'storage> RestoringStore<'storage> {
         &mut self,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<StoreHistoryCut, StoreRegistrationError> {
-        let target = self
-            .history
-            .current_merge_authority_cut(&self.membership)
-            .await?;
-        loop {
-            let before = CommitFrontier::from_refs(
-                self.database
-                    .materialized_frontier()
-                    .await
-                    .map_err(StoreRegistrationError::from)?,
-            )
-            .map_err(StoreRegistrationError::from)?;
-            if before.covers(&target.frontier()) {
-                return Ok(StoreHistoryCut(before.0));
-            }
-
-            let pulled = self.pull(routing_encryption).await?;
-            let after = CommitFrontier::from_refs(
-                self.database
-                    .materialized_frontier()
-                    .await
-                    .map_err(StoreRegistrationError::from)?,
-            )
-            .map_err(StoreRegistrationError::from)?;
-            if after.covers(&target.frontier()) {
-                return Ok(StoreHistoryCut(after.0));
-            }
-            if !pulled.held_positions.is_empty() {
-                return Err(StoreRegistrationError::Invalid(format!(
-                    "Owner recovery predecessor history is held at {:?}",
-                    pulled.held_positions
-                )));
-            }
-            if after == before {
-                return Err(StoreRegistrationError::Invalid(
-                    "Owner recovery predecessor history made no progress".into(),
-                ));
-            }
+        let pulled = self.pull(routing_encryption).await?;
+        if !pulled.held_positions.is_empty() {
+            return Err(StoreRegistrationError::Invalid(format!(
+                "Owner recovery predecessor history is held at {:?}",
+                pulled.held_positions
+            )));
         }
-    }
-
-    /// Record where an adopted registration's published streams stand: the
-    /// acknowledgement head the pulled history activated for it (the initial
-    /// acknowledgement when it never published another) and the snapshot its
-    /// stream on the provider ends on.
-    async fn resume_adopted_device_streams(
-        &self,
-        registration_ref: &StoreDeviceRegistrationRef,
-    ) -> Result<(), StoreRegistrationError> {
-        let registration = self
-            .database
-            .activated_store_device_registration_for_device(registration_ref.device_id)
-            .await
-            .map_err(StoreRegistrationError::from)?
-            .ok_or_else(|| {
-                StoreRegistrationError::Invalid(
-                    "adopted Owner recovery registration is not activated".into(),
-                )
-            })?;
-        let history = self.history.restore_history();
-        let latest_ack_ref = match self
-            .database
-            .activated_store_ack(registration_ref)
-            .await
-            .map_err(StoreRegistrationError::from)?
-        {
-            Some(activated) => activated.reference,
-            None => {
-                let durable = self
-                    .database
-                    .latest_local_store_device_registration()
-                    .await
-                    .map_err(StoreRegistrationError::from)?
-                    .ok_or_else(|| {
-                        StoreRegistrationError::Invalid(
-                            "adopted Owner recovery registration has no local journal".into(),
-                        )
-                    })?;
-                durable.initial_ack_ref
-            }
-        };
-        let latest_ack = history
-            .load_store_ack(&latest_ack_ref, registration.value())
-            .await?;
-        let latest_snapshot = history
-            .load_store_snapshot_stream(registration_ref, registration.value())
-            .await
-            .map_err(|error| StoreRegistrationError::SnapshotStream(Box::new(error)))?
-            .into_iter()
-            .last()
-            .map(|snapshot| (snapshot.reference, snapshot.meta));
-        self.database
-            .resume_local_device_streams((latest_ack_ref, latest_ack), latest_snapshot)
-            .await
-            .map_err(StoreRegistrationError::from)
+        CommitFrontier::from_refs(
+            self.database
+                .materialized_frontier()
+                .await
+                .map_err(StoreRegistrationError::from)?,
+        )
+        .map(|frontier| StoreHistoryCut(frontier.0))
+        .map_err(StoreRegistrationError::from)
     }
 
     pub async fn recover_owner_device(
@@ -161,6 +81,9 @@ impl<'storage> RestoringStore<'storage> {
             return Err(StoreRegistrationError::Invalid(
                 "Owner recovery authority differs from the active root founder grant".into(),
             ));
+        }
+        if let Some(publication) = database.owner_recovery_publication().await? {
+            return self.publish_owner_recovery(publication).await;
         }
         let coven_protocol::store_commit::GrantStreamAnchor::OwnerRecovery { first_slot } =
             &protocol.descriptor.founder_recovery
@@ -234,11 +157,6 @@ impl<'storage> RestoringStore<'storage> {
             )
             .await?
         {
-            // The device this authority derives already registered in an
-            // earlier life and published since; resume its streams from the
-            // heads the provider holds rather than the registration's first
-            // slots.
-            self.resume_adopted_device_streams(&registration).await?;
             return Ok(registration);
         }
         let context = |domain| {
@@ -332,32 +250,13 @@ impl<'storage> RestoringStore<'storage> {
             self.load_published_recovery_readiness(&node.exact().value, &origin)
                 .await?
         } else {
-            let head_context = context(coven_protocol::objects::ProtocolObjectDomain::StoreHead);
             let ack_context = context(coven_protocol::objects::ProtocolObjectDomain::StoreAck);
-            let snapshot_context =
-                context(coven_protocol::objects::ProtocolObjectDomain::StoreSnapshotMeta);
             let registration_context =
                 context(coven_protocol::objects::ProtocolObjectDomain::StoreDeviceRegistration);
-            let first_head = storage
-                .allocate_protocol_slot(
-                    &head_context,
-                    &head_slot_prefix(&device_id.to_string(), 1),
-                    ".json",
-                )
-                .await
-                .map_err(StoreObjectError::from)?;
             let first_ack = storage
                 .allocate_protocol_slot(
                     &ack_context,
                     &ack_slot_prefix(&device_id.to_string(), 1),
-                    ".json",
-                )
-                .await
-                .map_err(StoreObjectError::from)?;
-            let first_snapshot = storage
-                .allocate_protocol_slot(
-                    &snapshot_context,
-                    &snapshot_slot_prefix(&device_id.to_string(), 0),
                     ".json",
                 )
                 .await
@@ -376,14 +275,8 @@ impl<'storage> RestoringStore<'storage> {
                 root.clone(),
                 origin.clone(),
                 provider,
-                DeviceStreamAnchor::StoreAnnouncements {
-                    first_slot: first_head,
-                },
                 DeviceStreamAnchor::StoreAcknowledgements {
                     first_slot: first_ack.clone(),
-                },
-                DeviceStreamAnchor::StoreSnapshots {
-                    first_slot: first_snapshot,
                 },
                 identity_signer,
             )
@@ -504,7 +397,23 @@ impl<'storage> RestoringStore<'storage> {
             .await
             .map_err(StoreRegistrationError::from)?;
         if already_activated {
-            return Ok(registration_ref);
+            return self
+                .install_activated_owner_recovery(
+                    &origin,
+                    device_id,
+                    recovery_id,
+                    &recovery_slot,
+                    &owner_pubkey,
+                    &authority.owner_grant,
+                    sequence,
+                    &predecessor,
+                )
+                .await?
+                .ok_or_else(|| {
+                    StoreRegistrationError::Invalid(
+                        "activated Owner recovery disappeared during adoption".into(),
+                    )
+                });
         }
         if let Some(prepared) = readiness.registration.prepared_for_creation() {
             let exact = readiness.registration.exact();
@@ -593,9 +502,9 @@ impl<'storage> RestoringStore<'storage> {
                     )
                     .await?
                 {
-                    self.resume_adopted_device_streams(&adopted).await?;
                     return Ok(adopted);
                 }
+                let _authorship = database.author_own_stream().await;
                 let stream_id =
                     coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                         root.store_root_hash,
@@ -619,6 +528,13 @@ impl<'storage> RestoringStore<'storage> {
                     stream_id,
                     sequence: 1,
                 };
+                let publication_previous = database
+                    .store_current_publication()
+                    .await
+                    .map_err(StoreRegistrationError::from)?
+                    .require_observed()
+                    .map_err(StoreRegistrationError::from)?
+                    .clone();
                 let activation_ref = ActivatedStoreDeviceRegistrationRef {
                     registration: registration_ref.clone(),
                     authority: StoreDeviceRegistrationActivationRef::Recovery {
@@ -626,6 +542,28 @@ impl<'storage> RestoringStore<'storage> {
                         node: node_ref.clone(),
                     },
                 };
+                let signing_registration =
+                    coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                        registration_ref.clone(),
+                        registration.clone(),
+                    )?;
+                let signer = super::authorization::history::membership_publication::MembershipPublicationSigner::owner_recovery(&signing_registration, &device_signer, &self.identity)?;
+                let authority_stream = self
+                    .history
+                    .select_membership_author_stream(&self.membership, &owner_pubkey)
+                    .await
+                    .map_err(StoreError::from)?;
+                let entry = self.membership.signed_change_in_stream(
+                    &self.identity,
+                    authority_stream,
+                    coven_protocol::membership::StoreAuthorityChange::DeviceRegistrationActivation { registration: activation_ref.clone() },
+                    database.stamp(),
+                ).map_err(crate::sync::store::MembershipMutationError::from).map_err(StoreError::from)?;
+                let transition = self
+                    .history
+                    .prepare_membership_transition(&signer, &self.membership, entry)
+                    .await
+                    .map_err(StoreError::from)?;
                 let commit = StoreBatchCommit::signed_operations(
                     root.store_root_hash,
                     coven_protocol::write::WriteId::from_generated(format!(
@@ -635,7 +573,7 @@ impl<'storage> RestoringStore<'storage> {
                     registration_ref.clone(),
                     &registration,
                     order,
-                    coven_protocol::store_commit::StorePublicationBase::Genesis,
+                    publication_previous.record().publication_base(),
                     membership_state,
                     device_state,
                     StoreOperationMembershipAuthority {
@@ -653,6 +591,9 @@ impl<'storage> RestoringStore<'storage> {
                     },
                     coven_protocol::store_commit::StoreCommitOperationsInput {
                         device_registrations: vec![activation_ref],
+                        control: Some(coven_protocol::store_commit::StoreControl {
+                            transition: transition.transition.clone(),
+                        }),
                         ..coven_protocol::store_commit::StoreCommitOperationsInput::empty()
                     },
                     &device_signer,
@@ -690,6 +631,21 @@ impl<'storage> RestoringStore<'storage> {
                         &registration,
                     )
                     .map_err(StoreRegistrationError::from)?;
+                let membership_publication = self
+                    .history
+                    .finish_store_membership_transition(&signer, transition, commit_ref.clone())
+                    .await
+                    .map_err(StoreError::from)?;
+                let membership_proof = coven_protocol::store_commit::RetainedMergeMembershipProof {
+                    commit: commit_ref.clone(),
+                    commit_value: commit.clone(),
+                    entry: membership_publication.entry_ref.clone(),
+                    entry_value: membership_publication.entry.clone(),
+                    head: membership_publication.head_ref.clone(),
+                    head_value: membership_publication.head.clone(),
+                    resolution: None,
+                    resolution_value: None,
+                };
                 let state_after = predecessor_state
                     .activate_registration(
                         registration_ref.clone(),
@@ -707,7 +663,8 @@ impl<'storage> RestoringStore<'storage> {
                         &verified_commit,
                         &self.membership,
                         Some(&registration_ref),
-                        state_after,
+                        &predecessor_state,
+                        &state_after,
                         crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence {
                             registrations: vec![
                                 coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
@@ -717,51 +674,50 @@ impl<'storage> RestoringStore<'storage> {
                                 .map_err(StoreRegistrationError::from)?,
                             ],
                             acknowledgement: None,
-                            membership_proof: None,
+                            membership_proof: Some(membership_proof),
                         },
                     )
                     .await
                     .map_err(StoreRegistrationError::from)?;
-                let head_context = context(ProtocolObjectDomain::StoreHead);
-                let DeviceStreamAnchor::StoreAnnouncements { first_slot: _ } =
-                    &registration.store_commits
-                else {
-                    return Err(StoreRegistrationError::Invalid(
-                        "Owner recovery registration has no announcement stream anchor".into(),
-                    ));
-                };
-                let next_head = storage
-                    .allocate_protocol_slot(
-                        &head_context,
-                        &head_slot_prefix(&device_id.to_string(), 2),
-                        ".json",
+                let publication_entry =
+                    coven_protocol::store_commit::StorePublicationEntry::signed_commit(
+                        publication_previous.record(),
+                        &verified_commit,
+                        &device_signer,
                     )
+                    .map_err(StoreRegistrationError::from)?;
+                let publication_context = context(ProtocolObjectDomain::StorePublicationEntry);
+                let publication_prefix =
+                    coven_protocol::store_commit::store_publication_entry_semantic_prefix(
+                        &publication_entry,
+                    );
+                let publication_slot = storage
+                    .allocate_protocol_slot(&publication_context, &publication_prefix, ".json")
                     .await
                     .map_err(StoreObjectError::from)?;
-                let head = StoreDeviceHead::signed(
-                    root.store_root_hash,
-                    registration_ref.clone(),
-                    commit_ref.clone(),
-                    SuccessorLink {
-                        activation: registration
-                            .store_announcement_activation(&registration_ref)
-                            .map_err(StoreRegistrationError::from)?
-                            .activation_id(),
-                        predecessor: None,
-                        next_slot: next_head,
-                    },
-                    &device_signer,
-                )
-                .map_err(StoreRegistrationError::from)?;
-                let head_bytes = head.to_bytes();
-                let head_prepared = storage
+                let prepared_publication = storage
                     .prepare_protocol_object(
-                        &head_context,
-                        prepared_history.head_slot,
-                        &head_slot_prefix(&device_id.to_string(), 1),
-                        head_bytes.clone(),
+                        &publication_context,
+                        publication_slot,
+                        &publication_prefix,
+                        publication_entry.to_bytes(),
                     )
                     .map_err(StoreObjectError::from)?;
+                let publication_ref =
+                    coven_protocol::store_commit::StorePublicationRef::from_entry(
+                        &publication_entry,
+                        prepared_publication.reference().clone(),
+                    )
+                    .map_err(StoreRegistrationError::from)?;
+                let replacement =
+                    coven_protocol::store_commit::StoreCurrentPublicationRecord::advance_commit(
+                        publication_previous.record(),
+                        &publication_entry,
+                        publication_ref,
+                        &verified_commit,
+                        &device_signer,
+                    )
+                    .map_err(StoreRegistrationError::from)?;
                 database
                     .stage_owner_recovery_publication(coven_database::OwnerRecoveryPublication {
                         commit: coven_protocol::objects::ExactProtocolObject {
@@ -769,10 +725,12 @@ impl<'storage> RestoringStore<'storage> {
                             bytes: commit.to_bytes(),
                             prepared: commit_prepared,
                         },
-                        head: coven_protocol::objects::ExactProtocolObject {
-                            value: head,
-                            bytes: head_bytes,
-                            prepared: head_prepared,
+                        publication: coven_protocol::prepared_commit::PreparedStorePublication {
+                            previous: publication_previous.record().clone(),
+                            previous_version: publication_previous.version().clone(),
+                            entry: publication_entry,
+                            entry_object: prepared_publication.reference().clone(),
+                            replacement,
                         },
                         history_evidence: prepared_history.history_evidence,
                     })
@@ -780,70 +738,6 @@ impl<'storage> RestoringStore<'storage> {
                     .map_err(StoreRegistrationError::from)?
             }
         };
-        let publication_commit = publication.commit.value.value();
-        let publication_commit_prefix = commit_semantic_prefix(
-            publication_commit.candidate_family(),
-            &publication
-                .commit
-                .value
-                .reference()
-                .coord
-                .stream_id
-                .to_string(),
-            publication_commit.seq(),
-            publication_commit.commit_hash(),
-        );
-        storage
-            .create_verified_protocol_object(
-                &commit_context,
-                &publication.commit.prepared,
-                &publication_commit_prefix,
-                &publication.commit.bytes,
-            )
-            .await
-            .map_err(StoreObjectError::from)?;
-        let head_context = context(ProtocolObjectDomain::StoreHead);
-        let publication_head_prefix = head_slot_prefix(
-            &device_id.to_string(),
-            publication.head.value.slot_sequence(),
-        );
-        storage
-            .create_verified_protocol_object(
-                &head_context,
-                &publication.head.prepared,
-                &publication_head_prefix,
-                &publication.head.bytes,
-            )
-            .await
-            .map_err(StoreObjectError::from)?;
-        let registration =
-            coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
-                registration_ref.clone(),
-                registration,
-            )
-            .and_then(|registration| {
-                coven_protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
-                    registration,
-                    registration_activation,
-                )
-            })
-            .map_err(StoreRegistrationError::from)?;
-        let coven_database::OwnerRecoveryPublication {
-            commit,
-            head,
-            history_evidence,
-        } = publication;
-        let head_object = head.prepared.reference().clone();
-        database
-            .complete_owner_recovery(
-                commit.value,
-                head.value,
-                head_object,
-                history_evidence,
-                registration,
-            )
-            .await
-            .map_err(StoreRegistrationError::from)?;
-        Ok(registration_ref)
+        self.publish_owner_recovery(publication).await
     }
 }

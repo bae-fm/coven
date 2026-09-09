@@ -8,7 +8,10 @@ use coven_keys::keys::UserKeypair;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
-fn open(path: &Path, device_id: &str) -> (Database, coven_foundation::store_dir::StoreDir) {
+pub(super) fn open(
+    path: &Path,
+    device_id: &str,
+) -> (Database, coven_foundation::store_dir::StoreDir) {
     let store_dir = crate::sync::test_helpers::store_dir_for_test_database(path);
     let database = Database::open_synthetic_for_test(
         path,
@@ -24,7 +27,7 @@ fn open(path: &Path, device_id: &str) -> (Database, coven_foundation::store_dir:
     (database, store_dir)
 }
 
-fn store_database(database: &Database) -> StoreDatabase {
+pub(super) fn store_database(database: &Database) -> StoreDatabase {
     StoreDatabase::new(database)
 }
 
@@ -55,84 +58,159 @@ async fn initialize(
     .expect("create acknowledgement test Store")
 }
 
-struct LosingAckFixture {
-    home: InMemoryCloudHome,
-    signer: UserKeypair,
-    storage: Arc<CloudSyncConnection>,
-    db: Database,
-    device: TestDevice,
-    outbound: coven_database::OutboundStoreAck,
-    losing: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
-}
+#[tokio::test]
+async fn a_standing_acknowledgement_survives_reopening_without_another_publication() {
+    let directory = tempfile::tempdir().expect("acknowledgement database directory");
+    let path = directory.path().join("store.sqlite3");
+    let home = InMemoryCloudHome::new();
+    let signer = UserKeypair::generate();
+    let storage = storage(&home, &signer);
+    let (db, store_dir) = open(&path, "standing-ack-owner");
+    let device = initialize(&db, store_dir, &storage, &signer).await;
+    device
+        .stage_current_acknowledgement("2026-07-16T00:00:01Z")
+        .await
+        .expect("stage the initial statement");
+    assert_eq!(device.drain_acknowledgements_exact().await.unwrap(), 1);
+    let accepted = store_database(&db)
+        .store_current_publication()
+        .await
+        .expect("read accepted acknowledgement boundary");
+    let standing = store_database(&db)
+        .latest_local_store_ack()
+        .await
+        .expect("read standing acknowledgement")
+        .expect("acknowledgement was published");
+    drop(device);
+    drop(db);
 
-impl LosingAckFixture {
-    async fn create(path: &Path) -> Self {
-        let home = InMemoryCloudHome::new();
-        let signer = UserKeypair::generate();
-        let storage = storage(&home, &signer);
-        let (db, db_store_dir) = open(path, "ack-loser-device");
-        let device = Box::pin(initialize(&db, db_store_dir.clone(), &storage, &signer)).await;
-        Box::pin(device.stage_current_acknowledgement("2026-07-16T00:00:00Z"))
+    let (reopened, store_dir) = open(&path, "standing-ack-owner");
+    let device = TestDevice::load(&reopened, store_dir, storage, signer)
+        .await
+        .expect("reopen the acknowledgement owner");
+    assert!(
+        device
+            .stage_current_acknowledgement_if_new("2026-07-16T00:00:02Z")
             .await
-            .expect("stage exact acknowledgement");
-        let outbound = store_database(&db)
-            .oldest_outbound_store_ack()
+            .expect("compare the persisted statement")
+            .is_none(),
+        "reopening does not create a new assertion"
+    );
+    assert_eq!(device.drain_acknowledgements_exact().await.unwrap(), 0);
+    let database = store_database(&reopened);
+    assert_eq!(
+        database.store_current_publication().await.unwrap(),
+        accepted
+    );
+    assert_eq!(
+        database
+            .latest_local_store_ack()
             .await
             .unwrap()
-            .expect("staged acknowledgement exists");
-        let losing = Box::pin(device.prepare_acknowledgement_candidate_for_test(&outbound)).await;
-        let mut writer = device
-            .authorize_writer()
-            .await
-            .expect("authorize competing acknowledgement writer");
-        let competing_plan = writer
-            .prepare_plan()
-            .await
-            .expect("prepare competing Store operation");
-        let grant_id = coven_protocol::provider::ProviderAccessGrantId::from_random_bytes([91; 32]);
-        let grant_prefix =
-            coven_protocol::store_commit::provider_access_grant_semantic_prefix(&grant_id);
-        let grant_bytes = b"competing provider grant";
-        let grant = coven_protocol::provider::StoreMemberProviderAccessGrantRef {
-            grant_id,
-            grant_hash: coven_protocol::store_commit::ObjectHash::digest(grant_bytes),
-            object: coven_protocol::objects::ExactObjectRef::new(
-                coven_protocol::objects::ObjectSlot::logical(format!("{grant_prefix}.json"))
-                    .expect("valid provider grant slot"),
-                grant_bytes.len() as u64,
-                coven_protocol::store_commit::ObjectHash::digest(grant_bytes),
-            ),
-        };
-        let competing = writer
-            .prepare_candidate(
-                competing_plan,
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ProviderAccessGrant(grant),
-            )
-            .await
-            .expect("prepare competing candidate");
-        assert_ne!(competing.reference, losing.reference);
-        storage
-            .create_protocol_object(
-                &competing
-                    .prepared_commit()
-                    .expect("prepare competing commit"),
-            )
-            .await
-            .expect("publish competing commit");
-        storage
-            .create_protocol_object(&competing.prepared_head().expect("prepare competing head"))
-            .await
-            .expect("publish competing head");
-        Self {
-            home,
-            signer,
-            storage,
-            db,
-            device,
-            outbound,
-            losing,
-        }
+            .unwrap()
+            .reference,
+        standing.reference,
+    );
+}
+
+mod publication_race_tests;
+
+#[tokio::test]
+async fn acknowledgement_upload_keeps_the_local_author_position_reserved() {
+    let home = InMemoryCloudHome::new();
+    let signer = UserKeypair::generate();
+    let storage = storage(&home, &signer);
+    let (db, directory) = open(Path::new(":memory:"), "ack-authorship-owner");
+    let device = initialize(&db, directory, &storage, &signer).await;
+    device
+        .stage_current_acknowledgement("2026-07-16T00:00:01Z")
+        .await
+        .unwrap();
+    let (reached, release) = home.pause_after_exact_create_call(1);
+    let mut drain = Box::pin(device.drain_acknowledgements_exact());
+    tokio::select! {
+        result = &mut drain => panic!("drain finished before the ACK upload pause: {result:?}"),
+        () = reached.notified() => {}
     }
+    let database = store_database(&db);
+    assert!(database.active_store_publication().await.unwrap().is_some());
+    assert!(
+        futures_util::FutureExt::now_or_never(database.author_own_stream()).is_none(),
+        "another local writer must wait while the acknowledgement owns its author position",
+    );
+    release.notify_one();
+    assert_eq!(drain.await.unwrap(), 1);
+    assert!(database.active_store_publication().await.unwrap().is_none());
+    assert!(futures_util::FutureExt::now_or_never(database.author_own_stream()).is_some());
+}
+
+#[tokio::test]
+async fn a_prepared_acknowledgement_cannot_complete_without_its_installed_activation() {
+    let home = InMemoryCloudHome::new();
+    let signer = UserKeypair::generate();
+    let storage = storage(&home, &signer);
+    let (db, db_store_dir) = open(Path::new(":memory:"), "unaccepted-ack-device");
+    let device = initialize(&db, db_store_dir, &storage, &signer).await;
+    let database = store_database(&db);
+    let previous = database
+        .latest_local_store_ack()
+        .await
+        .expect("read previous acknowledgement")
+        .expect("founder acknowledgement");
+    device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage acknowledgement");
+    let pending = database
+        .oldest_outbound_store_ack()
+        .await
+        .expect("read outbox")
+        .expect("pending acknowledgement");
+    let candidate = device
+        .prepare_acknowledgement_candidate_for_test(&pending)
+        .await;
+    let active = database
+        .active_store_publication()
+        .await
+        .expect("read reserved publication");
+
+    database
+        .complete_outbound_store_ack(pending.reference.clone(), candidate.reference.clone())
+        .await
+        .expect_err("an unaccepted acknowledgement cannot complete");
+
+    assert_eq!(
+        database
+            .active_store_publication()
+            .await
+            .expect("read retained reservation"),
+        active
+    );
+    assert_eq!(
+        database
+            .oldest_outbound_store_ack()
+            .await
+            .expect("read retained outbox")
+            .expect("outbox survives")
+            .reference,
+        pending.reference
+    );
+    assert_eq!(
+        database
+            .latest_local_store_ack()
+            .await
+            .expect("read unchanged acknowledgement")
+            .expect("previous acknowledgement survives")
+            .reference,
+        previous.reference
+    );
+    assert_eq!(
+        device
+            .drain_acknowledgements_exact()
+            .await
+            .expect("publish after refused premature completion"),
+        1
+    );
 }
 
 #[tokio::test]
@@ -245,6 +323,37 @@ async fn invalid_acknowledgement_slot_bytes_are_never_replaced_or_completed() {
 
 #[tokio::test]
 async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
+    acknowledgement_slot_winner_is_adopted(SlotWinnerState::Unaccepted, false).await;
+}
+
+#[tokio::test]
+async fn accepted_acknowledgement_slot_winner_completes_the_losing_outbox() {
+    acknowledgement_slot_winner_is_adopted(SlotWinnerState::Accepted, false).await;
+}
+
+#[tokio::test]
+async fn acknowledgement_slot_winner_preserves_its_queued_circle_acknowledgement() {
+    acknowledgement_slot_winner_is_adopted(SlotWinnerState::Unaccepted, true).await;
+}
+
+#[tokio::test]
+async fn accepted_acknowledgement_slot_winner_leaves_unactivated_circle_work_queued() {
+    acknowledgement_slot_winner_is_adopted(SlotWinnerState::Accepted, true).await;
+}
+
+#[tokio::test]
+async fn created_acknowledgement_keeps_its_bytes_after_a_newer_snapshot() {
+    acknowledgement_slot_winner_is_adopted(SlotWinnerState::CreatedBeforeSnapshot, false).await;
+}
+
+#[derive(Clone, Copy)]
+enum SlotWinnerState {
+    Unaccepted,
+    Accepted,
+    CreatedBeforeSnapshot,
+}
+
+async fn acknowledgement_slot_winner_is_adopted(state: SlotWinnerState, carries_circle: bool) {
     Box::pin(async {
         let directory = tempfile::tempdir().expect("acknowledgement database directory");
         let seed_path = directory.path().join("seed.sqlite3");
@@ -252,9 +361,25 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
         let loser_path = directory.path().join("loser.sqlite3");
         let home = InMemoryCloudHome::new();
         let signer = UserKeypair::generate();
-        let storage = storage(&home, &signer);
+        let storage = if carries_circle {
+            Arc::new(CloudSyncConnection::new(
+                Arc::new(home.clone()),
+                CloudCipher::Encrypted(coven_keys::encryption::EncryptionService::from_key([42; 32])),
+                BlobPathScheme::Hashed,
+                "ack-exact-store",
+                signer.clone(),
+            ))
+        } else {
+            storage(&home, &signer)
+        };
         let (seed, seed_store_dir) = open(&seed_path, "ack-slot-race-device");
         let seed_device = initialize(&seed, seed_store_dir.clone(), &storage, &signer).await;
+        let circle_id = if carries_circle {
+            Some(seed_device.create_circle("0000000001000-0000-owner", "Slot winner Circle")
+                .await.expect("publish the Circle activation before copying the device"))
+        } else {
+            None
+        };
         for destination in [&winner_path, &loser_path] {
             let destination = destination
                 .to_str()
@@ -299,6 +424,13 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
         )
         .await
         .expect("bind loser acknowledgement Store");
+        if carries_circle {
+            let frontier = loser_device.acknowledgement_frontier().await.unwrap();
+            loser_device
+                .stage_circle_acknowledgements(&frontier, "2026-07-16T00:00:02Z")
+                .await
+                .expect("queue the Circle statement before the Store candidate");
+        }
         loser_device
             .stage_current_acknowledgement("2026-07-16T00:00:02Z")
             .await
@@ -323,36 +455,113 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
             .map(|remote| remote.object_id())
             .collect::<Vec<_>>();
 
+        if matches!(state, SlotWinnerState::Accepted) {
+            assert_eq!(
+                winner_device.drain_acknowledgements_exact().await.unwrap(),
+                1
+            );
+            loser_device
+                .pull_store()
+                .await
+                .expect("install the accepted slot winner");
+        }
+
+        if matches!(state, SlotWinnerState::CreatedBeforeSnapshot) {
+            let context = ProtocolObjectContext::signed_plaintext(
+                winner.ack.value.store_root_hash, ProtocolObjectDomain::StoreAck,
+            );
+            let (bytes, prepared) = storage.read_prepared_protocol_slot(
+                &context, winner.reference.object.slot(),
+                &ack_slot_prefix(&winner.reference.registration.device_id.to_string(), winner.reference.sequence),
+            ).await.expect("read the exact provider slot winner");
+            store_database(&loser_db).adopt_outbound_store_ack_slot_winner(
+                loser.reference.clone(), bytes, prepared,
+            ).await.expect("persist the created winner before restarting publication");
+            loser_db.execute_test_host_write(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) VALUES \
+                 ('after-created-ack', 'New accepted state', 1, '0000000003000-0000-owner', '2026-07-16')",
+            ).await;
+            assert!(loser_device.prepare_pending_store_write().await.unwrap());
+            assert_eq!(loser_device.drain_store_writes().await.unwrap(), 1);
+            let mut writer = loser_device.authorize_writer().await.unwrap();
+            let mut snapshots = writer.snapshots();
+            let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+            let cut = snapshots.capture_snapshot_cut(Some(&routing)).await.unwrap();
+            snapshots.push_snapshot_cut(cut, "2026-07-16T00:00:03Z".into()).await.unwrap();
+        }
+
         let result = loser_device.drain_acknowledgements_exact().await;
         assert_eq!(
             result.expect("adopt and activate acknowledgement slot winner"),
             1
         );
-        assert_eq!(
-            store_database(&loser_db)
+        let published = store_database(&loser_db)
                 .latest_local_store_ack()
                 .await
                 .expect("read adopted acknowledgement")
                 .expect("adopted acknowledgement is published")
-                .reference,
-            winner.reference
+                .reference;
+        if matches!(state, SlotWinnerState::CreatedBeforeSnapshot) {
+            assert_eq!(published.sequence, winner.reference.sequence + 1);
+            assert_eq!(published.object.slot(), &winner.ack.value.successor.next_slot);
+            assert_eq!(home.get(winner.reference.object.slot().logical_key()), Some(winner.ack.bytes.clone()));
+            let retained = loser_device.retained_merge_replay_inputs_for_test().await.unwrap();
+            let proof = retained.iter().filter_map(|row| row.history_evidence().acknowledgement.as_ref())
+                .find(|proof| proof.acknowledgement.0 == published)
+                .expect("retain the successor's exact predecessor proof");
+            assert_eq!(proof.predecessors, vec![(winner.reference.clone(), winner.ack.value.clone())]);
+        } else {
+            assert_eq!(published, winner.reference);
+        }
+        assert!(
+            store_database(&loser_db)
+                .oldest_outbound_store_ack()
+                .await
+                .expect("read drained acknowledgement outbox")
+                .is_none()
         );
-        assert!(store_database(&loser_db)
-            .oldest_outbound_store_ack()
-            .await
-            .expect("read drained acknowledgement outbox")
-            .is_none());
-        assert!(coven_database::StoreDatabase::new(&loser_db)
-            .protocol_inert_object(loser.reference.object)
-            .await
-            .expect("read losing acknowledgement inert state")
-            .is_none());
+        assert!(
+            coven_database::StoreDatabase::new(&loser_db)
+                .protocol_inert_object(loser.reference.object)
+                .await
+                .expect("read losing acknowledgement inert state")
+                .is_none()
+        );
         for object_id in losing_object_ids {
             let exists = loser_db
                 .remote_object_id_exists_for_test(object_id)
                 .await
                 .expect("read losing acknowledgement candidate ownership");
             assert!(!exists);
+        }
+        if let Some(circle_id) = circle_id {
+            let database = store_database(&loser_db);
+            if matches!(state, SlotWinnerState::Accepted) {
+                assert!(database.outbound_circle_acks_pending().await.unwrap());
+                assert!(
+                    database
+                        .activated_circle_ack(circle_id, loser_device.typed_device_id())
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                loser_device
+                    .stage_current_acknowledgement("2026-07-16T00:00:03Z")
+                    .await
+                    .expect("stage the remaining Circle work");
+                assert_eq!(
+                    loser_device.drain_acknowledgements_exact().await.unwrap(),
+                    1
+                );
+            }
+            assert!(!database.outbound_circle_acks_pending().await.unwrap());
+            assert!(
+                database
+                    .activated_circle_ack(circle_id, loser_device.typed_device_id())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
         }
     })
     .await;
@@ -551,325 +760,6 @@ async fn prepared_activation_candidate_resumes_exactly_after_restart() {
     assert_eq!(
         reopened_store.latest_local_store_position().await.unwrap(),
         Some(expected)
-    );
-}
-
-#[tokio::test]
-async fn uploaded_acknowledgement_accepts_its_sole_candidate_nonactivation() {
-    let home = InMemoryCloudHome::new();
-    let signer = UserKeypair::generate();
-    let storage = storage(&home, &signer);
-    let (db, db_store_dir) = open(Path::new(":memory:"), "ack-nonactivation-device");
-    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
-    device
-        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
-        .await
-        .expect("stage exact acknowledgement");
-    let outbound = store_database(&db)
-        .oldest_outbound_store_ack()
-        .await
-        .unwrap()
-        .expect("staged acknowledgement exists");
-    let candidate = device
-        .prepare_acknowledgement_candidate_for_test(&outbound)
-        .await;
-    let mut acknowledgement = candidate
-        .acknowledgement_remote_objects(&outbound.ack)
-        .expect("candidate owns acknowledgement")
-        .into_iter()
-        .find(|remote| remote.object() == &outbound.reference.object)
-        .expect("acknowledgement ownership record")
-        .into_record();
-    acknowledgement
-        .mark_uploaded_verified()
-        .expect("acknowledgement upload is durable");
-    let winner_bytes = b"different valid winner head";
-    let winner_object = coven_protocol::objects::ExactObjectRef::new(
-        coven_protocol::objects::ObjectSlot::logical(
-            "store-v1/heads/ack-nonactivation-winner.json".to_string(),
-        )
-        .expect("valid winner slot"),
-        winner_bytes.len() as u64,
-        coven_protocol::store_commit::ObjectHash::digest(winner_bytes),
-    );
-    let nonactivation = coven_protocol::remote_object::CandidateNonactivation::unverified_for_test(
-        coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
-            coord: candidate.reference.coord.clone(),
-            object: candidate.reference.object.clone(),
-            canonical_signed_bytes: candidate.commit.to_bytes(),
-        },
-        coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
-            winner_head: coven_protocol::store_commit::StoreDeviceHeadRef {
-                head_hash: coven_protocol::store_commit::ObjectHash::digest(winner_bytes),
-                object: winner_object,
-            },
-        },
-    );
-
-    assert!(acknowledgement
-        .begin_candidate_nonactivation(nonactivation)
-        .expect("uploaded acknowledgement accepts candidate loss")
-        .is_some());
-}
-
-#[tokio::test]
-async fn losing_activation_inerts_the_uploaded_acknowledgement() {
-    let LosingAckFixture {
-        home,
-        signer: _,
-        storage: _,
-        db,
-        device,
-        outbound,
-        losing,
-    } = Box::pin(LosingAckFixture::create(Path::new(":memory:"))).await;
-
-    assert_eq!(
-        device
-            .drain_acknowledgements_exact()
-            .await
-            .expect("settle losing acknowledgement activation"),
-        1
-    );
-    assert!(store_database(&db)
-        .oldest_outbound_store_ack()
-        .await
-        .unwrap()
-        .is_none());
-    assert_eq!(
-        store_database(&db)
-            .latest_local_store_ack()
-            .await
-            .unwrap()
-            .expect("inert acknowledgement still advances its physical stream")
-            .reference,
-        outbound.reference
-    );
-    let inert = coven_database::StoreDatabase::new(&db)
-        .protocol_inert_object(outbound.reference.object.clone())
-        .await
-        .unwrap()
-        .expect("losing acknowledgement is retained outside reducer state");
-    assert!(matches!(
-        inert.identity.domain,
-        coven_protocol::remote_object::RetainedAuthorityObjectDomain::Acknowledgement {
-            ref reference
-        } if reference == &outbound.reference
-    ));
-    assert!(inert
-        .candidate_nonactivation_proof(&losing.reference)
-        .expect("inert acknowledgement proof is valid")
-        .is_some());
-    assert!(home
-        .get(losing.reference.object.slot().logical_key())
-        .is_none());
-    assert_ne!(
-        store_database(&db)
-            .activated_store_ack(&outbound.reference.registration)
-            .await
-            .unwrap()
-            .map(|activated| activated.reference),
-        Some(outbound.reference.clone())
-    );
-}
-
-#[tokio::test]
-async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart() {
-    let directory = tempfile::tempdir().expect("acknowledgement database directory");
-    let path = directory.path().join("store.sqlite3");
-    let LosingAckFixture {
-        home,
-        signer,
-        storage,
-        db,
-        device,
-        outbound,
-        losing,
-    } = Box::pin(LosingAckFixture::create(&path)).await;
-    home.fail_exact_delete_on_call(1);
-
-    assert!(device.drain_acknowledgements_exact().await.is_err());
-    assert!(matches!(
-        store_database(&db).oldest_outbound_store_ack()
-            .await
-            .unwrap()
-            .expect("nonactivating acknowledgement remains durable")
-            .activation,
-        coven_database::OutboundStoreAckActivation::Nonactivating(ref candidate)
-            if candidate.reference == losing.reference
-    ));
-    assert!(coven_database::StoreDatabase::new(&db)
-        .protocol_inert_object(outbound.reference.object.clone())
-        .await
-        .unwrap()
-        .is_some());
-    drop(device);
-    drop(db);
-
-    let (reopened, reopened_store_dir) = open(&path, "ack-loser-device");
-    let reopened_device = TestDevice::load(
-        &reopened,
-        reopened_store_dir.clone(),
-        storage.clone(),
-        signer.clone(),
-    )
-    .await
-    .expect("bind reopened losing acknowledgement Store");
-    assert_eq!(
-        reopened_device
-            .drain_acknowledgements_exact()
-            .await
-            .unwrap(),
-        1
-    );
-    assert!(store_database(&reopened)
-        .oldest_outbound_store_ack()
-        .await
-        .unwrap()
-        .is_none());
-    assert!(home
-        .get(losing.reference.object.slot().logical_key())
-        .is_none());
-}
-
-#[tokio::test]
-async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
-    Box::pin(async {
-        let LosingAckFixture {
-            home,
-            signer: _,
-            storage: _,
-            db,
-            device,
-            outbound,
-            losing,
-        } = Box::pin(LosingAckFixture::create(Path::new(":memory:"))).await;
-        home.fail_exact_delete_on_call(1);
-        assert!(Box::pin(device.drain_acknowledgements_exact())
-            .await
-            .is_err());
-
-        let head = losing.head_ref();
-        let mut remote = db
-            .remote_object_for_test(head.object.clone())
-            .await
-            .expect("load test head ownership");
-        {
-            let coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record) =
-                &mut remote
-            else {
-                panic!("test head is not retained authority");
-            };
-            let coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
-                former_candidates,
-            } = &mut record.state
-            else {
-                panic!("test head is not proven uncreated");
-            };
-            let Some(nonactivation) = former_candidates.first_mut() else {
-                panic!("test head has no loss proof");
-            };
-            let coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
-                winner_head,
-            } = nonactivation.proof_mut_for_test()
-            else {
-                panic!("test head has a non-Merge loss proof");
-            };
-            let tampered_bytes = b"different winner at the same head slot";
-            winner_head.object = coven_protocol::objects::ExactObjectRef::new(
-                winner_head.object.slot().clone(),
-                tampered_bytes.len() as u64,
-                coven_protocol::store_commit::ObjectHash::digest(tampered_bytes),
-            );
-            remote.validate().expect("validate test head ownership");
-        }
-        db.replace_remote_object_for_test(head.object, remote)
-            .await
-            .expect("install mismatched durable head proof");
-
-        assert!(Box::pin(device.drain_acknowledgements_exact())
-            .await
-            .is_err());
-        assert_eq!(
-            store_database(&db)
-                .oldest_outbound_store_ack()
-                .await
-                .unwrap()
-                .expect("mismatched proof keeps acknowledgement pending")
-                .reference,
-            outbound.reference
-        );
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
-    let home = InMemoryCloudHome::new();
-    let signer = UserKeypair::generate();
-    let storage = storage(&home, &signer);
-    let (db, db_store_dir) = open(Path::new(":memory:"), "ack-alternate-head-device");
-    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
-    device
-        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
-        .await
-        .expect("stage exact acknowledgement");
-    let outbound = store_database(&db)
-        .oldest_outbound_store_ack()
-        .await
-        .unwrap()
-        .expect("staged acknowledgement exists");
-    let candidate = device
-        .prepare_acknowledgement_candidate_for_test(&outbound)
-        .await;
-    let expected_head = candidate.head.clone();
-    let expected_head_object = candidate.head_object.clone();
-    let alternate_next = coven_protocol::objects::ObjectSlot::opaque(
-        expected_head.successor.next_slot.logical_key().to_string(),
-        "alternate-next-slot".to_string(),
-    )
-    .expect("valid alternate successor slot");
-    let alternate_head = device
-        .sign_device_head_for_test(
-            candidate.reference.clone(),
-            coven_protocol::store_commit::SuccessorLink {
-                activation: expected_head.successor.activation,
-                predecessor: expected_head.successor.predecessor.clone(),
-                next_slot: alternate_next,
-            },
-        )
-        .await
-        .expect("sign alternate head");
-    let head_context = ProtocolObjectContext::signed_plaintext(
-        device.store_root().store_root_hash,
-        ProtocolObjectDomain::StoreHead,
-    );
-    let head_prefix = coven_protocol::store_commit::head_slot_prefix(
-        &outbound.reference.registration.device_id.to_string(),
-        candidate.commit.seq(),
-    );
-    let alternate_prepared = storage
-        .prepare_protocol_object(
-            &head_context,
-            expected_head_object.slot().clone(),
-            &head_prefix,
-            alternate_head.to_bytes(),
-        )
-        .expect("prepare alternate head at the same slot");
-    assert_ne!(alternate_prepared.reference(), &expected_head_object);
-    storage
-        .create_protocol_object(&alternate_prepared)
-        .await
-        .expect("publish alternate head");
-
-    assert_eq!(device.drain_acknowledgements_exact().await.unwrap(), 1);
-    assert_eq!(
-        store_database(&db)
-            .activated_store_ack(&outbound.reference.registration)
-            .await
-            .unwrap()
-            .map(|activated| activated.reference),
-        Some(outbound.reference)
     );
 }
 

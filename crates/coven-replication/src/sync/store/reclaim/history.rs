@@ -1,7 +1,7 @@
 use coven_database::StoreDatabase;
 use coven_protocol::store_commit::{
-    CommitFrontier, StoreBatchCommitRef, StoreDeviceHead, StoreDeviceHeadRef,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, VerifiedStoreBatchCommit,
+    CommitFrontier, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    VerifiedStoreBatchCommit,
 };
 use coven_storage::CloudSyncObjectStorage;
 
@@ -55,7 +55,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         crate::sync::store::acknowledgements::CircleAcknowledgementReader::new(
             self.database,
             self.storage,
-            self.history.verified_root().reference(),
+            self.history,
         )
     }
 
@@ -104,6 +104,15 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
             .await
     }
 
+    pub(crate) fn snapshot_authenticates_reclaim_authorization(
+        &self,
+        authorization: &coven_protocol::reclaim::ReclaimAuthorizationRef,
+        activation: &StoreBatchCommitRef,
+    ) -> bool {
+        self.history
+            .snapshot_authenticates_reclaim_authorization(authorization, activation)
+    }
+
     pub(crate) async fn load_ref(
         &mut self,
         reference: &StoreBatchCommitRef,
@@ -111,13 +120,31 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         self.history.load_ref(reference).await
     }
 
-    pub(crate) async fn load_store_snapshot_stream(
+    pub(crate) fn verify_commit_acceptance(
         &self,
-        registration_ref: &StoreDeviceRegistrationRef,
-        registration: &StoreDeviceRegistration,
-    ) -> Result<Vec<coven_database::PublishedStoreSnapshot>, snapshot::SnapshotError> {
+        reference: &StoreBatchCommitRef,
+    ) -> Result<(), crate::sync::store::pull::StorePullError> {
+        self.history.verify_commit_acceptance(reference)
+    }
+
+    pub(crate) async fn current_accepted_snapshot(
+        &mut self,
+    ) -> Result<
+        Option<crate::sync::store::commit_verification::merge_history::AcceptedStoreSnapshot>,
+        crate::sync::store::pull::StorePullError,
+    > {
+        self.history.current_accepted_snapshot().await
+    }
+
+    pub(crate) async fn store_blob_is_reclaimable(
+        &mut self,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<bool, crate::sync::store::pull::StorePullError> {
+        let Some(snapshot) = self.history.current_accepted_snapshot().await? else {
+            return Ok(false);
+        };
         self.history
-            .load_store_snapshot_stream(registration_ref, registration)
+            .store_snapshot_blob_is_reclaimable(snapshot.snapshot(), blob)
             .await
     }
 
@@ -129,25 +156,6 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         crate::sync::store::pull::StorePullError,
     > {
         self.history.load_covered_commits(coverage).await
-    }
-
-    pub(crate) async fn store_package_targets(
-        &mut self,
-        coverage: &CommitFrontier,
-    ) -> Result<
-        Vec<(
-            StoreBatchCommitRef,
-            coven_protocol::store_commit::StorePackageRef,
-        )>,
-        crate::sync::store::pull::StorePullError,
-    > {
-        let mut targets = std::collections::BTreeMap::new();
-        for (reference, commit) in self.load_covered_commits(coverage).await? {
-            if let Some(package) = commit.value().store_package().cloned() {
-                targets.insert(reference, package);
-            }
-        }
-        Ok(targets.into_iter().collect())
     }
 
     pub(crate) async fn circle_package_targets(
@@ -286,37 +294,6 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         self.history.load_reclaim_authorization(reference).await
     }
 
-    pub(crate) async fn load_head(
-        &mut self,
-        reference: &StoreDeviceHeadRef,
-        registration: &StoreDeviceRegistration,
-        commit: &StoreBatchCommitRef,
-    ) -> Result<
-        coven_protocol::objects::VerifiedObject<StoreDeviceHead>,
-        coven_protocol::objects::StoreObjectError,
-    > {
-        self.history
-            .load_head(reference, registration, commit)
-            .await
-    }
-
-    pub(crate) async fn exact_next_announcement_slot(
-        &mut self,
-        registration_ref: &StoreDeviceRegistrationRef,
-        registration: &StoreDeviceRegistration,
-        previous: Option<&VerifiedStoreBatchCommit>,
-    ) -> Result<
-        (
-            coven_protocol::objects::ObjectSlot,
-            Option<StoreDeviceHeadRef>,
-        ),
-        crate::sync::store::StoreError,
-    > {
-        self.history
-            .exact_next_announcement_slot(registration_ref, registration, previous)
-            .await
-    }
-
     pub(crate) async fn verify_currently_materialized(
         &mut self,
         reference: &StoreBatchCommitRef,
@@ -354,6 +331,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         self.history.load_registration(reference).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn load_store_snapshot(
         &mut self,
         registration_ref: &StoreDeviceRegistrationRef,
@@ -368,34 +346,6 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     > {
         self.history
             .load_store_snapshot(registration_ref, registration, reference)
-            .await
-    }
-
-    pub(crate) async fn verify_snapshot_stability(
-        &mut self,
-        snapshot: &coven_database::PublishedStoreSnapshot,
-        members: &coven_protocol::membership::MembershipChain,
-    ) -> Result<
-        coven_database::VerifiedAcknowledgedStoreSnapshot,
-        crate::sync::store::pull::StorePullError,
-    > {
-        self.history
-            .verify_snapshot_stability(snapshot, members)
-            .await
-    }
-
-    pub(crate) async fn select_maximal_acknowledged_store_snapshot(
-        &mut self,
-        candidates: Vec<coven_database::PublishedStoreSnapshot>,
-        members: &coven_protocol::membership::MembershipChain,
-    ) -> Result<
-        Option<
-            crate::sync::store::commit_verification::merge_history::SelectedAcknowledgedStoreSnapshot,
-        >,
-        crate::sync::store::pull::StorePullError,
-    >{
-        self.history
-            .select_maximal_acknowledged_store_snapshot(candidates, members)
             .await
     }
 }

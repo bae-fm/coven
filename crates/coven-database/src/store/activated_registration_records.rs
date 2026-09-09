@@ -70,7 +70,7 @@ pub(crate) fn record_activated_store_device_registrations_on(
                 return Err(DbError::Message(format!(
                     "Store registration {} origin differs from its signed activation authority",
                     registration.device_id
-                )))
+                )));
             }
         };
         if authority != &expected_authority {

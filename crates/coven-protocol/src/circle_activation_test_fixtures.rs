@@ -72,10 +72,6 @@ pub fn test_circle_activation(label: &str, active: bool) -> TestCircleActivation
             *ObjectHash::digest(label.as_bytes()).as_bytes(),
         ),
     };
-    let store_commits = DeviceStreamAnchor::StoreAnnouncements {
-        first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/announcements/1.json"))
-            .expect("valid test Store announcement slot"),
-    };
     let registration = StoreDeviceRegistration::signed(
         root.clone(),
         registration_origin,
@@ -86,16 +82,11 @@ pub fn test_circle_activation(label: &str, active: bool) -> TestCircleActivation
                 ),
             },
         },
-        store_commits,
         DeviceStreamAnchor::StoreAcknowledgements {
             first_slot: ObjectSlot::logical(format!(
                 "store-v1/test/{label}/acknowledgements/1.json"
             ))
             .expect("valid test Store acknowledgement slot"),
-        },
-        DeviceStreamAnchor::StoreSnapshots {
-            first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/snapshots/1.json"))
-                .expect("valid test Store snapshot slot"),
         },
         &owner,
     )

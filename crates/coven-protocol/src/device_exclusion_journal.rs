@@ -6,10 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::objects::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
 use crate::prepared_commit::PreparedStoreOperationCommit;
-use crate::remote_object::{
-    CandidateNonactivation, CandidateNonactivationProof, RemoteObjectRecord,
-    RemoteObjectRecordError,
-};
+use crate::remote_object::{RemoteObjectRecord, RemoteObjectRecordError};
 use crate::store_commit::{
     ObjectHash, StoreDeviceExclusionOutcome, StoreDeviceExclusionOutcomeRef,
     StoreDeviceExclusionProposal, StoreDeviceExclusionProposalRef,
@@ -165,11 +162,6 @@ pub enum StoreDeviceExclusionCompletion {
         intended: DurableStoreDeviceExclusionObject,
         winner: DurableStoreDeviceExclusionObject,
     },
-    CandidateNonactivated {
-        object: DurableStoreDeviceExclusionObject,
-        candidate: PreparedStoreOperationCommit,
-        proof: CandidateNonactivationProof,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,24 +171,7 @@ pub enum DurableStoreDeviceExclusionOperation {
         object: DurableStoreDeviceExclusionObject,
         candidate: PreparedStoreOperationCommit,
     },
-    CandidateNonactivating {
-        object: DurableStoreDeviceExclusionObject,
-        candidate: PreparedStoreOperationCommit,
-        proof: CandidateNonactivationProof,
-    },
-    ReplacingCandidate {
-        object: DurableStoreDeviceExclusionObject,
-        candidate: PreparedStoreOperationCommit,
-        losing: StoreDeviceExclusionCandidateLoss,
-    },
     Completed(StoreDeviceExclusionCompletion),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreDeviceExclusionCandidateLoss {
-    pub candidate: PreparedStoreOperationCommit,
-    pub proof: CandidateNonactivationProof,
 }
 
 impl DurableStoreDeviceExclusionOperation {
@@ -207,6 +182,19 @@ impl DurableStoreDeviceExclusionOperation {
         let operation = Self::CandidatePrepared { object, candidate };
         operation.validate()?;
         Ok(operation)
+    }
+
+    pub fn activated(&self) -> Result<Self, StoreDeviceExclusionJournalError> {
+        self.validate()?;
+        let Self::CandidatePrepared { object, candidate } = self else {
+            return Err(StoreDeviceExclusionJournalError::Invalid(
+                "Store-device exclusion has no pending activation candidate".into(),
+            ));
+        };
+        Ok(Self::Completed(StoreDeviceExclusionCompletion::Activated {
+            object: object.clone(),
+            candidate: candidate.clone(),
+        }))
     }
 
     pub fn operation_id(&self) -> ObjectHash {
@@ -235,8 +223,6 @@ impl DurableStoreDeviceExclusionOperation {
                     && candidate.reference == next_candidate.reference
                     && candidate.commit.to_bytes() == next_candidate.commit.to_bytes()
             }
-            (Self::CandidatePrepared { .. }, Self::CandidateNonactivating { .. }) => true,
-            (Self::CandidatePrepared { .. }, Self::ReplacingCandidate { .. }) => true,
             (
                 Self::CandidatePrepared { .. },
                 Self::Completed(StoreDeviceExclusionCompletion::OutcomeSlotOccupied { .. }),
@@ -248,64 +234,27 @@ impl DurableStoreDeviceExclusionOperation {
                     candidate: next_candidate,
                 }),
             ) => object == next_object && candidate.has_same_durable_activation_as(next_candidate),
-            (
-                Self::ReplacingCandidate {
-                    object, candidate, ..
-                },
-                Self::CandidatePrepared {
-                    object: next_object,
-                    candidate: next_candidate,
-                },
-            ) => object == next_object && candidate.has_same_durable_activation_as(next_candidate),
-            (
-                Self::CandidateNonactivating {
-                    object,
-                    candidate,
-                    proof,
-                },
-                Self::Completed(StoreDeviceExclusionCompletion::CandidateNonactivated {
-                    object: next_object,
-                    candidate: next_candidate,
-                    proof: next_proof,
-                }),
-            ) => {
-                object == next_object
-                    && candidate.has_same_durable_activation_as(next_candidate)
-                    && proof == next_proof
-            }
             _ => false,
         }
     }
 
     pub fn object(&self) -> &DurableStoreDeviceExclusionObject {
         match self {
-            Self::CandidatePrepared { object, .. }
-            | Self::CandidateNonactivating { object, .. }
-            | Self::ReplacingCandidate { object, .. } => object,
+            Self::CandidatePrepared { object, .. } => object,
             Self::Completed(StoreDeviceExclusionCompletion::Activated { object, .. }) => object,
             Self::Completed(StoreDeviceExclusionCompletion::OutcomeSlotOccupied {
                 intended,
                 ..
             }) => intended,
-            Self::Completed(StoreDeviceExclusionCompletion::CandidateNonactivated {
-                object,
-                ..
-            }) => object,
         }
     }
 
     pub fn candidate(&self) -> Option<&PreparedStoreOperationCommit> {
         match self {
-            Self::CandidatePrepared { candidate, .. }
-            | Self::CandidateNonactivating { candidate, .. }
-            | Self::ReplacingCandidate { candidate, .. } => Some(candidate),
+            Self::CandidatePrepared { candidate, .. } => Some(candidate),
             Self::Completed(StoreDeviceExclusionCompletion::Activated { candidate, .. }) => {
                 Some(candidate)
             }
-            Self::Completed(StoreDeviceExclusionCompletion::CandidateNonactivated {
-                candidate,
-                ..
-            }) => Some(candidate),
             Self::Completed(StoreDeviceExclusionCompletion::OutcomeSlotOccupied { .. }) => None,
         }
     }
@@ -321,7 +270,7 @@ impl DurableStoreDeviceExclusionOperation {
         })?;
         let authority = self.object().remote_record(candidate)?;
         candidate
-            .retained_authority_remote_objects(vec![authority])
+            .retained_control_remote_objects(vec![authority])
             .map_err(StoreDeviceExclusionJournalError::Outbound)
     }
 
@@ -334,71 +283,6 @@ impl DurableStoreDeviceExclusionOperation {
             )
         })?;
         self.object().remote_record(candidate)
-    }
-
-    pub fn begin_nonactivation(
-        &self,
-        nonactivation: CandidateNonactivation,
-    ) -> Result<(Self, CandidateNonactivation), StoreDeviceExclusionJournalError> {
-        let Self::CandidatePrepared { object, candidate } = self else {
-            return Err(StoreDeviceExclusionJournalError::Invalid(
-                "only a prepared exclusion candidate can become nonactivating".to_string(),
-            ));
-        };
-        if nonactivation
-            .reference()
-            .map_err(StoreDeviceExclusionJournalError::RemoteObject)?
-            != candidate.reference
-        {
-            return Err(StoreDeviceExclusionJournalError::Invalid(
-                "exclusion nonactivation names another candidate".to_string(),
-            ));
-        }
-        let proof = nonactivation.proof().clone();
-        let operation = Self::CandidateNonactivating {
-            object: object.clone(),
-            candidate: candidate.clone(),
-            proof,
-        };
-        operation.validate()?;
-        Ok((operation, nonactivation))
-    }
-
-    pub fn begin_replacement(
-        &self,
-        replacement: PreparedStoreOperationCommit,
-        nonactivation: CandidateNonactivation,
-    ) -> Result<(Self, CandidateNonactivation), StoreDeviceExclusionJournalError> {
-        let Self::CandidatePrepared { object, candidate } = self else {
-            return Err(StoreDeviceExclusionJournalError::Invalid(
-                "only a prepared exclusion candidate can be replaced".to_string(),
-            ));
-        };
-        if !matches!(object, DurableStoreDeviceExclusionObject::Outcome { .. }) {
-            return Err(StoreDeviceExclusionJournalError::Invalid(
-                "an exclusion proposal cannot move to another predecessor".to_string(),
-            ));
-        }
-        if nonactivation
-            .reference()
-            .map_err(StoreDeviceExclusionJournalError::RemoteObject)?
-            != candidate.reference
-        {
-            return Err(StoreDeviceExclusionJournalError::Invalid(
-                "replacement exclusion nonactivation names another candidate".to_string(),
-            ));
-        }
-        let proof = nonactivation.proof().clone();
-        let operation = Self::ReplacingCandidate {
-            object: object.clone(),
-            candidate: replacement,
-            losing: StoreDeviceExclusionCandidateLoss {
-                candidate: candidate.clone(),
-                proof,
-            },
-        };
-        operation.validate()?;
-        Ok((operation, nonactivation))
     }
 
     pub fn validate(&self) -> Result<(), StoreDeviceExclusionJournalError> {
@@ -423,50 +307,25 @@ impl DurableStoreDeviceExclusionOperation {
             return Ok(());
         };
         candidate.reference.verify_commit(&candidate.commit)?;
-        if !self.object().commit_names_exact_object(candidate)
+        let publication = candidate.prepared_membership_publication()?;
+        let change_matches = match (self.object(), &publication.entry.change) {
+            (
+                DurableStoreDeviceExclusionObject::Proposal { reference, .. },
+                crate::membership::StoreAuthorityChange::DeviceExclusionProposal { proposal },
+            ) => reference == proposal,
+            (
+                DurableStoreDeviceExclusionObject::Outcome { reference, .. },
+                crate::membership::StoreAuthorityChange::DeviceExclusionOutcome { outcome },
+            ) => reference == outcome,
+            _ => false,
+        };
+        if !change_matches
+            || !self.object().commit_names_exact_object(candidate)
             || candidate.commit.acknowledgement().is_some()
         {
             return Err(StoreDeviceExclusionJournalError::Invalid(
                 "exclusion journal candidate does not activate its one exact object".to_string(),
             ));
-        }
-        if let Self::CandidateNonactivating {
-            candidate, proof, ..
-        }
-        | Self::Completed(StoreDeviceExclusionCompletion::CandidateNonactivated {
-            candidate,
-            proof,
-            ..
-        }) = self
-        {
-            CandidateNonactivation::validate_durable_shape(
-                &candidate.reference,
-                &candidate.commit,
-                proof.clone(),
-            )
-            .map_err(StoreDeviceExclusionJournalError::RemoteObject)?;
-        }
-        if let Self::ReplacingCandidate {
-            object,
-            candidate,
-            losing,
-        } = self
-        {
-            if !matches!(object, DurableStoreDeviceExclusionObject::Outcome { .. })
-                || candidate.reference == losing.candidate.reference
-                || !object.commit_names_exact_object(candidate)
-                || !object.commit_names_exact_object(&losing.candidate)
-            {
-                return Err(StoreDeviceExclusionJournalError::Invalid(
-                    "replacement exclusion candidate changes its exact outcome".to_string(),
-                ));
-            }
-            CandidateNonactivation::validate_durable_shape(
-                &losing.candidate.reference,
-                &losing.candidate.commit,
-                losing.proof.clone(),
-            )
-            .map_err(StoreDeviceExclusionJournalError::RemoteObject)?;
         }
         Ok(())
     }

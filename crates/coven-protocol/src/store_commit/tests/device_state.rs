@@ -44,81 +44,25 @@ fn terminal_ref(fixture: &Fixture, identity_byte: u8) -> StoreDeviceExclusionRef
     }
 }
 
-fn inactive_status(
-    terminals: Vec<StoreDeviceExclusionRef>,
-    cut: impl IntoIterator<Item = (AuthorStreamId, StoreBatchCommitRef)>,
-) -> StoreDeviceStatus {
-    StoreDeviceStatus::Inactive {
-        terminals,
-        accepted_cut: StoreHistoryCut(cut.into_iter().collect()),
-    }
-}
-
 #[test]
-fn concurrent_terminal_states_union_terminals_and_intersect_cuts_in_both_orders() {
+fn terminal_states_preserve_each_exact_exclusion_in_either_merge_order() {
     let fixture = fixture();
-    let (stream_a, a3) = merge_cut_reference(1, 3, 31);
-    let (_, a5) = merge_cut_reference(1, 5, 51);
-    let (stream_b, b4) = merge_cut_reference(2, 4, 42);
     let left_terminal = terminal_ref(&fixture, 1);
     let right_terminal = terminal_ref(&fixture, 2);
-    let left = inactive_status(
-        vec![left_terminal.clone()],
-        [(stream_a, a5), (stream_b, b4.clone())],
-    );
-    let right = inactive_status(vec![right_terminal.clone()], [(stream_a, a3.clone())]);
-    let expected = inactive_status(vec![left_terminal, right_terminal], [(stream_a, a3)]);
-
+    let left = StoreDeviceStatus::Inactive {
+        terminals: vec![left_terminal.clone()],
+    };
+    let right = StoreDeviceStatus::Inactive {
+        terminals: vec![right_terminal.clone()],
+    };
+    let expected = StoreDeviceStatus::Inactive {
+        terminals: vec![left_terminal, right_terminal],
+    };
     assert_eq!(
         merge_device_status(left.clone(), right.clone()).unwrap(),
         expected
     );
-    assert_eq!(merge_device_status(right, left).unwrap(), expected);
-}
-
-#[test]
-fn concurrent_terminal_cut_rejects_different_refs_at_the_same_coordinate() {
-    let fixture = fixture();
-    let (stream, left) = merge_cut_reference(1, 3, 31);
-    let (_, right) = merge_cut_reference(1, 3, 32);
-    let terminal = terminal_ref(&fixture, 1);
-
-    assert!(matches!(
-        merge_device_status(
-            inactive_status(vec![terminal.clone()], [(stream, left)]),
-            inactive_status(vec![terminal], [(stream, right)]),
-        ),
-        Err(StoreProtocolError::DeviceStateMismatch)
-    ));
-}
-
-#[test]
-fn concurrent_terminal_cut_intersection_is_associative_and_idempotent() {
-    let fixture = fixture();
-    let terminal = terminal_ref(&fixture, 1);
-    let (stream_a, a2) = merge_cut_reference(1, 2, 21);
-    let (_, a3) = merge_cut_reference(1, 3, 31);
-    let (_, a4) = merge_cut_reference(1, 4, 41);
-    let (stream_b, b1) = merge_cut_reference(2, 1, 12);
-    let (_, b2) = merge_cut_reference(2, 2, 22);
-    let left = inactive_status(
-        vec![terminal.clone()],
-        [(stream_a, a4), (stream_b, b2.clone())],
-    );
-    let middle = inactive_status(
-        vec![terminal.clone()],
-        [(stream_a, a3), (stream_b, b1.clone())],
-    );
-    let right = inactive_status(vec![terminal], [(stream_a, a2)]);
-
-    assert_eq!(
-        merge_device_status(
-            merge_device_status(left.clone(), middle.clone()).unwrap(),
-            right.clone(),
-        )
-        .unwrap(),
-        merge_device_status(left.clone(), merge_device_status(middle, right).unwrap()).unwrap()
-    );
+    assert_eq!(merge_device_status(right, left.clone()).unwrap(), expected);
     assert_eq!(
         merge_device_status(left.clone(), left.clone()).unwrap(),
         left
@@ -154,7 +98,6 @@ fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
         &fixture.root.descriptor.founder_recovery,
     )
     .expect("founder device state");
-    let predecessor = fixture.commit.device_state.clone();
     let proposal_id =
         StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(b"device exclusion proposal"));
     let outcome_key = format!(
@@ -170,7 +113,6 @@ fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
         proposal_id,
         fixture.registration_ref.clone(),
         &fixture.registration,
-        predecessor.clone(),
         slot(outcome_key.clone()),
         fixture.registration_ref.clone(),
         fixture.root.descriptor.founder_grant.clone(),
@@ -204,7 +146,7 @@ fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
     assert_eq!(parsed, proposal);
 
     let pending = resolved
-        .propose_exclusion(proposal_ref.clone(), &proposal, &predecessor)
+        .propose_exclusion(proposal_ref.clone(), &proposal)
         .expect("activate exclusion proposal");
     assert!(device_state_has_exact_pending_proposal(
         &pending,
@@ -256,15 +198,6 @@ fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
         &proposal,
         fixture.registration_ref.clone(),
         &fixture.registration,
-        StoreDeviceExclusionProof {
-            frozen_device_state: proposal.frozen_device_state.clone(),
-            remaining_device_acks: Vec::new(),
-            cutoff: fixture
-                .commit
-                .order
-                .predecessor_cut()
-                .expect("derive exclusion cutoff"),
-        },
         fixture.registration_ref.clone(),
         fixture.root.descriptor.founder_grant.clone(),
         &fixture.registration,
@@ -282,13 +215,9 @@ fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
     let StoreDeviceExclusionOutcomeRef::Excluded(exclusion_ref) = exclusion_ref else {
         panic!("exclusion ref changed variant")
     };
-    let accepted_cut = fixture
-        .commit
-        .order
-        .predecessor_cut()
-        .expect("derive predecessor cut");
+    assert!(cancelled.exclude(exclusion_ref.clone()).is_err());
     let excluded = pending
-        .exclude(exclusion_ref.clone(), accepted_cut.clone())
+        .exclude(exclusion_ref.clone())
         .expect("activate device exclusion");
     assert!(matches!(
         &excluded
@@ -296,9 +225,8 @@ fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
             .get(&fixture.registration_ref.device_id)
             .expect("excluded record")
             .status,
-        StoreDeviceStatus::Inactive { terminals, accepted_cut: cut }
-            if terminals == &vec![exclusion_ref]
-                && cut == &accepted_cut
+        StoreDeviceStatus::Inactive { terminals }
+            if terminals == &vec![exclusion_ref.clone()]
     ));
 }
 
@@ -316,14 +244,8 @@ fn retained_registration_activations_reopen_exact_canonical_inputs() {
             owner_grant: fixture.root.descriptor.founder_grant.clone(),
         },
         fixture.registration.provider.clone(),
-        DeviceStreamAnchor::StoreAnnouncements {
-            first_slot: slot("store-v1/announcements/retained/1.json".to_string()),
-        },
         DeviceStreamAnchor::StoreAcknowledgements {
             first_slot: slot("store-v1/acks/retained/1.json".to_string()),
-        },
-        DeviceStreamAnchor::StoreSnapshots {
-            first_slot: slot("store-v1/snapshots/retained/1.json".to_string()),
         },
         &replacement,
     )
@@ -458,7 +380,7 @@ fn retained_registration_activations_reopen_exact_canonical_inputs() {
 }
 
 #[test]
-fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
+fn retained_device_operations_reopen_the_exact_exclusion_sources() {
     let fixture = fixture();
     let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
         b"retained exclusion proposal",
@@ -476,7 +398,6 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
         proposal_id,
         fixture.registration_ref.clone(),
         &fixture.registration,
-        fixture.commit.device_state.clone(),
         slot(outcome_key.clone()),
         fixture.registration_ref.clone(),
         fixture.root.descriptor.founder_grant.clone(),
@@ -556,15 +477,6 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
         &proposal,
         fixture.registration_ref.clone(),
         &fixture.registration,
-        StoreDeviceExclusionProof {
-            frozen_device_state: proposal.frozen_device_state.clone(),
-            remaining_device_acks: Vec::new(),
-            cutoff: fixture
-                .commit
-                .order
-                .predecessor_cut()
-                .expect("derive exclusion cutoff"),
-        },
         fixture.registration_ref.clone(),
         fixture.root.descriptor.founder_grant.clone(),
         &fixture.registration,
@@ -601,7 +513,7 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
             .operations_membership_authority()
             .expect("fixture carries membership authority"),
         StoreCommitOperationsInput {
-            device_exclusion_outcomes: vec![outcome_ref],
+            device_exclusion_outcomes: vec![outcome_ref.clone()],
             ..StoreCommitOperationsInput::empty()
         },
         &device_signer,
@@ -615,15 +527,10 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
         .verify_for(&fixture.root_ref, &commit)
         .expect("verify retained device operations");
     assert_eq!(verified.to_retained(), retained);
-    assert_eq!(
-        verified.exclusions().next().map(|(_, cut)| cut.clone()),
-        Some(
-            commit
-                .order
-                .predecessor_cut()
-                .expect("derive accepted predecessor cut")
-        )
-    );
+    let StoreDeviceExclusionOutcomeRef::Excluded(expected_exclusion) = outcome_ref else {
+        panic!("exclusion fixture changed outcome")
+    };
+    assert_eq!(verified.exclusions().next(), Some(&expected_exclusion));
 
     let mut tampered = serde_json::to_value(&retained).expect("encode retained operations");
     tampered["outcomes"][0]["excluded"]["canonical_outcome"]

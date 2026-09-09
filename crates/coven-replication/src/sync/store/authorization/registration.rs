@@ -335,7 +335,9 @@ mod tests {
                 .expect("retry completes absent recovery suffix");
             assert_eq!(
                 home.exact_create_count(),
-                6,
+                // Registration, initial ACK, recovery node, authority entry/head,
+                // commit, publication, result, and the interrupted create.
+                9,
                 "retry after boundary {failed_call} creates only the absent suffix",
             );
             let completed = database
@@ -452,7 +454,7 @@ mod tests {
         peer_device
             .publish_fixture_position("staged-recovery")
             .await;
-        let recovered = recovery
+        let _recovered = recovery
             .recover_owner_device(&authority, None)
             .await
             .expect("retry publishes the exact staged activation");
@@ -489,29 +491,42 @@ mod tests {
             published_commit.stored_bytes(),
             staged_before.commit.prepared.stored_bytes(),
         );
-        let head_prefix = coven_protocol::store_commit::head_slot_prefix(
-            &recovered.device_id.to_string(),
-            staged_before.head.value.slot_sequence(),
-        );
-        let published_head = cloud_storage
+        let accepted_publication = database
+            .store_publication_entries()
+            .await
+            .expect("read accepted recovery publication")
+            .into_iter()
+            .find(|entry| {
+                entry.value.payload
+                    == coven_protocol::store_commit::StorePublicationPayload::Commit(
+                        staged_before.commit.value.reference().clone(),
+                    )
+            })
+            .expect("the unchanged recovery commit has an accepted publication");
+        assert_ne!(accepted_publication.value, staged_before.publication.entry);
+        let publication_prefix =
+            coven_protocol::store_commit::store_publication_entry_semantic_prefix(
+                &accepted_publication.value,
+            );
+        let published_publication = cloud_storage
             .read_prepared_protocol_slot(
                 &coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                     store.root().store_root_hash,
-                    ProtocolObjectDomain::StoreHead,
+                    ProtocolObjectDomain::StorePublicationEntry,
                 ),
-                staged_before.head.prepared.reference().slot(),
-                &head_prefix,
+                accepted_publication.prepared.reference().slot(),
+                &publication_prefix,
             )
             .await
-            .expect("read published recovery head")
+            .expect("read published recovery publication entry")
             .1;
         assert_eq!(
-            published_head.reference(),
-            staged_before.head.prepared.reference(),
+            published_publication.reference(),
+            accepted_publication.prepared.reference(),
         );
         assert_eq!(
-            published_head.stored_bytes(),
-            staged_before.head.prepared.stored_bytes(),
+            published_publication.stored_bytes(),
+            accepted_publication.value.to_bytes(),
         );
     }
 
@@ -677,7 +692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn published_owner_recovery_blocks_snapshot_retirement_until_activation() {
+    async fn published_owner_recovery_survives_snapshot_retirement() {
         let founder = UserKeypair::generate();
         let founder_store_dir = crate::sync::test_helpers::test_store_dir();
         let founder_db = crate::sync::test_helpers::open_test_db(founder_store_dir.clone());
@@ -691,100 +706,98 @@ mod tests {
         )
         .await
         .expect("create recovery retirement Store");
-        let peer = UserKeypair::generate();
         let peer_store_dir = crate::sync::test_helpers::test_store_dir();
         let peer_db = crate::sync::test_helpers::open_test_db(peer_store_dir.clone());
-        let peer_device = store
-            .admit_and_activate_peer(
+        let recovering_device = store
+            .activate_joined_device(
                 &founder_db,
                 founder_store_dir.clone(),
                 &peer_db,
                 peer_store_dir,
-                &peer,
+                &founder,
+                "2026-07-16T00:00:00Z",
             )
             .await
-            .expect("activate peer writer");
-        let founder_device = store
-            .bind_device(&founder_db, founder_store_dir.clone(), &founder)
+            .expect("activate another Owner device");
+        let administrator = store
+            .bind_device(&founder_db, founder_store_dir, &founder)
             .await
-            .expect("bind founder writer");
-        peer_device
+            .expect("bind original provider administrator");
+        recovering_device
             .publish_fixture_position("retirement-snapshot-input")
             .await;
-        let (_, founder_pull) = founder_device
+        let original = recovering_device
+            .publish_snapshot_generation_for_test()
+            .await
+            .expect("publish the recovering device's snapshot");
+        let (_, pulled) = administrator
             .pull_store()
             .await
-            .expect("pull snapshot input into founder");
-        assert!(founder_pull.held_positions.is_empty());
-
-        let founder_database = coven_database::StoreDatabase::new(&founder_db);
-        let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-            founder_database
-                .materialized_frontier()
-                .await
-                .expect("read snapshot coverage"),
-        )
-        .expect("shape snapshot coverage");
-        let image_dir = tempfile::tempdir().expect("create snapshot image directory");
-        let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
-        let image = founder_database
-            .capture_snapshot_image_for_test(
-                store.root(),
-                image_dir.path().to_path_buf(),
-                Some(encryption.clone()),
-            )
-            .await
-            .expect("capture snapshot image");
-        founder_device
-            .publish_snapshot(image, coverage.clone())
-            .await
-            .expect("publish retirement snapshot");
-        founder_device
-            .publish_acknowledgement_without_advancing(coverage.clone())
-            .await
-            .expect("publish founder crossing acknowledgement");
-        peer_device
-            .publish_acknowledgement_without_advancing(coverage.clone())
-            .await
-            .expect("publish peer crossing acknowledgement");
-        founder_device
-            .publish_fixture_position("founder-acknowledgement-activation")
-            .await;
-        peer_device
-            .publish_fixture_position("peer-acknowledgement-activation")
-            .await;
-        let (_, peer_pull) = peer_device
-            .pull_store()
-            .await
-            .expect("materialize the acknowledgement closure");
-        assert!(peer_pull.held_positions.is_empty());
+            .expect("administrator adopts the snapshot");
+        assert!(pulled.held_positions.is_empty());
+        assert!(home.contains_exact_object(&original.meta.image.object));
+        assert!(home.contains_exact_object(&original.reference.object));
 
         let authority = store.founder_recovery_authority().await;
-        let mut recovery = founder_device
+        let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+        let mut recovery = recovering_device
             .owner_recovery_for_test()
             .await
             .expect("authorize Owner recovery Store");
         let (node_published, release_recovery) = home.pause_after_exact_create_call(3);
         let recover = recovery.recover_owner_device(&authority, Some(&encryption));
-        let retire = async {
-            node_published.notified().await;
-            let outcome = peer_device
-                .stand_on_acknowledged_snapshot()
-                .await
-                .expect("evaluate retirement while recovery is pending");
-            release_recovery.notify_one();
-            outcome
-        };
-        let (recovered, retirement) = tokio::join!(recover, retire);
-        recovered.expect("recovery completes after retirement declines");
+        tokio::pin!(recover);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::select! {
+                _ = node_published.notified() => {},
+                result = &mut recover => panic!("recovery returned before its node upload barrier: {result:?}"),
+            }
+        })
+        .await
+        .expect("pause recovery after its node upload");
+        let pending = coven_database::StoreDatabase::new(&peer_db)
+            .latest_local_store_device_registration()
+            .await
+            .expect("read pending recovery registration")
+            .expect("recovery readiness is durable before its node upload");
+        assert!(!pending.is_activated());
+        let registration = StoreDeviceRegistration::parse_at(
+            &pending.registration_bytes,
+            &store.root(),
+            pending.device_id,
+        )
+        .expect("verify the pending recovery registration");
+        assert!(matches!(
+            registration.origin,
+            StoreDeviceRegistrationOrigin::Recovery { .. }
+        ));
+
+        administrator
+            .publish_fixture_position("successor-snapshot-input")
+            .await;
+        let successor = administrator
+            .publish_snapshot_generation_for_test()
+            .await
+            .expect("publish successor coverage while recovery is pending");
+        assert_ne!(successor.reference, original.reference);
+        administrator
+            .reclaim_packages()
+            .await
+            .expect("retire the original snapshot while recovery is pending");
+        let image_retired = !home.contains_exact_object(&original.meta.image.object);
+        let metadata_retired = !home.contains_exact_object(&original.reference.object);
+        release_recovery.notify_one();
         assert!(
-            matches!(
-                retirement,
-                crate::sync::store::ReplayBaselineAdvance::Declined(
-                    crate::sync::store::ReplayBaselineDecline::PendingOwnerRecovery { .. }
-                )
-            ),
-            "published recovery registration must block retirement: {retirement:?}",
+            image_retired,
+            "the original snapshot image must be physically retired"
         );
+        assert!(
+            metadata_retired,
+            "the original snapshot metadata must be physically retired"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), &mut recover)
+            .await
+            .expect("resume recovery after snapshot retirement")
+            .expect("recovery completes after its published snapshot is retired");
     }
 }

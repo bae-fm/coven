@@ -391,7 +391,7 @@ unsafe fn validate_store_partition_foreign_key_closure(
                             parent,
                             parent_id: None,
                         },
-                    )))
+                    )));
                 }
             };
             if carried.contains(&(parent.clone(), parent_id.clone()))
@@ -463,7 +463,7 @@ pub(crate) fn validate_accepted_foreign_key_closure(
                                 parent,
                                 parent_id: None,
                             },
-                        )))
+                        )));
                     }
                 };
                 if private_rows.contains(&(parent.clone(), parent_id.clone())) {

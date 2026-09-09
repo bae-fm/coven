@@ -212,6 +212,7 @@ pub struct OwnerPromotionRequestBody {
     pub predecessor_membership: StoreMembershipStateRef,
     pub predecessor_devices: StoreDeviceStateRef,
     pub finalization: OwnerPromotionFinalization,
+    pub publication_slot: ObjectSlot,
 }
 
 impl SignedBody for OwnerPromotionRequestBody {
@@ -234,6 +235,7 @@ impl OwnerPromotionRequest {
         predecessor_membership: StoreMembershipStateRef,
         predecessor_devices: StoreDeviceStateRef,
         finalization: OwnerPromotionFinalization,
+        publication_slot: ObjectSlot,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         let intended_owner_grant =
@@ -250,6 +252,7 @@ impl OwnerPromotionRequest {
             predecessor_membership,
             predecessor_devices,
             finalization,
+            publication_slot,
         };
         body.validate_shape(root, promoter)?;
         let device_signer = promoter.device_signer(signer)?;
@@ -284,6 +287,11 @@ impl OwnerPromotionRequestBody {
                     &self.member_pubkey,
                 )
             || self.finalization.seq == 0
+            || self.publication_slot.logical_key()
+                != format!(
+                    "{}.json",
+                    owner_promotion_request_publication_semantic_prefix(self.promotion_id)
+                )
         {
             return Err(StoreProtocolError::OwnerPromotionMismatch);
         }
@@ -306,7 +314,7 @@ pub(crate) fn derive_owner_promotion_grant(
 #[serde(deny_unknown_fields)]
 pub struct OwnerPromotionRequestActivation {
     pub commit: StoreBatchCommitRef,
-    pub head: StoreDeviceHeadRef,
+    pub publication: StorePublicationRef,
 }
 
 impl OwnerPromotionRequestActivation {
@@ -497,10 +505,6 @@ impl OwnerConflictResolutionAcceptanceBody {
         self.owner_registration.verify_registration(registration)?;
         if registration.store_root.store_root_hash != self.store_root_hash
             || registration.provider != self.provider
-            || !matches!(
-                registration.store_commits,
-                DeviceStreamAnchor::StoreAnnouncements { .. }
-            )
             || !matches!(self.membership, GrantStreamAnchor::StoreMembership { .. })
             || !matches!(self.recovery, GrantStreamAnchor::OwnerRecovery { .. })
         {
@@ -574,8 +578,16 @@ pub struct StoreCommitOperations {
 }
 
 impl StoreCommitOperations {
+    /// Acknowledgements report observed state without introducing new edits or
+    /// authority. Receiving them alone does not require an acknowledgement.
+    pub fn is_acknowledgement_only(&self) -> bool {
+        self.acknowledgement.is_some() && self.has_no_non_acknowledgement_operations()
+    }
+
     pub(super) fn is_empty(&self) -> bool {
-        self.acknowledgement.is_none() && self.has_no_other_operations()
+        self.acknowledgement.is_none()
+            && self.circle_acknowledgements.is_empty()
+            && self.has_no_non_acknowledgement_operations()
     }
 
     pub fn is_circle_control_activation_only(&self) -> bool {
@@ -592,18 +604,31 @@ impl StoreCommitOperations {
             && self.circle_packages.is_empty()
     }
 
-    fn has_no_other_operations(&self) -> bool {
-        self.circle_acknowledgements.is_empty()
-            && self.control.is_none()
-            && self.device_join_attempt_decisions.is_empty()
-            && self.provider_access_grants.is_empty()
-            && self.device_registrations.is_empty()
-            && self.device_exclusion_proposals.is_empty()
-            && self.device_exclusion_outcomes.is_empty()
-            && self.stream_activations.is_empty()
-            && self.circle_controls.is_empty()
-            && self.store_package.is_none()
-            && self.circle_packages.is_empty()
+    fn has_no_non_acknowledgement_operations(&self) -> bool {
+        let Self {
+            acknowledgement: _,
+            circle_acknowledgements: _,
+            control,
+            device_join_attempt_decisions,
+            provider_access_grants,
+            device_registrations,
+            device_exclusion_proposals,
+            device_exclusion_outcomes,
+            stream_activations,
+            circle_controls,
+            store_package,
+            circle_packages,
+        } = self;
+        control.is_none()
+            && device_join_attempt_decisions.is_empty()
+            && provider_access_grants.is_empty()
+            && device_registrations.is_empty()
+            && device_exclusion_proposals.is_empty()
+            && device_exclusion_outcomes.is_empty()
+            && stream_activations.is_empty()
+            && circle_controls.is_empty()
+            && store_package.is_none()
+            && circle_packages.is_empty()
     }
 }
 

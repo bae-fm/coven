@@ -91,6 +91,7 @@ impl ConflictFixture {
             self.cloud_storage.clone(),
             self.dir1.clone(),
             self.founder.clone(),
+            Some(routing()),
         )
         .await
         .expect("load founder Store on device 1")
@@ -102,6 +103,7 @@ impl ConflictFixture {
             self.cloud_storage.clone(),
             self.dir2.clone(),
             self.founder.clone(),
+            Some(routing()),
         )
         .await
         .expect("load founder Store on device 2")
@@ -161,18 +163,59 @@ impl ConflictFixture {
     /// control without either device seeing the other's, then pull both onto
     /// device 1 so its current state retains the conflict.
     async fn fork(&self) -> (CircleControlCoord, CircleControlCoord) {
-        self.store1()
+        self.fork_with_pending_successor(false).await
+    }
+
+    async fn fork_with_pending_successor(
+        &self,
+        prepare_late_successor: bool,
+    ) -> (CircleControlCoord, CircleControlCoord) {
+        if prepare_late_successor {
+            self.home.fail_exact_create_before_call(1);
+        }
+        let first = self
+            .store1()
             .await
             .circles()
             .rename_circle("0000000001200-0000-device1", self.circle_id, "Alpha")
-            .await
-            .expect("device 1 authors a control successor");
+            .await;
+        if prepare_late_successor {
+            let error =
+                first.expect_err("keep the first branch unpublished while capturing its peer");
+            assert!(
+                crate::sync::error::error_chain_contains_transport(&error),
+                "{error}"
+            );
+        } else {
+            first.expect("device 1 authors a control successor");
+        }
         self.store2()
             .await
             .circles()
             .rename_circle("0000000001200-0000-device2", self.circle_id, "Beta")
             .await
             .expect("device 2 authors a concurrent control successor");
+        if prepare_late_successor {
+            self.home.fail_exact_create_before_call(1);
+            let error = self
+                .store2()
+                .await
+                .circles()
+                .rename_circle("0000000001700-0000-device2", self.circle_id, "Delta")
+                .await
+                .expect_err("capture the late successor before its device observes a conflict");
+            assert!(
+                crate::sync::error::error_chain_contains_transport(&error),
+                "{error}"
+            );
+            self.store
+                .bind_device(&self.db1, self.dir1.clone(), &self.founder)
+                .await
+                .expect("reopen first branch publisher")
+                .resume_circle_operations()
+                .await
+                .expect("publish the first captured branch");
+        }
         self.pull_device1().await;
         let branches = self.conflict_branches_device1().await;
         assert_eq!(branches.len(), 2, "two concurrent successors are retained");
@@ -424,7 +467,7 @@ async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
 #[tokio::test]
 async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict() {
     let fixture = ConflictFixture::build("resolve-stale").await;
-    let (chosen, _losing) = fixture.fork().await;
+    let (chosen, _losing) = fixture.fork_with_pending_successor(true).await;
     let store = fixture
         .store
         .bind_device(&fixture.db1, fixture.dir1.clone(), &fixture.founder)
@@ -470,17 +513,17 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
         "resolving the complete current set collapses the conflict"
     );
 
-    // After the resolution activates, a branch authored concurrently on device 2
-    // (which never saw the resolution) is discovered on device 1. The reduction
-    // retains it against the resolution and resurfaces ControlConflict — nothing
-    // pretends the resolution covered a set it did not.
+    // The durable successor captured on device 2 before it observed the
+    // competing branch is published after resolution. The resolution cannot claim it
+    // covered this later control, so the conflict resurfaces.
     fixture
-        .store2()
+        .store
+        .bind_device(&fixture.db2, fixture.dir2.clone(), &fixture.founder)
         .await
-        .circles()
-        .rename_circle("0000000001700-0000-device2", fixture.circle_id, "Delta")
+        .expect("reopen late branch publisher")
+        .resume_circle_operations()
         .await
-        .expect("device 2 authors a late concurrent successor");
+        .expect("publish the already captured late successor");
     fixture.pull_device1().await;
     let resurfaced = fixture.conflict_branches_device1().await;
     assert_eq!(
@@ -620,6 +663,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         cloud_storage.clone(),
         dir2.clone(),
         founder.clone(),
+        Some(routing()),
     )
     .await
     .expect("load device 2 Store")
@@ -637,6 +681,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         cloud_storage.clone(),
         store_dir.clone(),
         founder.clone(),
+        Some(routing()),
     )
     .await
     .expect("load device 1 Store")
@@ -649,6 +694,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         cloud_storage.clone(),
         dir2,
         founder.clone(),
+        Some(routing()),
     )
     .await
     .expect("load device 2 Store")
@@ -662,6 +708,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         cloud_storage.clone(),
         store_dir.clone(),
         founder.clone(),
+        Some(routing()),
     )
     .await
     .expect("load device 1 Store")
@@ -706,6 +753,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         cloud_storage.clone(),
         store_dir.clone(),
         founder.clone(),
+        Some(routing()),
     )
     .await
     .expect("load device 1 Store")
@@ -728,6 +776,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         cloud_storage.clone(),
         store_dir.clone(),
         founder.clone(),
+        Some(routing()),
     )
     .await
     .expect("load device 1 Store")
@@ -771,6 +820,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         cloud_storage,
         store_dir,
         founder.clone(),
+        Some(routing()),
     )
     .await
     .expect("load device 1 Store")
@@ -860,6 +910,7 @@ async fn non_owner_resolution_is_refused() {
         fixture.cloud_storage.clone(),
         outsider_db_store_dir.clone(),
         outsider.clone(),
+        Some(routing()),
     )
     .await
     .expect("load non-owner Store")
@@ -883,6 +934,7 @@ async fn non_owner_resolution_is_refused() {
         fixture.cloud_storage.clone(),
         outsider_db_store_dir,
         outsider.clone(),
+        Some(routing()),
     )
     .await
     .expect("load non-owner Store")
@@ -966,8 +1018,15 @@ async fn resolution_resumes_idempotently_after_a_restart() {
         .await
         .expect_err("the head create fails after the commit is published");
     assert!(
-        matches!(interrupted, CircleOperationError::Object(_)),
+        matches!(&interrupted, CircleOperationError::StoreOutbound(_))
+            && crate::sync::error::error_chain_contains_transport(&interrupted),
         "{interrupted}"
+    );
+    assert!(
+        after_publication
+            .home
+            .contains_exact_object(&journal.operation().commit_ref().object),
+        "the exact resolution commit is visible before its publication entry succeeds"
     );
     assert_eq!(
         StoreDatabase::new(&after_publication.db1)

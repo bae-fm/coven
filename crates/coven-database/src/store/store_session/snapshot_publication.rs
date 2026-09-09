@@ -1,9 +1,8 @@
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 
 use crate::*;
 use coven_protocol::store_commit::{
-    snapshot_image_semantic_prefix, snapshot_slot_prefix, SnapshotMeta, StoreSnapshotRef,
+    snapshot_image_semantic_prefix, SnapshotMeta, StoreSnapshotRef,
 };
 
 use super::*;
@@ -18,8 +17,10 @@ impl StoreSession<'_> {
 
     fn stage_snapshot_publication(
         &mut self,
+        stage: StoreSnapshotPublicationStage,
         meta: SnapshotMeta,
         meta_prepared: PreparedExactObject,
+        publication: coven_protocol::prepared_commit::PreparedStorePublication,
         rollup_bytes: Vec<u8>,
         rollup_prepared: PreparedExactObject,
         image: SnapshotDatabaseImage,
@@ -54,14 +55,13 @@ impl StoreSession<'_> {
             format!(
                 "{}.db",
                 snapshot_image_semantic_prefix(
-                    &registration.device_id.to_string(),
+                    meta_prepared.reference().slot(),
                     meta.image.image_hash,
                 )
             ),
             "Store",
         )?;
         let reference = StoreSnapshotRef {
-            generation: meta.generation,
             snapshot_hash: meta.snapshot_hash(),
             object: meta_prepared.reference().clone(),
         };
@@ -77,6 +77,9 @@ impl StoreSession<'_> {
                 "staged Store snapshot changed during exact verification".to_string(),
             ));
         }
+        publication
+            .validate_snapshot_shape(&meta, &reference)
+            .map_err(|error| DbError::context("verify staged Store snapshot publication", error))?;
         coven_protocol::store_commit::MembershipRollup::parse_at(
             &rollup_bytes,
             registration.store_root.store_root_hash,
@@ -107,64 +110,127 @@ impl StoreSession<'_> {
                     .to_string(),
             ));
         }
-        let previous = load_published_store_snapshot_on(&tx, &authority)?;
-        let (expected_generation, expected_predecessor, expected_slot) = match &previous {
-            Some(previous) => (
-                previous
-                    .reference
-                    .generation
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        DbError::Message("Store snapshot generation overflow".to_string())
-                    })?,
-                Some(previous.reference.clone()),
-                previous.successor_slot.clone(),
-            ),
-            None => (0, None, store_snapshot_first_slot(registration)?.clone()),
+        let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner::Store {
+            metadata_slot: reference.object.slot().clone(),
         };
-        if meta.generation != expected_generation
-            || meta.predecessor != expected_predecessor
-            || meta_prepared.reference().slot() != &expected_slot
-            || meta.successor.predecessor != previous.as_ref().map(|value| value.reference.clone())
-        {
-            return Err(DbError::Message(
-                "Store snapshot does not extend the exact local stream".to_string(),
-            ));
-        }
-        let next_generation = meta
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| DbError::Message("Store snapshot generation overflow".to_string()))?;
-        if meta.successor.activation
-            != registration
-                .store_snapshot_activation(registration_ref)
-                .map_err(DbError::from)?
-                .activation_id()
-            || meta.successor.next_slot.logical_key()
-                != format!(
-                    "{}.json",
-                    snapshot_slot_prefix(&registration.device_id.to_string(), next_generation)
-                )
-        {
-            return Err(DbError::Message(
-                "Store snapshot successor is outside its activated exact stream".to_string(),
-            ));
-        }
-        let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner {
-            activation: meta.successor.activation,
-            generation: meta.generation,
-        };
+        // The publication names this immutable image. Current rows may already
+        // contain unpublished replacements, deletions, or audience changes.
+        let image_bytes =
+            crate::payload_store::read_verified_payload_blocking(&tx, self.store_dir, image_hash)
+                .map_err(|error| DbError::context("read staged Store snapshot image", error))?;
+        let mut captured = Connection::open_in_memory()?;
+        crate::connection_io::deserialize_database_image_into(&mut captured, &image_bytes)?;
+        let captured_gates = Gates::from_tables(&captured, self.synced_tables)?;
         validate_snapshot_blob_plans_on(
-            self.conn,
-            self.gates,
+            &captured,
+            &captured_gates,
             self.synced_tables,
             &snapshot_owner,
             &blobs,
         )?;
+        drop(captured);
+        drop(image_bytes);
+        let mut active_publication = ActiveStorePublication::snapshot(publication)?;
+        match stage {
+            StoreSnapshotPublicationStage::Initial => {
+                match super::active_store_publication::claim_active_store_publication_on(
+                    &tx,
+                    &active_publication,
+                )? {
+                    super::active_store_publication::ActiveStorePublicationClaim::Acquired => {}
+                    super::active_store_publication::ActiveStorePublicationClaim::AlreadyOwned => {
+                        return Err(DbError::Message(
+                            "Store snapshot already owns publication before its journal"
+                                .to_string(),
+                        ));
+                    }
+                    super::active_store_publication::ActiveStorePublicationClaim::Occupied(
+                        owner,
+                    ) => {
+                        return Err(DbError::Message(format!(
+                            "another local Store operation owns publication: {owner:?}"
+                        )));
+                    }
+                }
+            }
+            StoreSnapshotPublicationStage::Replacing { previous, accepted } => {
+                let old = load_outbound_store_snapshot_on(&tx, self.store_dir, &authority)?
+                    .ok_or_else(|| {
+                        DbError::Message("replacement snapshot has no pending candidate".into())
+                    })?;
+                if old.reference != previous {
+                    return Err(DbError::Message(
+                        "snapshot candidate changed before replacement".into(),
+                    ));
+                }
+                let active =
+                    super::active_store_publication::load_active_store_publication_on(&tx)?
+                        .ok_or_else(|| {
+                            DbError::Message("snapshot replacement has no active owner".into())
+                        })?;
+                if active.owner() != &ActiveStorePublicationOwner::Snapshot
+                    || active.attempt()? != &old.publication
+                    || !active.retired_snapshot_objects().is_empty()
+                {
+                    return Err(DbError::Message(
+                        "snapshot replacement differs from its active owner".into(),
+                    ));
+                }
+                let observed =
+                    super::observed_store_publication::load_store_current_publication_on(&tx)?;
+                if observed.record() != accepted.interval().current()
+                    || observed.observed_version() != accepted.current_version()
+                    || active_publication.attempt()?.previous != *observed.record()
+                    || Some(&active_publication.attempt()?.previous_version)
+                        != observed.observed_version()
+                {
+                    return Err(DbError::Message(
+                        "snapshot replacement does not extend its installed winner".into(),
+                    ));
+                }
+                let old_entry = old.publication.reference()?;
+                let winner = accepted
+                    .interval()
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.reference().position == old_entry.position)
+                    .ok_or_else(|| {
+                        DbError::Message(
+                            "snapshot replacement lacks its settled exact position".into(),
+                        )
+                    })?;
+                if winner.entry().previous_state_hash != old.publication.previous.state_hash() {
+                    return Err(DbError::Message(
+                        "snapshot winner names another exact predecessor".into(),
+                    ));
+                }
+                if winner.reference() == &old_entry || accepted.interval().entries().iter().any(|entry|
+                    matches!(&entry.entry().payload, coven_protocol::store_commit::StorePublicationPayload::Snapshot(snapshot) if snapshot == &old.reference))
+                {
+                    return Err(DbError::Message("an accepted snapshot cannot be replaced as an unaccepted candidate".into()));
+                }
+                let retained = BTreeSet::from([
+                    reference.object.clone(),
+                    meta.image.object.clone(),
+                    meta.membership_rollup.object.clone(),
+                    active_publication.attempt()?.entry_object.clone(),
+                ]);
+                let cleanup = snapshot_candidate_cleanup_on(&tx, &old, &retained)?;
+                active_publication.retain_snapshot_cleanup(cleanup)?;
+                super::active_store_publication::update_active_store_publication_on(
+                    &tx,
+                    &active,
+                    &active_publication,
+                )?;
+                tx.execute(
+                    "DELETE FROM outbound_store_snapshot WHERE singleton = 1",
+                    [],
+                )?;
+            }
+        }
         tx.execute(
             "INSERT INTO outbound_store_snapshot \
-             (singleton, snapshot_ref, meta_prepared, image_ref, rollup_ref, \
-              meta_bytes, blobs) \
+             (singleton, snapshot_ref, meta_prepared, image_ref, rollup_ref, meta_bytes, blobs) \
              VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 serde_json::to_string(&reference).map_err(|error| {
@@ -200,30 +266,166 @@ impl StoreSession<'_> {
         Ok(reference)
     }
 
+    fn supersede_snapshot_publication(
+        &mut self,
+        previous: StoreSnapshotRef,
+        snapshot: PublishedStoreSnapshot,
+        accepted: AcceptedStorePublicationInterval,
+    ) -> Result<(), DbError> {
+        let baseline = self.installed_replay_baseline()?;
+        if baseline.snapshot() != Some(&snapshot) {
+            return Err(DbError::Message(
+                "superseding snapshot is not the installed verified baseline".into(),
+            ));
+        }
+        let authority = self.local_store_authority()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let old = load_outbound_store_snapshot_on(&tx, self.store_dir, &authority)?
+            .ok_or_else(|| DbError::Message("superseded snapshot has no pending request".into()))?;
+        let active = super::active_store_publication::load_active_store_publication_on(&tx)?
+            .ok_or_else(|| DbError::Message("superseded snapshot has no active owner".into()))?;
+        if old.reference != previous || active.attempt()? != &old.publication {
+            return Err(DbError::Message(
+                "snapshot request changed before supersession".into(),
+            ));
+        }
+        let observed = super::observed_store_publication::load_store_current_publication_on(&tx)?;
+        if observed.record() != accepted.interval().current()
+            || observed.observed_version() != accepted.current_version()
+        {
+            return Err(DbError::Message(
+                "superseding snapshot has another installed publication interval".into(),
+            ));
+        }
+        let entry = accepted.interval().entries().iter().find(|entry|
+            matches!(&entry.entry().payload, coven_protocol::store_commit::StorePublicationPayload::Snapshot(reference) if reference == &snapshot.reference)
+        ).ok_or_else(|| DbError::Message("superseding snapshot is absent from the accepted interval".into()))?;
+        if entry.reference().position <= old.publication.reference()?.position
+            || entry.entry().previous_state_hash
+                != snapshot.meta.publication_predecessor.state_hash()
+            || !snapshot.meta.coverage.covers(&old.meta.value.coverage)
+        {
+            return Err(DbError::Message(
+                "accepted snapshot does not supersede the requested checkpoint".into(),
+            ));
+        }
+        let retained = BTreeSet::from([
+            snapshot.reference.object.clone(),
+            snapshot.meta.image.object.clone(),
+            snapshot.meta.membership_rollup.object.clone(),
+            entry.reference().object.clone(),
+        ]);
+        let cleanup = snapshot_candidate_cleanup_on(&tx, &old, &retained)?;
+        let superseded = active.supersede_snapshot(snapshot, cleanup)?;
+        super::active_store_publication::update_active_store_publication_on(
+            &tx,
+            &active,
+            &superseded,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn complete_superseded_snapshot_publication(
+        &mut self,
+        expected: ActiveStorePublication,
+    ) -> Result<SnapshotMeta, DbError> {
+        let snapshot = expected.superseding_snapshot().ok_or_else(|| {
+            DbError::Message("snapshot request has no verified superseding checkpoint".into())
+        })?;
+        let authority = self.local_store_authority()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let pending = load_outbound_store_snapshot_on(&tx, self.store_dir, &authority)?
+            .ok_or_else(|| DbError::Message("superseded snapshot request is absent".into()))?;
+        if expected.attempt()? != &pending.publication {
+            return Err(DbError::Message(
+                "superseded snapshot differs from its original request".into(),
+            ));
+        }
+        super::active_store_publication::clear_active_store_publication_on(&tx, &expected)?;
+        tx.execute(
+            "DELETE FROM outbound_store_snapshot WHERE singleton = 1",
+            [],
+        )?;
+        crate::payload_store::release_payload_owner_on(
+            &tx,
+            crate::payload_store::OUTBOUND_STORE_SNAPSHOT_OWNER_KEY,
+        )?;
+        tx.commit()?;
+        Ok(snapshot.meta.clone())
+    }
+
+    fn complete_snapshot_candidate_cleanup(
+        &self,
+        expected: ActiveStorePublication,
+    ) -> Result<(), DbError> {
+        let mut replacement = expected.clone();
+        replacement.complete_snapshot_cleanup()?;
+        super::active_store_publication::update_active_store_publication_on(
+            self.conn,
+            &expected,
+            &replacement,
+        )
+    }
+
     fn latest_local_store_snapshot(&mut self) -> Result<Option<PublishedStoreSnapshot>, DbError> {
-        let authority = self.local_store_authority()?;
-        load_published_store_snapshot_on(self.conn, &authority)
+        let root = self.required_root_authority()?;
+        StoreRecords::new(self.conn, self.store_dir)
+            .published_store_snapshot(&root, self.verified_store_authority)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     fn local_store_snapshots(&mut self) -> Result<Vec<PublishedStoreSnapshot>, DbError> {
-        let authority = self.local_store_authority()?;
-        load_published_store_snapshots_on(self.conn, &authority)
+        let root = self.required_root_authority()?;
+        StoreRecords::new(self.conn, self.store_dir)
+            .published_store_snapshots(&root, self.verified_store_authority)
     }
 
-    fn complete_snapshot_publication(&mut self, accepted: StoreSnapshotRef) -> Result<(), DbError> {
+    fn complete_snapshot_publication(
+        &mut self,
+        accepted: crate::AcceptedStorePublicationInterval,
+    ) -> Result<SnapshotMeta, DbError> {
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let outbound = load_outbound_store_snapshot_on(&tx, self.store_dir, &authority)?
             .ok_or_else(|| DbError::Message("outbound Store snapshot is absent".to_string()))?;
-        if outbound.reference != accepted {
+        let accepted_entry = accepted
+            .interval()
+            .entries()
+            .iter()
+            .find(|entry| {
+                matches!(
+                    &entry.entry().payload,
+                    coven_protocol::store_commit::StorePublicationPayload::Snapshot(reference)
+                        if reference == &outbound.reference
+                )
+            })
+            .ok_or_else(|| {
+                DbError::Message(
+                    "accepted Store publication does not contain the prepared snapshot".to_string(),
+                )
+            })?;
+        if accepted.interval().previous() != &*outbound.publication.previous
+            || accepted_entry.entry() != &outbound.publication.entry
+            || accepted_entry.reference().object != outbound.publication.entry_object
+        {
             return Err(DbError::Message(
-                "accepted Store snapshot differs from the prepared exact object".to_string(),
+                "accepted Store snapshot differs from the prepared publication".to_string(),
             ));
         }
+        let superseded = StoreTransaction::new(&tx, self.store_dir)
+            .retire_snapshot_artifact_ownership(
+                self.verified_store_authority,
+                &authority.value().store_root,
+                &coven_protocol::store_commit::AcceptedStoreSnapshotRef {
+                    snapshot: outbound.reference.clone(),
+                    publication: accepted_entry.reference().clone(),
+                },
+                &outbound.meta.value,
+            )?;
         install_snapshot_blob_plans_on(&tx, &outbound.blobs)?;
-        let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner {
-            activation: outbound.meta.value.successor.activation,
-            generation: outbound.meta.value.generation,
+        let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner::Store {
+            metadata_slot: outbound.reference.object.slot().clone(),
         };
         persist_snapshot_image_on(
             &tx,
@@ -239,11 +441,13 @@ impl StoreSession<'_> {
             snapshot_owner,
             "Store membership rollup",
         )?;
+        StoreTransaction::new(&tx, self.store_dir)
+            .retire_store_blob_snapshot_ownership(outbound.reference.object.slot(), &superseded)?;
         let deleted = tx
             .execute(
                 "DELETE FROM outbound_store_snapshot \
                  WHERE singleton = 1 AND snapshot_ref = ?1",
-                [serde_json::to_string(&accepted).map_err(|error| {
+                [serde_json::to_string(&outbound.reference).map_err(|error| {
                     DbError::context("serialize accepted Store snapshot ref", error)
                 })?],
             )
@@ -257,53 +461,39 @@ impl StoreSession<'_> {
             &tx,
             crate::payload_store::OUTBOUND_STORE_SNAPSHOT_OWNER_KEY,
         )?;
-        let accepted_generation =
-            snapshot_generation_as_i64(accepted.generation, "Store snapshot")?;
+        let accepted_position =
+            i64::try_from(accepted_entry.reference().position.get()).map_err(|_| {
+                DbError::Message("Store snapshot position exceeds SQLite integer".into())
+            })?;
         tx.execute(
             "INSERT INTO published_store_snapshot \
-             (generation, snapshot_ref, successor_slot, meta_bytes) VALUES (?1, ?2, ?3, ?4)",
+             (publication_position, snapshot_ref, meta_bytes) VALUES (?1, ?2, ?3)",
             rusqlite::params![
-                accepted_generation,
-                serde_json::to_string(&accepted).map_err(|error| {
+                accepted_position,
+                serde_json::to_string(&outbound.reference).map_err(|error| {
                     DbError::context("serialize published Store snapshot ref", error)
                 })?,
-                serde_json::to_string(&outbound.meta.value.successor.next_slot).map_err(
-                    |error| DbError::context("serialize Store snapshot successor slot", error)
-                )?,
                 outbound.meta.bytes,
             ],
         )
         .map_err(DbError::from)?;
-        tx.commit().map_err(DbError::from)
-    }
-
-    fn snapshot_blob_spool_cleanup_paths(&self) -> Result<Vec<PathBuf>, DbError> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT path FROM snapshot_blob_spool_cleanup ORDER BY path")
-            .map_err(DbError::from)?;
-        let paths = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(DbError::from)?
-            .map(|row| row.map(PathBuf::from).map_err(DbError::from))
-            .collect();
-        paths
-    }
-
-    fn complete_snapshot_blob_spool_cleanup(&self, path: &str) -> Result<(), DbError> {
-        let deleted = self
-            .conn
-            .execute(
-                "DELETE FROM snapshot_blob_spool_cleanup WHERE path = ?1",
-                [path],
-            )
-            .map_err(DbError::from)?;
-        if deleted != 1 {
+        let expected = super::observed_store_publication::load_store_current_publication_on(&tx)?;
+        if expected.record() != accepted.interval().current() {
+            super::observed_store_publication::install_store_publication_interval_on(
+                &tx, &expected, &accepted,
+            )?;
+        } else if expected.observed_version() != accepted.current_version() {
             return Err(DbError::Message(
-                "snapshot blob spool cleanup ownership is absent".to_string(),
+                "accepted Store snapshot revision differs from the installed boundary".into(),
             ));
         }
-        Ok(())
+        let active_publication = ActiveStorePublication::snapshot(outbound.publication.clone())?;
+        super::active_store_publication::clear_active_store_publication_on(
+            &tx,
+            &active_publication,
+        )?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(outbound.meta.value)
     }
 }
 
@@ -311,20 +501,17 @@ impl StoreDatabase {
     pub async fn outbound_snapshot_publication(
         &self,
     ) -> Result<Option<DurableSnapshotPublication>, DbError> {
-        let pending = self
-            .call_store(|session| session.outbound_snapshot_publication())
-            .await?;
-        if let Some(pending) = &pending {
-            verify_snapshot_blob_spools(&pending.blobs, "prepared").await?;
-        }
-        Ok(pending)
+        self.call_store(|session| session.outbound_snapshot_publication())
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn stage_snapshot_publication(
         &self,
+        stage: StoreSnapshotPublicationStage,
         meta: SnapshotMeta,
         meta_prepared: PreparedExactObject,
+        publication: coven_protocol::prepared_commit::PreparedStorePublication,
         rollup_bytes: Vec<u8>,
         rollup_prepared: PreparedExactObject,
         image: SnapshotDatabaseImage,
@@ -333,8 +520,10 @@ impl StoreDatabase {
     ) -> Result<StoreSnapshotRef, DbError> {
         self.call_store(move |session| {
             session.stage_snapshot_publication(
+                stage,
                 meta,
                 meta_prepared,
+                publication,
                 rollup_bytes,
                 rollup_prepared,
                 image,
@@ -345,6 +534,34 @@ impl StoreDatabase {
         .await
     }
 
+    pub async fn supersede_snapshot_publication(
+        &self,
+        previous: StoreSnapshotRef,
+        snapshot: PublishedStoreSnapshot,
+        accepted: AcceptedStorePublicationInterval,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| {
+            session.supersede_snapshot_publication(previous, snapshot, accepted)
+        })
+        .await
+    }
+
+    pub async fn complete_superseded_snapshot_publication(
+        &self,
+        expected: ActiveStorePublication,
+    ) -> Result<SnapshotMeta, DbError> {
+        self.call_store(move |session| session.complete_superseded_snapshot_publication(expected))
+            .await
+    }
+
+    pub async fn complete_snapshot_candidate_cleanup(
+        &self,
+        expected: ActiveStorePublication,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| session.complete_snapshot_candidate_cleanup(expected))
+            .await
+    }
+
     pub async fn latest_local_store_snapshot(
         &self,
     ) -> Result<Option<PublishedStoreSnapshot>, DbError> {
@@ -352,6 +569,7 @@ impl StoreDatabase {
             .await
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn local_store_snapshots(&self) -> Result<Vec<PublishedStoreSnapshot>, DbError> {
         self.call_store(|session| session.local_store_snapshots())
             .await
@@ -359,20 +577,42 @@ impl StoreDatabase {
 
     pub async fn complete_snapshot_publication(
         &self,
-        accepted: StoreSnapshotRef,
-    ) -> Result<(), DbError> {
+        accepted: crate::AcceptedStorePublicationInterval,
+    ) -> Result<SnapshotMeta, DbError> {
         self.call_store(move |session| session.complete_snapshot_publication(accepted))
             .await
     }
+}
 
-    pub async fn snapshot_blob_spool_cleanup_paths(&self) -> Result<Vec<PathBuf>, DbError> {
-        self.call_store(|session| session.snapshot_blob_spool_cleanup_paths())
-            .await
+/// A pending snapshot has no installed image/rollup lease. Records already in
+/// the accepted object graph retain their own retirement authority; this owner
+/// retires only its otherwise unowned exact candidate objects.
+fn snapshot_candidate_cleanup_on(
+    connection: &Connection,
+    old: &DurableSnapshotPublication,
+    retained: &BTreeSet<ExactObjectRef>,
+) -> Result<Vec<ExactObjectRef>, DbError> {
+    let mut cleanup = Vec::new();
+    for object in BTreeSet::from([
+        old.reference.object.clone(),
+        old.meta.value.image.object.clone(),
+        old.meta.value.membership_rollup.object.clone(),
+        old.publication.entry_object.clone(),
+    ]) {
+        if retained.contains(&object) {
+            continue;
+        }
+        let object_id = coven_protocol::remote_object::remote_object_id(&object);
+        let owned: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if owned {
+            crate::load_remote_object_on(connection, object_id)?;
+        } else {
+            cleanup.push(object);
+        }
     }
-
-    pub async fn complete_snapshot_blob_spool_cleanup(&self, path: &Path) -> Result<(), DbError> {
-        let path = path.to_string_lossy().into_owned();
-        self.call_store(move |session| session.complete_snapshot_blob_spool_cleanup(&path))
-            .await
-    }
+    Ok(cleanup)
 }

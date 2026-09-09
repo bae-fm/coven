@@ -37,6 +37,34 @@ pub(crate) fn create_table_sql(
         .ok_or_else(|| CreateTableSchemaError::Missing(table.to_string()))
 }
 
+/// Compare schema tokens without interpreting formatting as a schema change.
+/// Quoted names and text remain byte-for-byte intact.
+pub(crate) fn normalize_schema_sql(sql: &str) -> rusqlite::Result<String> {
+    use sqlite3_parser::lexer::{sql::Tokenizer, Scanner};
+
+    let mut scanner = Scanner::new(Tokenizer::new());
+    let mut normalized = String::with_capacity(sql.len());
+    loop {
+        let (start, token, end) = scanner
+            .scan(sql.as_bytes())
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        if token.is_none() {
+            return Ok(normalized);
+        }
+        // Scanner values omit delimiters for some tokens (notably blobs), so
+        // use its source span to preserve each token's complete representation.
+        let text = &sql[start..end];
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        if text.starts_with(['\'', '"', '`', '[']) {
+            normalized.push_str(text);
+        } else {
+            normalized.push_str(&text.to_ascii_lowercase());
+        }
+    }
+}
+
 /// Qualify a `CREATE TABLE <name> ...` statement so it builds the table inside
 /// the attached schema `alias`, replacing only the table-name token.
 pub fn rewrite_create_into_schema(
@@ -314,6 +342,27 @@ fn primary_key_columns(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_normalization_preserves_unicode_literals_and_token_boundaries() {
+        let sql = "CREATE TABLE t ([é ] TEXT DEFAULT 'A  B''C', n BLOB DEFAULT X'4142') STRICT";
+        let normalized = normalize_schema_sql(sql).expect("normalize schema");
+        assert!(normalized.contains("[é ]"));
+        assert!(normalized.contains("'A  B''C'"));
+        assert!(normalized.contains("x'4142'"));
+        assert_eq!(
+            normalize_schema_sql("CREATE/*comment*/TABLE t(x TEXT) STRICT").expect("normalize"),
+            normalize_schema_sql("CREATE TABLE t ( x TEXT ) STRICT").expect("normalize"),
+        );
+    }
+
+    #[test]
+    fn schema_normalization_preserves_spaces_inside_bracketed_identifiers() {
+        assert_ne!(
+            normalize_schema_sql("CREATE TABLE t ([value ] TEXT) STRICT").expect("normalize"),
+            normalize_schema_sql("CREATE TABLE t ([value] TEXT) STRICT").expect("normalize"),
+        );
+    }
 
     #[test]
     fn create_table_rewrite_qualifies_table_token() {

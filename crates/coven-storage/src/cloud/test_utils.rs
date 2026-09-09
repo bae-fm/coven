@@ -36,7 +36,7 @@ struct InflightGuard {
 }
 
 #[derive(Clone)]
-struct ProbePause {
+struct OperationPause {
     reached: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
@@ -106,6 +106,7 @@ impl Drop for InflightGuard {
 pub struct InMemoryCloudHome {
     provider_binding: coven_protocol::objects::ResolvedProviderBinding,
     writes: Arc<Mutex<MemoryObjects>>,
+    access_requests: Arc<Mutex<Vec<CloudAccessState>>>,
     exact_slot_allocations: Arc<AtomicUsize>,
     exact_slot_allocation_delay_millis: Arc<AtomicU64>,
     exact_slot_allocation_inflight: Arc<AtomicUsize>,
@@ -120,8 +121,9 @@ pub struct InMemoryCloudHome {
     fail_exact_create_before: Arc<AtomicUsize>,
     fail_exact_create_after: Arc<AtomicUsize>,
     lose_next_conditional_replace_response: Arc<AtomicBool>,
+    conditional_replace_pause: Arc<Mutex<Option<OperationPause>>>,
     exact_create_pause: Arc<Mutex<Option<AppendPause>>>,
-    probe_pause: Arc<Mutex<Option<ProbePause>>>,
+    probe_pause: Arc<Mutex<Option<OperationPause>>>,
     probe_failure: Arc<Mutex<Option<coven_protocol::objects::StorageBackendFailure>>>,
     exact_full_read_count: Arc<AtomicUsize>,
     exact_full_read_delay_millis: Arc<AtomicU64>,
@@ -183,6 +185,7 @@ impl InMemoryCloudHome {
                 },
             },
             writes: Arc::new(Mutex::new(MemoryObjects::new())),
+            access_requests: Arc::new(Mutex::new(Vec::new())),
             exact_slot_allocations: Arc::new(AtomicUsize::new(0)),
             exact_slot_allocation_delay_millis: Arc::new(AtomicU64::new(0)),
             exact_slot_allocation_inflight: Arc::new(AtomicUsize::new(0)),
@@ -197,6 +200,7 @@ impl InMemoryCloudHome {
             fail_exact_create_before: Arc::new(AtomicUsize::new(0)),
             fail_exact_create_after: Arc::new(AtomicUsize::new(0)),
             lose_next_conditional_replace_response: Arc::new(AtomicBool::new(false)),
+            conditional_replace_pause: Arc::new(Mutex::new(None)),
             exact_create_pause: Arc::new(Mutex::new(None)),
             probe_pause: Arc::new(Mutex::new(None)),
             probe_failure: Arc::new(Mutex::new(None)),
@@ -303,6 +307,19 @@ impl InMemoryCloudHome {
             .store(true, Ordering::SeqCst);
     }
 
+    /// Pause after the next successful conditional replacement becomes visible.
+    pub fn pause_next_conditional_replace(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *self.conditional_replace_pause.lock().unwrap() = Some(OperationPause {
+            reached: reached.clone(),
+            release: release.clone(),
+        });
+        (reached, release)
+    }
+
     /// Pause after the selected exact create is physically visible.
     pub fn pause_after_exact_create_call(
         &self,
@@ -324,7 +341,7 @@ impl InMemoryCloudHome {
     pub fn pause_next_probe(&self) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        *self.probe_pause.lock().unwrap() = Some(ProbePause {
+        *self.probe_pause.lock().unwrap() = Some(OperationPause {
             reached: reached.clone(),
             release: release.clone(),
         });
@@ -518,6 +535,10 @@ impl InMemoryCloudHome {
     /// Snapshot of every delete that's been requested, in arrival order.
     pub fn deletes_seen(&self) -> Vec<String> {
         self.deletes.lock().unwrap().clone()
+    }
+
+    pub fn access_requests(&self) -> Vec<CloudAccessState> {
+        self.access_requests.lock().unwrap().clone()
     }
 
     /// Insert caller-selected bytes at one exact logical slot.
@@ -889,6 +910,7 @@ impl InMemoryCloudHome {
         &self,
         desired: super::CloudAccessState,
     ) -> Result<super::CloudAccessOutcome, CloudHomeError> {
+        self.access_requests.lock().unwrap().push(desired.clone());
         Ok(match desired {
             super::CloudAccessState::Present { .. } => {
                 super::CloudAccessOutcome::Present(super::CloudHomeJoinInfo::S3 {
@@ -1111,23 +1133,28 @@ impl ExactSlotStorage for InMemoryCloudHome {
             ));
         }
         let key = Self::exact_storage_key(slot)?;
-        let mut writes = self.writes.lock().unwrap();
-        let Some(current) = writes.values.get(&key) else {
-            return Err(CloudHomeError::NotFound(slot.logical_key().to_string()));
+        let (version, lose_response, pause) = {
+            let mut writes = self.writes.lock().unwrap();
+            let Some(current) = writes.values.get(&key) else {
+                return Err(CloudHomeError::NotFound(slot.logical_key().to_string()));
+            };
+            if current.version.to_string() != expected.as_provider() {
+                return Ok(ConditionalWriteOutcome::VersionChanged);
+            }
+            writes.insert(key, bytes);
+            let version = writes.next_version;
+            // Claim these faults before another writer can replace this record.
+            let lose_response = self
+                .lose_next_conditional_replace_response
+                .swap(false, Ordering::SeqCst);
+            let pause = self.conditional_replace_pause.lock().unwrap().take();
+            (version, lose_response, pause)
         };
-        if current.version.to_string() != expected.as_provider() {
-            return Ok(ConditionalWriteOutcome::VersionChanged);
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.release.notified().await;
         }
-        writes.insert(key, bytes);
-        let version = writes
-            .values
-            .get(&Self::exact_storage_key(slot)?)
-            .expect("conditional replacement inserted the record")
-            .version;
-        if self
-            .lose_next_conditional_replace_response
-            .swap(false, Ordering::SeqCst)
-        {
+        if lose_response {
             return Err(CloudHomeError::Transport(
                 "InMemoryCloudHome: conditional replacement response lost".to_string(),
             ));

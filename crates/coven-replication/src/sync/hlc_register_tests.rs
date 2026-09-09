@@ -3,8 +3,8 @@
 //! Unlike the self-tests in `hlc.rs` (which prove the clock is a correct clock),
 //! these assert an *external* outcome of wiring the clock to the data plane: they
 //! fail if `_updated_at` is wall-clock-stamped, if the clock regresses across a
-//! restart, or if revocation depended on an author-supplied transport timestamp
-//! rather than current write-capable membership. They drive a real
+//! restart. Membership changes preserve writes already accepted before removal;
+//! an author-supplied row timestamp does not determine that boundary. They drive a real
 //! [`coven_database::Database`] (with an injected, wall-clock-controlled `Hlc`)
 //! so the register lives where production puts it: inside the owned connection.
 
@@ -288,9 +288,17 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let pull_db = target.clone();
     let pull_storage = storage.clone();
     let pull_store_dir = store_dir.clone();
-    let pull = tokio::spawn(async move { pull_storage.pull_into(&pull_db, &pull_store_dir).await });
+    let mut pull =
+        tokio::spawn(async move { pull_storage.pull_into(&pull_db, &pull_store_dir).await });
 
-    commit_reached.notified().await;
+    tokio::select! {
+        _ = commit_reached.notified() => {}
+        result = &mut pull => panic!("pull ended before the post-commit pause: {result:?}"),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+            pull.abort();
+            panic!("pull did not reach the post-commit pause");
+        }
+    }
     let queued_stamp = coven_database::StoreDatabase::new(&target).stamp();
     let host_stamp = coven_database::StoreDatabase::new(&target)
         .run_host_store_write_for_test(None, None, move |tx| {
@@ -306,7 +314,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
         .expect("queued host write commits")
         .value;
     pull.abort();
-    let _ = pull.await;
+    assert!(pull.await.expect_err("cancel paused pull").is_cancelled());
 
     assert!(
         host_stamp > remote_stamp,
@@ -367,12 +375,10 @@ fn reconstructed_clock_does_not_regress_below_persisted_high_water() {
     );
 }
 
-/// Revocation is enforced by current membership, not by when a changeset was
-/// committed. A member publishes a changeset while their grant is active, then an
-/// owner removes them before another device pulls it. The pull must reject the
-/// earlier commit because its author lacks a current membership grant.
+/// A member publishes while authorized, then is removed before another device
+/// pulls. Removal prevents later acceptance; it does not retract that accepted row.
 #[tokio::test]
-async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
+async fn accepted_member_write_survives_removal_before_a_receiver_pulls() {
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
     let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
@@ -420,16 +426,10 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         )
         .await
         .expect("install member's active exact device fixture");
-    let member_device_id = member_db
-        .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read member device id")
-        .expect("member device registration is active");
-
     member_db
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('n1', 'Stale writer', NULL, 1, '0000000003000-0000-member', '2026-01-01')",
+         VALUES ('n1', 'Accepted member write', NULL, 1, '0000000003000-0000-member', '2026-01-01')",
         )
         .await;
     let member_store_dir = member_db_store_dir.clone();
@@ -438,6 +438,9 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         cloud_storage,
         member_store_dir,
         member.clone(),
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("load member Store");
@@ -456,6 +459,13 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .drain_store_writes()
         .await
         .expect("publish member commit while grant is active");
+    let accepted = coven_protocol::store_commit::CommitFrontier::from_refs(
+        coven_database::StoreDatabase::new(&member_db)
+            .materialized_frontier()
+            .await
+            .expect("read the member's accepted frontier"),
+    )
+    .expect("shape the accepted frontier");
 
     let custody = TestCustody::default();
     custody.set_initial_key([42; 32]);
@@ -471,16 +481,29 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .await
         .expect("remove exact member identity");
 
-    let (updated, _result) = storage
+    let (_updated, result) = storage
         .pull_into(&receiver_db, &receiver_db_store_dir)
         .await;
 
-    assert!(
-        !receiver_db
-            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
-            .await
+    assert!(result.held_positions.is_empty(), "{result:?}");
+    assert_eq!(
+        receiver_db
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
+        "Accepted member write",
+        "removal must preserve the row accepted before it",
     );
-    assert_eq!(updated.get(&member_device_id), None);
+    let received = coven_protocol::store_commit::CommitFrontier::from_refs(
+        coven_database::StoreDatabase::new(&receiver_db)
+            .materialized_frontier()
+            .await
+            .expect("read the receiver's accepted frontier"),
+    )
+    .expect("shape the received frontier");
+    assert!(
+        received.covers(&accepted),
+        "the receiver retains acceptance as well as the member's row",
+    );
 }
 
 /// `Database::open_synthetic_for_test` seeds the register from the persisted high-water mark, so the

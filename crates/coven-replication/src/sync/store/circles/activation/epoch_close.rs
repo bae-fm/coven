@@ -8,6 +8,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         objects: &CircleActivationObjects,
         encryption: EncryptionService,
         roster_chain: &coven_protocol::circle::CircleRosterChain,
+        prepared: &[&VerifiedCircleActivations],
     ) -> Result<Option<VerifiedCloseOutcome>, CircleOperationError> {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             // The successor is an ActiveEpoch. Dispatch on the settled slot object,
@@ -20,7 +21,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                         "Circle epoch reopen also carries a close outcome or intent".to_string(),
                     ));
                 }
-                self.verify_epoch_reopen(commit, control, objects).await?;
+                self.verify_epoch_reopen(commit, control, objects, prepared)
+                    .await?;
                 return Ok(None);
             }
             if objects.close_intent.is_some() {
@@ -29,7 +31,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 ));
             }
             return self
-                .verify_epoch_close_outcome(commit, control, objects, encryption)
+                .verify_epoch_close_outcome(commit, control, objects, encryption, prepared)
                 .await;
         };
         if objects.close_outcome.is_some()
@@ -58,10 +60,12 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             ));
         }
         let remaining_members = remaining.members();
+        // The accepted predecessor history can be verified before this pull
+        // installs it. Its state binds the frozen reference checked above.
         let devices = self
-            .database
-            .resolved_store_device_state(&close.frozen_device_state)
-            .await?;
+            .history
+            .verified_predecessor_state(commit)
+            .map_err(CircleOperationError::from)?;
         let mut expected = Vec::new();
         for record in devices.devices.values() {
             if !matches!(
@@ -70,11 +74,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             ) {
                 continue;
             }
-            let registration = self
-                .database
-                .activated_store_device_registration(record.registration.clone())
-                .await?;
-            if remaining_members.contains_key(&registration.value().author_pubkey) {
+            let registration = self.history.load_registration(&record.registration).await?;
+            if remaining_members.contains_key(&registration.value.author_pubkey) {
                 expected.push(record.registration.clone());
             }
         }
@@ -152,6 +153,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         control: &PreparedCircleControl,
         objects: &CircleActivationObjects,
         encryption: EncryptionService,
+        prepared: &[&VerifiedCircleActivations],
     ) -> Result<Option<VerifiedCloseOutcome>, CircleOperationError> {
         let active = control.value.active_epoch().ok_or_else(|| {
             CircleOperationError::InvalidState(
@@ -167,9 +169,15 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             None => None,
             Some(_) => {
                 let coord = Self::reopen_predecessor_coord(control)?;
-                self.database
-                    .verified_circle_activation(self.root().clone(), control.value.circle_id, coord)
-                    .await?
+                Some(
+                    self.load_predecessor_activation(
+                        commit,
+                        control.value.circle_id,
+                        coord,
+                        prepared,
+                    )
+                    .await?,
+                )
             }
         };
         let predecessor_is_close = epoch_predecessor.as_ref().is_some_and(|predecessor| {
@@ -245,19 +253,11 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 "Circle epoch origin differs from its outcome reference".to_string(),
             ));
         }
-        let predecessor = self
-            .database
-            .verified_circle_activation(
-                self.root().clone(),
-                control.value.circle_id,
-                close_control.clone(),
+        let predecessor = epoch_predecessor.ok_or_else(|| {
+            CircleOperationError::InvalidState(
+                "Circle successor retained no exact close activation".to_string(),
             )
-            .await?
-            .ok_or_else(|| {
-                CircleOperationError::InvalidState(
-                    "Circle successor retained no exact close activation".to_string(),
-                )
-            })?;
+        })?;
         let CircleControlState::EpochClose(close) = predecessor.control.value.state() else {
             return Err(CircleOperationError::InvalidState(
                 "Circle successor origin names an active predecessor".to_string(),
@@ -350,10 +350,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             let settlement = match &slot_value {
                 coven_protocol::circle::CircleEpochCloseResponseSlotValue::Response(response) => {
                     let registration = self
-                        .database
-                        .activated_store_device_registration(participant.registration.clone())
+                        .history
+                        .load_registration(&participant.registration)
                         .await?;
-                    if !response.verify_for(&predecessor.control, registration.value()) {
+                    if !response.verify_for(&predecessor.control, &registration.value) {
                         return Err(CircleOperationError::InvalidState(
                             "Circle epoch-close response failed exact verification".to_string(),
                         ));
@@ -451,6 +451,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         commit: &StoreBatchCommit,
         control: &PreparedCircleControl,
         objects: &CircleActivationObjects,
+        prepared: &[&VerifiedCircleActivations],
     ) -> Result<(), CircleOperationError> {
         let active = control.value.active_epoch().ok_or_else(|| {
             CircleOperationError::InvalidState(
@@ -464,18 +465,13 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         })?;
         let close_coord = Self::reopen_predecessor_coord(control)?;
         let predecessor = self
-            .database
-            .verified_circle_activation(
-                self.root().clone(),
+            .load_predecessor_activation(
+                commit,
                 control.value.circle_id,
                 close_coord.clone(),
+                prepared,
             )
-            .await?
-            .ok_or_else(|| {
-                CircleOperationError::InvalidState(
-                    "Circle reopen retained no exact close activation".to_string(),
-                )
-            })?;
+            .await?;
         let CircleControlState::EpochClose(close) = predecessor.control.value.state() else {
             return Err(CircleOperationError::InvalidState(
                 "Circle reopen predecessor is an active epoch, not a close".to_string(),
@@ -537,5 +533,43 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             ));
         }
         Ok(())
+    }
+
+    async fn load_predecessor_activation(
+        &self,
+        commit: &StoreBatchCommit,
+        circle_id: CircleId,
+        coordinate: CircleControlCoord,
+        prepared: &[&VerifiedCircleActivations],
+    ) -> Result<VerifiedCircleReference, CircleOperationError> {
+        let mut matching = None;
+        for group in prepared {
+            for activation in group.circles() {
+                if activation.circle_id == circle_id && activation.control.coord == coordinate {
+                    let found = (activation, group.stream_activations().activating_commit());
+                    if matching.is_some_and(|prior| prior != found) {
+                        return Err(CircleOperationError::InvalidState(
+                            "prepared Circle history contains conflicting copies of an exact control"
+                                .to_string(),
+                        ));
+                    }
+                    matching = Some(found);
+                }
+            }
+        }
+        if let Some((activation, activating_commit)) = matching {
+            self.history
+                .verify_prepared_circle_predecessor(commit, activating_commit, activation)
+                .map_err(CircleOperationError::from)?;
+            return Ok(activation.clone());
+        }
+        self.database
+            .verified_circle_activation(self.root().clone(), circle_id, coordinate)
+            .await?
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(
+                    "Circle successor has no verified exact predecessor control".to_string(),
+                )
+            })
     }
 }

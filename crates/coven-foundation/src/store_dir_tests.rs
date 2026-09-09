@@ -2,24 +2,27 @@ use super::*;
 
 use std::time::Duration;
 
-/// A normal id partitions by its first two dash-stripped byte-pairs, with the
-/// full id (dashes kept) as the file name — the layout the cloud and local
-/// stores share.
+/// Cache entries partition by the first two dash-stripped byte-pairs, with the
+/// full id as the file name.
 #[test]
-fn hashed_path_partitions_a_normal_id() {
+fn cache_path_partitions_a_normal_id() {
+    let store = StoreDir::new_ephemeral("/stores/example");
     let id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
     assert_eq!(
-        StoreDir::hashed_path("images", id).expect("valid id"),
-        format!("images/a1/b2/{id}"),
+        store
+            .cache_folder_blob_path("cache", "images", id)
+            .expect("valid id"),
+        store.storage_dir().join(format!("cache/images/a1/b2/{id}")),
     );
 }
 
 /// An id too short to take the `{ab}/{cd}` prefix cannot index a two-byte
 /// shard, so it is rejected as `Unindexable` rather than slicing past its end.
 #[test]
-fn hashed_path_refuses_a_short_id_instead_of_panicking() {
+fn cache_path_refuses_a_short_id_instead_of_panicking() {
+    let store = StoreDir::new_ephemeral("/stores/example");
     assert_eq!(
-        StoreDir::hashed_path("images", "a"),
+        store.cache_folder_blob_path("cache", "images", "a"),
         Err(PathTokenError::Unindexable),
     );
 }
@@ -27,10 +30,11 @@ fn hashed_path_refuses_a_short_id_instead_of_panicking() {
 /// An id whose dash-stripped form splits a multi-byte char at the prefix
 /// boundary is unindexable too, not a panic.
 #[test]
-fn hashed_path_refuses_a_misaligned_multibyte_id() {
+fn cache_path_refuses_a_misaligned_multibyte_id() {
+    let store = StoreDir::new_ephemeral("/stores/example");
     // 'é' is two bytes; "aé" puts a char boundary failure at byte 2.
     assert_eq!(
-        StoreDir::hashed_path("images", "aé"),
+        store.cache_folder_blob_path("cache", "images", "aé"),
         Err(PathTokenError::Unindexable),
     );
 }
@@ -38,21 +42,22 @@ fn hashed_path_refuses_a_misaligned_multibyte_id() {
 /// An id or namespace carrying a separator, a `..`, or a NUL is a traversal
 /// attempt and is refused before any path is built.
 #[test]
-fn hashed_path_refuses_traversal_tokens() {
+fn cache_path_refuses_traversal_tokens() {
+    let store = StoreDir::new_ephemeral("/stores/example");
     assert_eq!(
-        StoreDir::hashed_path("images", "ab/../../etc/passwd"),
+        store.cache_folder_blob_path("cache", "images", "ab/../../etc/passwd"),
         Err(PathTokenError::Separator),
     );
     assert_eq!(
-        StoreDir::hashed_path("images", ".."),
+        store.cache_folder_blob_path("cache", "images", ".."),
         Err(PathTokenError::ParentDir),
     );
     assert_eq!(
-        StoreDir::hashed_path("images", "a\0b"),
+        store.cache_folder_blob_path("cache", "images", "a\0b"),
         Err(PathTokenError::NulByte),
     );
     assert_eq!(
-        StoreDir::hashed_path("im/ages", "abcd"),
+        store.cache_folder_blob_path("cache", "im/ages", "abcd"),
         Err(PathTokenError::Separator),
     );
 }

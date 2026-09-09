@@ -134,23 +134,6 @@ pub(super) fn stage_pending_rotation_on(
     replace_rotation_gate_on(tx, existing.as_ref(), Some(gate), "candidate staging")
 }
 
-pub(super) fn replace_rotation_candidate_mutation_on(
-    tx: &rusqlite::Transaction<'_>,
-    previous: ObjectHash,
-    replacement: ObjectHash,
-    generation: u64,
-) -> Result<(), DbError> {
-    let existing = load_rotation_gate_on(tx)?.ok_or_else(|| {
-        DbError::Message("rotation gate is absent during candidate replacement".to_string())
-    })?;
-    let next = existing
-        .1
-        .clone()
-        .replace_candidate_mutation(generation, previous, replacement)
-        .map_err(DbError::from)?;
-    replace_rotation_gate_on(tx, Some(&existing), Some(next), "candidate replacement")
-}
-
 pub(super) fn remove_rotation_candidate_on(
     tx: &rusqlite::Transaction<'_>,
     intent_hash: ObjectHash,

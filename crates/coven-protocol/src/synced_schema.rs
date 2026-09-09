@@ -326,9 +326,9 @@ pub struct BlobDecl {
     pub hash_column: String,
     /// Cloud namespace for the blob, e.g. `"images"` or `"audio"`.
     pub namespace: String,
-    /// The column holding the consumer's readable cloud-relative path, used as the
-    /// object key under the plain (browsable) blob-path scheme. `None` means the
-    /// blob is keyed only by its hashed id (the default obfuscated scheme).
+    /// The column holding the consumer's readable cloud-relative path. A
+    /// browsable home requires this path and appends a locator-hash version;
+    /// an opaque home's object path uses only the namespace and locator hash.
     pub cloud_path_column: Option<String>,
     /// How the blob is scoped for encryption (see [`crate::blob::BlobScope`]).
     pub scope: crate::blob::BlobScope,
@@ -340,10 +340,10 @@ pub struct BlobDecl {
     /// into the cache on every pull) or [`crate::blob::CacheFill::CacheLazy`]
     /// (fetched into the cache on first read).
     pub fill: crate::blob::CacheFill,
-    /// The blob's **replacement story**: whether this row may be repointed at a
-    /// different blob ([`crate::blob::BlobReplacement`]). Decides what coven requires of
-    /// the blob's cloud key so that a cloud object is never rewritten with different
-    /// bytes. Defaults to [`crate::blob::BlobReplacement::Replaceable`].
+    /// The row's repointing and readable-name policy
+    /// ([`crate::blob::BlobReplacement`]). Exact cloud-object identity is supplied
+    /// by the blob locator in both cases. Defaults to
+    /// [`crate::blob::BlobReplacement::Replaceable`].
     pub replacement: crate::blob::BlobReplacement,
 }
 
@@ -371,12 +371,10 @@ impl BlobDecl {
         }
     }
 
-    /// Declare that this table's row is never repointed at a different blob
-    /// ([`crate::blob::BlobReplacement::WriteOnce`]), which frees its readable
-    /// `cloud_path` to be a stable, fully human-readable name. coven refuses a
-    /// repointing. Read that variant's docs before reaching for this: it is a weaker
-    /// contract than the default, and it asks the consumer to guarantee the part coven
-    /// cannot see — that a path is never reused by a different blob.
+    /// Refuse changeset updates that change a row's blob-id column
+    /// ([`crate::blob::BlobReplacement::WriteOnce`]). The readable `cloud_path`
+    /// need not contain the blob id; its final cloud key still includes the
+    /// locator-hash version.
     pub fn write_once(mut self) -> Self {
         self.replacement = crate::blob::BlobReplacement::WriteOnce;
         self
@@ -394,7 +392,8 @@ impl BlobDecl {
         self
     }
 
-    /// Key the blob at the readable cloud path in `column` (the plain scheme).
+    /// Take the browsable locator's readable path from `column`. The cloud
+    /// object key appends `.coven-versions/{locator_hash}` to that path.
     pub fn with_cloud_path_column(mut self, column: impl Into<String>) -> Self {
         self.cloud_path_column = Some(column.into());
         self

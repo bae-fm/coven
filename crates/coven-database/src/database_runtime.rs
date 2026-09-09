@@ -27,13 +27,48 @@ fn store_dir_of(path: &Path) -> coven_foundation::store_dir::StoreDir {
 }
 
 impl Database {
+    pub(crate) async fn prepare_received_snapshot_circles(
+        &self,
+        selection: crate::StagedCircleRestore,
+        receiver_wall_ms: u64,
+    ) -> Result<(), DbError> {
+        self.connection
+            .prepare_received_snapshot_circles(selection, receiver_wall_ms)
+            .await
+    }
+
+    pub(crate) async fn prepare_snapshot_database(
+        &self,
+        plaintext: Vec<u8>,
+        install: VerifiedSnapshotBootstrapInstall,
+    ) -> Result<Database, OpenError> {
+        let connection = self
+            .connection
+            .prepare_snapshot_database(plaintext, install)
+            .await?;
+        Ok(Self { connection })
+    }
+
+    pub(crate) async fn into_prepared_snapshot(
+        self,
+    ) -> Result<crate::PreparedStoreSnapshot, DbError> {
+        self.connection.into_prepared_snapshot().await
+    }
+
+    pub(crate) async fn discard_snapshot_preparation(self) -> Result<(), DbError> {
+        self.connection.discard_snapshot_preparation().await
+    }
+
     pub(crate) fn from_core(core: DatabaseCore, thread_name: &str) -> Result<Self, DbError> {
         Ok(Self {
             connection: DatabaseConnection::start(core, thread_name)?,
         })
     }
 
-    pub(crate) async fn call_database<F, R>(&self, operation: F) -> Result<R, DbError>
+    pub(crate) fn call_database<F, R>(
+        &self,
+        operation: F,
+    ) -> impl std::future::Future<Output = Result<R, DbError>> + Send + '_
     where
         F: for<'session> FnOnce(
                 &mut crate::database_session::DatabaseSession<'session>,
@@ -42,20 +77,26 @@ impl Database {
             + 'static,
         R: Send + 'static,
     {
-        self.connection.call_database(operation).await
+        self.connection.call_database(operation)
     }
 
-    pub(crate) async fn call_store<F, R>(&self, operation: F) -> Result<R, DbError>
+    pub(crate) fn call_store<F, R>(
+        &self,
+        operation: F,
+    ) -> impl std::future::Future<Output = Result<R, DbError>> + Send + '_
     where
         F: for<'session> FnOnce(&mut crate::store::StoreSession<'session>) -> Result<R, DbError>
             + Send
             + 'static,
         R: Send + 'static,
     {
-        self.connection.call_store(operation).await
+        self.connection.call_store(operation)
     }
 
-    pub(crate) async fn read_store<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
+    pub(crate) fn read_store<F, R, E>(
+        &self,
+        read: F,
+    ) -> impl std::future::Future<Output = Result<Result<R, E>, DbError>> + Send + '_
     where
         F: for<'connection> FnOnce(crate::store::SqlReadContext<'connection>) -> Result<R, E>
             + Send
@@ -63,7 +104,7 @@ impl Database {
         R: Send + 'static,
         E: Send + 'static,
     {
-        self.connection.read_store(read).await
+        self.connection.read_store(read)
     }
 
     pub(crate) fn store_schema_version(&self) -> u32 {
@@ -176,7 +217,7 @@ impl Database {
         self.connection.device_exclusion_permit().await
     }
 
-    pub(crate) async fn author_own_store_stream(&self) -> crate::store::OwnStreamAuthorship {
+    pub(crate) async fn author_own_store_stream(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.connection.author_own_store_stream().await
     }
 
@@ -264,6 +305,14 @@ impl Database {
         coven_migration_policy: CovenMigrationPolicy,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
+        if ObjectHash::digest(&std::fs::read(path).map_err(DbError::from)?)
+            != install.snapshot.meta.image.image_hash
+        {
+            return Err(DbError::Message(
+                "snapshot database image differs from its authenticated plaintext hash".into(),
+            )
+            .into());
+        }
         let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
         Self::open_with_hlc_and_coven_metadata(
             path,
@@ -470,6 +519,26 @@ impl Database {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn schema_version(&self) -> u32 {
         self.connection.store_schema_version()
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn synced_tables_for_test(&self) -> Vec<SyncedTable> {
+        self.connection.store_synced_tables()
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn replace_with_database_image_for_test(
+        &self,
+        image: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.connection
+            .replace_with_database_image_for_test(image)
+            .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn database_image_for_test(&self) -> Result<Vec<u8>, DbError> {
+        self.connection.database_image_for_test().await
     }
 
     #[cfg(any(test, feature = "test-utils"))]

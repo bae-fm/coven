@@ -15,11 +15,37 @@ pub(crate) fn filter_inbound_circle_changeset(
             conn,
             changeset,
             &package_audience,
-            store_transitions,
+            InboundRoutingSource::Published(store_transitions),
             gates,
             routing_key,
         )?;
         filter_inbound_audience_rows_raw(conn, &normalized, &package_audience, gates, routing_key)
+    }
+}
+
+enum InboundRoutingSource<'a> {
+    Published(&'a StoreAudienceTransitions),
+    InstalledSnapshot,
+}
+
+pub(crate) fn filter_snapshot_circle_changeset(
+    conn: &Connection,
+    changeset: &[u8],
+    circle_id: CircleId,
+    gates: &Gates,
+    routing_key: &RowRoutingKey,
+) -> Result<Vec<u8>, GateError> {
+    unsafe {
+        let audience = Audience::Circle(circle_id);
+        let (normalized, _) = normalize_inbound_private_routes_raw(
+            conn,
+            changeset,
+            &audience,
+            InboundRoutingSource::InstalledSnapshot,
+            gates,
+            routing_key,
+        )?;
+        filter_inbound_audience_rows_raw(conn, &normalized, &audience, gates, routing_key)
     }
 }
 
@@ -119,7 +145,7 @@ pub(crate) fn normalize_inbound_store_changeset(
             conn,
             changeset,
             &Audience::Store,
-            &store_transitions,
+            InboundRoutingSource::Published(&store_transitions),
             gates,
             routing_key,
         )
@@ -264,11 +290,11 @@ pub(crate) unsafe fn filter_inbound_audience_rows_raw(
     group.output()
 }
 
-pub(crate) unsafe fn normalize_inbound_private_routes_raw(
+unsafe fn normalize_inbound_private_routes_raw(
     conn: &Connection,
     changeset: &[u8],
     package_audience: &Audience,
-    store_transitions: &StoreAudienceTransitions,
+    routing_source: InboundRoutingSource<'_>,
     gates: &Gates,
     routing_key: &RowRoutingKey,
 ) -> Result<(Vec<u8>, PackageRoutes), GateError> {
@@ -276,7 +302,7 @@ pub(crate) unsafe fn normalize_inbound_private_routes_raw(
         conn,
         changeset,
         package_audience,
-        store_transitions,
+        routing_source,
         gates,
         routing_key,
     )?;
@@ -305,11 +331,11 @@ pub(crate) unsafe fn normalize_inbound_private_routes_raw(
     Ok((group.output()?, package_routes))
 }
 
-pub(crate) unsafe fn validate_inbound_private_routes_raw(
+unsafe fn validate_inbound_private_routes_raw(
     conn: &Connection,
     changeset: &[u8],
     package_audience: &Audience,
-    store_transitions: &StoreAudienceTransitions,
+    routing_source: InboundRoutingSource<'_>,
     gates: &Gates,
     routing_key: &RowRoutingKey,
 ) -> Result<PackageRoutes, GateError> {
@@ -402,26 +428,28 @@ pub(crate) unsafe fn validate_inbound_private_routes_raw(
                 row.0, row.1
             )));
         }
-        let (transition_audience, audience_stamp) = store_transitions
-            .by_routing_id
-            .get(routing_id)
-            .ok_or_else(|| {
-                GateError::InvalidInboundAudiencePackage(format!(
-                    "private route for {}.{} has no Store audience transition",
+        if let InboundRoutingSource::Published(store_transitions) = &routing_source {
+            let (transition_audience, audience_stamp) = store_transitions
+                .by_routing_id
+                .get(routing_id)
+                .ok_or_else(|| {
+                    GateError::InvalidInboundAudiencePackage(format!(
+                        "private route for {}.{} has no Store audience transition",
+                        row.0, row.1
+                    ))
+                })?;
+            if transition_audience != package_audience {
+                return Err(GateError::InvalidInboundAudiencePackage(format!(
+                    "private route for {}.{} is packaged for a different audience than its Store transition",
                     row.0, row.1
-                ))
-            })?;
-        if transition_audience != package_audience {
-            return Err(GateError::InvalidInboundAudiencePackage(format!(
-                "private route for {}.{} is packaged for a different audience than its Store transition",
-                row.0, row.1
-            )));
-        }
-        if route_stamp != audience_stamp {
-            return Err(GateError::InvalidInboundAudiencePackage(format!(
-                "private route for {}.{} has a different _updated_at than its Store audience transition",
-                row.0, row.1
-            )));
+                )));
+            }
+            if route_stamp != audience_stamp {
+                return Err(GateError::InvalidInboundAudiencePackage(format!(
+                    "private route for {}.{} has a different _updated_at than its Store audience transition",
+                    row.0, row.1
+                )));
+            }
         }
     }
     for row in &package_row_inserts {

@@ -1969,11 +1969,13 @@ async fn scoped_descendant_keeps_store_ancestor() {
             ("documents", "moving-document"),
             ("details", "moving-detail"),
         ] {
-            assert!(!changes.iter().any(|change| change.table == table
-                && change
-                    .columns
-                    .iter()
-                    .any(|value| value.as_deref() == Some(id))));
+            assert!(!changes.iter().any(|change| {
+                change.table == table
+                    && change
+                        .columns
+                        .iter()
+                        .any(|value| value.as_deref() == Some(id))
+            }));
         }
     }
 
@@ -2023,10 +2025,12 @@ async fn scoped_descendant_keeps_store_ancestor() {
             "required-folder"
         ));
         for id in ["sibling-document", "sibling-detail"] {
-            assert!(!changes.iter().any(|change| change
-                .columns
-                .iter()
-                .any(|value| value.as_deref() == Some(id))));
+            assert!(!changes.iter().any(|change| {
+                change
+                    .columns
+                    .iter()
+                    .any(|value| value.as_deref() == Some(id))
+            }));
         }
     }
 

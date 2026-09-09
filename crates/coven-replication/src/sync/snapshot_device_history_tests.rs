@@ -39,16 +39,7 @@ async fn data_commits_share_one_device_state_body() {
 }
 
 #[tokio::test]
-async fn a_lagging_peer_can_publish_after_the_owner_advances_its_snapshot() {
-    exercise_lagging_peer(false).await;
-}
-
-#[tokio::test]
-async fn accepted_history_supplies_a_device_state_pruned_from_the_replay_image() {
-    exercise_lagging_peer(true).await;
-}
-
-async fn exercise_lagging_peer(prune_image: bool) {
+async fn a_peer_can_publish_after_adopting_compacted_device_history() {
     let fixture = AcknowledgedHistory::publish(2).await;
     let peer_frontier = store_database(&fixture.peer_db)
         .materialized_frontier()
@@ -63,12 +54,12 @@ async fn exercise_lagging_peer(prune_image: bool) {
             .device
             .run_cycle(None)
             .await
-            .expect("owner publishes its snapshot acknowledgement");
+            .expect("owner adopts its accepted snapshot");
         fixture
             .peer
             .run_cycle(None)
             .await
-            .expect("peer crosses and acknowledges the snapshot");
+            .expect("peer adopts the accepted snapshot");
         fixture
             .device
             .run_cycle(None)
@@ -86,14 +77,12 @@ async fn exercise_lagging_peer(prune_image: bool) {
             baseline.coverage().covers_commit(reference)
                 && !baseline.coverage().0.values().any(|tip| tip == *reference)
         })
-        .expect("peer depends on a position below the snapshot tips")
+        .expect("peer's earlier history lies below the snapshot tips")
         .clone();
-    if prune_image {
-        store_database(&fixture.db)
-            .replace_replay_baseline_device_state_for_test(reference, None)
-            .await
-            .expect("remove a covered state from the replay image");
-    }
+    assert!(
+        baseline.covered_state(&reference).is_none(),
+        "ordinary covered history no longer retains each device-state mapping"
+    );
 
     HistoryPublisher::new(&fixture.peer_db, &fixture.peer)
         .publish_note(101)
@@ -102,7 +91,7 @@ async fn exercise_lagging_peer(prune_image: bool) {
         .device
         .pull_store()
         .await
-        .expect("apply lagging peer's update");
+        .expect("apply peer's update after adoption");
     assert!(
         fixture
             .db
@@ -133,7 +122,7 @@ async fn exercise_lagging_peer(prune_image: bool) {
 }
 
 #[tokio::test]
-async fn snapshots_keep_device_states_below_their_coverage_tips() {
+async fn snapshots_retire_device_states_below_their_coverage_tips() {
     let fixture = AcknowledgedHistory::publish(2).await;
     let earlier = store_database(&fixture.db)
         .materialized_frontier()
@@ -141,7 +130,7 @@ async fn snapshots_keep_device_states_below_their_coverage_tips() {
         .expect("earlier frontier");
     fixture.publish_round(3).await;
     let image_dir = tempfile::tempdir().expect("snapshot directory");
-    let (image, _) = store_database(&fixture.db)
+    let (image, coverage) = store_database(&fixture.db)
         .capture_store_snapshot_cut(
             fixture._store.root().clone(),
             image_dir.path().to_path_buf(),
@@ -149,42 +138,33 @@ async fn snapshots_keep_device_states_below_their_coverage_tips() {
         )
         .await
         .expect("capture snapshot");
-    for reference in earlier.values() {
+    let retired = earlier
+        .values()
+        .filter(|reference| !coverage.commits().values().any(|tip| tip == *reference))
+        .collect::<Vec<_>>();
+    assert!(!retired.is_empty());
+    for reference in retired {
         image
             .device_state_for_test(reference)
             .await
-            .expect("snapshot retains the accepted device state below its coverage tips");
+            .expect_err("ordinary covered state has no continuing exact consumer");
+    }
+    for reference in coverage.commits().values() {
+        image
+            .device_state_for_test(reference)
+            .await
+            .expect("checkpoint tip state");
     }
 }
 
 #[tokio::test]
-async fn advancing_snapshots_preserve_shared_device_states_and_old_references() {
+async fn advancing_snapshots_preserve_checkpoint_states_and_retire_old_references() {
     let fixture = AcknowledgedHistory::publish(2).await;
-    let states_table = coven_database::DatabaseTestTable::named("store_device_states");
-    let initial_bodies = fixture
-        .db
-        .table_row_count_for_test(states_table)
-        .await
-        .expect("count initial state bodies");
-    assert!(
-        initial_bodies > 1,
-        "device activation produced distinct states"
-    );
-    let references = fixture
+    let old_references = fixture
         .db
         .store_device_state_snapshot_refs_for_test()
         .await
         .expect("initial exact references");
-    let mut expected = Vec::new();
-    for reference in references {
-        let (_, state) = store_database(&fixture.db)
-            .store_device_state_for_history_cut(&coven_protocol::store_commit::StoreHistoryCut(
-                std::collections::BTreeMap::from([(reference.coord.stream_id, reference.clone())]),
-            ))
-            .await
-            .expect("initial state");
-        expected.push((reference, state));
-    }
     for round in 3..=5 {
         fixture.publish_round(round).await;
         let image_dir = tempfile::tempdir().expect("snapshot directory");
@@ -196,45 +176,59 @@ async fn advancing_snapshots_preserve_shared_device_states_and_old_references() 
             )
             .await
             .expect("capture snapshot");
+        let mut expected = Vec::new();
+        for reference in coverage.commits().values() {
+            let (_, state) = store_database(&fixture.db)
+                .store_device_state_for_history_cut(&coven_protocol::store_commit::StoreHistoryCut(
+                    std::collections::BTreeMap::from([(
+                        reference.coord.stream_id,
+                        reference.clone(),
+                    )]),
+                ))
+                .await
+                .expect("accepted checkpoint state");
+            assert_eq!(
+                image
+                    .device_state_for_test(reference)
+                    .await
+                    .expect("image checkpoint state"),
+                state
+            );
+            expected.push((reference.clone(), state));
+        }
         let bytes = image.read_image().await.expect("snapshot bytes");
         let inspected = coven_database::DatabaseImageTest::from_bytes(&bytes).expect("open image");
         assert_eq!(
             inspected
-                .coven_table_row_count(states_table)
-                .expect("snapshot bodies"),
-            initial_bodies
+                .store_device_state_snapshot_refs()
+                .expect("snapshot state refs")
+                .len(),
+            expected.len(),
+            "this Store has no retained Circle or exclusion state consumer"
         );
-        for (reference, state) in &expected {
-            assert_eq!(
-                &image
-                    .device_state_for_test(reference)
-                    .await
-                    .expect("old exact reference"),
-                state
-            );
-        }
         fixture
             .device
             .publish_snapshot(bytes, coverage)
             .await
             .expect("publish snapshot");
         fixture.settle_onto_the_published_snapshot().await;
-        for (database_index, db) in [&fixture.db, &fixture.peer_db].into_iter().enumerate() {
-            assert_eq!(
-                db.table_row_count_for_test(states_table)
-                    .await
-                    .expect("live bodies"),
-                initial_bodies
-            );
+        for db in [&fixture.db, &fixture.peer_db] {
             let baseline = store_database(db)
                 .installed_replay_baseline()
                 .await
                 .expect("advanced baseline");
             for (reference, state) in &expected {
-                assert_eq!(
-                    baseline.covered_state(reference),
-                    Some(state),
-                    "round {round}, database {database_index}, reference {reference:?}"
+                assert_eq!(baseline.covered_state(reference), Some(state));
+            }
+            let retired = old_references
+                .iter()
+                .filter(|reference| !expected.iter().any(|(tip, _)| tip == *reference))
+                .collect::<Vec<_>>();
+            assert!(!retired.is_empty());
+            for reference in retired {
+                assert!(
+                    baseline.covered_state(reference).is_none(),
+                    "retired state {reference:?}"
                 );
             }
         }
@@ -244,10 +238,6 @@ async fn advancing_snapshots_preserve_shared_device_states_and_old_references() 
 #[tokio::test]
 async fn conflicting_replay_device_history_does_not_change_accepted_data() {
     let fixture = AcknowledgedHistory::publish(2).await;
-    let earlier = store_database(&fixture.db)
-        .materialized_frontier()
-        .await
-        .expect("earlier frontier");
     let genesis = store_database(&fixture.db)
         .store_device_state_for_history_cut(&coven_protocol::store_commit::StoreHistoryCut(
             std::collections::BTreeMap::new(),
@@ -278,13 +268,12 @@ async fn conflicting_replay_device_history_does_not_change_accepted_data() {
         .installed_replay_baseline()
         .await
         .expect("baseline");
-    let reference = earlier
+    let reference = baseline
+        .coverage()
+        .commits()
         .values()
-        .find(|reference| {
-            baseline.coverage().covers_commit(reference)
-                && !baseline.coverage().0.values().any(|tip| tip == *reference)
-        })
-        .expect("non-tip reference")
+        .next()
+        .expect("checkpoint has an exact tip")
         .clone();
     store_database(&fixture.db)
         .replace_replay_baseline_device_state_for_test(reference, Some(genesis))
@@ -302,10 +291,7 @@ async fn conflicting_replay_device_history_does_not_change_accepted_data() {
         .pull_store()
         .await
         .expect_err("conflicting state must stop replay");
-    assert!(
-        format!("{error:?}").contains("replay image device state disagrees with accepted history"),
-        "{error:?}"
-    );
+    assert!(format!("{error:?}").contains("device state"), "{error:?}");
     assert_eq!(
         before,
         store_database(&fixture.db)

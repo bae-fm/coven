@@ -7,6 +7,9 @@ use crate::write::WriteId;
 use crate::{audience_package, membership, store_commit};
 use coven_keys::encryption::KeyFingerprint;
 
+#[path = "pending_release_tests.rs"]
+mod pending_release_tests;
+
 fn test_commit_ref(label: &str, sequence: u64) -> StoreBatchCommitRef {
     let commit_hash = ObjectHash::digest(format!("{label} semantic commit").as_bytes());
     let stored = format!("{label} stored commit");
@@ -522,51 +525,54 @@ fn shared_membership_resolution_retains_its_remaining_candidate_owner() {
 }
 
 #[test]
-fn deserialized_device_head_rejects_resolution_cleanup_state() {
+fn deserialized_acknowledgement_rejects_resolution_cleanup_state() {
     let (_, resolution_bytes) = test_membership_resolution();
     let resolution: membership::StoreMembershipConflictResolution =
         serde_json::from_slice(&resolution_bytes).expect("parse resolution fixture");
-    let candidate = test_commit_ref("invalid-head-cleanup-state", 1);
-    let head =
-        store_commit::StoreDeviceHead::unsigned_for_test(store_commit::StoreDeviceHeadBody {
-            store_root_hash: resolution.store_root_hash,
-            author_registration: resolution.replacement_acceptance.owner_registration.clone(),
-            commit: candidate.clone(),
-            successor: store_commit::SuccessorLink {
-                activation: store_commit::StreamActivation::grant_authorized(
-                    resolution.store_root_hash,
-                    resolution.replacement_acceptance.owner_registration.clone(),
-                    resolution.replacement_grant.clone(),
-                    resolution.replacement_membership.clone(),
-                )
-                .activation_id(),
-                predecessor: None,
-                next_slot: ObjectSlot::logical(
-                    "store-v1/heads/invalid-cleanup-successor.json".to_string(),
-                )
+    let candidate = test_commit_ref("invalid-ack-cleanup-state", 1);
+    let acknowledgement = store_commit::StoreAck::unsigned_for_test(store_commit::StoreAckBody {
+        store_root_hash: resolution.store_root_hash,
+        registration: resolution.replacement_acceptance.owner_registration.clone(),
+        sequence: 1,
+        store_cut: store_commit::StoreHistoryCut(BTreeMap::new()),
+        device_state: resolution.replacement_acceptance.device_state.clone(),
+        last_sync: "2026-01-01T00:00:00Z".into(),
+        successor: store_commit::SuccessorLink {
+            activation: store_commit::StreamActivation::device_authorized(
+                resolution.store_root_hash,
+                resolution.replacement_acceptance.owner_registration.clone(),
+                store_commit::DeviceStreamAnchor::StoreAcknowledgements {
+                    first_slot: ObjectSlot::logical("store-v1/acks/invalid-cleanup.json".into())
+                        .expect("valid first ack slot"),
+                },
+            )
+            .activation_id(),
+            predecessor: None,
+            next_slot: ObjectSlot::logical("store-v1/acks/invalid-cleanup-successor.json".into())
                 .expect("valid successor slot"),
-            },
-        });
-    let bytes = head.to_bytes();
+        },
+    });
+    let bytes = acknowledgement.to_bytes();
     let object = ExactObjectRef::new(
-        ObjectSlot::logical("store-v1/heads/invalid-cleanup.json".to_string())
-            .expect("valid head slot"),
+        ObjectSlot::logical("store-v1/acks/invalid-cleanup.json".into()).expect("valid ack slot"),
         bytes.len() as u64,
         ObjectHash::digest(&bytes),
     );
-    let mut record = RemoteObjectRecord::candidate_activated_store_head(
-        store_commit::StoreDeviceHeadRef {
-            head_hash: head.head_hash(),
+    let mut record = RemoteObjectRecord::candidate_activated_store_acknowledgement(
+        store_commit::StoreAckRef {
+            registration: acknowledgement.registration.clone(),
+            sequence: acknowledgement.sequence,
+            ack_hash: acknowledgement.ack_hash(),
             object,
         },
         &bytes,
         &bytes,
         candidate,
     )
-    .expect("prepare retained Store head")
+    .expect("prepare retained Store acknowledgement")
     .into_record();
     let RemoteObjectRecord::RetainedAuthority(retained) = &mut record else {
-        panic!("Store head must use retained authority")
+        panic!("Store acknowledgement must use retained authority")
     };
     retained.state = RetainedAuthorityObjectState::CleanupPending {
         former_candidates: Vec::new(),

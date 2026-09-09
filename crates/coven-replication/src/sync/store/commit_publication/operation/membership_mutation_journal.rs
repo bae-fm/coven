@@ -2,7 +2,7 @@ use coven_database::DurableMembershipMutation;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::membership::{
-    self, MemberRole, MembershipChange, MembershipEntry, StoreMembershipConflictResolution,
+    self, MemberRole, MembershipEntry, StoreAuthorityChange, StoreMembershipConflictResolution,
     StoreMembershipConflictResolutionRef,
 };
 use coven_protocol::membership_mutation::{
@@ -42,7 +42,7 @@ impl MembershipMutationPlan {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AdmissionMutationPlan {
-    pub(super) publication: PreparedMembershipPublication,
+    pub(super) activation: PreparedMembershipActivation,
     pub(super) member_pubkey: String,
     pub(super) member_email: Option<String>,
     pub(super) role: MemberRole,
@@ -59,8 +59,8 @@ impl AdmissionMutationPlan {
         role: &MemberRole,
         store_id: &str,
     ) -> bool {
-        self.publication.entry.author_pubkey == owner_pubkey
-            && self.publication.entry.store_id == store_id
+        self.activation.publication.entry.author_pubkey == owner_pubkey
+            && self.activation.publication.entry.store_id == store_id
             && self.member_pubkey == member_pubkey
             && self.member_email.as_deref() == member_email
             && &self.role == role
@@ -70,8 +70,8 @@ impl AdmissionMutationPlan {
                     provider_account_email: member_email.map(str::to_string),
                 })
             && matches!(
-                &self.publication.entry.change,
-                MembershipChange::SetMember {
+                &self.activation.publication.entry.change,
+                StoreAuthorityChange::SetMember {
                     user_pubkey,
                     provider_account_email,
                     role: entry_role,
@@ -86,7 +86,7 @@ impl AdmissionMutationPlan {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RevokeMutationPlan {
-    pub(super) publication: RevokeMembershipPublication,
+    pub(super) publication: PreparedMembershipActivation,
     pub(super) revokee_pubkey: String,
     pub(super) desired_access: CloudAccessState,
     pub(super) prior_access: CloudAccessState,
@@ -106,7 +106,7 @@ impl RevokeMutationPlan {
             && self.revokee_pubkey == revokee_pubkey
             && matches!(
                 &self.publication.entry().change,
-                MembershipChange::RemoveMember { user_pubkey, .. }
+                StoreAuthorityChange::RemoveMember { user_pubkey, .. }
                     if user_pubkey == revokee_pubkey
             )
             && matches!(
@@ -122,7 +122,7 @@ impl RevokeMutationPlan {
     }
 
     pub(super) fn validate_closed_shape(&self) -> Result<(), MembershipMutationError> {
-        let publication = self.publication.publication();
+        let publication = &self.publication.publication;
         publication.validate()?;
         let (desired_member, desired_email) = match &self.desired_access {
             CloudAccessState::Absent {
@@ -154,7 +154,7 @@ impl RevokeMutationPlan {
                 "membership removal access and compensation intents disagree".to_string(),
             ));
         }
-        let MembershipChange::RemoveMember {
+        let StoreAuthorityChange::RemoveMember {
             user_pubkey,
             wrapped_keys,
             retirement_device_state,
@@ -176,122 +176,53 @@ impl RevokeMutationPlan {
                 "membership removal plan differs from its exact entry".to_string(),
             ));
         }
-        match &self.publication {
-            RevokeMembershipPublication::Direct { .. } => {
-                if retirement_device_state.is_some()
-                    || retirement_barriers.values().any(|barrier| {
-                        matches!(
-                            barrier,
-                            membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
-                        )
-                    })
-                    || !matches!(
-                        publication.head.activation,
-                        membership::MembershipHeadActivation::Direct
-                    )
-                {
-                    return Err(MembershipMutationError::InvalidDurableMutation(
-                        "direct membership removal carries Owner retirement authority".to_string(),
-                    ));
-                }
-            }
-            RevokeMembershipPublication::StoreActivated {
-                transition,
-                candidate,
-                ..
-            } => {
-                transition.validate()?;
-                candidate
-                    .validate_closed_shape()
-                    .map_err(MembershipMutationError::PreparedCommit)?;
-                if transition.entry != publication.entry
-                    || transition.entry_ref != publication.entry_ref
-                    || retirement_device_state.as_ref() != Some(&candidate.commit.device_state)
-                    || !retirement_barriers.values().any(|barrier| {
-                        matches!(
-                            barrier,
-                            membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
-                        )
-                    })
-                    || candidate.commit.control()
-                        != Some(&store_commit::StoreControl {
-                            transition: transition.transition.clone(),
-                        })
-                    || !transition
-                        .transition
-                        .matches_head(&publication.head, &publication.head_ref)
-                    || !matches!(
-                        &publication.head.activation,
-                        membership::MembershipHeadActivation::StoreCommit { commit }
-                            if commit == &candidate.reference
-                    )
-                {
-                    return Err(MembershipMutationError::InvalidDurableMutation(
-                        "Owner retirement differs from its exact Store activation graph"
-                            .to_string(),
-                    ));
-                }
-                candidate
-                    .merge_membership_activation_remote_objects(
-                        transition,
-                        publication,
-                        &self
-                            .wraps
-                            .iter()
-                            .map(|wrap| wrap.prepared.clone())
-                            .collect::<Vec<_>>(),
-                    )
-                    .map_err(MembershipMutationError::from)?;
-            }
+        let activation = &self.publication;
+        activation.validate()?;
+        let retires_owner = retirement_barriers.values().any(|barrier| {
+            matches!(
+                barrier,
+                membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
+            )
+        });
+        if retires_owner != retirement_device_state.is_some()
+            || retirement_device_state
+                .as_ref()
+                .is_some_and(|state| state != &activation.candidate.commit.device_state)
+        {
+            return Err(MembershipMutationError::InvalidDurableMutation(
+                "membership retirement differs from its exact Store device state".into(),
+            ));
         }
+        self.candidate_remote_objects()?;
         Ok(())
     }
 
     pub(super) fn candidate_remote_objects(
         &self,
-    ) -> Result<Option<Vec<ClosedRemoteObject>>, MembershipMutationError> {
-        match &self.publication {
-            RevokeMembershipPublication::Direct { .. } => Ok(None),
-            RevokeMembershipPublication::StoreActivated {
-                transition,
-                candidate,
-                publication,
-            } => candidate
-                .merge_membership_activation_remote_objects(
-                    transition,
-                    publication,
-                    &self
-                        .wraps
-                        .iter()
-                        .map(|wrap| wrap.prepared.clone())
-                        .collect::<Vec<_>>(),
-                )
-                .map(Some)
-                .map_err(MembershipMutationError::from),
-        }
+    ) -> Result<Vec<ClosedRemoteObject>, MembershipMutationError> {
+        self.publication.remote_objects(
+            &self
+                .wraps
+                .iter()
+                .map(|wrap| wrap.prepared.clone())
+                .collect::<Vec<_>>(),
+        )
     }
 
-    pub(super) fn candidate_cleanup_objects(&self) -> (Vec<ExactObjectRef>, Vec<ExactObjectRef>) {
-        match &self.publication {
-            RevokeMembershipPublication::Direct { .. } => (Vec::new(), Vec::new()),
-            RevokeMembershipPublication::StoreActivated {
-                transition,
-                candidate,
-                publication,
-            } => {
-                let candidate_objects = std::iter::once(candidate.reference.object.clone())
-                    .chain(std::iter::once(transition.entry_ref.object.clone()))
-                    .chain(std::iter::once(publication.head_ref.object.clone()))
-                    .chain(
-                        self.wraps
-                            .iter()
-                            .map(|wrap| wrap.prepared.reference.object.clone()),
-                    )
-                    .collect();
-                let retained = vec![candidate.head_ref().object];
-                (candidate_objects, retained)
-            }
-        }
+    pub(super) fn candidate_cleanup_objects(&self) -> Vec<ExactObjectRef> {
+        std::iter::once(self.publication.candidate.reference.object.clone())
+            .chain(std::iter::once(
+                self.publication.transition.entry_ref.object.clone(),
+            ))
+            .chain(std::iter::once(
+                self.publication.publication.head_ref.object.clone(),
+            ))
+            .chain(
+                self.wraps
+                    .iter()
+                    .map(|wrap| wrap.prepared.reference.object.clone()),
+            )
+            .collect()
     }
 }
 
@@ -325,10 +256,7 @@ impl ResolveMutationPlan {
                 self.transition.entry_ref.object.clone(),
                 self.publication.head_ref.object.clone(),
             ],
-            vec![
-                self.reference.object.clone(),
-                self.candidate.head_ref().object,
-            ],
+            vec![self.reference.object.clone()],
         )
     }
 
@@ -362,12 +290,12 @@ impl ResolveMutationPlan {
                 })
             || !matches!(
                 &self.publication.entry.change,
-                MembershipChange::ResolutionActivation { resolution }
+                StoreAuthorityChange::ResolutionActivation { resolution }
                     if resolution == &self.reference
             )
             || !matches!(
                 &self.publication.head.activation,
-                membership::MembershipHeadActivation::StoreCommit { commit }
+                membership::MembershipHeadActivation::StoreCommit { commit, .. }
                     if commit == &self.candidate.reference
             )
         {
@@ -381,27 +309,50 @@ impl ResolveMutationPlan {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "activation", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum RevokeMembershipPublication {
-    Direct {
-        publication: Box<PreparedMembershipPublication>,
-    },
-    StoreActivated {
-        transition: Box<PreparedMembershipTransition>,
-        candidate: Box<PreparedStoreOperationCommit>,
-        publication: Box<PreparedMembershipPublication>,
-    },
+#[serde(deny_unknown_fields)]
+pub(super) struct PreparedMembershipActivation {
+    pub(super) transition: Box<PreparedMembershipTransition>,
+    pub(super) candidate: Box<PreparedStoreOperationCommit>,
+    pub(super) publication: Box<PreparedMembershipPublication>,
 }
 
-impl RevokeMembershipPublication {
-    pub(super) fn publication(&self) -> &PreparedMembershipPublication {
-        match self {
-            Self::Direct { publication } | Self::StoreActivated { publication, .. } => publication,
-        }
+impl PreparedMembershipActivation {
+    pub(super) fn entry(&self) -> &MembershipEntry {
+        &self.publication.entry
     }
 
-    pub(super) fn entry(&self) -> &MembershipEntry {
-        &self.publication().entry
+    pub(super) fn validate(&self) -> Result<(), MembershipMutationError> {
+        self.transition.validate()?;
+        self.publication.validate()?;
+        self.candidate
+            .validate_closed_shape()
+            .map_err(MembershipMutationError::PreparedCommit)?;
+        if self.transition.entry != self.publication.entry
+            || self.transition.entry_ref != self.publication.entry_ref
+            || self.candidate.commit.control()
+                != Some(&store_commit::StoreControl {
+                    transition: self.transition.transition.clone(),
+                })
+            || !self
+                .transition
+                .transition
+                .matches_head(&self.publication.head, &self.publication.head_ref)
+            || !matches!(&self.publication.head.activation, membership::MembershipHeadActivation::StoreCommit { commit, .. } if commit == &self.candidate.reference)
+        {
+            return Err(MembershipMutationError::InvalidDurableMutation(
+                "membership change differs from its exact Store activation graph".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn remote_objects(
+        &self,
+        wraps: &[PreparedWrappedStoreKey],
+    ) -> Result<Vec<ClosedRemoteObject>, MembershipMutationError> {
+        self.candidate
+            .merge_membership_activation_remote_objects(&self.transition, &self.publication, wraps)
+            .map_err(MembershipMutationError::from)
     }
 }
 
@@ -418,6 +369,9 @@ pub(super) enum MembershipMutationProgress {
     AdmissionGranted {
         join_info: CloudHomeJoinInfo,
     },
+    AdmissionActivated {
+        join_info: CloudHomeJoinInfo,
+    },
     RevokeAccessRemoved,
     RevokeCandidateNonactivating {
         nonactivation: CandidateNonactivation,
@@ -426,7 +380,7 @@ pub(super) enum MembershipMutationProgress {
         nonactivation: CandidateNonactivation,
     },
     RevokeActivated {
-        candidate: Option<StoreBatchCommitRef>,
+        candidate: StoreBatchCommitRef,
     },
     ResolutionActivated {
         candidate: StoreBatchCommitRef,
@@ -481,42 +435,6 @@ impl MutationPersistence {
         Ok(())
     }
 
-    pub(super) async fn record_direct_revoke_activation(
-        &self,
-        generation: u64,
-    ) -> Result<(), MembershipMutationError> {
-        self.database
-            .record_direct_revoke_activation(
-                self.intent_hash,
-                MembershipMutationProgress::RevokeActivated { candidate: None }.encode()?,
-                generation,
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub(super) async fn adopt_candidate_head(
-        &mut self,
-        plan_bytes: Vec<u8>,
-        previous: RemoteObjectRecord,
-        replacement: ClosedRemoteObject,
-        rotation_generation: Option<u64>,
-    ) -> Result<(ObjectHash, ObjectHash), MembershipMutationError> {
-        let previous_intent = self.intent_hash;
-        let replacement_intent = self
-            .database
-            .adopt_merge_membership_candidate_head(
-                previous_intent,
-                plan_bytes,
-                previous,
-                replacement,
-                rotation_generation,
-            )
-            .await?;
-        self.intent_hash = replacement_intent;
-        Ok((previous_intent, replacement_intent))
-    }
-
     pub(super) async fn complete(&self) -> Result<(), MembershipMutationError> {
         self.database
             .complete_membership_mutation(self.intent_hash)
@@ -528,13 +446,8 @@ impl MutationPersistence {
         &self,
         plan: &RevokeMutationPlan,
     ) -> Result<(), MembershipMutationError> {
-        let RevokeMembershipPublication::StoreActivated { candidate, .. } = &plan.publication
-        else {
-            return Err(MembershipMutationError::InvalidDurableMutation(
-                "direct membership removal has no candidate cleanup".to_string(),
-            ));
-        };
-        let (candidate_objects, _) = plan.candidate_cleanup_objects();
+        let candidate = &plan.publication.candidate;
+        let candidate_objects = plan.candidate_cleanup_objects();
         let cleanup = self
             .database
             .membership_candidate_cleanup_targets(
@@ -547,47 +460,12 @@ impl MutationPersistence {
             .await
     }
 
-    pub(super) async fn begin_nonactivating_revoke(
-        &self,
-        plan: &RevokeMutationPlan,
-        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
-    ) -> Result<(), MembershipMutationError> {
-        let (candidate_objects, retained) = plan.candidate_cleanup_objects();
-        let RevokeMembershipPublication::StoreActivated { candidate, .. } = &plan.publication
-        else {
-            return Err(MembershipMutationError::InvalidDurableMutation(
-                "direct membership removal has no candidate nonactivation".to_string(),
-            ));
-        };
-        let progress = MembershipMutationProgress::RevokeCandidateNonactivating {
-            nonactivation: nonactivation.clone().into_durable(),
-        };
-        let cleanup = self
-            .database
-            .begin_membership_candidate_nonactivation(
-                self.intent_hash,
-                candidate.reference.clone(),
-                candidate_objects,
-                retained,
-                progress.encode()?,
-                nonactivation,
-            )
-            .await?;
-        self.finish_nonactivating_revoke_with_targets(plan, cleanup)
-            .await
-    }
-
     async fn finish_nonactivating_revoke_with_targets(
         &self,
         plan: &RevokeMutationPlan,
         cleanup: Vec<coven_database::CandidateCleanupObject>,
     ) -> Result<(), MembershipMutationError> {
-        let RevokeMembershipPublication::StoreActivated { candidate, .. } = &plan.publication
-        else {
-            return Err(MembershipMutationError::InvalidDurableMutation(
-                "direct membership removal has no candidate terminalization".to_string(),
-            ));
-        };
+        let candidate = &plan.publication.candidate;
         match self
             .storage
             .set_member_access(plan.prior_access.clone())
@@ -602,15 +480,15 @@ impl MutationPersistence {
         }
         crate::sync::store::authorization::delete_candidate_cleanup_targets::<
             MembershipMutationError,
-        >(self.storage.as_ref(), &self.database, cleanup)
+        >(self.storage.as_ref(), cleanup)
         .await?;
-        let (candidate_objects, retained) = plan.candidate_cleanup_objects();
+        let candidate_objects = plan.candidate_cleanup_objects();
         self.database
             .complete_nonactivating_membership_candidate_mutation(
                 self.intent_hash,
                 candidate.reference.clone(),
                 candidate_objects,
-                retained,
+                Vec::new(),
                 Some(
                     EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
                         .map_err(MembershipMutationError::Encryption)?
@@ -638,30 +516,6 @@ impl MutationPersistence {
             .await
     }
 
-    pub(super) async fn begin_nonactivating_resolution(
-        &self,
-        plan: &ResolveMutationPlan,
-        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
-    ) -> Result<(), MembershipMutationError> {
-        let (candidate_objects, retained) = plan.candidate_cleanup_objects();
-        let progress = MembershipMutationProgress::ResolutionCandidateNonactivating {
-            nonactivation: nonactivation.clone().into_durable(),
-        };
-        let cleanup = self
-            .database
-            .begin_membership_candidate_nonactivation(
-                self.intent_hash,
-                plan.candidate.reference.clone(),
-                candidate_objects,
-                retained,
-                progress.encode()?,
-                nonactivation,
-            )
-            .await?;
-        self.finish_nonactivating_resolution_with_targets(plan, cleanup)
-            .await
-    }
-
     async fn finish_nonactivating_resolution_with_targets(
         &self,
         plan: &ResolveMutationPlan,
@@ -670,7 +524,7 @@ impl MutationPersistence {
         let (candidate_objects, retained) = plan.candidate_cleanup_objects();
         crate::sync::store::authorization::delete_candidate_cleanup_targets::<
             MembershipMutationError,
-        >(self.storage.as_ref(), &self.database, cleanup)
+        >(self.storage.as_ref(), cleanup)
         .await?;
         self.database
             .complete_nonactivating_membership_candidate_mutation(

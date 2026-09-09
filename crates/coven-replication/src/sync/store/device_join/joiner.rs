@@ -265,22 +265,12 @@ impl<'storage> JoiningStore<'storage> {
         activation: DeviceJoinActivation,
     ) -> Result<JoinedStore, DeviceJoinError> {
         let root = self.history.root().clone();
-        // The activation commit carries the membership state it was published
-        // under, so the device state this materializes against comes from the
-        // commit rather than from a separate file restating it.
-        let membership_state = self
-            .history
-            .device_join()
-            .load_commit(&activation.outcome_activation)
-            .await?
-            .value()
-            .membership_state
-            .clone();
         self.history
             .materialize_device_join_activation(
                 &activation.outcome_activation,
                 activation.attempt_id,
-                &membership_state,
+                &mut self.membership,
+                &self.identity,
             )
             .await?;
 
@@ -666,6 +656,7 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
                     store_dir,
                     identity.clone(),
                     membership,
+                    routing_encryption.cloned(),
                 ),
             )
             .await?;
@@ -764,17 +755,6 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             .prepare_registration_request(&self.offer, &self.identity, approval)
             .await
     }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn begin_joining_store(
-        self,
-        database: StoreDatabase,
-        store_dir: &'storage coven_foundation::store_dir::StoreDir,
-    ) -> Result<JoiningStore<'storage>, DeviceJoinError> {
-        self.observation
-            .into_joining_store(database, store_dir, self.identity, None)
-            .await
-    }
 }
 
 /// The registration a joining device's checks name, from the two places it can
@@ -857,6 +837,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         identity: UserKeypair,
         membership: Option<coven_protocol::membership::MembershipChain>,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<JoiningStore<'storage>, DeviceJoinError> {
         let Self {
             journal,
@@ -875,6 +856,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         let mut history = super::AuthorizedStoreHistory::from_pending_device_join(
             PendingDeviceJoinHistoryConstruction,
             database,
+            routing_encryption,
             storage,
             store_dir,
             blob_cache,
@@ -1014,18 +996,6 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
                         ".json",
                     )
                     .await?;
-                let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-                    offer.store_root.store_root_hash,
-                    ProtocolObjectDomain::StoreHead,
-                );
-                let first_head = self
-                    .storage
-                    .allocate_protocol_slot(
-                        &head_context,
-                        &coven_protocol::store_commit::head_slot_prefix(&device_id.to_string(), 1),
-                        ".json",
-                    )
-                    .await?;
                 let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                     offer.store_root.store_root_hash,
                     ProtocolObjectDomain::StoreAck,
@@ -1038,34 +1008,12 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
                         ".json",
                     )
                     .await?;
-                let snapshot_context =
-                    coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-                        offer.store_root.store_root_hash,
-                        ProtocolObjectDomain::StoreSnapshotMeta,
-                    );
-                let first_snapshot = self
-                    .storage
-                    .allocate_protocol_slot(
-                        &snapshot_context,
-                        &coven_protocol::store_commit::snapshot_slot_prefix(
-                            &device_id.to_string(),
-                            0,
-                        ),
-                        ".json",
-                    )
-                    .await?;
                 let registration = StoreDeviceRegistration::signed(
                     offer.store_root.clone(),
                     origin,
                     binding.device.clone(),
-                    coven_protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements {
-                        first_slot: first_head,
-                    },
                     coven_protocol::store_commit::DeviceStreamAnchor::StoreAcknowledgements {
                         first_slot: first_ack,
-                    },
-                    coven_protocol::store_commit::DeviceStreamAnchor::StoreSnapshots {
-                        first_slot: first_snapshot,
                     },
                     identity,
                 )

@@ -11,10 +11,7 @@ pub struct VerifiedStoreDeviceOperations {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum VerifiedStoreDeviceExclusionOutcome {
-    Excluded {
-        source: RetainedStoreDeviceExclusionOutcome,
-        accepted_cut: StoreHistoryCut,
-    },
+    Excluded(RetainedStoreDeviceExclusionOutcome),
     Cancelled(RetainedStoreDeviceExclusionOutcome),
 }
 
@@ -78,12 +75,11 @@ impl VerifiedStoreDeviceOperations {
             .map(|(source, proposal)| (&source.reference, proposal))
     }
 
-    pub fn exclusions(&self) -> impl Iterator<Item = (&StoreDeviceExclusionRef, &StoreHistoryCut)> {
+    pub fn exclusions(&self) -> impl Iterator<Item = &StoreDeviceExclusionRef> {
         self.outcomes.iter().filter_map(|outcome| match outcome {
-            VerifiedStoreDeviceExclusionOutcome::Excluded {
-                source,
-                accepted_cut,
-            } => Some((source.exclusion_reference(), accepted_cut)),
+            VerifiedStoreDeviceExclusionOutcome::Excluded(source) => {
+                Some(source.exclusion_reference())
+            }
             VerifiedStoreDeviceExclusionOutcome::Cancelled(_) => None,
         })
     }
@@ -115,9 +111,6 @@ impl VerifiedStoreDeviceOperations {
             .into_iter()
             .map(|source| {
                 let proposal = source.verify(root)?;
-                if proposal.frozen_device_state != commit.device_state {
-                    return Err(StoreProtocolError::DeviceStateMismatch);
-                }
                 Ok((source, proposal))
             })
             .collect::<Result<Vec<_>, StoreProtocolError>>()?;
@@ -166,24 +159,54 @@ impl VerifiedStoreDeviceOperations {
     pub fn apply_to(
         &self,
         predecessor: ResolvedStoreDeviceState,
-        predecessor_ref: &StoreDeviceStateRef,
     ) -> Result<ResolvedStoreDeviceState, StoreProtocolError> {
         let mut state = predecessor;
         for (source, proposal) in &self.proposals {
-            state = state.propose_exclusion(source.reference.clone(), proposal, predecessor_ref)?;
+            state = state.propose_exclusion(source.reference.clone(), proposal)?;
         }
         for outcome in &self.outcomes {
             state = match outcome {
-                VerifiedStoreDeviceExclusionOutcome::Excluded {
-                    source,
-                    accepted_cut,
-                } => state.exclude(source.exclusion_reference().clone(), accepted_cut.clone())?,
+                VerifiedStoreDeviceExclusionOutcome::Excluded(source) => {
+                    state.exclude(source.exclusion_reference().clone())?
+                }
                 VerifiedStoreDeviceExclusionOutcome::Cancelled(source) => {
                     state.cancel_exclusion(source.cancellation_reference().clone())?
                 }
             };
         }
         Ok(state)
+    }
+
+    /// Return the state these operations continue to contribute after their
+    /// publication is accepted. This does not establish their issuer authority
+    /// or recheck transition preconditions at a later snapshot boundary.
+    pub fn accepted_effect(&self) -> Result<ResolvedStoreDeviceState, StoreProtocolError> {
+        let proposals =
+            self.proposals
+                .iter()
+                .map(|(source, _)| StoreDeviceProposalState::Pending {
+                    proposal: source.reference.clone(),
+                });
+        let outcomes = self.outcomes.iter().map(|outcome| match outcome {
+            VerifiedStoreDeviceExclusionOutcome::Excluded(source) => {
+                let exclusion = source.exclusion_reference();
+                StoreDeviceProposalState::Superseded {
+                    proposal: exclusion.proposal.clone(),
+                    terminals: vec![exclusion.clone()],
+                }
+            }
+            VerifiedStoreDeviceExclusionOutcome::Cancelled(source) => {
+                StoreDeviceProposalState::Cancelled {
+                    outcome: source.cancellation_reference().clone(),
+                }
+            }
+        });
+        ResolvedStoreDeviceState::merge(
+            proposals
+                .chain(outcomes)
+                .map(ResolvedStoreDeviceState::exclusion_effect)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
     }
 }
 
@@ -499,15 +522,8 @@ impl RetainedStoreDeviceExclusionOutcome {
             &owner,
         )?;
         match (&self, outcome) {
-            (Self::Excluded { .. }, StoreDeviceExclusionOutcome::Excluded(exclusion)) => {
-                if exclusion.proof.frozen_device_state != proposal.object.value.frozen_device_state
-                {
-                    return Err(StoreProtocolError::DeviceStateMismatch);
-                }
-                Ok(VerifiedStoreDeviceExclusionOutcome::Excluded {
-                    source: self,
-                    accepted_cut: exclusion.proof.cutoff.clone(),
-                })
+            (Self::Excluded { .. }, StoreDeviceExclusionOutcome::Excluded(_)) => {
+                Ok(VerifiedStoreDeviceExclusionOutcome::Excluded(self))
             }
             (Self::Cancelled { .. }, StoreDeviceExclusionOutcome::Cancelled(_)) => {
                 Ok(VerifiedStoreDeviceExclusionOutcome::Cancelled(self))
@@ -537,7 +553,7 @@ fn verify_retained_registration(
 impl VerifiedStoreDeviceExclusionOutcome {
     fn source(&self) -> &RetainedStoreDeviceExclusionOutcome {
         match self {
-            Self::Excluded { source, .. } | Self::Cancelled(source) => source,
+            Self::Excluded(source) | Self::Cancelled(source) => source,
         }
     }
 }

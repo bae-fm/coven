@@ -31,6 +31,9 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
         store_dir,
         "0000000000001-0000-founder",
         &founder,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("create Store with founder graph");
@@ -73,7 +76,13 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
         .await
         .expect("read current publication record with its provider version");
     assert_eq!(remote_bytes, current_bytes);
-    assert_eq!(publication.version(), &remote_version);
+    assert_eq!(
+        publication
+            .require_observed()
+            .expect("created provider observation")
+            .version(),
+        &remote_version
+    );
 
     let (store, _device_id) = initialized.into_parts();
     let membership = store
@@ -107,6 +116,9 @@ async fn interrupted_store_creation_keeps_durable_founder_objects_for_retry() {
             crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
             timestamp,
             &founder,
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
         )
         .await
         .stage()
@@ -135,6 +147,9 @@ async fn interrupted_store_creation_keeps_durable_founder_objects_for_retry() {
             store_dir,
             timestamp,
             &founder,
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
         )
         .await
         .expect("retry resumes the durable Store creation attempt");
@@ -175,6 +190,9 @@ async fn failed_store_creation_retries_with_its_durable_founder_timestamp() {
         store_dir.clone(),
         "0000000000001-0000-founder",
         &founder,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await;
     assert!(
@@ -188,6 +206,9 @@ async fn failed_store_creation_retries_with_its_durable_founder_timestamp() {
         store_dir,
         "0000000000002-0000-founder",
         &founder,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("retry resumes the durable Store creation attempt");
@@ -229,6 +250,9 @@ async fn interrupted_founder_publication_resumes_after_database_restart() {
         crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
         timestamp,
         &founder,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .stage()
@@ -251,6 +275,9 @@ async fn interrupted_founder_publication_resumes_after_database_restart() {
         store_dir,
         timestamp,
         &founder,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("retry resumes founder publication from its durable graph");
@@ -278,6 +305,9 @@ async fn concurrent_store_creation_calls_do_not_delete_each_others_objects() {
         crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
         timestamp,
         &founder,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .stage()
@@ -297,6 +327,9 @@ async fn concurrent_store_creation_calls_do_not_delete_each_others_objects() {
             first_store_dir,
             timestamp,
             &first_founder,
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
         )
         .await
     });
@@ -312,6 +345,9 @@ async fn concurrent_store_creation_calls_do_not_delete_each_others_objects() {
             second_store_dir,
             timestamp,
             &second_founder,
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
         )
         .await
     });
@@ -355,6 +391,9 @@ async fn founder_publication_preserves_a_different_object_in_the_reserved_slot()
         crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
         timestamp,
         &founder,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .stage()
@@ -409,6 +448,9 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
         store_dir.clone(),
         "0000000000001-0000-opaque-founder",
         &founder,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("create opaque Store");
@@ -423,6 +465,9 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
         store_dir,
         &root_ref,
         &founder,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("open exact opaque root");

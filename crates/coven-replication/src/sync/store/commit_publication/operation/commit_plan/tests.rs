@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::sync::store::merge_conflict::{
-    ExcludedCandidateHeadObservation, MergeCandidateAbandonment,
-};
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, TestCustody, TestStore};
 use coven_database::Database;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
@@ -23,7 +20,5 @@ use merge_fixture::*;
 
 #[path = "tests/authorization.rs"]
 mod authorization;
-#[path = "tests/candidate_nonactivation.rs"]
-mod candidate_nonactivation;
 #[path = "tests/merge_publication.rs"]
 mod merge_publication;

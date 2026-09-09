@@ -37,6 +37,8 @@ pub enum MembershipMutationError {
     NotAMember(String),
     #[error("Cannot revoke the last owner of a store")]
     LastOwner,
+    #[error("the authority that initiated this membership request has been retired")]
+    InitiatingAuthorityRetired,
     #[error("membership mutation database state: {0}")]
     Database(#[from] coven_database::DbError),
     #[error("pending membership mutation does not match this request: {0}")]

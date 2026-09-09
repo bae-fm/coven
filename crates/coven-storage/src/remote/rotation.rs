@@ -10,8 +10,6 @@ pub enum RotationStateError {
     LockPoisoned,
     #[error("rotation candidate gate is absent during proven nonactivation")]
     MissingCandidateDuringNonactivation,
-    #[error("rotation candidate gate is absent during candidate replacement")]
-    MissingCandidateDuringReplacement,
 }
 
 pub trait CloudSyncRotationStateAccess: Send + Sync {
@@ -29,12 +27,6 @@ pub trait CloudSyncRotationStateAccess: Send + Sync {
         &self,
         generation: u64,
         mutation: ObjectHash,
-    ) -> Result<(), RotationStateError>;
-    fn replace_candidate_mutation(
-        &self,
-        generation: u64,
-        previous: ObjectHash,
-        replacement: ObjectHash,
     ) -> Result<(), RotationStateError>;
     fn gate(&self) -> Option<RotationGate>;
     fn install_durable_gate(&self, gate: Option<RotationGate>);
@@ -99,23 +91,6 @@ impl PendingRotation {
             .clone()
             .ok_or(RotationStateError::MissingCandidateDuringNonactivation)?;
         *recorded = gate.remove_candidate(generation, mutation)?;
-        Ok(())
-    }
-
-    pub fn replace_candidate_mutation(
-        &self,
-        generation: u64,
-        previous: coven_protocol::store_commit::ObjectHash,
-        replacement: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<(), RotationStateError> {
-        let mut recorded = self
-            .0
-            .write()
-            .map_err(|_| RotationStateError::LockPoisoned)?;
-        let gate = recorded
-            .clone()
-            .ok_or(RotationStateError::MissingCandidateDuringReplacement)?;
-        *recorded = Some(gate.replace_candidate_mutation(generation, previous, replacement)?);
         Ok(())
     }
 
@@ -196,15 +171,6 @@ impl CloudSyncRotationStateAccess for PendingRotation {
         mutation: ObjectHash,
     ) -> Result<(), RotationStateError> {
         PendingRotation::remove_candidate(self, generation, mutation)
-    }
-
-    fn replace_candidate_mutation(
-        &self,
-        generation: u64,
-        previous: ObjectHash,
-        replacement: ObjectHash,
-    ) -> Result<(), RotationStateError> {
-        PendingRotation::replace_candidate_mutation(self, generation, previous, replacement)
     }
 
     fn gate(&self) -> Option<RotationGate> {

@@ -1,6 +1,70 @@
 use super::*;
 
 impl MembershipChain {
+    /// Membership changes consume the resolved grant and key authority they
+    /// were prepared against. Unrelated device controls do not change that
+    /// authority, but an accepted grant change requires a new candidate.
+    pub fn validate_publication_predecessor(
+        &self,
+        entry: &MembershipEntry,
+    ) -> Result<(), MembershipError> {
+        match &entry.change {
+            StoreAuthorityChange::SetMember { .. }
+            | StoreAuthorityChange::RemoveMember { .. }
+            | StoreAuthorityChange::ProviderAdmin => {}
+            StoreAuthorityChange::Founder { .. } => return Err(MembershipError::InvalidFounder),
+            StoreAuthorityChange::DeviceRegistrationActivation { .. }
+            | StoreAuthorityChange::DeviceExclusionProposal { .. }
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::ResolutionActivation { .. } => return Ok(()),
+        }
+        let MembershipStatus::Resolved(current) = self.status() else {
+            return Err(MembershipError::Conflict);
+        };
+        if entry.resolution_dependencies != self.resolution_refs() {
+            return Err(MembershipError::PublicationPredecessorChanged {
+                coord: Box::new(entry.coord()),
+            });
+        }
+        let included = causal_grants::history_closure(&self.entries, &entry.dependencies);
+        let causal_past = self
+            .entries
+            .iter()
+            .filter(|prior| included.contains(&prior.coord()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let reduced = match &self.resolution_checkpoint {
+            Some(checkpoint) => reduce_store_membership_from_checkpoint(&causal_past, checkpoint)?,
+            None => reduce_store_membership(&causal_past)?,
+        };
+        let CausalGrantStatus::Resolved(reduced) = reduced else {
+            return Err(MembershipError::Conflict);
+        };
+        let checkpoint_grants = self
+            .resolution_checkpoint
+            .as_ref()
+            .map(|checkpoint| &checkpoint.grants);
+        let provider_seed = self
+            .resolution_checkpoint
+            .as_ref()
+            .map_or(&self.provider_admin_genesis, |checkpoint| {
+                &checkpoint.provider_admin
+            });
+        let provider = crate::provider::ProviderAdminState::reduce_merge(
+            provider_seed,
+            &causal_past,
+            &reduced.included,
+        )?;
+        let prepared =
+            resolved_store_membership(&reduced, checkpoint_grants, provider, &causal_past)?;
+        if prepared.state_hash != current.state_hash {
+            return Err(MembershipError::PublicationPredecessorChanged {
+                coord: Box::new(entry.coord()),
+            });
+        }
+        Ok(())
+    }
+
     pub fn can_write_now(&self, pubkey: &str) -> bool {
         if self.conflict().is_some() {
             return false;
@@ -50,6 +114,28 @@ impl MembershipChain {
         })
     }
 
+    /// The permanent retirement of this exact grant, if membership is resolved.
+    pub fn write_authority_retirement(
+        &self,
+        authority: &MembershipGrantCreationAuthority,
+        pubkey: &str,
+    ) -> Option<&MembershipGrantRetirement> {
+        let MembershipStatus::Resolved(resolved) = self.status() else {
+            return None;
+        };
+        let grant = resolved.grants.values().find(|grant| {
+            grant.record().creation_authority == *authority
+                && grant.record().member_pubkey == pubkey
+        })?;
+        Some(
+            grant
+                .retirements()?
+                .iter()
+                .next()
+                .expect("grant retirements are nonempty"),
+        )
+    }
+
     pub fn active_grant(&self, grant_id: &MembershipGrantId) -> Option<&MembershipGrantRecord> {
         let MembershipStatus::Resolved(resolved) = self.status() else {
             return None;
@@ -73,16 +159,19 @@ impl MembershipChain {
         self.entries_with_coords()
             .filter(|(coord, _)| self.included.contains(*coord))
             .flat_map(|(_, entry)| match &entry.change {
-                MembershipChange::SetMember {
+                StoreAuthorityChange::SetMember {
                     grant_id,
                     wrapped_key,
                     ..
                 } if active_grants.contains(grant_id) => std::slice::from_ref(wrapped_key),
-                MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.as_slice(),
-                MembershipChange::Founder { .. }
-                | MembershipChange::SetMember { .. }
-                | MembershipChange::ProviderAdmin
-                | MembershipChange::ResolutionActivation { .. } => &[],
+                StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.as_slice(),
+                StoreAuthorityChange::Founder { .. }
+                | StoreAuthorityChange::SetMember { .. }
+                | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+                | StoreAuthorityChange::DeviceExclusionProposal { .. }
+                | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+                | StoreAuthorityChange::ProviderAdmin
+                | StoreAuthorityChange::ResolutionActivation { .. } => &[],
             })
             .filter(|reference| reference.recipient_pubkey == recipient_pubkey)
             .cloned()
@@ -101,7 +190,7 @@ impl MembershipChain {
             .enumerate()
             .filter(|(_, (coord, _))| self.included.contains(*coord))
         {
-            let MembershipChange::RemoveMember { wrapped_keys, .. } = &entry.change else {
+            let StoreAuthorityChange::RemoveMember { wrapped_keys, .. } = &entry.change else {
                 continue;
             };
             if wrapped_keys
@@ -119,13 +208,14 @@ impl MembershipChain {
                     let Some((_, creation)) = self.entries_with_coords().find(|(_, entry)| {
                         matches!(
                             &entry.change,
-                            MembershipChange::SetMember { grant_id, .. }
+                            StoreAuthorityChange::SetMember { grant_id, .. }
                                 if grant_id == *active_grant
                         )
                     }) else {
                         return false;
                     };
-                    let MembershipChange::SetMember { wrapped_key, .. } = &creation.change else {
+                    let StoreAuthorityChange::SetMember { wrapped_key, .. } = &creation.change
+                    else {
                         return false;
                     };
                     wrapped_key.generation >= rotation_generation

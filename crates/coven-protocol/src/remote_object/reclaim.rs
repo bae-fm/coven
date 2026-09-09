@@ -206,11 +206,8 @@ impl RemoteObjectRecord {
         Ok(())
     }
 
-    /// A snapshot image is reclaimable when the generation that published it is its
-    /// only surviving owner: no pending activation and exactly one activated owner,
-    /// the `Snapshot` owner naming that stream and generation. A snapshot image
-    /// accretes no further owners, so anything else means the record is not the one
-    /// the claim describes.
+    /// A snapshot image is reclaimable when the exact snapshot named by the
+    /// claim is its only surviving owner, with no pending activation.
     pub fn validate_reclaimable_snapshot_image(
         &self,
         image: &crate::store_commit::SnapshotImageRef,
@@ -253,9 +250,8 @@ impl RemoteObjectRecord {
         Ok(ownership)
     }
 
-    /// A membership rollup is reclaimable when the generation named as its
-    /// owner is its *only* owner. A rollup two generations point at carries
-    /// both, and stays until the other one is reclaimed as well.
+    /// A membership rollup is reclaimable when the exact snapshot named as its
+    /// owner is its only owner. Another snapshot owner keeps the shared object live.
     pub fn validate_reclaimable_membership_rollup(
         &self,
         rollup: &crate::store_commit::MembershipRollupRef,
@@ -371,19 +367,12 @@ impl RemoteObjectRecord {
 
     pub fn snapshot_owners(&self) -> impl Iterator<Item = &SnapshotObjectOwner> {
         let owners = match self {
-            Self::SharedLiveSet(record)
-                if matches!(
-                    record.identity.domain,
-                    SharedLiveSetObjectDomain::StoredBlob
-                        | SharedLiveSetObjectDomain::StoreSnapshotImage { .. }
-                ) =>
-            {
-                match &record.state {
-                    OwnedObjectState::UploadedVerified { ownership } => Some(&ownership.activated),
-                    OwnedObjectState::Prepared { .. }
-                    | OwnedObjectState::RetirementPending { .. } => None,
+            Self::SharedLiveSet(record) => match &record.state {
+                OwnedObjectState::UploadedVerified { ownership } => Some(&ownership.activated),
+                OwnedObjectState::Prepared { .. } | OwnedObjectState::RetirementPending { .. } => {
+                    None
                 }
-            }
+            },
             _ => None,
         };
         owners.into_iter().flat_map(|owners| {

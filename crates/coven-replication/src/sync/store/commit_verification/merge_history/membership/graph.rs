@@ -139,7 +139,7 @@ pub(super) fn validate_exact_membership_head_paths(
                     "membership coordinate selects different exact heads".to_string(),
                 ));
             }
-            match &node.head.body.predecessor {
+            match node.head.body.predecessor_head() {
                 Some(predecessor) => {
                     if predecessor.coord.stream_key() != reference.coord.stream_key()
                         || predecessor.coord.seq.checked_add(1) != Some(reference.coord.seq)
@@ -162,6 +162,17 @@ pub(super) fn validate_exact_membership_head_paths(
                                     .to_string(),
                             )
                         })?;
+                    node.head
+                        .body
+                        .predecessor
+                        .as_ref()
+                        .ok_or_else(|| {
+                            AnchoredChainError::LoadFailed(
+                                "membership successor omits its exact predecessor".into(),
+                            )
+                        })?
+                        .verify_head(&predecessor_node.head)
+                        .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
                     if predecessor_node.reference != *predecessor
                         || predecessor_node.head.body.successor.next_slot
                             != *reference.object.slot()
@@ -180,7 +191,7 @@ pub(super) fn validate_exact_membership_head_paths(
                     }
                 }
             }
-            current = node.head.body.predecessor.as_ref();
+            current = node.head.body.predecessor_head();
         }
     }
     Ok(())
@@ -197,7 +208,7 @@ fn membership_resolution_activations(
 ) -> Result<BTreeMap<StoreMembershipConflictResolutionRef, MembershipCoord>, AnchoredChainError> {
     let mut activations = BTreeMap::new();
     for node in graph.path_heads.values() {
-        if let MembershipChange::ResolutionActivation { resolution } = &node.entry.change {
+        if let StoreAuthorityChange::ResolutionActivation { resolution } = &node.entry.change {
             if activations
                 .insert(resolution.clone(), node.reference.coord.clone())
                 .is_some()
@@ -228,7 +239,7 @@ fn membership_projection_activation_status(
         (false, coven_protocol::membership::MembershipHeadActivation::Direct) => {
             Ok(MembershipProjectionStatus::Included)
         }
-        (true, coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit }) => prefix
+        (true, coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit, .. }) => prefix
             .classify_head(&node.reference, &node.head, commit)
             .map(|status| match status {
                 crate::sync::store::commit_verification::merge_history::VerifiedMergePrefixHeadStatus::Included => {
@@ -265,15 +276,15 @@ fn membership_projection_dependencies(
     let mut dependencies = node
         .head
         .body
-        .predecessor
-        .iter()
+        .predecessor_head()
+        .into_iter()
         .map(|reference| reference.coord.clone())
         .chain(node.entry.dependencies.iter().cloned())
         .collect::<Vec<_>>();
     for resolution in &node.entry.resolution_dependencies {
         let introduced_here = matches!(
             &node.entry.change,
-            MembershipChange::ResolutionActivation { resolution: introduced }
+            StoreAuthorityChange::ResolutionActivation { resolution: introduced }
                 if introduced == resolution
         );
         if !introduced_here {
@@ -397,8 +408,7 @@ pub(super) fn project_membership_cut_to_store_prefix(
                         })?
                         .head
                         .body
-                        .predecessor
-                        .as_ref();
+                        .predecessor_head();
                 }
             }
         };
@@ -451,14 +461,14 @@ pub(super) fn validate_owner_grant_records(
 ) -> Result<(), AnchoredChainError> {
     for entry in entries {
         match &entry.change {
-            MembershipChange::Founder { creation_id, .. }
+            StoreAuthorityChange::Founder { creation_id, .. }
                 if *creation_id == root_value.descriptor.creation_id => {}
-            MembershipChange::Founder { .. } => {
+            StoreAuthorityChange::Founder { .. } => {
                 return Err(AnchoredChainError::LoadFailed(
                     "founder Owner grant carries another Store creation id".to_string(),
                 ));
             }
-            MembershipChange::SetMember {
+            StoreAuthorityChange::SetMember {
                 role:
                     coven_protocol::membership::StoreMembershipRoleGrant::Owner {
                         recovery:
@@ -469,7 +479,7 @@ pub(super) fn validate_owner_grant_records(
                 // The exact head's Store activation verified this entry's promotion
                 // acceptance before records are reduced into a membership chain.
             }
-            MembershipChange::SetMember {
+            StoreAuthorityChange::SetMember {
                 role: coven_protocol::membership::StoreMembershipRoleGrant::Owner { .. },
                 ..
             } => {
@@ -477,10 +487,13 @@ pub(super) fn validate_owner_grant_records(
                     "non-founder Owner grant does not carry promotion acceptance".to_string(),
                 ));
             }
-            MembershipChange::SetMember { .. }
-            | MembershipChange::RemoveMember { .. }
-            | MembershipChange::ProviderAdmin
-            | MembershipChange::ResolutionActivation { .. } => {}
+            StoreAuthorityChange::SetMember { .. }
+            | StoreAuthorityChange::RemoveMember { .. }
+            | StoreAuthorityChange::ProviderAdmin
+            | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+            | StoreAuthorityChange::DeviceExclusionProposal { .. }
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::ResolutionActivation { .. } => {}
         }
     }
     Ok(())

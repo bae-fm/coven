@@ -52,53 +52,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(chain)
     }
 
-    pub(crate) async fn load_head(
-        &self,
-        reference: &StoreDeviceHeadRef,
-        registration: &StoreDeviceRegistration,
-        commit: &StoreBatchCommitRef,
-    ) -> Result<VerifiedObject<StoreDeviceHead>, StoreObjectError> {
-        self.commit_verifier
-            .load_head(reference, registration, commit)
-            .await
-    }
-
-    pub(super) async fn load_state_registrations(
-        &self,
-        state: &ResolvedStoreDeviceState,
-        registrations: &mut BTreeMap<
-            store_commit::StoreDeviceId,
-            ReferencedStoreDeviceRegistration,
-        >,
-    ) -> Result<(), StorePullError> {
-        for (device_id, record) in &state.devices {
-            if registrations
-                .get(device_id)
-                .is_some_and(|registration| registration.reference() == &record.registration)
-            {
-                continue;
-            }
-            let registration = self
-                .commit_verifier
-                .load_registration(&record.registration)
-                .await?;
-            if registration.value.device_id != *device_id {
-                return Err(StorePullError::InvalidState(
-                    "current Merge device state registration has another device id".to_string(),
-                ));
-            }
-            registrations.insert(
-                *device_id,
-                ReferencedStoreDeviceRegistration::verified(
-                    record.registration.clone(),
-                    registration.value,
-                )
-                .map_err(StorePullError::Protocol)?,
-            );
-        }
-        Ok(())
-    }
-
     pub(crate) async fn load_ref(
         &mut self,
         reference: &StoreBatchCommitRef,
@@ -173,6 +126,15 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.commit_verifier.load_registration(&self.founder).await
     }
 
+    pub(crate) async fn load_store_snapshot_image(
+        &self,
+        snapshot: &coven_database::PublishedStoreSnapshot,
+    ) -> Result<Vec<u8>, StoreObjectError> {
+        self.commit_verifier
+            .load_store_snapshot_image(&snapshot.reference, &snapshot.meta)
+            .await
+    }
+
     pub(crate) async fn load_device_exclusion_proposal(
         &self,
         reference: &StoreDeviceExclusionProposalRef,
@@ -219,21 +181,37 @@ impl<'a> MergeHistoryVerifier<'a> {
         registration: &StoreDeviceRegistration,
         reference: &StoreSnapshotRef,
     ) -> Result<(StoreSnapshotRef, SnapshotMeta), StoreObjectError> {
+        if let Some(installed) = self
+            .history
+            .baseline
+            .snapshot()
+            .filter(|installed| &installed.reference == reference)
+        {
+            installed
+                .meta
+                .verify_at(
+                    self.root.reference().store_root_hash,
+                    reference,
+                    registration,
+                )
+                .and_then(|()| {
+                    if installed.meta.author_registration != *registration_ref {
+                        return Err(StoreProtocolError::Malformed(
+                            "installed Store snapshot names another exact author registration"
+                                .to_string(),
+                        ));
+                    }
+                    Ok(())
+                })
+                .map_err(|source| StoreObjectError::InvalidObject {
+                    semantic_prefix: reference.object.slot().logical_key().to_string(),
+                    key: reference.object.slot().logical_key().to_string(),
+                    source: Box::new(source),
+                })?;
+            return Ok((reference.clone(), installed.meta.clone()));
+        }
         self.commit_verifier
             .load_store_snapshot(registration_ref, registration, reference)
-            .await
-    }
-
-    pub(crate) async fn load_store_snapshot_stream(
-        &self,
-        registration_ref: &StoreDeviceRegistrationRef,
-        registration: &StoreDeviceRegistration,
-    ) -> Result<
-        Vec<coven_database::PublishedStoreSnapshot>,
-        crate::sync::store::snapshots::SnapshotError,
-    > {
-        self.commit_verifier
-            .load_store_snapshot_stream(registration_ref, registration)
             .await
     }
 
@@ -300,23 +278,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
     }
 
-    pub(crate) async fn exact_next_announcement_slot(
-        &mut self,
-        registration_ref: &StoreDeviceRegistrationRef,
-        registration: &StoreDeviceRegistration,
-        previous: Option<&VerifiedStoreBatchCommit>,
-    ) -> Result<
-        (
-            coven_protocol::objects::ObjectSlot,
-            Option<StoreDeviceHeadRef>,
-        ),
-        StoreError,
-    > {
-        self.commit_verifier
-            .exact_next_announcement_slot(registration_ref, registration, previous)
-            .await
-    }
-
     pub(crate) async fn load_merge_commit_registrations(
         &mut self,
         commit: &StoreBatchCommit,
@@ -371,19 +332,19 @@ impl<'a> MergeHistoryVerifier<'a> {
                 )
             })?;
             let opened = self
-                .load_reclaim_authorization(reference)
+                .commit_verifier
+                .load_reclaim_authorization_record(reference, &activating_author.author_pubkey)
                 .await
                 .map_err(RegistrationLoadError::Object)?;
-            let evidence = &opened.evidence.value;
-            let authorization = &opened.authorization.value;
+            let authorization = &opened.value;
             let owner_authorized = authorization.authority.membership == commit.membership_state
                 && predecessor_verifies_owner(
                     predecessor,
                     &authorization.authority.membership,
-                    &evidence.author_pubkey,
+                    &activating_author.author_pubkey,
                     &authorization.authority.owner_grant,
                 );
-            if evidence.author_pubkey != activating_author.author_pubkey || !owner_authorized {
+            if !owner_authorized {
                 return Err(RegistrationLoadError::Invalid(
                     "reclaim authorization signer is not an active Owner at its exact predecessor"
                         .to_string(),
@@ -392,19 +353,46 @@ impl<'a> MergeHistoryVerifier<'a> {
             // Each kind of activating authority is re-read differently, so the binding
             // between the evidence and the object it authorizes deleting dispatches on
             // which authority published the target.
-            let target = evidence.claim.target();
+            let target = &authorization.target;
             match target.activation() {
                 coven_protocol::reclaim::ReclaimActivation::Commit(activating_commit) => {
-                    accepted.validate_commit_activated_reclaim_target(&target, activating_commit)
+                    accepted.validate_commit_activated_reclaim_target(target, activating_commit)
                 }
                 coven_protocol::reclaim::ReclaimActivation::CircleSnapshotMetadata(activation) => {
-                    validate_circle_snapshot_activated_reclaim_target(&target, &activation)
-                }
-                coven_protocol::reclaim::ReclaimActivation::StoreSnapshotMetadata(activation) => {
-                    validate_store_snapshot_activated_reclaim_target(&target, &activation)
+                    validate_circle_snapshot_activated_reclaim_target(target, &activation)
                 }
                 coven_protocol::reclaim::ReclaimActivation::PackageBlobBinding(activation) => {
-                    accepted.validate_package_bound_reclaim_target(&target, &activation)
+                    accepted.validate_package_bound_reclaim_target(target, activation)
+                }
+                coven_protocol::reclaim::ReclaimActivation::StoreBlobInventory(blob) => {
+                    let store_commit::StorePublicationBase::Snapshot(base) =
+                        commit.publication_base()
+                    else {
+                        return Err(RegistrationLoadError::Invalid(
+                            "Store blob reclaim has no accepted snapshot inventory".into(),
+                        ));
+                    };
+                    // Admission binds this base to the snapshot at the commit's
+                    // exact publication. The retained replay floor can be older.
+                    let snapshot = coven_database::PublishedStoreSnapshot {
+                        reference: base.snapshot.clone(),
+                        meta: self
+                            .load_snapshot_metadata(&base.snapshot)
+                            .await
+                            .map_err(registration_attempt_error)?,
+                    };
+                    if self
+                        .store_snapshot_blob_is_reclaimable(&snapshot, blob)
+                        .await
+                        .map_err(registration_attempt_error)?
+                    {
+                        Ok(())
+                    } else {
+                        Err(RegistrationLoadError::Invalid(
+                            "Store blob reclaim is absent from the accepted orphan inventory"
+                                .into(),
+                        ))
+                    }
                 }
             }?;
         }
@@ -434,14 +422,10 @@ impl<'a> MergeHistoryVerifier<'a> {
                         .to_string(),
                 ));
             }
-            if matches!(
-                accepted
-                    .find(None, |_, candidate| {
-                        candidate.reclaim_authorization() == Some(&receipt.authorization)
-                    })
-                    .map_err(registration_attempt_error)?,
-                PredecessorSearch::Absent
-            ) {
+            if !accepted
+                .contains_reclaim_authorization(&receipt.authorization)
+                .map_err(registration_attempt_error)?
+            {
                 return Err(RegistrationLoadError::Invalid(
                     "reclaim receipt authorization is absent from predecessor history".to_string(),
                 ));
@@ -503,31 +487,5 @@ impl<'a> MergeHistoryVerifier<'a> {
             registrations.push(registration);
         }
         Ok(registrations)
-    }
-
-    pub(crate) async fn load_activation_head(
-        &mut self,
-        verified_commit: &VerifiedStoreBatchCommit,
-    ) -> Result<VerifiedObject<StoreDeviceHead>, StorePullError> {
-        let author = verified_commit.author().clone();
-        let commit = verified_commit.value();
-        let (_, head_ref) = self
-            .commit_verifier
-            .exact_next_announcement_slot(
-                &commit.author_registration,
-                &author,
-                Some(verified_commit),
-            )
-            .await
-            .map_err(|error| StorePullError::Store(Box::new(error)))?;
-        let head_ref = head_ref.ok_or_else(|| {
-            StorePullError::InvalidState(
-                "device join activation has no exact accepted activation head".to_string(),
-            )
-        })?;
-        Ok(self
-            .commit_verifier
-            .load_head(&head_ref, &author, verified_commit.reference())
-            .await?)
     }
 }

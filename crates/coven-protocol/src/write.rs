@@ -4,7 +4,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::store_commit::StoreBatchCommitRef;
+use crate::store_commit::{
+    AcceptedStoreSnapshotRef, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceRegistrationRef,
+};
 
 /// Stable identity of one successfully committed host transaction.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -41,10 +43,45 @@ impl PublishedPosition {
     }
 }
 
+/// A reserved author position whose accepted edit is included in a snapshot.
+/// The snapshot does not identify which exact candidate completed the edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotCoveredPosition {
+    pub author_registration: StoreDeviceRegistrationRef,
+    pub coord: StoreCommitCoord,
+    pub snapshot: AcceptedStoreSnapshotRef,
+}
+
+/// Durable evidence that a host write was published, with or without its exact commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PublishedWrite {
+    Commit(PublishedPosition),
+    Snapshot(SnapshotCoveredPosition),
+}
+
+impl PublishedWrite {
+    pub fn coord(&self) -> &StoreCommitCoord {
+        match self {
+            Self::Commit(position) => &position.commit.coord,
+            Self::Snapshot(position) => &position.coord,
+        }
+    }
+
+    pub fn exact_commit(&self) -> Option<&StoreBatchCommitRef> {
+        match self {
+            Self::Commit(position) => Some(position.commit()),
+            Self::Snapshot(_) => None,
+        }
+    }
+}
+
 /// A semantic write fault. Retrying transport cannot change this result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum WriteBlock {
+    RebaseConflict(WriteRebaseConflict),
     InvalidPackage {
         reason: String,
     },
@@ -70,9 +107,11 @@ pub enum WriteBlock {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum WriteStatus {
     LocalOnly,
+    /// Private intent retained for explicit resolution; it never owes publication.
+    LocalOnlyBlocked(WriteBlock),
     Pending,
     Publishing,
-    Published(Box<PublishedPosition>),
+    Published(Box<PublishedWrite>),
     Blocked(WriteBlock),
     Resolved(WriteResolution),
 }
@@ -81,61 +120,43 @@ pub enum WriteStatus {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum WriteResolution {
     Discarded,
-    Retracted { witness: WriteRetractionWitness },
 }
 
-/// Durable proof that a previously published write cannot activate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WriteRetractionWitness {
-    original: PublishedPosition,
-    nonactivation: crate::remote_object::CandidateNonactivation,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum WriteRetractionError {
-    #[error("invalid candidate nonactivation: {0}")]
-    Nonactivation(#[from] crate::remote_object::RemoteObjectRecordError),
-    #[error("write retraction proof names another published commit")]
-    CommitMismatch,
-}
-
-impl WriteRetractionWitness {
-    pub fn new(
-        original: PublishedPosition,
-        nonactivation: crate::remote_object::CandidateNonactivation,
-    ) -> Result<Self, WriteRetractionError> {
-        let candidate = nonactivation.reference()?;
-        if original.commit() != &candidate {
-            return Err(WriteRetractionError::CommitMismatch);
-        }
-        let witness = Self {
-            original,
-            nonactivation,
-        };
-        witness.validate()?;
-        Ok(witness)
-    }
-
-    pub fn original_position(&self) -> &PublishedPosition {
-        &self.original
-    }
-
-    pub fn validate(&self) -> Result<(), WriteRetractionError> {
-        let candidate = self.nonactivation.reference()?;
-        if self.original.commit() != &candidate {
-            return Err(WriteRetractionError::CommitMismatch);
-        }
-        Ok(())
-    }
-}
-
-/// One table/primary-key identity affected by the shared part of a write.
+/// One table/primary-key identity affected by a write.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AffectedRow {
     pub table: String,
     pub primary_key: String,
+}
+
+/// A recorded edit cannot be applied to the accepted state without changing its intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+#[error("write {write_id} cannot rebase rows {affected_rows:?}: {reason}")]
+pub struct WriteRebaseConflict {
+    pub write_id: WriteId,
+    /// The exact row for an attributed conflict, or the captured write's rows
+    /// when SQLite rejects the transaction without attributing a single row.
+    pub affected_rows: Vec<AffectedRow>,
+    pub reason: WriteRebaseConflictReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum WriteRebaseConflictReason {
+    #[error("the edited row is absent")]
+    MissingTarget,
+    #[error("column {column:?} conflicts with the recorded edit")]
+    ChangedColumn { column: String },
+    #[error("the inserted row identity already exists")]
+    IdentityCollision,
+    #[error("the private edit conflicts with an accepted shared row")]
+    PrivateShared,
+    #[error("Circle {circle_id} no longer authorizes the captured edit")]
+    InvalidCircleContext { circle_id: crate::circle::CircleId },
+    #[error("the edit violates a constraint: {message}")]
+    Constraint { message: String },
 }
 
 /// Durable write information returned by `CovenHandle::pending_writes`.

@@ -21,12 +21,40 @@ use coven_protocol::objects::{
 };
 use coven_protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
-    commit_semantic_prefix, head_slot_prefix, CircleAccessEnvelopeObjectRef,
-    CircleAccessLeafObjectRef, CircleAccessObjectRef, GrantStreamAnchor, ObjectHash,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StreamActivation,
+    commit_semantic_prefix, CircleAccessEnvelopeObjectRef, CircleAccessLeafObjectRef,
+    CircleAccessObjectRef, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
+    StoreCommitCoord, StreamActivation,
 };
 use coven_storage::cloud::CloudHome;
 use coven_storage::CloudSyncObjectStorage;
+
+/// A Circle-scoped `documents` table whose rows carry a blob.
+fn open_circle_blob_test_db(store_dir: coven_foundation::store_dir::StoreDir) -> Database {
+    crate::sync::test_helpers::open_test_db_schema(
+        store_dir,
+        vec![coven_protocol::synced_schema::SyncedTable::new(
+            "documents",
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
+        )
+        .scoped_by("audience")
+        .carries_blob(coven_protocol::synced_schema::BlobDecl::new(
+            "files",
+            coven_protocol::blob::Provenance::HostProvided,
+            coven_protocol::blob::CacheFill::CacheEager,
+        ))],
+        vec![coven_database::Migration::sql(
+            1,
+            "Circle member bootstrap schema",
+            "CREATE TABLE documents (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 size INTEGER NOT NULL,
+                 hash TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+}
 
 async fn create_test_store_in_its_own_task(
     db: &Database,
@@ -284,7 +312,11 @@ async fn finalize_circle_epoch_close(
         .await
         .expect("publish local Circle epoch-close response");
     components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("activate the Circle epoch-close outcome");
 }
@@ -328,17 +360,21 @@ fn assert_exact_operation(expected: &CircleOperationJournal, actual: &CircleOper
     assert_eq!(actual.intent, expected.intent);
     assert_eq!(actual.operation().creation, expected.operation().creation);
     assert_eq!(
-        actual.operation().commit_bytes,
-        expected.operation().commit_bytes
+        actual.operation().store_commit,
+        expected.operation().store_commit
     );
-    assert_eq!(actual.operation().policy, expected.operation().policy);
 }
 
+mod bootstrap_discard;
 mod journal;
 mod local_validation;
+mod metadata_clock;
 mod publication;
 mod recovery;
 mod remote_validation;
 mod resolution;
 mod retained;
 mod rotation_required;
+mod snapshot_restore;
+mod snapshot_row_clock;
+mod staged_packages;

@@ -127,9 +127,6 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         },
         object: reclaim_test_object("store-v1/reclaim/authorizations/closed.json"),
     };
-    let authorization_activation =
-        reclaim_test_activation(authorization_activation, "authorization");
-    let receipt_activation = reclaim_test_activation(receipt_activation, "receipt");
     let operation = DurableStoreReclaimOperation::Authorized {
         authorization: authorization.clone(),
         activation: authorization_activation.clone(),
@@ -201,7 +198,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
 }
 
 #[test]
-fn snapshot_blob_owner_rejects_other_activation_and_later_generation() {
+fn snapshot_blob_owner_requires_the_exact_candidate() {
     let conn = Connection::open_in_memory().expect("open snapshot owner database");
     apply_coven_schema(&conn).expect("apply snapshot owner schema");
     let binding = exact_blob_binding(
@@ -209,9 +206,13 @@ fn snapshot_blob_owner_rejects_other_activation_and_later_generation() {
         "0000000001000-0000-owner",
         b"snapshot owner bytes",
     );
-    let expected = coven_protocol::remote_object::SnapshotObjectOwner {
-        activation: snapshot_activation("verified"),
-        generation: 7,
+    let expected_slot = coven_protocol::objects::ObjectSlot::opaque(
+        "store-v1/snapshots/verified.json".to_string(),
+        "verified-provider-id".to_string(),
+    )
+    .expect("snapshot metadata slot");
+    let expected = coven_protocol::remote_object::SnapshotObjectOwner::Store {
+        metadata_slot: expected_slot.clone(),
     };
     let install = |owner: coven_protocol::remote_object::SnapshotObjectOwner| {
         conn.execute("DELETE FROM remote_objects", [])
@@ -230,27 +231,31 @@ fn snapshot_blob_owner_rejects_other_activation_and_later_generation() {
     };
 
     install(expected.clone());
-    validate_snapshot_object_owner_records_on(&conn, &expected)
+    validate_snapshot_object_owner_records_on(&conn, &expected, &BTreeSet::new())
         .expect("verified snapshot owner matches");
 
-    install(coven_protocol::remote_object::SnapshotObjectOwner {
-        activation: expected.activation,
-        generation: expected.generation - 1,
+    install(coven_protocol::remote_object::SnapshotObjectOwner::Store {
+        metadata_slot: coven_protocol::objects::ObjectSlot::opaque(
+            expected_slot.logical_key().to_string(),
+            "different-provider-id".to_string(),
+        )
+        .expect("different physical snapshot slot"),
     });
-    validate_snapshot_object_owner_records_on(&conn, &expected)
-        .expect("an earlier generation remains valid snapshot ownership");
+    assert!(validate_snapshot_object_owner_records_on(&conn, &expected, &BTreeSet::new()).is_err());
 
-    install(coven_protocol::remote_object::SnapshotObjectOwner {
-        activation: snapshot_activation("other"),
-        generation: expected.generation,
+    install(coven_protocol::remote_object::SnapshotObjectOwner::Store {
+        metadata_slot: coven_protocol::objects::ObjectSlot::logical(
+            expected_slot.logical_key().to_string(),
+        )
+        .expect("logical snapshot slot"),
     });
-    assert!(validate_snapshot_object_owner_records_on(&conn, &expected).is_err());
+    assert!(validate_snapshot_object_owner_records_on(&conn, &expected, &BTreeSet::new()).is_err());
 
-    install(coven_protocol::remote_object::SnapshotObjectOwner {
-        activation: expected.activation,
-        generation: expected.generation + 1,
+    install(coven_protocol::remote_object::SnapshotObjectOwner::Circle {
+        activation: snapshot_activation("circle"),
+        generation: 7,
     });
-    assert!(validate_snapshot_object_owner_records_on(&conn, &expected).is_err());
+    assert!(validate_snapshot_object_owner_records_on(&conn, &expected, &BTreeSet::new()).is_err());
 }
 
 #[tokio::test]
@@ -484,11 +489,28 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
     );
     tx.commit().expect("commit");
 
+    let indexed = conn
+        .prepare("SELECT remote_object_id FROM blob_locators ORDER BY remote_object_id")
+        .expect("prepare locator index query")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("read locator index")
+        .collect::<Result<BTreeSet<_>, _>>()
+        .expect("decode locator index");
     assert_eq!(
-        conn.query_row("SELECT count(*) FROM blob_locators", [], |row| row
+        indexed,
+        package
+            .blob_bindings()
+            .iter()
+            .map(|binding| remote_object_id(binding.blob().object()).to_string())
+            .collect(),
+        "every accepted object keeps its provenance until exact retirement"
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM row_blob_locators", [], |row| row
             .get::<_, i64>(0))
-            .expect("count locators"),
-        1
+            .expect("count row bindings"),
+        1,
+        "only the winning row version receives a binding"
     );
     assert_eq!(
         conn.query_row("SELECT row_id FROM row_blob_locators", [], |row| row
@@ -496,6 +518,14 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
             .expect("read binding"),
         "winner"
     );
+    let loser = Database::row_blob_ref_on(&conn, &gates, &tables[0], "loser")
+        .expect("resolve the newer row without binding it to losing content");
+    assert_eq!(loser.row_stamp(), "0000000002000-0000-b");
+    assert!(matches!(
+        loser.authority(),
+        RowBlobAuthority::PendingRemote(_)
+    ));
+    assert!(loser.stored().is_none());
     let resolved = Database::row_blob_ref_on(&conn, &gates, &tables[0], "winner")
         .expect("resolve exact row blob reference");
     assert_eq!(resolved.row_stamp(), "0000000001000-0000-a");

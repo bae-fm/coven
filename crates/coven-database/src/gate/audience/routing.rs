@@ -292,7 +292,7 @@ pub(crate) fn required_store_ancestors(
                         table: table.clone(),
                         row_id: Some(row_id.clone()),
                         parent,
-                    })
+                    });
                 }
             }
         }
@@ -339,7 +339,7 @@ pub(crate) fn required_store_ancestors_for_deleted_rows(
                         table: key.0.clone(),
                         row_id: Some(key.1.clone()),
                         parent,
-                    })
+                    });
                 }
             }
         }
@@ -426,14 +426,14 @@ pub(crate) fn compatible_parent_rows(
                 return Err(GateError::MissingAudienceRow {
                     table: table.to_string(),
                     row_id: row_id.to_string(),
-                })
+                });
             }
             FkParentRow::ParentAbsent => {
                 return Err(GateError::MissingAudienceParent {
                     table: table.to_string(),
                     row_id: Some(row_id.to_string()),
                     parent: parent_table,
-                })
+                });
             }
         };
         let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;

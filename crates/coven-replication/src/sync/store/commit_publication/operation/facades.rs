@@ -1,11 +1,14 @@
 use super::*;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
-    pub(crate) fn accepted_commit_membership_state(
-        &self,
-        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Option<&coven_protocol::circle_control::StoreMembershipStateRef> {
-        self.history.accepted_commit_membership_state(reference)
+    pub(crate) async fn history_has_only_acknowledgements(
+        &mut self,
+        previous: &coven_protocol::store_commit::StoreHistoryCut,
+        current: &coven_protocol::store_commit::StoreHistoryCut,
+    ) -> Result<bool, crate::sync::store::pull::StorePullError> {
+        self.history
+            .history_has_only_acknowledgements(previous, current)
+            .await
     }
 
     pub(super) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'storage> {
@@ -22,21 +25,45 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         crate::sync::store::snapshots::AuthorizedSnapshotPublication::begin(
             &self.database,
             self.storage.as_ref(),
-            self.store_dir,
         )
         .await
     }
 
     pub(crate) async fn resume_snapshot_publication(
-        &self,
+        &mut self,
     ) -> Result<
         Option<coven_protocol::store_commit::SnapshotMeta>,
         crate::sync::store::snapshots::SnapshotError,
     > {
-        self.snapshot_publication().await.resume_store().await
+        self.snapshots().resume_pending_publication().await
     }
 
-    pub(super) fn protocol_root(&self) -> &coven_protocol::store_commit::StoreProtocolRoot {
+    pub(crate) async fn publish_store_snapshot(
+        &mut self,
+        pending: &coven_database::DurableSnapshotPublication,
+        objects: &crate::sync::store::snapshots::AuthorizedSnapshotPublication<'_>,
+    ) -> Result<
+        crate::sync::store::authorization::history::publication::StoreSnapshotPublicationAttemptOutcome,
+        crate::sync::store::snapshots::SnapshotError,
+    >{
+        self.writer
+            .publish_store_snapshot(&mut self.history, &mut self.membership, pending, objects)
+            .await
+    }
+
+    pub(crate) async fn capture_current_store_snapshot_cut(
+        &self,
+    ) -> Result<
+        (
+            coven_database::CreatedSnapshot,
+            coven_protocol::store_commit::CommitFrontier,
+        ),
+        coven_database::DbError,
+    > {
+        self.history.capture_current_store_snapshot_cut().await
+    }
+
+    pub(crate) fn protocol_root(&self) -> &coven_protocol::store_commit::StoreProtocolRoot {
         &self.history.verified_root_object().value
     }
 
@@ -54,36 +81,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             ),
             None => Ok(&self.membership),
         }
-    }
-
-    pub(super) async fn open_keyring(
-        &self,
-    ) -> Result<
-        coven_keys::encryption::EncryptionService,
-        crate::sync::store::commit_publication::membership::MembershipMutationError,
-    > {
-        self.keyrings.open(&self.membership).await
-    }
-
-    pub(super) async fn open_keyring_for_membership(
-        &self,
-        membership: &coven_protocol::membership::MembershipChain,
-    ) -> Result<
-        coven_keys::encryption::EncryptionService,
-        crate::sync::store::commit_publication::membership::MembershipMutationError,
-    > {
-        self.keyrings.open(membership).await
-    }
-
-    pub(crate) async fn open_keyring_or_for_membership(
-        &self,
-        membership: &coven_protocol::membership::MembershipChain,
-        initial: &coven_keys::encryption::EncryptionService,
-    ) -> Result<
-        coven_keys::encryption::EncryptionService,
-        crate::sync::store::commit_publication::membership::MembershipMutationError,
-    > {
-        self.keyrings.open_or(membership, initial).await
     }
 
     pub(crate) async fn prepare_wrapped_key(
@@ -107,95 +104,21 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         coven_protocol::membership::AuthorStreamId,
         crate::sync::store::commit_publication::membership::MembershipMutationError,
     > {
-        let author = self.writer.author_pubkey();
-        let grant = chain.active_owner_grant(&author).ok_or_else(|| {
-            coven_protocol::membership::MembershipError::SignerIsNotOwner(author.clone())
-        })?;
-        let mut reusable = chain.reusable_author_streams(&author, &grant);
-        if let Some(anchored) = chain.membership_stream_id(&grant) {
-            reusable.insert(anchored);
-        }
-        Ok(self
-            .database
-            .select_membership_author_stream(&author, &grant, reusable)
-            .await?)
-    }
-
-    pub(super) async fn verify_membership_publication_author(
-        &self,
-        publication: &PreparedMembershipPublication,
-    ) -> Result<
-        coven_protocol::store_commit::StoreDeviceRegistration,
-        crate::sync::store::membership::MembershipMutationError,
-    > {
-        let author = self
-            .history
-            .load_registration(&publication.head.body.author_registration)
-            .await
-            .map_err(crate::sync::store::membership::MembershipMutationError::from)?
-            .value;
-        if !publication.head.verify(&author) {
-            return Err(
-                crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
-                    "prepared membership head has an invalid certified-device signature"
-                        .to_string(),
-                ),
-            );
-        }
-        Ok(author)
-    }
-
-    pub(super) async fn blocked_candidate_nonactivation(
-        &mut self,
-        candidate: &coven_database::BlockedMergeCandidate,
-    ) -> Result<Option<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
-    {
-        let verified = self
-            .history
-            .authenticate_blocked_candidate(candidate)
-            .await?;
         self.history
-            .merge_conflict()
-            .excluded_candidate_nonactivation(&verified, &candidate.head, &candidate.head_object)
+            .select_membership_author_stream(chain, &self.writer.author_pubkey())
             .await
     }
 
-    pub(super) async fn cleanup_merge_candidate_history(
+    pub(crate) async fn resolve_accepted_snapshot(
         &mut self,
-        write_id: coven_protocol::write::WriteId,
-    ) -> Result<(), crate::sync::store::pull::StorePullError> {
-        self.history.cleanup_merge_candidate(write_id).await
-    }
-
-    pub(crate) async fn resolve_acknowledged_snapshot(
-        &mut self,
-        registration: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-        members: &coven_protocol::membership::MembershipChain,
     ) -> Result<
         Result<
-            crate::sync::store::commit_verification::merge_history::SelectedReplayBaselineRetirement,
+            crate::sync::store::commit_verification::merge_history::SelectedStoreSnapshot,
             crate::sync::store::ReplayBaselineDecline,
         >,
         crate::sync::store::acknowledgements::StoreAckError,
-    >{
-        self.history
-            .resolve_acknowledged_snapshot(registration, members)
-            .await
-    }
-
-    pub(crate) async fn select_acknowledgement_snapshot(
-        &mut self,
-        frontier: &coven_protocol::store_commit::CommitFrontier,
-        device_state: &coven_protocol::store_commit::StoreDeviceStateRef,
-    ) -> Result<
-        Option<
-            crate::sync::store::commit_verification::merge_history::SelectedInstallableStoreSnapshot,
-        >,
-        crate::sync::store::acknowledgements::StoreAckError,
-    >{
-        self.history
-            .select_acknowledgement_snapshot(frontier, device_state)
-            .await
+    > {
+        self.history.resolve_accepted_snapshot().await
     }
 
     pub(super) async fn stage_verified_blob_plaintext(
@@ -219,7 +142,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
     }
 
-    pub(super) async fn authorize_retained_outbound(
+    pub(super) async fn authorize_retained_preparation(
         &self,
         order: &coven_protocol::store_commit::StoreCommitOrder,
         membership_heads: &[coven_protocol::membership::MembershipHeadRef],
@@ -228,7 +151,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         crate::sync::store::pull::StorePullError,
     > {
         self.writer
-            .authorize_retained_outbound(&self.history, order, membership_heads)
+            .authorize_retained_preparation(&self.history, order, membership_heads)
             .await
     }
 
@@ -294,7 +217,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         membership: &coven_protocol::membership::MembershipChain,
         recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
-        state_after: coven_protocol::store_commit::ResolvedStoreDeviceState,
+        predecessor_state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
+        state_after: &coven_protocol::store_commit::ResolvedStoreDeviceState,
         evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
     ) -> Result<
         crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
@@ -305,22 +229,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 commit,
                 membership,
                 recovery_author,
+                predecessor_state,
                 state_after,
                 evidence,
             )
-            .await
-    }
-
-    pub(super) async fn observe_occupied_merge_head(
-        &mut self,
-        expected: &coven_protocol::store_commit::StoreDeviceHead,
-        expected_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        slot: &coven_protocol::objects::ObjectSlot,
-        semantic_prefix: &str,
-    ) -> Result<crate::sync::store::merge_conflict::VerifiedMergeWinner, StoreError> {
-        self.history
-            .merge_conflict()
-            .observe_occupied_merge_head(expected, expected_commit, slot, semantic_prefix)
             .await
     }
 
@@ -385,12 +297,19 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         coverage: &coven_protocol::store_commit::CommitFrontier,
         membership: &coven_protocol::membership::MembershipChain,
         state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
+        publication: &coven_protocol::store_commit::StoreCurrentPublicationRecord,
     ) -> Result<
         coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         crate::sync::store::pull::StorePullError,
     > {
         self.writer
-            .prepare_merge_snapshot_history_summary(&self.history, coverage, membership, state)
+            .prepare_merge_snapshot_history_summary(
+                &self.history,
+                coverage,
+                membership,
+                state,
+                publication,
+            )
             .await
     }
 
@@ -423,14 +342,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let database = self.database.clone();
         let storage = Arc::clone(self.storage);
         let store_dir = self.store_dir;
-        let membership = self.membership.clone();
         let local_writer = Arc::clone(&self.writer);
         crate::sync::store::snapshots::AuthorizedSnapshots::new(
             self,
             database,
             storage,
             store_dir,
-            membership,
             local_writer,
         )
     }
@@ -461,9 +378,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let database = self.database.clone();
         let storage = self.storage.clone();
         let root = self.store_root().clone();
-        let membership = self.membership.clone();
         crate::sync::store::owner_role_promotion::AuthorizedOwnerPromotion::new(
-            self, database, storage, root, membership,
+            self, database, storage, root,
         )
     }
 
@@ -497,7 +413,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 return Ok(());
             }
 
-            match self.open_keyring().await {
+            match self.keyrings.open(&self.membership).await {
                 Ok(new_encryption) => {
                     let merged = cipher
                         .merged_keyring(&new_encryption)
@@ -565,7 +481,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let storage = Arc::clone(self.storage);
         let store_dir = self.store_dir;
         let root = self.store_root().clone();
-        let membership = self.membership.clone();
         let local_writer = Arc::clone(&self.writer);
         crate::sync::store::circles::AuthorizedCircleWriter::from_parts(
             self,
@@ -573,7 +488,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             storage,
             store_dir,
             root,
-            membership,
             local_writer,
         )
     }

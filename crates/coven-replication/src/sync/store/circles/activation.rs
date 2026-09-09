@@ -29,7 +29,6 @@ mod access;
 mod epoch_close;
 mod heads;
 
-pub(crate) use access::LocalCircleAccess;
 use heads::{CircleHeadKind, CircleHeadValue};
 
 use super::exact_object::read_exact_circle_object;
@@ -109,13 +108,31 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         control: &PreparedCircleControl,
         keyring: &str,
     ) -> Result<coven_protocol::circle::CircleRosterChain, CircleOperationError> {
+        self.load_control_roster_chain_with_prefix(
+            verified,
+            reference,
+            control,
+            keyring,
+            &VerifiedStreamActivationPrefix::empty(),
+        )
+        .await
+    }
+
+    pub(crate) async fn load_control_roster_chain_with_prefix(
+        &mut self,
+        verified: &VerifiedStoreBatchCommit,
+        reference: &coven_protocol::store_commit::CircleControlRef,
+        control: &PreparedCircleControl,
+        keyring: &str,
+        verified_prefix: &VerifiedStreamActivationPrefix,
+    ) -> Result<coven_protocol::circle::CircleRosterChain, CircleOperationError> {
         verify_control_context_for_verified_commit(reference, control, verified)?;
         let commit_ref = verified.reference();
         let commit = verified.value();
         let encryption = EncryptionService::from(MasterKeyring::from_serialized(keyring)?);
         let mut consumed_stream_activations = BTreeSet::new();
         self.load_circle_roster_chain(
-            &VerifiedStreamActivationPrefix::empty(),
+            verified_prefix,
             commit_ref,
             commit,
             reference.circle_id(),
@@ -134,6 +151,26 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
 struct VerifiedCloseOutcome {
     close_id: CircleEpochCloseId,
     exclusions: Vec<StoreDeviceRegistrationRef>,
+}
+
+impl VerifiedCloseOutcome {
+    fn local_exclusion(
+        &self,
+        control: &PreparedCircleControl,
+        activating_commit: &StoreBatchCommitRef,
+        local_device_id: &str,
+    ) -> Option<LocalCircleExclusion> {
+        self.exclusions
+            .iter()
+            .find(|registration| registration.device_id.to_string() == local_device_id)
+            .map(|excluded| LocalCircleExclusion {
+                circle_id: control.value.circle_id,
+                close_id: self.close_id,
+                excluded: excluded.clone(),
+                successor_control: control.coord.clone(),
+                activating_commit: activating_commit.clone(),
+            })
+    }
 }
 
 fn verify_loaded_control_membership(

@@ -1,238 +1,6 @@
-use coven_foundation::clock::Stopwatch;
-
 use super::*;
 
-fn held_protocol_error(error: StoreProtocolError) -> HeldStorePositionReason {
-    match error {
-        StoreProtocolError::InvalidSignature => HeldStorePositionReason::InvalidSignature,
-        StoreProtocolError::RelocatedSlot { .. }
-        | StoreProtocolError::RelocatedPackage { .. }
-        | StoreProtocolError::StoreRootMismatch { .. }
-        | StoreProtocolError::StoreMismatch { .. }
-        | StoreProtocolError::FounderMismatch { .. } => {
-            HeldStorePositionReason::WrongSlotProtocol(error.into())
-        }
-        error => HeldStorePositionReason::InvalidObjectProtocol(error.into()),
-    }
-}
-
 impl<'a> MergeHistoryVerifier<'a> {
-    pub(crate) async fn discover_merge_stream(
-        &mut self,
-        registration_ref: &StoreDeviceRegistrationRef,
-        registration: &StoreDeviceRegistration,
-        inactive_accepted_cut: Option<&StoreHistoryCut>,
-    ) -> Result<MergeStreamDiscovery, StorePullError> {
-        let DeviceStreamAnchor::StoreAnnouncements { first_slot } = &registration.store_commits
-        else {
-            return Err(StorePullError::InvalidState(format!(
-                "Store registration {} has no Merge announcement anchor",
-                registration.device_id
-            )));
-        };
-        let root = self.root.reference().clone();
-        let stream_id = store_commit::StreamActivation::device_authorized_stream_id(
-            root.store_root_hash,
-            registration_ref,
-            store_commit::StreamAnchorDomain::StoreAnnouncements,
-        );
-        let maximum_sequence = inactive_accepted_cut.map(|cut| {
-            cut.0
-                .get(&stream_id)
-                .map_or(0, |reference| reference.coord.sequence())
-        });
-        let activation = registration
-            .store_announcement_activation(registration_ref)
-            .map_err(StorePullError::Protocol)?
-            .activation_id();
-        let context = ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::StoreHead,
-        );
-        let accepted = self.commit_verifier.accepted_announcement_prefix(
-            registration_ref,
-            first_slot,
-            maximum_sequence,
-        )?;
-        let mut visited = accepted
-            .commits
-            .iter()
-            .map(|(head, _, _, _)| head.object.slot().clone())
-            .collect::<BTreeSet<_>>();
-        // The head the walk resumes behind is occupied too. When the prefix
-        // came from an installed snapshot its slot is in none of the commits
-        // above, so the repeated-slot check would not see it.
-        if let Some(predecessor) = &accepted.predecessor {
-            visited.insert(predecessor.slot().clone());
-        }
-        let mut slot = accepted.next_slot;
-        let mut predecessor = accepted.predecessor;
-        let mut sequence = accepted.next_sequence;
-        let mut latest_head = accepted.commits.last().map(|(_, head, _, _)| head.clone());
-        let mut commits = accepted.commits;
-        let mut block = None;
-        let mut reads = MergeStreamReadTiming::default();
-
-        loop {
-            if maximum_sequence.is_some_and(|maximum| sequence > maximum) {
-                break;
-            }
-            if !visited.insert(slot.clone()) {
-                return Err(StorePullError::InvalidState(format!(
-                    "Store announcement stream {stream_id} repeats a reserved slot"
-                )));
-            }
-            let semantic_prefix =
-                store_commit::head_slot_prefix(&registration.device_id.to_string(), sequence);
-            let head_read = Stopwatch::start();
-            let opened = self
-                .commit_verifier
-                .read_protocol_slot(&context, &slot, &semantic_prefix)
-                .await;
-            reads.heads = reads.heads.saturating_add(head_read.elapsed());
-            reads.head_reads = reads.head_reads.saturating_add(1);
-            let (bytes, object) = match opened {
-                Ok(opened) => opened,
-                Err(StorageError::NotFound(_)) => break,
-                Err(error) => return Err(StoreObjectError::Storage(error).into()),
-            };
-            let unverified: StoreDeviceHead = match serde_json::from_slice(&bytes) {
-                Ok(head) => head,
-                Err(error) => {
-                    block = Some(MergeStreamBlock::Unauthenticated(HeldStorePosition {
-                        coordinate: HeldStoreCoordinate::Head {
-                            device_id: stream_id.to_string(),
-                            seq: sequence,
-                            head_hash: ObjectHash::digest(&bytes),
-                        },
-                        reason: HeldStorePositionReason::InvalidObjectJson(error.into()),
-                    }));
-                    break;
-                }
-            };
-            let authenticated = unverified.signature_is_valid_for(registration);
-            let coord_matches = unverified.commit.coord.stream_id == stream_id
-                && unverified.commit.coord.sequence == sequence;
-            if !coord_matches
-                || unverified.author_registration != *registration_ref
-                || unverified.successor.activation != activation
-                || unverified.successor.predecessor != predecessor
-            {
-                let position = HeldStorePosition {
-                    coordinate: HeldStoreCoordinate::Head {
-                        device_id: stream_id.to_string(),
-                        seq: sequence,
-                        head_hash: unverified.head_hash(),
-                    },
-                    reason: HeldStorePositionReason::WrongSlot(
-                        "Store head differs from its activated successor chain".to_string(),
-                    ),
-                };
-                block = Some(if authenticated {
-                    MergeStreamBlock::Authenticated(position)
-                } else {
-                    MergeStreamBlock::Unauthenticated(position)
-                });
-                break;
-            }
-            let head = match StoreDeviceHead::parse_at(
-                &bytes,
-                root.store_root_hash,
-                registration,
-                &unverified.commit,
-            ) {
-                Ok(head) => head,
-                Err(error) => {
-                    let position = HeldStorePosition {
-                        coordinate: HeldStoreCoordinate::Head {
-                            device_id: stream_id.to_string(),
-                            seq: sequence,
-                            head_hash: unverified.head_hash(),
-                        },
-                        reason: held_protocol_error(error),
-                    };
-                    block = Some(if authenticated {
-                        MergeStreamBlock::Authenticated(position)
-                    } else {
-                        MergeStreamBlock::Unauthenticated(position)
-                    });
-                    break;
-                }
-            };
-            let commit_read = Stopwatch::start();
-            let loaded = self.load_ref(&unverified.commit).await;
-            reads.commits = reads.commits.saturating_add(commit_read.elapsed());
-            reads.commit_reads = reads.commit_reads.saturating_add(1);
-            let commit = match loaded {
-                Ok(verified)
-                    if verified.value().author_registration == *registration_ref
-                        && verified.author() == registration =>
-                {
-                    verified.value().clone()
-                }
-                Ok(_) => {
-                    block = Some(MergeStreamBlock::Authenticated(HeldStorePosition::commit(
-                        &unverified.commit,
-                        HeldStorePositionReason::Unauthorized,
-                    )));
-                    break;
-                }
-                Err(error) => {
-                    let reason = match error {
-                        StorePullError::Object(error) => held_object_error(error),
-                        error => HeldStorePositionReason::InvalidObjectPull(error.into()),
-                    };
-                    block = Some(MergeStreamBlock::Authenticated(HeldStorePosition::commit(
-                        &unverified.commit,
-                        reason,
-                    )));
-                    break;
-                }
-            };
-            let next_slot = head.successor.next_slot.clone();
-            let head_ref = StoreDeviceHeadRef {
-                head_hash: head.head_hash(),
-                object: object.clone(),
-            };
-            self.commit_verifier
-                .remember_verified_head(
-                    &head_ref,
-                    VerifiedObject {
-                        value: head.clone(),
-                        bytes,
-                        semantic_hash: head_ref.head_hash,
-                        object: object.clone(),
-                    },
-                )
-                .map_err(StorePullError::Protocol)?;
-            self.commit_verifier
-                .remember_accepted_announcement(
-                    registration_ref,
-                    sequence,
-                    head.commit.clone(),
-                    head_ref.clone(),
-                    next_slot.clone(),
-                )
-                .map_err(StorePullError::Protocol)?;
-            predecessor = Some(object);
-            sequence = sequence.checked_add(1).ok_or_else(|| {
-                StorePullError::InvalidState(format!(
-                    "Store announcement stream {stream_id} sequence overflow"
-                ))
-            })?;
-            commits.push((head_ref, head.clone(), head.commit.clone(), commit));
-            latest_head = Some(head);
-            slot = next_slot;
-        }
-
-        Ok(MergeStreamDiscovery {
-            latest_head,
-            commits,
-            block,
-            reads,
-        })
-    }
-
     pub(crate) async fn history_cut_covers(
         &mut self,
         cut: &StoreHistoryCut,
@@ -397,228 +165,230 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(None)
     }
 
-    pub(crate) async fn verify_refs(
-        &mut self,
-        tips: impl IntoIterator<Item = StoreBatchCommitRef>,
-    ) -> Result<(), StorePullError> {
-        let mut pending = tips.into_iter().collect::<Vec<_>>();
-        let mut loaded = BTreeMap::<StoreBatchCommitRef, VerifiedStoreBatchCommit>::new();
-        while let Some(reference) = pending.pop() {
-            // The baseline is where this walk ends. A covered commit is retired
-            // — its rows, its package and its announcement head are gone, and
-            // the signed image restates what it did — so loading it would ask
-            // the provider for history this device deliberately dropped, once
-            // per commit standing above it.
-            if self.history.commits.contains_key(&reference)
-                || loaded.contains_key(&reference)
-                || self.history.superseded(&reference)
-            {
-                continue;
-            }
-            let verified = self.load_ref(&reference).await?;
-            pending.extend(commit_predecessor_references(verified.value()));
-            loaded.insert(reference, verified);
-        }
-
-        let mut states = self.history.resolved_states();
-        while !loaded.is_empty() {
-            let next = loaded.iter().find_map(|(reference, verified)| {
-                commit_predecessor_references(verified.value())
-                    .iter()
-                    .all(|dependency| states.contains_key(dependency))
-                    .then(|| reference.clone())
-            });
-            let Some(reference) = next else {
-                return Err(StorePullError::InvalidState(
-                    "Merge history is cyclic or has an unresolved predecessor".to_string(),
-                ));
-            };
-            let verified = loaded.remove(&reference).ok_or_else(|| {
-                StorePullError::InvalidState(
-                    "selected exclusion-history commit disappeared before verification".to_string(),
-                )
-            })?;
-            let commit = verified.value().clone();
-            let author = verified.author().clone();
-            let (_, accepted_head) = self
-                .commit_verifier
-                .exact_next_announcement_slot(&commit.author_registration, &author, Some(&verified))
-                .await
-                .map_err(|error| StorePullError::Store(Box::new(error)))?;
-            let activation_head_ref = accepted_head.ok_or_else(|| {
-                StorePullError::InvalidState(
-                    "Merge history commit has no accepted announcement head".to_string(),
-                )
-            })?;
-            let predecessor_state =
-                verified_merge_predecessor_state(&self.history.genesis, &states, &commit)?;
-            let verified_membership_prefix = verified_merge_membership_prefix(
-                &self.history,
-                commit_predecessor_references(&commit),
-            )?;
-            let pending_resolution =
-                Box::pin(self.verify_resolution_activation_acceptance(&commit)).await?;
-            let cached_membership = if pending_resolution.is_none() {
-                self.cached_verified_membership(
-                    &commit.membership_state,
-                    &verified_membership_prefix,
-                )
-            } else {
-                None
-            };
-            let membership = match cached_membership {
-                Some(membership) => membership,
-                None => self
-                    .load_membership_at_verified_prefix(
-                        &commit.membership_state.heads,
-                        &commit.membership_state.resolutions,
-                        &verified_membership_prefix,
-                        pending_resolution.as_ref(),
-                    )
-                    .await
-                    .map_err(StorePullError::MembershipChain)?,
-            };
-            verified_membership_prefix.validate_complete_membership(&membership)?;
-            verify_merge_membership_state_ref(
-                &commit.membership_state,
-                &membership,
-                &predecessor_state,
-            )?;
-            if !membership_authorizes(Some(&membership), &commit, &author) {
-                return Err(StorePullError::InvalidState(
-                    "Merge history commit lacks exact membership authority".to_string(),
-                ));
-            }
-            let accepted_frontier = commit_predecessor_references(&commit);
-            let registrations = match self.history.retained_registrations(&reference) {
-                Some(registrations) => registrations.to_vec(),
-                None => {
-                    Box::pin(self.load_merge_commit_registrations(
-                        &commit,
-                        &author,
-                        &membership,
-                        &accepted_frontier,
-                    ))
-                    .await?
+    /// Keep the history traversal on the heap across its callers. Constructing
+    /// the box before polling also releases construction storage before nested
+    /// authority verification begins.
+    #[inline(never)]
+    pub(crate) fn verify_refs<'verification, I>(
+        &'verification mut self,
+        tips: I,
+    ) -> std::pin::Pin<
+        Box<
+            impl std::future::Future<Output = Result<(), StorePullError>>
+                + 'verification
+                + use<'verification, 'a, I>,
+        >,
+    >
+    where
+        I: IntoIterator<Item = StoreBatchCommitRef> + 'verification,
+    {
+        Box::pin(async move {
+            let mut pending = tips.into_iter().collect::<Vec<_>>();
+            let mut loaded = BTreeMap::<StoreBatchCommitRef, VerifiedStoreBatchCommit>::new();
+            while let Some(reference) = pending.pop() {
+                // The baseline is where this walk ends. A covered commit is retired
+                // — its rows, its package and its announcement head are gone, and
+                // the signed image restates what it did — so loading it would ask
+                // the provider for history this device deliberately dropped, once
+                // per commit standing above it.
+                if self.history.commits.contains_key(&reference)
+                    || loaded.contains_key(&reference)
+                    || self.history.superseded(&reference)
+                {
+                    continue;
                 }
-            };
-            let (authorized_predecessor, recovery_author) = predecessor_state
-                .clone()
-                .preactivate_recovery_author(&commit, &registrations)
-                .map_err(StorePullError::Protocol)?;
-            if !device_state_has_active_registration(
-                &authorized_predecessor,
-                &commit.author_registration,
-            ) {
-                return Err(StorePullError::InvalidState(
-                    "author exclusion history commit author is inactive at its predecessor"
-                        .to_string(),
-                ));
+                let verified = self.load_ref(&reference).await?;
+                pending.extend(commit_predecessor_references(verified.value()));
+                loaded.insert(reference, verified);
             }
-            let resolver = DeviceStateResolver::Loaded {
-                genesis: &self.history.genesis,
-                states: &states,
-            };
-            let operations = Box::pin(self.commit_verifier.load_commit_device_operations(
-                Some(&resolver),
-                &commit,
-                &authorized_predecessor,
-                Some(&membership),
-            ))
-            .await
-            .map_err(StorePullError::from)?;
-            let acknowledgement = self
-                .validate_commit_acknowledgement(&commit, &author)
-                .await
-                .map_err(StorePullError::from)?;
-            let membership_control =
-                if let Some(store_commit::StoreControl { transition }) = commit.control() {
-                    let (activations, conflict_resolution) =
-                        Box::pin(self.verify_membership_control_with_retained_history(
-                            &reference,
-                            &commit,
-                            &membership,
-                            &predecessor_state,
-                            pending_resolution.as_ref(),
-                        ))
-                        .await?;
-                    Some(VerifiedMergeMembershipControl {
-                        activations,
-                        head_activation: VerifiedMergeMembershipHeadActivation {
-                            commit: reference.clone(),
-                            transition: transition.clone(),
-                        },
-                        conflict_resolution,
-                    })
+
+            while !loaded.is_empty() {
+                let next = loaded.iter().find_map(|(reference, verified)| {
+                    commit_predecessor_references(verified.value())
+                        .iter()
+                        .all(|dependency| {
+                            self.history.commits.contains_key(dependency)
+                                || self.history.superseded(dependency)
+                        })
+                        .then(|| reference.clone())
+                });
+                let Some(reference) = next else {
+                    return Err(StorePullError::InvalidState(
+                        "Merge history is cyclic or has an unresolved predecessor".to_string(),
+                    ));
+                };
+                let verified = loaded.remove(&reference).ok_or_else(|| {
+                    StorePullError::InvalidState(
+                        "selected exclusion-history commit disappeared before verification"
+                            .to_string(),
+                    )
+                })?;
+                if !self.accepted_publications.contains_key(&reference)
+                    && !self.history.retained.contains_key(&reference)
+                {
+                    return Err(StorePullError::InvalidState(format!(
+                        "Store commit {reference:?} is absent from accepted publication history"
+                    )));
+                }
+                let commit = verified.value().clone();
+                let author = verified.author().clone();
+                let predecessor_state = self.verified_predecessor_state(&commit)?;
+                let verified_membership_prefix = verified_merge_membership_prefix(
+                    &self.history,
+                    commit_predecessor_references(&commit),
+                )?;
+                let pending_resolution =
+                    Box::pin(self.verify_resolution_activation_acceptance(&commit)).await?;
+                let cached_membership = if pending_resolution.is_none() {
+                    self.cached_verified_membership(
+                        &commit.membership_state,
+                        &verified_membership_prefix,
+                    )
                 } else {
                     None
                 };
-            let owner_recovery = self
-                .commit_verifier
-                .verify_owner_recovery_activation(&commit)
-                .await?;
-            let state = operations
-                .apply_to(authorized_predecessor, &commit.device_state)
-                .map_err(StorePullError::Protocol)?;
-            let state = state
-                .apply_verified_lifecycle(
+                let membership = match cached_membership {
+                    Some(membership) => membership,
+                    None => self
+                        .load_membership_at_verified_prefix(
+                            &commit.membership_state.heads,
+                            &commit.membership_state.resolutions,
+                            &verified_membership_prefix,
+                            pending_resolution.as_ref(),
+                        )
+                        .await
+                        .map_err(StorePullError::MembershipChain)?,
+                };
+                verified_membership_prefix.validate_complete_membership(&membership)?;
+                verify_merge_membership_state_ref(
+                    &commit.membership_state,
+                    &membership,
+                    &predecessor_state,
+                )?;
+                if !membership_authorizes(Some(&membership), &commit, &author) {
+                    return Err(StorePullError::InvalidState(
+                        "Merge history commit lacks exact membership authority".to_string(),
+                    ));
+                }
+                let accepted_frontier = commit_predecessor_references(&commit);
+                let registrations = match self.history.retained_registrations(&reference) {
+                    Some(registrations) => registrations.to_vec(),
+                    None => {
+                        Box::pin(self.load_merge_commit_registrations(
+                            &commit,
+                            &author,
+                            &membership,
+                            &accepted_frontier,
+                        ))
+                        .await?
+                    }
+                };
+                let (authorized_predecessor, recovery_author) = predecessor_state
+                    .clone()
+                    .preactivate_recovery_author(&commit, &registrations)
+                    .map_err(StorePullError::Protocol)?;
+                if !device_state_has_active_registration(
+                    &authorized_predecessor,
+                    &commit.author_registration,
+                ) {
+                    return Err(StorePullError::InvalidState(
+                        "author exclusion history commit author is inactive at its predecessor"
+                            .to_string(),
+                    ));
+                }
+                let operations = Box::pin(self.commit_verifier.load_commit_device_operations(
                     &commit,
-                    &registrations,
-                    recovery_author.as_ref(),
-                    owner_recovery,
-                )
-                .map_err(StorePullError::Protocol)?;
-            let membership_closure = Box::pin(
-                self.commit_verifier
-                    .verified_merge_membership_objects(&reference, &commit),
-            )
-            .await?;
-            let retained_acknowledgement = match acknowledgement.clone() {
-                Some((acknowledgement_ref, acknowledgement_value)) => Some(
-                    self.retain_acknowledgement(
-                        &reference,
+                    &authorized_predecessor,
+                    Some(&membership),
+                ))
+                .await
+                .map_err(StorePullError::from)?;
+                let acknowledgement = self
+                    .validate_commit_acknowledgement(&commit, &author)
+                    .await
+                    .map_err(StorePullError::from)?;
+                let membership_control =
+                    if let Some(store_commit::StoreControl { transition }) = commit.control() {
+                        let (activations, conflict_resolution) =
+                            Box::pin(self.verify_membership_control_with_retained_history(
+                                &reference,
+                                &commit,
+                                &membership,
+                                &predecessor_state,
+                                pending_resolution.as_ref(),
+                            ))
+                            .await?;
+                        Some(VerifiedMergeMembershipControl {
+                            activations,
+                            head_activation: VerifiedMergeMembershipHeadActivation {
+                                commit: reference.clone(),
+                                transition: transition.clone(),
+                            },
+                            conflict_resolution,
+                        })
+                    } else {
+                        None
+                    };
+                let owner_recovery = self
+                    .commit_verifier
+                    .verify_owner_recovery_activation(&commit)
+                    .await?;
+                let state = operations
+                    .apply_to(authorized_predecessor)
+                    .map_err(StorePullError::Protocol)?;
+                let state = state
+                    .apply_verified_lifecycle(
                         &commit,
-                        &author,
-                        acknowledgement_ref,
-                        acknowledgement_value,
+                        &registrations,
+                        recovery_author.as_ref(),
+                        owner_recovery,
                     )
-                    .await?,
-                ),
-                None => None,
-            };
-            let history_evidence = store_commit::RetainedMergeCommitEvidence {
-                acknowledgement: retained_acknowledgement.map(Box::new),
-                membership_proof: membership_closure.map(|closure| Box::new(closure.proof)),
-            };
-            history_evidence
-                .validate_for(&reference, &commit)
-                .map_err(StorePullError::Protocol)?;
-            let activation_head = self
-                .commit_verifier
-                .load_head(&activation_head_ref, &author, &reference)
+                    .map_err(StorePullError::Protocol)?;
+                let membership_closure = Box::pin(
+                    self.commit_verifier
+                        .verified_merge_membership_objects(&reference, &commit),
+                )
                 .await?;
-            let membership_to_remember = pending_resolution.is_none().then(|| membership.clone());
-            states.insert(reference.clone(), state.clone());
-            self.history.commits.insert(
-                reference,
-                VerifiedMergeHistoryCommit {
-                    verified,
-                    predecessor_membership: membership,
-                    predecessor_state,
-                    state_after: state,
-                    registrations,
-                    operations,
-                    acknowledgement,
-                    membership_control,
-                    activation_head: activation_head.value,
-                    activation_head_object: activation_head.object,
-                    history_evidence,
-                },
-            );
-            if let Some(membership) = membership_to_remember {
-                self.remember_verified_membership(verified_membership_prefix, membership);
+                let retained_acknowledgement = match acknowledgement.clone() {
+                    Some((acknowledgement_ref, acknowledgement_value)) => Some(
+                        self.retain_acknowledgement(
+                            &reference,
+                            &commit,
+                            &author,
+                            acknowledgement_ref,
+                            acknowledgement_value,
+                        )
+                        .await?,
+                    ),
+                    None => None,
+                };
+                let history_evidence = store_commit::RetainedMergeCommitEvidence {
+                    acknowledgement: retained_acknowledgement.map(Box::new),
+                    membership_proof: membership_closure.map(|closure| Box::new(closure.proof)),
+                };
+                history_evidence
+                    .validate_for(&reference, &commit)
+                    .map_err(StorePullError::Protocol)?;
+                let membership_to_remember =
+                    pending_resolution.is_none().then(|| membership.clone());
+                self.history.commits.insert(
+                    reference,
+                    VerifiedMergeHistoryCommit {
+                        verified,
+                        predecessor_membership: membership,
+                        predecessor_state,
+                        state_after: state,
+                        registrations,
+                        operations,
+                        membership_control,
+                        history_evidence,
+                    },
+                );
+                if let Some(membership) = membership_to_remember {
+                    self.remember_verified_membership(verified_membership_prefix, membership);
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }

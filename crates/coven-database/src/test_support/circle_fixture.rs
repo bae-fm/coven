@@ -50,3 +50,42 @@ impl DatabaseTestSql<'_> {
         (activation.circle_id, activation.control.coord)
     }
 }
+
+impl crate::Database {
+    pub async fn bind_circle_row_blob_for_test(
+        &self,
+        binding: coven_protocol::audience_package::RowBlobLocatorBinding,
+        package: coven_protocol::store_commit::CirclePackageRef,
+        owner: coven_protocol::store_commit::StoreBatchCommitRef,
+    ) {
+        let record = coven_protocol::remote_object::RemoteObjectRecord::activated_blob(
+            binding.blob(),
+            owner,
+        )
+        .expect("construct activated Circle blob")
+        .into_record();
+        let audience = coven_protocol::audience_package::PackageAudience::Circle {
+            circle_id: package.circle_id,
+            control: package.control,
+            key_fingerprint: package.key_fingerprint,
+        };
+        assert_eq!(
+            binding.blob().locator().audience(),
+            audience.remote_audience()
+        );
+        self.test_sql(move |database| {
+            database.install_blob_binding(
+                &record.object_id().to_string(),
+                &serde_json::to_string(&record)?,
+                &binding.blob().locator().locator_hash().to_string(),
+                binding.table(),
+                binding.row_id(),
+                binding.column(),
+                binding.row_stamp(),
+                &serde_json::to_string(&audience)?,
+            )
+        })
+        .await
+        .expect("bind Circle row blob");
+    }
+}

@@ -7,6 +7,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn new(
         database: StoreDatabase,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         storage: &'storage Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         blob_cache: crate::sync::store::blob::StoreBlobCache,
@@ -16,6 +17,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Self {
         Self {
             database,
+            routing_encryption,
             storage,
             store_dir,
             blob_cache,
@@ -66,6 +68,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             identity.clone(),
             Some(device_id.clone()),
             self.history_verifier.verified_root().clone(),
+            self.routing_encryption.clone(),
         );
         Ok(InitializedStore::new(store, device_id))
     }
@@ -264,6 +267,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) fn from_pending_device_join(
         _authority: crate::sync::store::device_join::PendingDeviceJoinHistoryConstruction,
         database: StoreDatabase,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         storage: &'storage Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         blob_cache: crate::sync::store::blob::StoreBlobCache,
@@ -273,6 +277,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Self {
         Self::new(
             database,
+            routing_encryption,
             storage,
             store_dir,
             blob_cache,
@@ -285,6 +290,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) fn from_snapshot(
         _authority: crate::sync::store::commit_publication::SnapshotHistoryConstruction,
         database: StoreDatabase,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         storage: &'storage Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         blob_cache: crate::sync::store::blob::StoreBlobCache,
@@ -294,6 +300,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Self {
         Self::new(
             database,
+            routing_encryption,
             storage,
             store_dir,
             blob_cache,

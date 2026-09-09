@@ -6,7 +6,6 @@ pub enum ProtectedObjectDomain {
     StoreCurrentPublication,
     StorePublicationEntry,
     StoreCommit,
-    StoreHead,
     StoreAck,
     StoreDeviceRegistration,
     DeviceJoinAbandonment,
@@ -19,11 +18,13 @@ pub enum ProtectedObjectDomain {
     StoreReclaimReceipt,
     ProviderAccessGrant,
     OwnerRecoveryNode,
+    OwnerPromotionRequestPublication,
     StoreSnapshotMeta,
     StoreSnapshotImage,
     StoreMembershipRollup,
     StoreMembershipEntry,
     StoreMembershipHead,
+    StoreMembershipHeadAcceptance,
     StoreMembershipResolution,
     StoreWrappedKey,
     StorePackage,
@@ -203,14 +204,6 @@ impl ProtectedObjectDomain {
                 },
                 extension: ".json",
             },
-            Self::StoreHead => ProtocolObjectMetadata {
-                aad_label: b"store-head",
-                path: ProtocolPathRule::Exact(&[ExactPathShape {
-                    component_count: 4,
-                    fixed_components: &[(0, "store-v1"), (1, "heads")],
-                }]),
-                extension: ".json",
-            },
             Self::StoreAck => ProtocolObjectMetadata {
                 aad_label: b"store-ack",
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
@@ -296,6 +289,14 @@ impl ProtectedObjectDomain {
                 }]),
                 extension: ".json",
             },
+            Self::OwnerPromotionRequestPublication => ProtocolObjectMetadata {
+                aad_label: b"owner-promotion-request-publication",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 3,
+                    fixed_components: &[(0, "store-v1"), (1, "owner-promotion-publications")],
+                }]),
+                extension: ".json",
+            },
             Self::OwnerRecoveryNode => ProtocolObjectMetadata {
                 aad_label: b"owner-recovery-node",
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
@@ -339,6 +340,14 @@ impl ProtectedObjectDomain {
             Self::StoreMembershipHead => ProtocolObjectMetadata {
                 aad_label: b"store-membership-head",
                 path: ProtocolPathRule::StoreMembershipHead,
+                extension: ".json",
+            },
+            Self::StoreMembershipHeadAcceptance => ProtocolObjectMetadata {
+                aad_label: b"store-membership-head-acceptance",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 7,
+                    fixed_components: &[(0, "store-v1"), (1, "membership"), (2, "acceptances")],
+                }]),
                 extension: ".json",
             },
             Self::StoreMembershipResolution => ProtocolObjectMetadata {
@@ -538,8 +547,6 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StorePublicationEntry);
     pub const StoreCommit: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreCommit);
-    pub const StoreHead: SignedStoreProtocolObjectDomain =
-        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreHead);
     pub const StoreAck: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreAck);
     pub const StoreDeviceRegistration: SignedStoreProtocolObjectDomain =
@@ -566,6 +573,8 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessGrant);
     pub const OwnerRecoveryNode: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::OwnerRecoveryNode);
+    pub const OwnerPromotionRequestPublication: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::OwnerPromotionRequestPublication);
     pub const StoreSnapshotMeta: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreSnapshotMeta);
     pub const StoreSnapshotImage: StoreEncryptedProtocolObjectDomain =
@@ -576,6 +585,8 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipEntry);
     pub const StoreMembershipHead: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipHead);
+    pub const StoreMembershipHeadAcceptance: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipHeadAcceptance);
     pub const StoreMembershipResolution: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipResolution);
     pub const StoreWrappedKey: RecipientSealedProtocolObjectDomain =

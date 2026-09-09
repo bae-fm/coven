@@ -81,6 +81,12 @@ mod mutation;
 /// Why loading an owner-anchored membership chain failed.
 #[derive(Debug, thiserror::Error)]
 pub enum AnchoredChainError {
+    #[error("membership authority transition is awaiting publication finalization: {source}")]
+    IncompleteFinalization {
+        head: Box<coven_protocol::membership::MembershipHeadRef>,
+        #[source]
+        source: StorageError,
+    },
     #[error("membership storage unavailable while {operation}: {source}")]
     StorageUnavailable {
         operation: String,
@@ -95,6 +101,8 @@ pub enum AnchoredChainError {
     Database(#[from] coven_database::DbError),
     #[error("membership protocol: {0}")]
     Membership(#[from] coven_protocol::membership::MembershipError),
+    #[error("membership Store publication: {0}")]
+    StoreProtocol(#[from] coven_protocol::store_commit::StoreProtocolError),
     #[error("membership provider probe: {0}")]
     ProviderProbe(#[from] coven_protocol::provider::ProviderProbeError),
     #[error("membership floor failed validation: {0}")]

@@ -25,7 +25,7 @@ pub(crate) fn verify_device_join_activation_commit(
         || commit.store_package().is_some()
         || commit.reclaim_authorization().is_some()
         || commit.reclaim_receipt().is_some()
-        || commit.control().is_some()
+        || commit.control().is_none()
     {
         return Err(StorePullError::InvalidState(
             "device join activation commit carries unrelated operations".to_string(),

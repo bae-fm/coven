@@ -7,8 +7,8 @@ and a row addressed to a Circle reaches only that Circle's members, not the rest
 of the store.
 
 Circles do not add a second protocol. Every Store and Circle change rides the
-same [immutable per-device commit streams](/docs/sync-model) that carry ordinary
-row changes: a Store commit is the only thing that activates a Circle package,
+same [accepted Store publication history](/docs/sync-model) that carries ordinary
+row changes: an accepted Store commit is what activates a Circle package,
 control change, roster change, or bootstrap. What a Circle adds is *who* a row's
 package is encrypted for.
 
@@ -349,8 +349,8 @@ the write rather than deferring a download.
 ## Offline and blocked writes
 
 The [write status](/docs/sync-model#lifecycle) surface is unchanged for Circle
-rows: a host transaction is `LocalOnly`, `Pending`, `Publishing`, `Published`,
-`Blocked`, or `Resolved`, whatever its rows' audience. One
+rows: a host transaction is `LocalOnly`, `LocalOnlyBlocked`, `Pending`,
+`Publishing`, `Published`, `Blocked`, or `Resolved`, whatever its rows' audience. One
 [`WriteBlock`](rustdoc:enum:coven::WriteBlock) reason is Circle-specific:
 `RotationRequired { circle_id, removed_members }`, recorded when a write targets
 a Circle whose roster names a removed store member. Repair it by completing the
@@ -361,17 +361,23 @@ Store write.
 
 ## Snapshots, restore, and reclamation
 
-A new device [bootstraps](/docs/bootstrap) from a Store snapshot, then installs
-one Circle image per Circle it has active access to. Circle images use the same
-verified-image machinery as a Store snapshot: an active device authors a
-standalone Circle snapshot for each Circle it holds, sealed to that epoch's key.
-A Circle snapshot is acknowledgement-stable only once every device that holds
-active access has acknowledged a frontier that dominates its cut; restore and
-reclamation read the maximal stable snapshot.
+A new device [bootstraps](/docs/bootstrap) from the accepted Store snapshot,
+then reconstructs each Circle its receiving identity can access. Its base can
+be a recipient bootstrap, a retained bootstrap, or a standalone Circle snapshot.
+When a same-epoch control supplies no new image, restore follows its verified
+predecessors to the recipient's earlier bootstrap. Only verified founding access
+allows reconstruction from an empty Circle base.
 
-Restore stages the Store image and every Circle image the restoring identity can
-decrypt, verifies each, and installs them all in one transaction — a partially
-installed image is never exposed as the current database.
+Restore verifies the selected image and its exact coverage, then applies accepted
+Circle packages beyond that base. Missing or invalid required images fail restore;
+they do not authorize another base. The Store rows, Circle rows, routing, blob
+ownership, and receiving identity's access install in one transaction.
+
+Standalone Circle snapshots are sealed to their epoch's key. Restore selects an
+applicable image whose cut is covered by the accepted Store frontier; incomparable
+candidate cuts fail selection. Reclamation additionally requires acknowledgement
+stability: every device with active access must acknowledge a frontier covering
+the snapshot cut. This also gates publication of the next standalone generation.
 
 Reclamation is audience-specific and evidence-based: it deletes a Circle
 package, snapshot, or bootstrap only when verified acknowledgements and snapshot

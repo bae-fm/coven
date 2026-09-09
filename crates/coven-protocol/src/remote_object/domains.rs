@@ -278,10 +278,9 @@ pub enum SharedLiveSetObjectDomain {
     StoreSnapshotImage {
         reference: crate::store_commit::SnapshotImageRef,
     },
-    /// The membership rollup one snapshot generation published beside its
-    /// image. Content-addressed, so two generations over the same membership
-    /// frontier name the same object — which is why it is owned rather than
-    /// simply deleted with the generation that named it last.
+    /// The membership rollup a Store snapshot published beside its image.
+    /// Its exact slot belongs to the snapshot metadata candidate, even when
+    /// another candidate carries identical rollup bytes.
     StoreMembershipRollup {
         reference: crate::store_commit::MembershipRollupRef,
     },
@@ -331,35 +330,6 @@ impl ProtocolInertObject {
     pub fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         validate_nonactivations(&self.former_candidates)
     }
-
-    pub fn candidate_nonactivation_proof(
-        &self,
-        candidate: &StoreBatchCommitRef,
-    ) -> Result<Option<&CandidateNonactivationProof>, RemoteObjectRecordError> {
-        self.validate()?;
-        find_nonactivation_proof(&self.former_candidates, candidate)
-    }
-
-    pub fn is_terminal_head_for(
-        &self,
-        candidate: &StoreBatchCommitRef,
-        object: &ExactObjectRef,
-    ) -> Result<bool, RemoteObjectRecordError> {
-        self.validate()?;
-        Ok(self.identity.object == *object
-            && matches!(
-                &self.identity.domain,
-                RetainedAuthorityObjectDomain::DeviceHead { reference, head_commit }
-                    if reference.object == *object && head_commit == candidate
-            )
-            && matches!(
-                self.candidate_nonactivation_proof(candidate)?,
-                Some(
-                    CandidateNonactivationProof::AuthorExclusion { .. }
-                        | CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
-                )
-            ))
-    }
 }
 
 impl RetainedAuthorityObjectRef {
@@ -374,14 +344,6 @@ pub enum RetainedAuthorityObjectDomain {
     Commit {
         reference: StoreBatchCommitRef,
     },
-    DeviceHead {
-        reference: crate::store_commit::StoreDeviceHeadRef,
-        /// The commit this head publishes, read out of the head's bytes when
-        /// the record was built. A head must belong to a candidate that owns
-        /// it, and carrying the commit is what lets a load check that without
-        /// re-parsing megabytes of signed head.
-        head_commit: StoreBatchCommitRef,
-    },
     Acknowledgement {
         reference: crate::store_commit::StoreAckRef,
     },
@@ -394,11 +356,28 @@ pub enum RetainedAuthorityObjectDomain {
     StoreMembershipResolution {
         reference: crate::membership::StoreMembershipConflictResolutionRef,
     },
+    ProviderAccessGrant {
+        reference: crate::provider::StoreMemberProviderAccessGrantRef,
+    },
+    DeviceJoinAbandonment {
+        reference: crate::store_commit::DeviceJoinAbandonmentRef,
+    },
+    DeviceRegistration {
+        reference: crate::store_commit::StoreDeviceRegistrationRef,
+    },
     MergeMembershipEntry {
         reference: crate::membership::MembershipEntryRef,
     },
     MergeMembershipHead {
         reference: crate::membership::MembershipHeadRef,
+    },
+    MembershipHeadAcceptance {
+        head: crate::membership::MembershipHeadRef,
+        publication: crate::store_commit::StorePublicationRef,
+    },
+    OwnerPromotionRequestPublication {
+        promotion_id: crate::store_commit::OwnerPromotionId,
+        activation: crate::store_commit::OwnerPromotionRequestActivation,
     },
     DeviceExclusionProposal {
         reference: crate::store_commit::StoreDeviceExclusionProposalRef,

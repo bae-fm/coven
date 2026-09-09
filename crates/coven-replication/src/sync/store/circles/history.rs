@@ -1,4 +1,3 @@
-use crate::sync::store::authorization::history::{cleanup, retained};
 use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use coven_database::StoreDatabase;
 use coven_storage::CloudSyncObjectStorage;
@@ -40,12 +39,8 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         crate::sync::store::acknowledgements::CircleAcknowledgementReader::new(
             &self.database,
             self.storage,
-            self.history.verified_root().reference(),
+            self.history,
         )
-    }
-
-    pub(crate) fn root(&self) -> &coven_protocol::store_commit::StoreRootRef {
-        self.history.verified_root().reference()
     }
 
     pub(crate) async fn authenticate_commit_bytes(
@@ -59,6 +54,14 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         self.history.authenticate_bytes(reference, bytes).await
     }
 
+    pub(crate) fn admit_materialized_publication(
+        &mut self,
+        materialization: &coven_database::OwnedVerifiedMergeMaterialization,
+    ) -> Result<(), crate::sync::store::pull::StorePullError> {
+        self.history
+            .admit_retained_history(std::slice::from_ref(materialization))
+    }
+
     pub(crate) async fn load_commit(
         &mut self,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
@@ -69,31 +72,14 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         self.history.load_ref(reference).await
     }
 
-    pub(crate) async fn observe_excluded_candidate_head(
-        &mut self,
-        candidate: &coven_protocol::store_commit::StoreDeviceHead,
-        candidate_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        candidate_object: &coven_protocol::objects::ExactObjectRef,
-    ) -> Result<
-        crate::sync::store::merge_conflict::ExcludedCandidateHeadObservation,
-        crate::sync::store::StoreError,
-    > {
-        crate::sync::store::merge_conflict::MergeConflictHistory::new(
-            &self.database,
-            self.storage,
-            self.history,
-        )
-        .observe_excluded_candidate_head(candidate, candidate_commit, candidate_object)
-        .await
-    }
-
     pub(crate) async fn discard_operation(
         &mut self,
         operation_id: &coven_protocol::circle::CircleOperationId,
     ) -> Result<(), super::CircleOperationError> {
         use super::CircleOperationError;
 
-        let journal = self
+        let _author = self.database.author_own_stream().await;
+        let mut journal = self
             .database
             .circle_operation(operation_id)
             .await?
@@ -103,74 +89,39 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
                 ))
             })?;
         if !journal.is_discarding() {
-            let discard_candidate = self
-                .database
-                .circle_operation_discard_candidate(operation_id)
+            let commit = self
+                .history
+                .authenticate_bytes(
+                    journal.operation().commit_ref(),
+                    &journal.operation().commit().to_bytes(),
+                )
                 .await?;
-            let Some(nonactivation) =
-                crate::sync::store::merge_conflict::MergeConflictHistory::new(
-                    &self.database,
-                    self.storage,
-                    self.history,
-                )
-                .discard_candidate_nonactivation(
-                    &discard_candidate.candidate,
-                    discard_candidate.revoked_grant.as_ref(),
-                )
+            let (membership, publication) = self
+                .history
+                .candidate_grant_retirement(&self.database, &commit)
                 .await?
-            else {
-                return Err(CircleOperationError::DiscardRequiresNonactivation {
+                .ok_or_else(|| CircleOperationError::DiscardRequiresNonactivation {
                     operation_id: operation_id.clone(),
-                });
-            };
+                })?;
             self.database
-                .begin_circle_operation_discard(self.root().clone(), operation_id, nonactivation)
+                .begin_circle_operation_discard(journal.clone(), membership, publication)
                 .await?;
+            journal.begin_discard()?;
         }
-        self.cleanup_operation_candidate(operation_id).await?;
+        let targets = self
+            .database
+            .circle_operation_discard_targets(journal.clone())
+            .await?;
+        crate::sync::store::authorization::delete_candidate_cleanup_targets::<
+            CircleOperationError,
+        >(self.storage, targets)
+        .await?;
         self.database
-            .finish_circle_operation_discard(operation_id)
+            .complete_circle_operation_discard(journal)
             .await?;
         Ok(())
     }
 
-    pub(crate) async fn cleanup_operation_candidate(
-        &mut self,
-        operation_id: &coven_protocol::circle::CircleOperationId,
-    ) -> Result<(), crate::sync::store::pull::StorePullError> {
-        cleanup::cleanup_circle_operation_candidate(
-            &self.database,
-            self.storage,
-            self.history,
-            operation_id,
-        )
-        .await
-    }
-
-    pub(crate) async fn prepare_successor(
-        &mut self,
-        commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        membership: &coven_protocol::membership::MembershipChain,
-        recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
-        state_after: coven_protocol::store_commit::ResolvedStoreDeviceState,
-        evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
-    ) -> Result<
-        crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
-        crate::sync::store::pull::StorePullError,
-    > {
-        retained::prepare_merge_history_successor(
-            &self.database,
-            self.history,
-            commit,
-            membership,
-            recovery_author,
-            state_after,
-            evidence,
-        )
-        .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn snapshots(
         &mut self,
     ) -> crate::sync::store::snapshots::CircleSnapshotReader<'_, 'storage> {

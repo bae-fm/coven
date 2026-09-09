@@ -1,6 +1,15 @@
 use super::*;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
+    pub(crate) fn sign_owner_promotion_request_publication(
+        &self,
+        commit: &coven_protocol::store_commit::StoreBatchCommit,
+        accepted: &coven_database::AcceptedStoreCommitPublication,
+    ) -> Result<coven_protocol::store_commit::OwnerPromotionRequestPublication, StoreError> {
+        self.writer
+            .sign_owner_promotion_request_publication(commit, accepted)
+    }
+
     pub(crate) fn sign_owner_promotion_acceptance(
         &self,
         request: coven_protocol::store_commit::OwnerPromotionRequest,
@@ -14,18 +23,28 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .sign_owner_promotion_acceptance(request, activation, anchors)
     }
 
-    pub(crate) fn seal_local_keyring(
+    pub(crate) async fn prepare_member_wrapped_key(
         &self,
-        store_id: &str,
+        membership: &MembershipChain,
+        initial: &coven_keys::encryption::EncryptionService,
         recipient: &str,
-        recipient_key: &[u8; coven_keys::keys::CURVE25519_PUBLICKEYBYTES],
-        keyring: &coven_keys::encryption::EncryptionService,
-    ) -> Result<
-        coven_protocol::wrapped_store_key::WrappedStoreKey,
-        coven_keys::encryption::EncryptionError,
-    > {
-        self.writer
-            .seal_keyring(store_id, recipient, recipient_key, keyring)
+    ) -> Result<PreparedWrappedStoreKey, MembershipMutationError> {
+        let store_id = self.store_root().store_root_id.to_string();
+        if membership.store_id() != Some(store_id.as_str()) {
+            return Err(MembershipMutationError::InvalidDurableMutation(
+                "wrapped-key membership belongs to another Store".into(),
+            ));
+        }
+        let recipient_key = coven_keys::keys::ed25519_hex_to_x25519_public_key(recipient)?;
+        let keyring = self.keyrings.open_or(membership, initial).await?;
+        let signed = self
+            .writer
+            .seal_keyring_for_member(store_id, recipient.to_string(), recipient_key, keyring)
+            .await?;
+        self.keyrings
+            .prepare(recipient, signed)
+            .await
+            .map_err(MembershipMutationError::from)
     }
 
     pub(crate) fn sign_finalize_owner_promotion(
@@ -87,7 +106,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .map_err(MembershipMutationError::from)
     }
 
-    pub(super) fn sign_direct_removal(
+    pub(super) fn sign_member_removal(
         &self,
         chain: &MembershipChain,
         stream_id: membership::AuthorStreamId,
@@ -96,7 +115,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         timestamp: String,
     ) -> Result<MembershipEntry, MembershipMutationError> {
         self.writer
-            .sign_direct_removal(chain, stream_id, revokee_pubkey, wrapped_keys, timestamp)
+            .sign_member_removal(chain, stream_id, revokee_pubkey, wrapped_keys, timestamp)
             .map_err(MembershipMutationError::from)
     }
 

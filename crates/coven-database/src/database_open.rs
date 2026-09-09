@@ -201,6 +201,36 @@ impl DatabaseCore {
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<Self, OpenError> {
+        let core = Self::open_unseeded(
+            path,
+            store_dir,
+            connection_durability,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            hlc,
+            coven_migration_policy,
+            migrations,
+            metadata_open,
+            true,
+        )?;
+        core.seed_clock()?;
+        Ok(core)
+    }
+
+    pub(super) fn open_unseeded(
+        path: &Path,
+        store_dir: StoreDir,
+        connection_durability: crate::connection_io::ConnectionDurability,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        transfer_limits: coven_protocol::blob::TransferLimits,
+        hlc: Arc<Hlc>,
+        coven_migration_policy: CovenMigrationPolicy,
+        migrations: &[Migration],
+        metadata_open: CovenMetadataOpen<'_>,
+        capture_committed_changes: bool,
+    ) -> Result<Self, OpenError> {
         // A device join spends most of its wall time inside this function, and
         // from the caller it is one opaque step. Every phase below scales with
         // something different — the migration ladder with the number of
@@ -209,11 +239,22 @@ impl DatabaseCore {
         let mut timings = StageTimings::start("Store database open");
         let mut conn = timings.mark("open the connection", || {
             let conn = Connection::open(path).map_err(DbError::from)?;
-            // WAL so the read-only connection `Coven::open` pairs with this writer
-            // keeps serving reads while this one commits, rather than queueing
-            // behind a rollback journal's exclusive commit lock. See
-            // `configure_connection_durability` for the whole choice.
-            crate::connection_io::configure_connection_durability(&conn, connection_durability)?;
+            match &metadata_open {
+                CovenMetadataOpen::Detect => {
+                    crate::connection_io::configure_connection_durability(
+                        &conn,
+                        connection_durability,
+                    )?;
+                }
+                CovenMetadataOpen::VerifiedSnapshot(_) => {
+                    // Changing journal mode rewrites the image header. Authenticate
+                    // the original SQLite view before selecting the writer's mode.
+                    crate::connection_io::configure_connection_synchronous(
+                        &conn,
+                        connection_durability,
+                    )?;
+                }
+            }
             conn.pragma_update(None, "foreign_keys", "ON")
                 .map_err(DbError::from)?;
             Ok::<_, OpenError>(conn)
@@ -240,8 +281,28 @@ impl DatabaseCore {
             .then(|| load_coven_metadata(&conn))
             .transpose()?;
         let (schema_version, sync_routing_contract, gates, blob_decls) = {
-            let tx = conn.transaction().map_err(DbError::from)?;
+            let transaction_behavior = match &metadata_open {
+                CovenMetadataOpen::Detect => rusqlite::TransactionBehavior::Deferred,
+                CovenMetadataOpen::VerifiedSnapshot(_) => rusqlite::TransactionBehavior::Immediate,
+            };
+            let tx = conn
+                .transaction_with_behavior(transaction_behavior)
+                .map_err(DbError::from)?;
             let outcome = (|| -> Result<_, OpenError> {
+                if let CovenMetadataOpen::VerifiedSnapshot(install) = &metadata_open {
+                    timings.mark("authenticate the snapshot image", || {
+                        // The pager includes committed WAL pages. The same write
+                        // transaction owns this view through migration and install.
+                        let image = tx.serialize(rusqlite::MAIN_DB).map_err(DbError::from)?;
+                        if ObjectHash::digest(&image) != install.snapshot.meta.image.image_hash {
+                            return Err(DbError::Message(
+                                "snapshot database image differs from its authenticated plaintext hash"
+                                    .into(),
+                            ));
+                        }
+                        Ok(())
+                    })?;
+                }
                 if let Some(pinned) = &pinned_routing_contract {
                     timings.mark("migrate Coven schema", || {
                         run_coven_migrations_in_transaction(
@@ -340,6 +401,7 @@ impl DatabaseCore {
                             schema_version,
                             resolved.hash(),
                             &synced_tables,
+                            hlc.wall_now_ms(),
                         )
                     })?;
                 }
@@ -353,6 +415,9 @@ impl DatabaseCore {
                 Err(error) => return Err(error),
             }
         };
+        if matches!(&metadata_open, CovenMetadataOpen::VerifiedSnapshot(_)) {
+            crate::connection_io::configure_connection_durability(&conn, connection_durability)?;
+        }
         let sync_routing_hash = sync_routing_contract.hash();
         timings.mark("finish payload cleanup", || {
             crate::payload_store::pay_owed_payload_deletions_on(&conn, &store_dir)
@@ -364,18 +429,6 @@ impl DatabaseCore {
         // above, a freshly installed snapshot image is read end to end three
         // times before the database is usable.
         timings.mark("check foreign keys", || validate_durable_coven_state(&conn))?;
-        // Seed the register clock so a restart cannot mint a stamp behind a value
-        // already on disk. Floor = max(persisted high-water, max synced-row
-        // `_updated_at`).
-        timings.mark("seed the clock", || {
-            let persisted = get_protocol_state_on(&conn, HIGHWATER_STATE_KEY)?;
-            seed_from(&hlc, persisted, "HLC high-water mark in protocol_state")?;
-            let seed_wall_ms = hlc.wall_now_ms();
-            let seed_bound_ms = seed_wall_ms.saturating_add(MAX_FUTURE_SKEW_MS);
-            let on_disk = scan_max_updated_at(&conn, &synced_tables, seed_bound_ms)?;
-            seed_from(&hlc, on_disk, "`_updated_at` in synced tables")
-        })?;
-
         let synced_tables = Arc::new(synced_tables);
         let gates = Arc::new(gates);
         let blob_decls = Arc::new(blob_decls);
@@ -392,13 +445,15 @@ impl DatabaseCore {
             conn,
             hlc,
             synced_tables,
+            Arc::from(migrations.to_vec()),
+            coven_migration_policy,
             schema_version,
             sync_routing_hash,
             gates,
             blob_decls,
             blob_tombstone_grace,
             transfer_limits,
-            true,
+            capture_committed_changes,
         ))
     }
 
@@ -458,6 +513,8 @@ impl DatabaseCore {
             conn,
             hlc,
             synced_tables,
+            Arc::from(migrations.to_vec()),
+            CovenMigrationPolicy::RefusePending,
             schema_version,
             sync_routing_hash,
             gates,

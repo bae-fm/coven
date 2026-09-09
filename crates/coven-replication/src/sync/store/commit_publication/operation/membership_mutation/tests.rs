@@ -3,6 +3,98 @@ use coven_protocol::membership::MemberRole;
 use coven_protocol::store_commit::ObjectHash;
 
 #[tokio::test]
+async fn a_retained_writer_verifies_control_after_another_writer_advances_its_database() {
+    use crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch;
+    use crate::sync::test_helpers::{open_test_db, test_cloud_home, test_store_dir, TestStore};
+    use coven_keys::encryption::EncryptionService;
+
+    let store_dir = test_store_dir();
+    let db = open_test_db(store_dir.clone());
+    let owner = UserKeypair::generate();
+    let store = TestStore::create(
+        &db,
+        store_dir.clone(),
+        "retained-writer-predecessor",
+        owner.clone(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let device = store.bind_device_in(&db, store_dir, &owner).await.unwrap();
+    let mut writer = device.authorize_writer().await.unwrap();
+    db.execute_test_host_write(
+        "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+         VALUES ('predecessor', 'Accepted row', 1, '0000000001000-0000-owner', '2026-09-08')",
+    )
+    .await;
+    assert!(device.prepare_pending_store_write().await.unwrap());
+    assert_eq!(device.drain_store_writes().await.unwrap(), 1);
+    let predecessor = device.latest_local_store_position().await.unwrap().unwrap();
+
+    let plan = writer
+        .prepare_plan()
+        .await
+        .expect("prepare from installed history");
+    assert!(plan
+        .predecessor_cut()
+        .unwrap()
+        .0
+        .values()
+        .any(|tip| tip == &predecessor));
+    let chain = plan.membership().clone();
+    let recipient = keys::public_key_hex(&UserKeypair::generate());
+    let wrapped = writer
+        .prepare_member_wrapped_key(&chain, &EncryptionService::from_key([42; 32]), &recipient)
+        .await
+        .unwrap();
+    let stream = writer
+        .select_membership_author_stream(&chain)
+        .await
+        .unwrap();
+    let entry = writer
+        .writer
+        .sign_set_member(
+            &chain,
+            stream,
+            recipient,
+            None,
+            MemberRole::Member,
+            wrapped.reference.clone(),
+            "2026-09-08T00:00:00Z".into(),
+        )
+        .unwrap();
+    let transition = writer
+        .prepare_membership_transition(&chain, entry)
+        .await
+        .unwrap();
+    let mut candidate = writer
+        .prepare_candidate(
+            &plan,
+            StoreOperationBatch::MergeMembershipActivation {
+                transition: transition.transition.clone(),
+                stream_activations: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let publication = writer
+        .finish_store_membership_transition(transition.clone(), candidate.reference.clone())
+        .await
+        .unwrap();
+    writer
+        .attach_membership_proof(&mut candidate, &publication)
+        .unwrap();
+    writer
+        .publish_membership_authority(&transition, &[wrapped])
+        .await
+        .unwrap();
+    writer
+        .upload_prepared(Box::new(candidate))
+        .await
+        .expect("verify the control against the accepted predecessor used to prepare it");
+}
+
+#[tokio::test]
 async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
@@ -74,11 +166,18 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     substituted_entry.transition.body.entry.object = substituted_ref;
     assert!(substituted_entry.validate().is_err());
 
+    let plan = writer
+        .prepare_plan()
+        .await
+        .expect("prepare membership Store commit");
+    let candidate = writer.prepare_candidate(
+        &plan,
+        crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::MergeMembershipActivation {
+            transition: prepared.transition.clone(), stream_activations: Vec::new(),
+        },
+    ).await.expect("prepare exact activation candidate");
     let mut substituted_head = writer
-        .finish_membership_transition(
-            prepared,
-            coven_protocol::membership::MembershipHeadActivation::Direct,
-        )
+        .finish_store_membership_transition(prepared, candidate.reference.clone())
         .await
         .expect("finish membership transition");
     let substituted_bytes = b"substituted exact membership head".to_vec();
@@ -89,4 +188,123 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     );
     substituted_head.head_ref.object = substituted_ref;
     assert!(substituted_head.validate().is_err());
+}
+
+#[tokio::test]
+async fn accepted_device_controls_refresh_the_same_writer_membership() {
+    use crate::sync::store::device_exclusion::StoreDeviceExclusionResult;
+    use crate::sync::test_helpers::{open_test_db, test_cloud_home, test_store_dir, TestStore};
+    use coven_database::StoreDatabase;
+
+    let owner_dir = test_store_dir();
+    let owner_db = open_test_db(owner_dir.clone());
+    let signer = UserKeypair::generate();
+    let store = TestStore::create(
+        &owner_db,
+        owner_dir.clone(),
+        "same-writer-authority",
+        signer.clone(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let peer_dir = test_store_dir();
+    let peer_db = open_test_db(peer_dir.clone());
+    store
+        .activate_joined_device(
+            &owner_db,
+            owner_dir.clone(),
+            &peer_db,
+            peer_dir,
+            &signer,
+            "2026-07-18T00:00:00Z",
+        )
+        .await
+        .expect("activate peer");
+    let owner = store
+        .bind_device_in(&owner_db, owner_dir, &signer)
+        .await
+        .expect("bind owner");
+    let database = StoreDatabase::new(&owner_db);
+    let target = database
+        .activated_store_device_registration_records()
+        .await
+        .expect("registrations")
+        .into_iter()
+        .map(|record| record.reference().clone())
+        .find(|reference| reference.device_id.to_string() != owner.device_id().as_str())
+        .expect("peer registration");
+    let mut writer = owner.authorize_writer().await.expect("retain writer");
+    let before = writer.membership.head_refs().to_vec();
+    let StoreDeviceExclusionResult::ProposalActivated { proposal, commit } = writer
+        .device_exclusion()
+        .propose(&target)
+        .await
+        .expect("publish proposal")
+    else {
+        panic!("proposal must activate");
+    };
+    let proposal_head = completed_device_control_head(&database, &commit).await;
+    assert!(
+        !before.contains(&proposal_head),
+        "proposal advances accepted authority"
+    );
+    assert!(
+        writer.membership.head_refs().contains(&proposal_head),
+        "the same writer must retain its accepted authority head"
+    );
+    let StoreDeviceExclusionResult::OutcomeActivated { commit, .. } = writer
+        .device_exclusion()
+        .cancel(&proposal)
+        .await
+        .expect("publish cancellation with the same writer")
+    else {
+        panic!("cancellation must activate");
+    };
+    let outcome_head = completed_device_control_head(&database, &commit).await;
+    assert_ne!(outcome_head, proposal_head);
+    assert!(writer.membership.head_refs().contains(&outcome_head));
+    assert!(database
+        .active_outbound_store_device_exclusion()
+        .await
+        .expect("completed device journal")
+        .is_none());
+    assert!(database
+        .active_store_publication()
+        .await
+        .expect("completed publication")
+        .is_none());
+}
+
+async fn completed_device_control_head(
+    database: &coven_database::StoreDatabase,
+    commit: &coven_protocol::store_commit::StoreBatchCommitRef,
+) -> coven_protocol::membership::MembershipHeadRef {
+    let entries = database
+        .store_publication_entries()
+        .await
+        .expect("installed accepted entries");
+    assert_eq!(entries.iter().filter(|entry| matches!(
+        &entry.value.payload,
+        coven_protocol::store_commit::StorePublicationPayload::Commit(reference) if reference == commit,
+    )).count(), 1, "control has one exact accepted publication");
+    let operations = database
+        .outbound_store_device_exclusion_operations()
+        .await
+        .expect("device journals");
+    let operation = operations
+        .iter()
+        .find(|operation| {
+            operation
+                .candidate()
+                .is_some_and(|candidate| &candidate.reference == commit)
+        })
+        .expect("journal for the accepted control");
+    assert!(operation.is_completed());
+    operation
+        .candidate()
+        .expect("completed activation retains its candidate")
+        .prepared_membership_publication()
+        .expect("exact accepted authority graph")
+        .head_ref
 }

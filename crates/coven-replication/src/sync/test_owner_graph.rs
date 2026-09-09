@@ -322,7 +322,11 @@ impl TestOwnerGraph {
         .await?;
         let components = Box::pin(components.initialize(None)).await?;
         Ok(components
-            .run_cycle(&coven_foundation::clock::SystemClock, None)
+            .run_cycle(
+                &coven_foundation::clock::SystemClock,
+                None,
+                coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+            )
             .await?)
     }
 }

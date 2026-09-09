@@ -1,67 +1,109 @@
 use super::*;
 use crate::store::retained_replay::load_generation_zero_replay_baseline_on;
 use crate::store::store_session::StoreRecords;
+use coven_protocol::write::{PublishedWrite, SnapshotCoveredPosition};
 
-/// The plaintext one record names in the payload store.
-fn stored_semantic_payload(
-    records: StoreRecords<'_>,
-    remote: &coven_protocol::remote_object::RemoteObjectRecord,
-) -> Result<Vec<u8>, DbError> {
-    let coven_protocol::remote_object::SemanticPayload::Spooled(hash) = remote.semantic_payload()
-    else {
-        return Err(DbError::Message(format!(
-            "remote object {} names no stored plaintext",
-            remote.object_id()
-        )));
-    };
-    records.payload(hash).map_err(DbError::from)
+fn snapshot_write_is_covered(position: &SnapshotCoveredPosition, cut: &CommitFrontier) -> bool {
+    cut.commits()
+        .get(&position.coord.stream_id)
+        .is_some_and(|covered| covered.coord.sequence() >= position.coord.sequence())
 }
 
-fn prepared_state_contains_commit(
-    encoded: &str,
-    reference: &StoreBatchCommitRef,
+fn validate_snapshot_write_baseline(
+    position: &SnapshotCoveredPosition,
+    baseline: &RetainedReplayBaseline,
+) -> Result<(), DbError> {
+    let RetainedReplayAuthority::InstalledSnapshot(authority) = &baseline.authority else {
+        return Err(DbError::Message(
+            "snapshot-covered write has no installed snapshot baseline".into(),
+        ));
+    };
+    let root = authority.store_root.store_root_hash;
+    let stream = coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
+        root,
+        &position.author_registration,
+        coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+    );
+    let installed_position = authority.metadata.publication_predecessor.next_position()?;
+    if position.snapshot.publication.store_root_hash != root
+        || position.coord.sequence() == 0
+        || position.coord.stream_id != stream
+        || installed_position < position.snapshot.publication.position
+        || (installed_position == position.snapshot.publication.position
+            && authority.snapshot != position.snapshot.snapshot)
+        || baseline.exact_cut != authority.metadata.coverage
+        || !snapshot_write_is_covered(position, &baseline.exact_cut)
+    {
+        return Err(DbError::Message(
+            "snapshot-covered write differs from its installed cumulative baseline".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn replay_write_is_covered(
+    records: StoreRecords<'_>,
+    baseline: &RetainedReplayBaseline,
+    write_id: &WriteId,
+    status: &WriteStatus,
+    candidate: Option<&StoreBatchCommitRef>,
 ) -> Result<bool, DbError> {
+    match status {
+        WriteStatus::Published(published) => match published.as_ref() {
+            PublishedWrite::Commit(position) => {
+                Ok(baseline.exact_cut.covers_commit(position.commit()))
+            }
+            PublishedWrite::Snapshot(position) => {
+                validate_snapshot_write_baseline(position, baseline)?;
+                Ok(true)
+            }
+        },
+        WriteStatus::Publishing | WriteStatus::Blocked(_) => {
+            match (&baseline.authority, candidate) {
+                (RetainedReplayAuthority::InstalledSnapshot(authority), Some(candidate)) => {
+                    records.snapshot_covers_reserved_write(write_id, candidate, authority)
+                }
+                _ => Ok(false),
+            }
+        }
+        WriteStatus::LocalOnly
+        | WriteStatus::LocalOnlyBlocked(_)
+        | WriteStatus::Pending
+        | WriteStatus::Resolved(_) => Ok(false),
+    }
+}
+
+fn prepared_state_commit_reference(
+    encoded: &str,
+    write_id: &WriteId,
+) -> Result<StoreBatchCommitRef, DbError> {
     let prepared: crate::store::publication_state::PreparedStoreWriteState =
         serde_json::from_str(encoded)
             .map_err(|error| DbError::context("retained replay prepared Store write", error))?;
-    let candidates = match &prepared {
-        crate::store::publication_state::PreparedStoreWriteState::Publication {
-            commit, ..
-        } => {
-            vec![commit]
-        }
-        crate::store::publication_state::PreparedStoreWriteState::MergeAbandonment {
-            candidate_commit,
-            authority_commit,
-            ..
-        } => vec![candidate_commit, authority_commit],
-    };
-    for candidate in candidates {
-        let value: StoreBatchCommit = serde_json::from_slice(candidate.semantic_bytes())
-            .map_err(|error| DbError::context("retained replay prepared Store commit", error))?;
-        if reference.coord.sequence() == value.seq()
-            && reference.commit_hash == value.commit_hash()
-            && &reference.object == candidate.prepared().reference()
-        {
-            return Ok(true);
-        }
+    let commit: StoreBatchCommit = serde_json::from_slice(prepared.commit.semantic_bytes())
+        .map_err(|error| DbError::context("retained replay prepared Store commit", error))?;
+    if &commit.write_id != write_id {
+        return Err(DbError::Message(format!(
+            "retained write {write_id} names another prepared logical write"
+        )));
     }
-    Ok(false)
+    let coord = coven_protocol::store_commit::StoreCommitCoord {
+        stream_id: coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
+            commit.store_root_hash,
+            &commit.author_registration,
+            coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        ),
+        sequence: commit.seq(),
+    };
+    StoreBatchCommitRef::from_commit(
+        &commit,
+        coord,
+        prepared.commit.prepared().reference().clone(),
+    )
+    .map_err(DbError::from)
 }
 
 impl crate::store::store_session::StoreTransaction<'_, '_> {
-    pub(crate) fn load_merge_retraction_cleanup(
-        self,
-        authority: &mut VerifiedStoreAuthority,
-        candidate: &StoreBatchCommitRef,
-    ) -> Result<PreparedMergeCandidate, DbError> {
-        StoreDatabase::load_merge_retraction_cleanup_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-            authority,
-            candidate,
-        )
-    }
-
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn load_retained_merge_materialization_by_ref(
         self,
@@ -79,242 +121,6 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
 }
 
 impl StoreDatabase {
-    pub(crate) fn open_retained_merge_materialization_input_with_verified_commit_on(
-        records: StoreRecords<'_>,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        registration_lookup: &mut dyn VerifiedRegistrationLookup,
-        commit_ref: &StoreBatchCommitRef,
-        input: &RetainedMergeMaterializationInput,
-        input_hash: ObjectHash,
-        verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        Self::open_retained_merge_materialization_input_with_authority_on(
-            records,
-            root,
-            registration_lookup,
-            commit_ref,
-            input,
-            input_hash,
-            RetainedCommitAuthority::Operation(verified),
-        )
-    }
-
-    fn open_retained_merge_materialization_input_with_authority_on(
-        records: StoreRecords<'_>,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        registration_lookup: &mut dyn VerifiedRegistrationLookup,
-        commit_ref: &StoreBatchCommitRef,
-        input: &RetainedMergeMaterializationInput,
-        input_hash: ObjectHash,
-        authority: RetainedCommitAuthority<'_>,
-    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let sequence = &commit_ref.coord.sequence;
-        if sequence == &0 {
-            return Err(DbError::Message(
-                "retained Merge input names sequence zero".to_string(),
-            ));
-        }
-        let unverified: StoreBatchCommit = serde_json::from_slice(input.commit.stored_bytes())
-            .map_err(|error| DbError::context("retained Merge commit", error))?;
-        let registrations = input
-            .activation
-            .registrations
-            .verify_for(root, &unverified)
-            .map_err(DbError::from)?;
-        let introduced_registration = |reference: &StoreDeviceRegistrationRef| {
-            let mut matches = unverified
-                .device_registrations()
-                .iter()
-                .zip(&registrations)
-                .filter(|(activated, _)| &activated.registration == reference)
-                .map(|(_, registration)| registration.value());
-            let registration = matches.next();
-            if matches.next().is_some() {
-                return Err(DbError::Message(
-                    "retained Merge input introduces one registration more than once".to_string(),
-                ));
-            }
-            Ok(registration)
-        };
-        let introduced_author = introduced_registration(&unverified.author_registration)?;
-        let operation_author = match &authority {
-            RetainedCommitAuthority::Operation(verified)
-                if verified.reference() == commit_ref
-                    && verified.value().author_registration == unverified.author_registration
-                    && verified.value().to_bytes() == input.commit.stored_bytes() =>
-            {
-                Some(verified.author())
-            }
-            RetainedCommitAuthority::Operation(_) => {
-                return Err(DbError::Message(
-                    "retained Merge commit differs from its operation-verified exact commit"
-                        .to_string(),
-                ));
-            }
-            RetainedCommitAuthority::StoredBytes => None,
-        };
-        let stored_author;
-        let author = match (introduced_author, operation_author) {
-            (Some(author), _) => author,
-            (None, Some(author)) => author,
-            (None, None) => {
-                stored_author = registration_lookup.activated_registration_on(
-                    records,
-                    root,
-                    &unverified.author_registration,
-                )?;
-                &stored_author
-            }
-        };
-        let verified_commit = match authority {
-            RetainedCommitAuthority::StoredBytes => {
-                coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
-                    input.commit.stored_bytes(),
-                    root.store_root_hash,
-                    commit_ref,
-                    author,
-                )
-                .map_err(|error| DbError::context("retained Merge commit", error))?
-            }
-            RetainedCommitAuthority::Operation(verified) if verified.author() == author => {
-                verified.clone()
-            }
-            RetainedCommitAuthority::Operation(_) => {
-                return Err(DbError::Message(
-                    "retained Merge commit differs from its operation-verified exact commit"
-                        .to_string(),
-                ))
-            }
-        };
-        let commit = verified_commit.value().clone();
-        if commit.to_bytes() != input.commit.stored_bytes() {
-            return Err(DbError::Message(
-                "retained Merge commit bytes are not canonical".to_string(),
-            ));
-        }
-        let exact_ref = StoreBatchCommitRef::from_commit(
-            &commit,
-            commit_ref.coord.clone(),
-            input.commit.reference().clone(),
-        )
-        .map_err(DbError::from)?;
-        if &exact_ref != commit_ref {
-            return Err(DbError::Message(
-                "retained Merge commit differs from its materialized coordinate".to_string(),
-            ));
-        }
-        let head = StoreDeviceHead::parse_at(
-            input.activation_head.stored_bytes(),
-            root.store_root_hash,
-            author,
-            commit_ref,
-        )
-        .map_err(|error| DbError::context("retained Merge activation head", error))?;
-        if head.to_bytes() != input.activation_head.stored_bytes() {
-            return Err(DbError::Message(
-                "retained Merge activation head bytes are not canonical".to_string(),
-            ));
-        }
-        let package_values = input
-            .packages
-            .iter()
-            .map(RetainedAudiencePackage::package)
-            .cloned()
-            .collect::<Vec<_>>();
-        let packages =
-            super::canonical_retained_merge_packages(&commit, commit_ref, &package_values)?;
-        if packages != input.packages {
-            return Err(DbError::Message(
-                "retained Merge packages are not in commit order".to_string(),
-            ));
-        }
-        if packages.is_empty() != input.activation.package_application.is_none() {
-            return Err(DbError::Message(
-                "retained Merge package application does not match its applied packages"
-                    .to_string(),
-            ));
-        }
-        let device_operations = input
-            .activation
-            .device_operations
-            .verify_for(root, &commit)
-            .map_err(DbError::from)?;
-        let local_identity = match records.local_activated_registration_ref()? {
-            Some(reference) => Some(match introduced_registration(&reference)? {
-                Some(registration) => registration.author_pubkey.clone(),
-                None if reference == unverified.author_registration => author.author_pubkey.clone(),
-                None => registration_lookup
-                    .activated_registration_on(records, root, &reference)?
-                    .author_pubkey
-                    .clone(),
-            }),
-            None => None,
-        };
-        let circle_activations = VerifiedCircleActivations::parse_retained_for_verified_commit(
-            &input.activation.circle_activations,
-            &verified_commit,
-            local_identity.as_deref(),
-        )
-        .map_err(DbError::from)?;
-        if commit.control().is_some() != input.membership_objects.is_some() {
-            return Err(DbError::Message(
-                "retained Merge membership closure differs from its exact Store control"
-                    .to_string(),
-            ));
-        }
-        if let Some(objects) = &input.membership_objects {
-            let entry_remote = records.remote_object(remote_object_id(&objects.entry().object))?;
-            let entry: MembershipEntry =
-                serde_json::from_slice(&stored_semantic_payload(records, &entry_remote)?)
-                    .map_err(|error| DbError::context("retained membership entry", error))?;
-            let head_remote = records.remote_object(remote_object_id(&objects.head().object))?;
-            let head_value: AuthorHead =
-                serde_json::from_slice(&stored_semantic_payload(records, &head_remote)?)
-                    .map_err(|error| DbError::context("retained membership head", error))?;
-            let verified_objects = VerifiedMergeMembershipObjects::verify(
-                &commit,
-                commit_ref,
-                &entry,
-                &head_value,
-                objects.head().clone(),
-            )?;
-            if &verified_objects != objects || entry_remote.object() != &objects.entry().object {
-                return Err(DbError::Message(
-                    "retained membership objects differ from their exact authority".to_string(),
-                ));
-            }
-            if let Some(reference) = objects.resolution() {
-                let remote = records.remote_object(remote_object_id(&reference.object))?;
-                let resolution: coven_protocol::membership::StoreMembershipConflictResolution =
-                    serde_json::from_slice(&stored_semantic_payload(records, &remote)?).map_err(
-                        |error| DbError::context("retained membership resolution", error),
-                    )?;
-                if !resolution.verify_signature()
-                    || resolution.resolution_ref(reference.object.clone()) != *reference
-                {
-                    return Err(DbError::Message(
-                        "retained membership resolution differs from its exact authority"
-                            .to_string(),
-                    ));
-                }
-            }
-        }
-        OwnedVerifiedMergeMaterialization::verify(
-            root.clone(),
-            verified_commit,
-            registrations,
-            device_operations,
-            circle_activations,
-            head,
-            input.activation_head.reference().clone(),
-            input.history_evidence.clone(),
-            input.membership_objects.clone(),
-            package_values,
-            input.activation.package_application,
-            input_hash,
-        )
-    }
-
     pub(crate) fn load_retained_merge_materialization_on(
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
@@ -324,100 +130,16 @@ impl StoreDatabase {
         commit_ref: &StoreBatchCommitRef,
         expected_input_hash: &str,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        Self::load_retained_merge_materialization_with_authority_on(
-            records,
+        let baseline = crate::store::retained_replay::load_replay_baseline_metadata_on(records)?;
+        records.open_retained_merge_materialization(
             root,
             registrations,
             stream_id,
             sequence,
             commit_ref,
             expected_input_hash,
-            RetainedCommitAuthority::StoredBytes,
+            baseline.as_ref(),
         )
-    }
-
-    pub(crate) fn load_retained_merge_materialization_with_verified_commit_on(
-        records: StoreRecords<'_>,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        registrations: &mut dyn VerifiedRegistrationLookup,
-        stream_id: &str,
-        sequence: u64,
-        commit_ref: &StoreBatchCommitRef,
-        expected_input_hash: &str,
-        verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        Self::load_retained_merge_materialization_with_authority_on(
-            records,
-            root,
-            registrations,
-            stream_id,
-            sequence,
-            commit_ref,
-            expected_input_hash,
-            RetainedCommitAuthority::Operation(verified),
-        )
-    }
-
-    fn load_retained_merge_materialization_with_authority_on(
-        records: StoreRecords<'_>,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        registrations: &mut dyn VerifiedRegistrationLookup,
-        stream_id: &str,
-        sequence: u64,
-        commit_ref: &StoreBatchCommitRef,
-        expected_input_hash: &str,
-        authority: RetainedCommitAuthority<'_>,
-    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let sequence_sql = Database::sequence_to_sqlite(stream_id, sequence)?;
-        let (stored_ref, stored_hash, canonical_input) =
-            records.retained_materialization_row(stream_id, sequence_sql)?;
-        let expected_ref = serde_json::to_string(commit_ref)
-            .map_err(|error| DbError::context("serialize materialized Merge commit ref", error))?;
-        if stored_ref != expected_ref {
-            return Err(DbError::Message(format!(
-                "retained Merge coordinate {stream_id}/{sequence} names another commit"
-            )));
-        }
-        if stored_hash != expected_input_hash
-            || stored_hash != ObjectHash::digest(&canonical_input).to_string()
-        {
-            return Err(DbError::Message(format!(
-                "retained Merge coordinate {stream_id}/{sequence} input hash differs from its bytes"
-            )));
-        }
-        let input: RetainedMergeMaterializationInput = serde_json::from_slice(&canonical_input)
-            .map_err(|error| DbError::context("retained Merge materialization input", error))?;
-        if serde_json::to_vec(&input)
-            .map_err(|error| DbError::context("serialize retained Merge materialization", error))?
-            != canonical_input
-        {
-            return Err(DbError::Message(
-                "retained Merge materialization input is not canonical".to_string(),
-            ));
-        }
-        let input_hash = stored_hash.parse().map_err(|error| {
-            DbError::context(
-                format!("retained Merge coordinate {stream_id}/{sequence} input hash is invalid"),
-                error,
-            )
-        })?;
-        let verified = Self::open_retained_merge_materialization_input_with_authority_on(
-            records,
-            root,
-            registrations,
-            commit_ref,
-            &input,
-            input_hash,
-            authority,
-        )?;
-        records.validate_retained_merge_pin_closure(
-            &input,
-            &RetainedReplayOwner::Commit {
-                commit: commit_ref.clone(),
-                input_hash,
-            },
-        )?;
-        Ok(verified)
     }
 
     pub(crate) fn load_retained_merge_materialization_by_ref_on(
@@ -425,6 +147,23 @@ impl StoreDatabase {
         root: &coven_protocol::store_commit::StoreRootRef,
         registrations: &mut dyn VerifiedRegistrationLookup,
         reference: &StoreBatchCommitRef,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        let baseline = crate::store::retained_replay::load_replay_baseline_metadata_on(records)?;
+        Self::load_retained_merge_materialization_at_baseline_on(
+            records,
+            root,
+            registrations,
+            reference,
+            baseline.as_ref(),
+        )
+    }
+
+    pub(crate) fn load_retained_merge_materialization_at_baseline_on(
+        records: StoreRecords<'_>,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
+        reference: &StoreBatchCommitRef,
+        baseline: Option<&RetainedReplayBaseline>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let StoreCommitCoord {
             stream_id,
@@ -444,14 +183,14 @@ impl StoreDatabase {
                 "retained Merge materialization coordinate contains another commit".to_string(),
             ));
         }
-        Self::load_retained_merge_materialization_on(
-            records,
+        records.open_retained_merge_materialization(
             root,
             registrations,
             &stream_id,
             *sequence,
             reference,
             &input_hash,
+            baseline,
         )
     }
 
@@ -577,7 +316,6 @@ impl StoreDatabase {
         }
         Ok(
             coven_protocol::store_commit::OpenedRetainedMergeHistorySummary {
-                announcement_frontier: summary.announcement_frontier.clone(),
                 post_state: state,
                 summary,
             },
@@ -644,21 +382,28 @@ impl StoreDatabase {
             })?;
             let fold = match status.clone() {
                 WriteStatus::LocalOnly => crate::SettledWriteFold::LocalOnly,
-                WriteStatus::Published(position) => {
-                    if !cut.covers_commit(position.commit()) {
+                WriteStatus::Published(published) => {
+                    let covered = match published.as_ref() {
+                        PublishedWrite::Commit(position) => cut.covers_commit(position.commit()),
+                        PublishedWrite::Snapshot(position) => {
+                            snapshot_write_is_covered(position, cut)
+                        }
+                    };
+                    if !covered {
                         break;
                     }
                     crate::SettledWriteFold::Published
                 }
                 WriteStatus::Resolved(_) => crate::SettledWriteFold::Reversed,
-                WriteStatus::Pending | WriteStatus::Publishing | WriteStatus::Blocked(_) => break,
+                WriteStatus::Pending
+                | WriteStatus::Publishing
+                | WriteStatus::Blocked(_)
+                | WriteStatus::LocalOnlyBlocked(_) => break,
             };
-            let base: StoreWriteBase = serde_json::from_str(&row.base).map_err(|error| {
-                DbError::context(
-                    format!("settled write {} observed frontier", row.write_id),
-                    error,
-                )
-            })?;
+            let base = records.effective_store_write_base(
+                &WriteId::from_generated(row.write_id.clone()),
+                &row.base,
+            )?;
             let observed = CommitFrontier::from_refs(base.dependencies.clone())
                 .map_err(|error| DbError::context("settled write observed frontier", error))?;
             if fold.states_local_rows() && !cut.covers(&observed) {
@@ -703,12 +448,7 @@ impl StoreDatabase {
         })?;
         let changeset_hash = changeset_hash.parse::<ObjectHash>()?;
         records.payload(changeset_hash)?;
-        let base: StoreWriteBase = serde_json::from_str(&base).map_err(|error| {
-            DbError::context(
-                format!("retained write {write_id} observed frontier"),
-                error,
-            )
-        })?;
+        let base = records.effective_store_write_base(&write_id, &base)?;
         let observed = CommitFrontier::from_refs(base.dependencies)
             .map_err(|error| DbError::context("retained write observed frontier", error))?;
         let mut partitions = records.store_write_partitions(write_id.as_str())?;
@@ -749,12 +489,10 @@ impl StoreDatabase {
             let status: WriteStatus = serde_json::from_str(&row.status).map_err(|error| {
                 DbError::context(format!("folded write {} status", row.write_id), error)
             })?;
-            let base: StoreWriteBase = serde_json::from_str(&row.base).map_err(|error| {
-                DbError::context(
-                    format!("folded write {} observed frontier", row.write_id),
-                    error,
-                )
-            })?;
+            let base = records.effective_store_write_base(
+                &WriteId::from_generated(row.write_id.clone()),
+                &row.base,
+            )?;
             if status != settled.status || base != settled.observed {
                 return Err(DbError::Message(format!(
                     "folded write {} changed during baseline capture",
@@ -772,19 +510,23 @@ impl StoreDatabase {
                     )?;
                     MergeReplayWrite::LocalOnly { effect, observed }
                 }
-                (crate::SettledWriteFold::Published, WriteStatus::Published(position)) => {
-                    let commit = position.commit().clone();
+                (crate::SettledWriteFold::Published, WriteStatus::Published(published)) => {
                     let (effect, observed) = Self::retained_write_effect_on(
                         records,
                         settled.write_id.clone(),
                         Some(row.base),
                         Some(row.changeset_hash),
-                        false,
+                        matches!(published.as_ref(), PublishedWrite::Snapshot(_)),
                     )?;
-                    MergeReplayWrite::Accepted {
-                        effect,
-                        observed,
-                        commit,
+                    match *published {
+                        PublishedWrite::Commit(position) => MergeReplayWrite::Accepted {
+                            effect,
+                            observed,
+                            commit: position.commit,
+                        },
+                        PublishedWrite::Snapshot(_) => {
+                            MergeReplayWrite::LocalOnly { effect, observed }
+                        }
                     }
                 }
                 (crate::SettledWriteFold::Reversed, WriteStatus::Resolved(_)) => {
@@ -796,7 +538,7 @@ impl StoreDatabase {
                     return Err(DbError::Message(format!(
                         "folded write {} changed status during baseline capture",
                         row.write_id
-                    )))
+                    )));
                 }
             };
             journal.push(write);
@@ -804,9 +546,45 @@ impl StoreDatabase {
         Ok(journal)
     }
 
+    pub(crate) fn covered_replay_suffix_on(
+        records: StoreRecords<'_>,
+        baseline: &RetainedReplayBaseline,
+        folded: &[crate::SettledStoreWrite],
+    ) -> Result<Vec<MergeReplayWriteEffect>, DbError> {
+        let prefix = Self::load_folded_replay_journal_on(records, folded)?;
+        let mut effects = Vec::new();
+        for row in records
+            .store_write_replay_rows()?
+            .into_iter()
+            .skip(prefix.len())
+        {
+            let write_id = WriteId::from_generated(row.write_id);
+            let status: WriteStatus = serde_json::from_str(&row.status)?;
+            let candidate = match &status {
+                WriteStatus::Publishing | WriteStatus::Blocked(_) => row
+                    .prepared
+                    .as_deref()
+                    .map(|prepared| prepared_state_commit_reference(prepared, &write_id))
+                    .transpose()?,
+                _ => None,
+            };
+            if replay_write_is_covered(records, baseline, &write_id, &status, candidate.as_ref())? {
+                let (effect, _) = Self::retained_write_effect_on(
+                    records,
+                    write_id,
+                    Some(row.base),
+                    Some(row.changeset_hash),
+                    false,
+                )?;
+                effects.push(effect);
+            }
+        }
+        Ok(effects)
+    }
+
     pub(crate) fn load_merge_replay_journal_on(
         records: StoreRecords<'_>,
-        baseline_cut: &CommitFrontier,
+        baseline: &RetainedReplayBaseline,
         active_accepted_writes: &std::collections::BTreeMap<WriteId, StoreBatchCommitRef>,
         retracted_writes: &BTreeSet<WriteId>,
     ) -> Result<Vec<MergeReplayWrite>, DbError> {
@@ -828,13 +606,13 @@ impl StoreDatabase {
             let active = active_accepted_writes.get(&write_id);
             let retracted = retracted_writes.contains(&write_id);
             let write = match status {
-                WriteStatus::LocalOnly => {
+                WriteStatus::LocalOnly | WriteStatus::LocalOnlyBlocked(_) => {
                     let (effect, observed) = Self::retained_write_effect_on(
                         records,
                         write_id,
                         Some(row.base),
                         Some(row.changeset_hash),
-                        true,
+                        false,
                     )?;
                     if effect.partitions.store.is_some() || !effect.partitions.circles.is_empty() {
                         return Err(DbError::Message(format!(
@@ -859,69 +637,117 @@ impl StoreDatabase {
                             "unresolved write {encoded_id} is already terminally retracted"
                         )));
                     }
-                    let accepted = match (active, row.prepared.as_deref()) {
-                        (Some(reference), Some(prepared))
-                            if prepared_state_contains_commit(prepared, reference)? =>
-                        {
+                    let candidate = row
+                        .prepared
+                        .as_deref()
+                        .map(|prepared| prepared_state_commit_reference(prepared, &write_id))
+                        .transpose()?;
+                    let covered = replay_write_is_covered(
+                        records,
+                        baseline,
+                        &write_id,
+                        &status,
+                        candidate.as_ref(),
+                    )?;
+                    let accepted = match (active, candidate.as_ref()) {
+                        (Some(reference), Some(candidate)) if reference == candidate => {
                             Some(reference.clone())
                         }
-                        (Some(_), None) => {
+                        (Some(_), _) => {
                             return Err(DbError::Message(format!(
-                                "unresolved write {encoded_id} has no prepared candidate"
-                            )))
+                                "unresolved write {encoded_id} differs from its accepted candidate"
+                            )));
                         }
-                        _ => None,
+                        (None, _) => None,
                     };
                     let (effect, observed) = Self::retained_write_effect_on(
                         records,
                         write_id,
                         Some(row.base),
                         Some(row.changeset_hash),
-                        false,
+                        covered,
                     )?;
-                    match accepted {
-                        Some(commit) => MergeReplayWrite::Accepted {
-                            effect,
-                            observed,
-                            commit,
-                        },
-                        None => MergeReplayWrite::Unaccepted { effect, observed },
-                    }
-                }
-                WriteStatus::Published(position) => {
-                    if retracted {
-                        MergeReplayWrite::Consumed { write_id }
-                    } else if baseline_cut.covers_commit(position.commit()) {
-                        let (effect, observed) = Self::retained_write_effect_on(
-                            records,
-                            write_id,
-                            Some(row.base),
-                            Some(row.changeset_hash),
-                            false,
-                        )?;
+                    if covered {
                         MergeReplayWrite::LocalOnly { effect, observed }
                     } else {
-                        let active = active.ok_or_else(|| {
-                            DbError::Message(format!(
-                                "published write {encoded_id} has no retained replay input"
-                            ))
-                        })?;
-                        if active != position.commit() {
-                            return Err(DbError::Message(format!(
-                                "published write {encoded_id} is associated with another accepted commit"
-                            )));
+                        match accepted {
+                            Some(commit) => MergeReplayWrite::Accepted {
+                                effect,
+                                observed,
+                                commit,
+                            },
+                            None => MergeReplayWrite::Unaccepted { effect, observed },
                         }
-                        let (effect, observed) = Self::retained_write_effect_on(
+                    }
+                }
+                WriteStatus::Published(published) => {
+                    let covered = if !retracted
+                        || matches!(published.as_ref(), PublishedWrite::Snapshot(_))
+                    {
+                        replay_write_is_covered(
                             records,
-                            write_id,
-                            Some(row.base),
-                            Some(row.changeset_hash),
-                            false,
-                        )?;
-                        MergeReplayWrite::Accepted {
-                            effect,
-                            observed,
-                            commit: active.clone(),
+                            baseline,
+                            &write_id,
+                            &WriteStatus::Published(published.clone()),
+                            None,
+                        )?
+                    } else {
+                        false
+                    };
+                    match *published {
+                        PublishedWrite::Snapshot(position) => {
+                            if retracted
+                                || active.is_some_and(|commit| commit.coord != position.coord)
+                            {
+                                return Err(DbError::Message(format!(
+                                    "snapshot-covered write {encoded_id} has a conflicting replay association"
+                                )));
+                            }
+                            let (effect, observed) = Self::retained_write_effect_on(
+                                records,
+                                write_id,
+                                Some(row.base),
+                                Some(row.changeset_hash),
+                                true,
+                            )?;
+                            MergeReplayWrite::LocalOnly { effect, observed }
+                        }
+                        PublishedWrite::Commit(position) => {
+                            if retracted {
+                                MergeReplayWrite::Consumed { write_id }
+                            } else if covered {
+                                let (effect, observed) = Self::retained_write_effect_on(
+                                    records,
+                                    write_id,
+                                    Some(row.base),
+                                    Some(row.changeset_hash),
+                                    true,
+                                )?;
+                                MergeReplayWrite::LocalOnly { effect, observed }
+                            } else {
+                                let active = active.ok_or_else(|| {
+                                    DbError::Message(format!(
+                                        "published write {encoded_id} has no retained replay input"
+                                    ))
+                                })?;
+                                if active != position.commit() {
+                                    return Err(DbError::Message(format!(
+                                        "published write {encoded_id} is associated with another accepted commit"
+                                    )));
+                                }
+                                let (effect, observed) = Self::retained_write_effect_on(
+                                    records,
+                                    write_id,
+                                    Some(row.base),
+                                    Some(row.changeset_hash),
+                                    false,
+                                )?;
+                                MergeReplayWrite::Accepted {
+                                    effect,
+                                    observed,
+                                    commit: active.clone(),
+                                }
+                            }
                         }
                     }
                 }
@@ -934,13 +760,13 @@ impl StoreDatabase {
 
     pub(crate) fn load_merge_replay_associations_on(
         records: StoreRecords<'_>,
-        baseline_cut: &CommitFrontier,
+        baseline: &RetainedReplayBaseline,
         active_accepted_writes: &std::collections::BTreeMap<WriteId, StoreBatchCommitRef>,
         retracted_writes: &BTreeSet<WriteId>,
     ) -> Result<Vec<MergeReplayWrite>, DbError> {
         let associations = Self::load_merge_replay_journal_on(
             records,
-            baseline_cut,
+            baseline,
             active_accepted_writes,
             retracted_writes,
         )?
@@ -972,56 +798,6 @@ impl StoreDatabase {
         load_generation_zero_replay_baseline_on(records)?.ok_or_else(|| {
             DbError::Message("generation-zero retained replay baseline is absent".to_string())
         })
-    }
-
-    pub(crate) fn load_merge_retraction_cleanup_on(
-        records: StoreRecords<'_>,
-        authority: &mut VerifiedStoreAuthority,
-        candidate: &StoreBatchCommitRef,
-    ) -> Result<PreparedMergeCandidate, DbError> {
-        let (commit, head) = records.merge_retraction_cleanup_objects(candidate)?;
-        let prepared = parse_prepared_merge_candidate_parts_on(
-            records,
-            authority,
-            commit.semantic_bytes(),
-            commit.prepared().reference(),
-            head.semantic_bytes(),
-            head.prepared().reference(),
-        )?;
-        if &prepared.reference != candidate {
-            return Err(DbError::Message(
-                "Merge retraction cleanup opens another candidate".to_string(),
-            ));
-        }
-        Ok(prepared)
-    }
-
-    pub(crate) fn load_merge_retraction_cleanup_for_verified_materialization_on(
-        conn: &Connection,
-        retained: &OwnedVerifiedMergeMaterialization,
-    ) -> Result<PreparedMergeCandidate, DbError> {
-        let (commit, head) = load_merge_retraction_cleanup_objects_on(conn, retained.commit_ref())?;
-        let unverified = serde_json::from_slice(commit.semantic_bytes())
-            .map_err(|error| DbError::context("signed Merge retraction cleanup", error))?;
-        let prepared = verify_prepared_merge_candidate_parts(
-            &retained.verified_commit().author().store_root,
-            unverified,
-            retained.verified_commit().author(),
-            commit.semantic_bytes(),
-            commit.prepared().reference(),
-            head.semantic_bytes(),
-            head.prepared().reference(),
-        )?;
-        if prepared.reference != *retained.commit_ref()
-            || prepared.commit.to_bytes() != retained.commit().to_bytes()
-            || prepared.head != *retained.activation_head()
-            || prepared.head_object != *retained.activation_head_object()
-        {
-            return Err(DbError::Message(
-                "Merge retraction cleanup differs from its verified materialization".to_string(),
-            ));
-        }
-        Ok(prepared)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

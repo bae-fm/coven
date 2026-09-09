@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::membership::MembershipGrantId;
-use crate::objects::{ExactObjectRef, ObjectSlot};
+use crate::objects::{ObjectSlot, PreparedExactObject};
 use crate::provider::{
     ActivatedStoreMemberProviderAccessGrant, CrossPrincipalProbeChallenge,
     CrossPrincipalProbeReceipt, CrossPrincipalProbeResponse,
@@ -554,9 +554,47 @@ pub struct DeviceJoinBootstrapCommitClosure {
     pub author: ReferencedStoreDeviceRegistration,
     pub registrations: RetainedStoreDeviceRegistrationActivations,
     pub device_operations: RetainedStoreDeviceOperations,
-    pub activation_head: StoreDeviceHead,
-    pub activation_object: ExactObjectRef,
     pub history_evidence: RetainedMergeCommitEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceJoinBootstrapPublicationEntry {
+    pub entry: PreparedExactObject,
+    pub author: ReferencedStoreDeviceRegistration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceJoinBootstrapPublicationInterval {
+    pub previous: StoreCurrentPublicationRecordBody,
+    pub current: StoreCurrentPublicationRecord,
+    pub entries: Vec<DeviceJoinBootstrapPublicationEntry>,
+}
+
+impl DeviceJoinBootstrapPublicationInterval {
+    pub fn verify(&self) -> Result<VerifiedStorePublicationInterval, StoreProtocolError> {
+        let entries = self
+            .entries
+            .iter()
+            .map(|carried| {
+                let entry: StorePublicationEntry =
+                    crate::objects::decode_protocol_object(carried.entry.stored_bytes())?;
+                let reference =
+                    StorePublicationRef::from_entry(&entry, carried.entry.reference().clone())?;
+                Ok(StorePublicationIntervalEntry::new(
+                    entry,
+                    reference,
+                    carried.author.clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreProtocolError>>()?;
+        VerifiedStorePublicationInterval::from_nonempty_history(
+            self.previous.clone(),
+            self.current.clone(),
+            entries,
+        )
+    }
 }
 
 /// The exact verified history required after the selected snapshot. This is a
@@ -568,7 +606,44 @@ pub struct DeviceJoinBootstrapClosure {
     pub founder: ReferencedStoreDeviceRegistration,
     pub genesis: ResolvedStoreDeviceState,
     pub membership: crate::membership::MembershipFloor,
+    pub publication: DeviceJoinBootstrapPublicationInterval,
     pub commits: Vec<DeviceJoinBootstrapCommitClosure>,
+}
+
+impl DeviceJoinBootstrapClosure {
+    pub fn verified_commit(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<VerifiedStoreBatchCommit, StoreProtocolError> {
+        let carried = self
+            .commits
+            .iter()
+            .find(|carried| &carried.reference == reference)
+            .ok_or_else(|| {
+                StoreProtocolError::Malformed(
+                    "retained device join omits the requested exact commit".into(),
+                )
+            })?;
+        let commit = VerifiedStoreBatchCommit::parse(
+            &carried.canonical_commit,
+            self.publication.current.store_root_hash,
+            reference,
+            carried.author.value(),
+        )?;
+        if commit.author_registration != *carried.author.reference() {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        Ok(commit)
+    }
+
+    pub fn accepted_commit(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<AcceptedStoreCommitPublication, StoreProtocolError> {
+        self.publication
+            .verify()?
+            .accepted_commit(&self.verified_commit(reference)?)
+    }
 }
 
 /// The signed snapshot authority and exact Merge closure a same-provider
@@ -578,8 +653,6 @@ pub struct DeviceJoinBootstrapClosure {
 #[serde(deny_unknown_fields)]
 pub struct SamePrincipalStoreInstallation {
     pub store_root: StoreProtocolRoot,
-    pub snapshot: StoreSnapshotRef,
-    pub metadata: SnapshotMeta,
     pub authority: RetainedReplaySnapshotAuthority,
     pub bootstrap: DeviceJoinBootstrapClosure,
 }
@@ -639,8 +712,6 @@ impl SamePrincipalDeviceJoin {
                     .request
                     .offer
                     .store_root
-            || installation.snapshot != installation.authority.snapshot
-            || installation.metadata != installation.authority.metadata
             || installation.store_root.descriptor.store_root_id()
                 != installation.authority.store_root.store_root_id
             || installation.store_root.object_hash()

@@ -551,7 +551,11 @@ async fn separate_host_transactions_publish_as_separate_store_commits_after_rest
 
     first_status.changed().await.expect("published status");
     let first_sequence = match &*first_status.borrow() {
-        crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
+        crate::WriteStatus::Published(position) => position
+            .exact_commit()
+            .expect("published host transaction has an exact commit")
+            .coord
+            .sequence(),
         status => panic!("first host transaction is not published: {status:?}"),
     };
     assert_eq!(
@@ -570,7 +574,11 @@ async fn separate_host_transactions_publish_as_separate_store_commits_after_rest
         .await
         .expect("second status")
     {
-        crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
+        crate::WriteStatus::Published(position) => position
+            .exact_commit()
+            .expect("published host transaction has an exact commit")
+            .coord
+            .sequence(),
         status => panic!("second host transaction is not published: {status:?}"),
     };
     assert_eq!(second_sequence, first_sequence + 1);
@@ -1954,7 +1962,11 @@ impl PendingReplacement {
             .await
             .expect("first status")
         {
-            crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
+            crate::WriteStatus::Published(position) => position
+                .exact_commit()
+                .expect("published host transaction has an exact commit")
+                .coord
+                .sequence(),
             status => panic!("first replacement write is not published: {status:?}"),
         };
         assert_eq!(
@@ -1975,7 +1987,11 @@ impl PendingReplacement {
             .await
             .expect("second status")
         {
-            crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
+            crate::WriteStatus::Published(position) => position
+                .exact_commit()
+                .expect("published host transaction has an exact commit")
+                .coord
+                .sequence(),
             status => panic!("second replacement write is not published: {status:?}"),
         };
         assert_eq!(

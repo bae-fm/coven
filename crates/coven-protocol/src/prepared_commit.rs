@@ -3,10 +3,11 @@
 //! activation derives from them.
 
 use crate::membership_mutation::{PreparedMembershipPublication, PreparedMembershipTransition};
-use crate::objects::{ExactObjectRef, PreparedExactObject, StoreObjectError};
+use crate::objects::{ExactObjectRef, ExactObjectVersion, PreparedExactObject, StoreObjectError};
 use crate::store_commit::{
-    ActivatedStoreDeviceRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreControl,
-    StoreDeviceHead, StoreDeviceHeadRef,
+    ActivatedStoreDeviceRegistration, SnapshotMeta, StoreBatchCommit, StoreBatchCommitRef,
+    StoreControl, StoreCurrentPublicationRecord, StorePublicationEntry, StorePublicationPayload,
+    StorePublicationRef, StoreSnapshotRef,
 };
 
 /// A prepared commit whose parts contradict each other or cannot form valid
@@ -47,6 +48,96 @@ pub struct PreparedStoreOperationCommon {
     pub registration_activation: Option<ActivatedStoreDeviceRegistration>,
 }
 
+/// One immutable Store publication entry and the conditional replacement that
+/// can accept it. The observed record and provider version remain together so
+/// a retry cannot apply the replacement against another boundary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedStorePublication {
+    pub previous: StoreCurrentPublicationRecord,
+    pub previous_version: ExactObjectVersion,
+    pub entry: StorePublicationEntry,
+    pub entry_object: ExactObjectRef,
+    pub replacement: StoreCurrentPublicationRecord,
+}
+
+impl PreparedStorePublication {
+    pub fn reference(&self) -> Result<StorePublicationRef, PreparedCommitError> {
+        StorePublicationRef::from_entry(&self.entry, self.entry_object.clone())
+            .map_err(PreparedCommitError::from)
+    }
+
+    pub fn prepared_entry(&self) -> Result<PreparedExactObject, PreparedCommitError> {
+        PreparedExactObject::new(self.entry_object.clone(), self.entry.to_bytes())
+            .map_err(PreparedCommitError::from)
+    }
+
+    pub fn verify_commit(
+        &self,
+        commit: &crate::store_commit::VerifiedStoreBatchCommit,
+    ) -> Result<(), PreparedCommitError> {
+        let reference = self.reference()?;
+        let signing_pubkey = &commit.author().device_signing_pubkey;
+        StorePublicationEntry::parse_at(
+            &self.entry.to_bytes(),
+            commit.store_root_hash(),
+            &reference,
+            signing_pubkey,
+        )?;
+        self.replacement.verify_commit_transition(
+            &self.previous,
+            &self.entry,
+            &reference,
+            commit,
+            signing_pubkey,
+        )?;
+        Ok(())
+    }
+
+    pub fn validate_commit_shape(
+        &self,
+        commit: &StoreBatchCommit,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<(), PreparedCommitError> {
+        let publication = self.reference()?;
+        if self.entry.predecessor.as_ref() != self.previous.accepted()
+            || self.entry.previous_state_hash != self.previous.state_hash()
+            || self.replacement.accepted() != Some(&publication)
+            || self.replacement.store_root_hash != self.previous.store_root_hash
+            || self.entry.store_root_hash != commit.store_root_hash
+            || self.entry.author_registration != commit.author_registration
+            || !matches!(&self.entry.payload, StorePublicationPayload::Commit(published) if published == reference)
+        {
+            return Err(PreparedCommitError::Invariant(
+                "prepared Store publication differs from its commit or predecessor".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_snapshot_shape(
+        &self,
+        snapshot: &SnapshotMeta,
+        reference: &StoreSnapshotRef,
+    ) -> Result<(), PreparedCommitError> {
+        let publication = self.reference()?;
+        if self.entry.predecessor.as_ref() != self.previous.accepted()
+            || self.entry.previous_state_hash != self.previous.state_hash()
+            || self.replacement.accepted() != Some(&publication)
+            || self.replacement.store_root_hash != self.previous.store_root_hash
+            || snapshot.publication_predecessor != self.previous
+            || self.entry.store_root_hash != snapshot.store_root_hash
+            || self.entry.author_registration != snapshot.author_registration
+            || !matches!(&self.entry.payload, StorePublicationPayload::Snapshot(published) if published == reference)
+        {
+            return Err(PreparedCommitError::Invariant(
+                "prepared Store publication differs from its snapshot or predecessor".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl PreparedStoreOperationCommon {
     /// The commit prepared for upload: its canonical bytes, re-derived from the
     /// value, under the exact reference the operation names.
@@ -60,8 +151,7 @@ impl PreparedStoreOperationCommon {
 #[serde(deny_unknown_fields)]
 pub struct PreparedStoreOperationCommit {
     pub common: PreparedStoreOperationCommon,
-    pub head: StoreDeviceHead,
-    pub head_object: ExactObjectRef,
+    pub publication: PreparedStorePublication,
     pub history_evidence: super::store_commit::RetainedMergeCommitEvidence,
 }
 
@@ -80,29 +170,18 @@ impl std::ops::DerefMut for PreparedStoreOperationCommit {
 }
 
 impl PreparedStoreOperationCommit {
-    fn candidate_remote_objects(
+    pub(crate) fn candidate_remote_object(
         &self,
-    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
+    ) -> Result<crate::remote_object::ClosedRemoteObject, PreparedCommitError> {
         let commit_bytes = self.commit.to_bytes();
-        let head_bytes = self.head.to_bytes();
-        // A Store commit and a Store head are signed plaintext: what goes to
-        // storage is the canonical value, so both arguments are the same bytes.
-        let mut objects = vec![crate::remote_object::RemoteObjectRecord::candidate_commit(
+        // Store commits are signed plaintext: their canonical bytes are also
+        // their stored bytes. The publication attempt owns its own entry.
+        crate::remote_object::RemoteObjectRecord::candidate_commit(
             self.reference.clone(),
             &commit_bytes,
             &commit_bytes,
         )
-        .map_err(PreparedCommitError::from)?];
-        objects.push(
-            crate::remote_object::RemoteObjectRecord::candidate_activated_store_head(
-                self.head_ref(),
-                &head_bytes,
-                &head_bytes,
-                self.reference.clone(),
-            )
-            .map_err(PreparedCommitError::from)?,
-        );
-        Ok(objects)
+        .map_err(PreparedCommitError::from)
     }
 
     /// Validate the frame every Merge membership-activation candidate shares:
@@ -125,7 +204,7 @@ impl PreparedStoreOperationCommit {
                 .matches_head(&publication.head, &publication.head_ref)
             || !matches!(
                 &publication.head.activation,
-                super::membership::MembershipHeadActivation::StoreCommit { commit }
+                super::membership::MembershipHeadActivation::StoreCommit { commit, .. }
                     if commit == &self.reference
             )
         {
@@ -137,6 +216,36 @@ impl PreparedStoreOperationCommit {
         Ok(())
     }
 
+    pub fn prepared_membership_publication(
+        &self,
+    ) -> Result<PreparedMembershipPublication, PreparedCommitError> {
+        let proof = self
+            .history_evidence
+            .membership_proof
+            .as_ref()
+            .ok_or_else(|| {
+                PreparedCommitError::Invariant(
+                    "Store control lacks its prepared authority proof".into(),
+                )
+            })?;
+        let publication = PreparedMembershipPublication {
+            entry: proof.entry_value.clone(),
+            entry_ref: proof.entry.clone(),
+            head: proof.head_value.clone(),
+            head_ref: proof.head.clone(),
+        };
+        self.validate_merge_membership_activation(&publication.transition(), &publication)?;
+        Ok(publication)
+    }
+
+    pub(crate) fn retained_control_remote_objects(
+        &self,
+        authorities: Vec<crate::remote_object::ClosedRemoteObject>,
+    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
+        let publication = self.prepared_membership_publication()?;
+        self.close_merge_membership_remote_objects(&publication, &[], authorities)
+    }
+
     pub fn merge_membership_activation_remote_objects(
         &self,
         transition: &PreparedMembershipTransition,
@@ -144,14 +253,24 @@ impl PreparedStoreOperationCommit {
         wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         self.validate_merge_membership_activation(transition, publication)?;
-        let expected_wraps = match &transition.entry.change {
-            super::membership::MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys,
-            _ => {
-                return Err(PreparedCommitError::Invariant(
-                    "Merge membership removal graph contains another change".to_string(),
-                ))
-            }
-        };
+        let expected_wraps: &[super::wrapped_store_key::WrappedStoreKeyRef] =
+            match &transition.entry.change {
+                super::membership::StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => {
+                    wrapped_keys
+                }
+                super::membership::StoreAuthorityChange::SetMember {
+                    role:
+                        super::membership::StoreMembershipRoleGrant::Member
+                        | super::membership::StoreMembershipRoleGrant::Follower,
+                    wrapped_key,
+                    ..
+                } => std::slice::from_ref(wrapped_key),
+                _ => {
+                    return Err(PreparedCommitError::Invariant(
+                        "Merge membership mutation graph contains another change".to_string(),
+                    ))
+                }
+            };
         if expected_wraps.len() != wraps.len()
             || expected_wraps
                 .iter()
@@ -159,10 +278,10 @@ impl PreparedStoreOperationCommit {
                 .any(|(reference, prepared)| reference != &prepared.reference)
         {
             return Err(PreparedCommitError::Invariant(
-                "Merge membership removal wraps differ from its exact entry".to_string(),
+                "Merge membership mutation wraps differ from its exact entry".to_string(),
             ));
         }
-        self.close_merge_membership_remote_objects(transition, publication, wraps, Vec::new())
+        self.close_merge_membership_remote_objects(publication, wraps, Vec::new())
     }
 
     pub fn merge_membership_resolution_remote_objects(
@@ -180,7 +299,7 @@ impl PreparedStoreOperationCommit {
             })?;
         if !matches!(
             &transition.entry.change,
-            super::membership::MembershipChange::ResolutionActivation {
+            super::membership::StoreAuthorityChange::ResolutionActivation {
                 resolution: introduced,
             } if introduced == reference
         ) || reference.object.verify(&resolution_bytes).is_err()
@@ -201,7 +320,7 @@ impl PreparedStoreOperationCommit {
                 self.reference.clone(),
             )
             .map_err(PreparedCommitError::from)?;
-        self.close_merge_membership_remote_objects(transition, publication, &[], vec![authority])
+        self.close_merge_membership_remote_objects(publication, &[], vec![authority])
     }
 
     pub fn merge_owner_promotion_remote_objects(
@@ -213,7 +332,7 @@ impl PreparedStoreOperationCommit {
         self.validate_merge_membership_activation(transition, publication)?;
         if !matches!(
             &transition.entry.change,
-            super::membership::MembershipChange::SetMember { wrapped_key: expected, role: super::membership::StoreMembershipRoleGrant::Owner { .. }, .. }
+            super::membership::StoreAuthorityChange::SetMember { wrapped_key: expected, role: super::membership::StoreMembershipRoleGrant::Owner { .. }, .. }
                 if expected == &wrapped_key.reference
         ) {
             return Err(PreparedCommitError::Invariant(
@@ -222,7 +341,6 @@ impl PreparedStoreOperationCommit {
             ));
         }
         self.close_merge_membership_remote_objects(
-            transition,
             publication,
             std::slice::from_ref(wrapped_key),
             Vec::new(),
@@ -231,45 +349,13 @@ impl PreparedStoreOperationCommit {
 
     fn close_merge_membership_remote_objects(
         &self,
-        transition: &PreparedMembershipTransition,
         publication: &PreparedMembershipPublication,
         wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
         authorities: Vec<crate::remote_object::ClosedRemoteObject>,
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         let family = self.commit.candidate_family();
-        let mut objects = self.candidate_remote_objects()?;
-        let entry_bytes =
-            serde_json::to_vec(&transition.entry).map_err(|source| PreparedCommitError::Json {
-                operation: "serialize Merge membership candidate entry",
-                source,
-            })?;
-        let head_bytes =
-            serde_json::to_vec(&publication.head).map_err(|source| PreparedCommitError::Json {
-                operation: "serialize Merge membership candidate head",
-                source,
-            })?;
-        // Membership entries and heads are signed plaintext, so the canonical
-        // value is also what goes to storage.
-        objects.push(
-            crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
-                family,
-                transition.entry_ref.clone(),
-                &entry_bytes,
-                &entry_bytes,
-                self.reference.clone(),
-            )
-            .map_err(PreparedCommitError::from)?,
-        );
-        objects.push(
-            crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
-                family,
-                publication.head_ref.clone(),
-                &head_bytes,
-                &head_bytes,
-                self.reference.clone(),
-            )
-            .map_err(PreparedCommitError::from)?,
-        );
+        let mut objects = vec![self.candidate_remote_object()?];
+        objects.extend(publication.candidate_remote_objects(&self.commit, &self.reference)?);
         for prepared in wraps {
             let value = prepared.validate().map_err(PreparedCommitError::from)?;
             let canonical =
@@ -304,12 +390,8 @@ impl PreparedStoreOperationCommit {
     pub fn validate_closed_shape(&self) -> Result<(), PreparedCommitError> {
         self.reference.verify_commit(&self.commit)?;
         self.reference.object.verify(&self.commit.to_bytes())?;
-        if self.head.commit != self.reference {
-            return Err(PreparedCommitError::Invariant(
-                "prepared Store operation head names another commit".to_string(),
-            ));
-        }
-        self.head_object.verify(&self.head.to_bytes())?;
+        self.publication
+            .validate_commit_shape(&self.commit, &self.reference)?;
         self.history_evidence
             .validate_for(&self.reference, &self.commit)?;
         Ok(())
@@ -319,27 +401,8 @@ impl PreparedStoreOperationCommit {
         self.reference == other.reference
             && self.commit.to_bytes() == other.commit.to_bytes()
             && self.registration_activation == other.registration_activation
-            && self.head.to_bytes() == other.head.to_bytes()
-            && self.head_object == other.head_object
+            && self.publication == other.publication
             && self.history_evidence == other.history_evidence
-    }
-
-    /// The activation head prepared for upload: its canonical bytes, re-derived
-    /// from the value, under the exact object the operation names.
-    pub fn prepared_head(&self) -> Result<PreparedExactObject, PreparedCommitError> {
-        PreparedExactObject::new(self.head_object.clone(), self.head.to_bytes())
-            .map_err(PreparedCommitError::from)
-    }
-
-    pub fn publication(&self) -> (&StoreDeviceHead, &ExactObjectRef) {
-        (&self.head, &self.head_object)
-    }
-
-    pub fn head_ref(&self) -> StoreDeviceHeadRef {
-        StoreDeviceHeadRef {
-            head_hash: self.head.head_hash(),
-            object: self.head_object.clone(),
-        }
     }
 
     pub fn acknowledgement_remote_objects(
@@ -368,7 +431,26 @@ impl PreparedStoreOperationCommit {
                 self.reference.clone(),
             )
             .map_err(PreparedCommitError::from)?;
-        self.retained_authority_remote_objects(vec![authority])
+        let mut authorities = vec![authority];
+        let retained = self
+            .history_evidence
+            .acknowledgement
+            .as_ref()
+            .ok_or_else(|| {
+                PreparedCommitError::Invariant(
+                    "prepared acknowledgement omits its retained proof".into(),
+                )
+            })?;
+        retained.validate_predecessors()?;
+        for (reference, value) in &retained.predecessors {
+            let bytes = value.to_bytes();
+            authorities.push(
+                crate::remote_object::RemoteObjectRecord::candidate_activated_store_acknowledgement(
+                    reference.clone(), &bytes, &bytes, self.reference.clone(),
+                )?,
+            );
+        }
+        self.retained_authority_remote_objects(authorities)
     }
 
     pub fn circle_acknowledgement_remote_objects(
@@ -432,32 +514,9 @@ impl PreparedStoreOperationCommit {
                 ));
             }
         }
-        let mut objects = self.candidate_remote_objects()?;
+        let mut objects = vec![self.candidate_remote_object()?];
         objects.extend(authorities);
         Ok(objects)
-    }
-
-    pub fn adopt_merge_head(
-        &mut self,
-        winner: StoreDeviceHead,
-        object: ExactObjectRef,
-    ) -> Result<(), PreparedCommitError> {
-        let current = &mut self.head;
-        let current_object = &mut self.head_object;
-        if winner.commit != self.common.reference
-            || object.slot() != current_object.slot()
-            || object == *current_object
-            || winner.author_registration != current.author_registration
-            || winner.successor.activation != current.successor.activation
-            || winner.successor.predecessor != current.successor.predecessor
-        {
-            return Err(PreparedCommitError::Invariant(
-                "alternate Merge head differs from the prepared activation point".to_string(),
-            ));
-        }
-        *current = winner;
-        *current_object = object;
-        Ok(())
     }
 
     pub fn attach_merge_membership_proof_with(
@@ -481,7 +540,7 @@ impl PreparedStoreOperationCommit {
             ));
         }
         let resolution = match &publication.entry.change {
-            super::membership::MembershipChange::ResolutionActivation { resolution } => {
+            super::membership::StoreAuthorityChange::ResolutionActivation { resolution } => {
                 let value = resolution_value.ok_or_else(|| {
                     PreparedCommitError::Invariant(
                         "Merge resolution activation lacks its exact resolution proof".to_string(),
@@ -505,7 +564,6 @@ impl PreparedStoreOperationCommit {
             super::store_commit::RetainedMergeMembershipProof {
                 commit: reference,
                 commit_value: commit,
-                announcement: None,
                 entry: publication.entry_ref.clone(),
                 entry_value: publication.entry.clone(),
                 head: publication.head_ref.clone(),

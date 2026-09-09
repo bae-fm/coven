@@ -9,12 +9,11 @@ use coven_protocol::circle_activation::{
     verify_control_context_for_verified_commit, VerifiedCircleAccess, VerifiedCircleActive,
     VerifiedCircleReference,
 };
-use coven_protocol::circle_journal::{CircleOperationJournal, CircleOperationPolicy};
-use coven_protocol::objects::StoreObjectError;
-use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
+use coven_protocol::circle_journal::CircleOperationJournal;
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
-    commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreDeviceRegistration,
+    commit_semantic_prefix, StoreBatchCommit, StoreDeviceRegistration,
 };
 use coven_storage::CloudSyncObjectStorage;
 use std::collections::BTreeSet;
@@ -22,25 +21,22 @@ use std::collections::BTreeSet;
 pub(super) struct CircleCandidatePublisher<'operation, 'storage> {
     database: StoreDatabase,
     storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
-    membership: coven_protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
-    history: super::VerifiedCircleHistory<'operation, 'storage>,
+    writer: &'operation mut crate::sync::store::AuthorizedWriterOperation<'storage>,
 }
 
 impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
     pub(super) fn new(
         database: StoreDatabase,
         storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
-        membership: coven_protocol::membership::MembershipChain,
         local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
-        history: super::VerifiedCircleHistory<'operation, 'storage>,
+        writer: &'operation mut crate::sync::store::AuthorizedWriterOperation<'storage>,
     ) -> Self {
         Self {
             database,
             storage,
-            membership,
             local_writer,
-            history,
+            writer,
         }
     }
 
@@ -64,7 +60,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         }
         let creation = journal.operation().creation.clone();
         let store_root_hash = creation.control.value.store_root_hash;
-        if self.history.root().store_root_hash != store_root_hash {
+        if self.writer.store_root().store_root_hash != store_root_hash {
             return Err(CircleOperationError::InvalidState(
                 "Circle commit names a different Store root".to_string(),
             ));
@@ -72,10 +68,11 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         let circle_encryption =
             EncryptionService::from(MasterKeyring::from_serialized(&creation.keyring)?);
         let verified_commit = self
-            .history
+            .writer
+            .circle_history()
             .authenticate_commit_bytes(
-                &journal.operation().commit_ref,
-                &journal.operation().commit_bytes,
+                journal.operation().commit_ref(),
+                &journal.operation().commit().to_bytes(),
             )
             .await?;
         let author = verified_commit.author().clone();
@@ -116,34 +113,11 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 .await?;
             return Err(CircleOperationError::Blocked { circle_id, block });
         }
-        {
-            let CircleOperationPolicy {
-                head,
-                history_evidence,
-            } = &journal.operation().policy;
-            let prepared_head = journal
-                .operation()
-                .prepared_objects
-                .get("store-head")
-                .ok_or_else(|| {
-                    CircleOperationError::JournalState(
-                        "Merge Circle operation lacks its prepared Store head".to_string(),
-                    )
-                })?;
-            coven_protocol::store_commit::StoreDeviceHead::parse_at(
-                &head.to_bytes(),
-                store_root_hash,
-                &author,
-                &journal.operation().commit_ref,
-            )
-            .map_err(CircleOperationError::from)?;
-            prepared_head
-                .verify(&head.to_bytes())
-                .map_err(CircleOperationError::from)?;
-            history_evidence
-                .validate_for(&journal.operation().commit_ref, commit)
-                .map_err(CircleOperationError::from)?;
-        }
+        journal
+            .operation()
+            .store_commit
+            .validate_closed_shape()
+            .map_err(coven_protocol::circle_journal::CircleJournalError::from)?;
 
         let CircleTransitionPolicyObjects {
             roster,
@@ -470,7 +444,11 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         }
         let verified = self
             .local_writer
-            .load_circle_activations(&mut self.history, &verified_commit, routing_key)
+            .load_circle_activations(
+                &mut self.writer.circle_history(),
+                &verified_commit,
+                routing_key,
+            )
             .await?;
         let expected =
             expected_local_circle_activation(&creation, reference, &author.author_pubkey)?;
@@ -480,15 +458,13 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             ));
         }
         {
-            // Creating the head takes a position on this device's own stream, and
-            // the activation below is what records the position as taken. A writer
-            // that read the position between the two would compose against one this
-            // operation has already claimed, so both run on one turn.
+            // Publishing the commit and advancing the shared Store position belong
+            // to one authorship turn so another local operation cannot compose from
+            // a position this operation has already claimed.
             let _authorship = self.database.author_own_stream().await;
-            let head = journal.operation().policy.head.clone();
-            let commit_bytes = journal.operation().commit_bytes.clone();
-            let commit_hash = journal.operation().commit_ref.commit_hash;
-            let stream_id = journal.operation().commit_ref.coord.stream_id;
+            let commit_bytes = journal.operation().commit().to_bytes();
+            let commit_hash = journal.operation().commit_ref().commit_hash;
+            let stream_id = journal.operation().commit_ref().coord.stream_id;
             self.append_step(
                 &mut journal,
                 "store-commit",
@@ -505,60 +481,20 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 &commit_bytes,
             )
             .await?;
-            // A different writer may already hold this device's create-once head
-            // slot. Observe and verify the occupant before declaring the position
-            // lost; only a verified winner blocks this operation. Any invalid
-            // occupant remains a loud storage or verification failure.
-            let published_head = self
-                .append_step(
-                    &mut journal,
-                    "store-head",
-                    &ProtocolObjectContext::signed_plaintext(
-                        store_root_hash,
-                        ProtocolObjectDomain::StoreHead,
-                    ),
-                    &head_slot_prefix(
-                        &head.author_registration.device_id.to_string(),
-                        commit.seq(),
-                    ),
-                    &head.to_bytes(),
-                )
-                .await;
-            if matches!(
-                &published_head,
-                Err(CircleOperationError::Object(StoreObjectError::Storage(
-                    StorageError::SlotCollision(_)
-                )))
-            ) {
-                let prepared_head = journal
-                    .operation()
-                    .prepared_objects
-                    .get("store-head")
-                    .ok_or_else(|| {
-                        CircleOperationError::JournalState(
-                            "Merge Circle operation lacks its prepared Store head".to_string(),
-                        )
-                    })?;
-                if let crate::sync::store::merge_conflict::ExcludedCandidateHeadObservation::MergeWinner(
-                    winner,
-                ) = self
-                    .history
-                    .observe_excluded_candidate_head(&head, &verified_commit, prepared_head)
-                    .await?
-                {
-                    let block = coven_protocol::circle::CircleOperationBlock::PositionLost {
-                        winner_commit: winner.winner().commit.commit_hash,
-                    };
-                    self.database
-                        .block_circle_operation(operation_id, block.clone())
-                        .await?;
-                    return Err(CircleOperationError::Blocked { circle_id, block });
-                }
-            }
-            published_head?;
-            self.database
-                .activate_circle_operation(journal, verified)
+            let accepted_transition = self
+                .writer
+                .publish_store_commit_publication(&verified_commit)
+                .await?
+                .require_published()?;
+            let materialization = self
+                .database
+                .activate_circle_operation(journal, verified, accepted_transition)
                 .await?;
+            if let Some(materialization) = materialization {
+                self.writer
+                    .circle_history()
+                    .admit_materialized_publication(&materialization)?;
+            }
         }
         Ok(())
     }
@@ -568,7 +504,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         commit: &StoreBatchCommit,
         author: &StoreDeviceRegistration,
     ) -> Result<CurrentMergeAuthority, CircleOperationError> {
-        if let Some(conflict) = self.membership.conflict() {
+        if let Some(conflict) = self.writer.membership().conflict() {
             return Err(CircleOperationError::InvalidState(
                 crate::sync::store::membership::MembershipOpsError::SemanticConflict(Box::new(
                     conflict.clone(),
@@ -576,7 +512,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 .to_string(),
             ));
         }
-        if self.history.root().store_root_hash != commit.store_root_hash {
+        if self.writer.store_root().store_root_hash != commit.store_root_hash {
             return Err(CircleOperationError::InvalidState(
                 "Circle commit names a different Store root".to_string(),
             ));
@@ -587,7 +523,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             )
         })?;
         let coven_protocol::membership::MembershipStatus::Resolved(resolved) =
-            self.membership.status()
+            self.writer.membership().status()
         else {
             return Err(CircleOperationError::InvalidState(
                 "current Store membership is conflicted".to_string(),
@@ -715,7 +651,7 @@ fn verify_prepared_objects_are_signed(
     let operation = journal.operation();
     let objects = reference.objects();
     let mut signed = BTreeSet::<coven_protocol::objects::ExactObjectRef>::from([
-        operation.commit_ref.object.clone(),
+        operation.commit_ref().object.clone(),
         objects.control.clone(),
     ]);
     signed.insert(reference.head_object().clone());
@@ -751,7 +687,7 @@ fn verify_prepared_objects_are_signed(
         }
     }
     for (step, object) in &operation.prepared_objects {
-        if step != "store-head" && !signed.contains(object) {
+        if !signed.contains(object) {
             return Err(CircleOperationError::JournalState(format!(
                 "Circle upload step {step:?} names an object outside its signed Store commit graph"
             )));

@@ -72,6 +72,27 @@ impl VerifiedStreamActivationPrefix {
         }
     }
 
+    pub fn include(
+        &mut self,
+        verified: &VerifiedStreamActivations,
+    ) -> Result<(), crate::store_commit::StoreProtocolError> {
+        for activation in verified.as_slice() {
+            let value = (activation.clone(), verified.activating_commit().clone());
+            match self.by_activation.entry(activation.activation_id()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(value);
+                }
+                std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &value => {}
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    return Err(crate::store_commit::StoreProtocolError::Malformed(
+                        "verified stream activation prefix contains conflicting activation authority".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn activation(
         &self,
         activation_id: StreamActivationId,
@@ -198,6 +219,16 @@ impl VerifiedCircleActivations {
 
     pub fn bootstrap_pending_exclusions(&self) -> &[LocalCircleExclusion] {
         &self.bootstrap_pending_exclusions
+    }
+
+    pub fn without_local_access(mut self) -> Self {
+        for circle in &mut self.circles {
+            circle.local_access = None;
+        }
+        self.bootstraps.clear();
+        self.local_exclusions.clear();
+        self.bootstrap_pending_exclusions.clear();
+        self
     }
 
     pub fn to_retained(&self) -> Result<Vec<u8>, CircleStateError> {

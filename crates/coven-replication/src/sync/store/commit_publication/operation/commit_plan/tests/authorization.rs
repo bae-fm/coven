@@ -196,7 +196,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         .expect("removal-witnessing predecessor exists");
     let predecessor_membership = &prepared.commit.value.membership_state;
     assert_eq!(predecessor_membership.heads, after_removal.head_refs());
-    let predecessor = prepared.head.value.commit.clone();
+    let predecessor = prepared.commit.value.reference().clone();
     assert_eq!(owner_device.drain_store_writes().await.unwrap(), 1);
 
     let writer_device = store
@@ -220,7 +220,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
 }
 
 #[tokio::test]
-async fn merge_outbound_authorization_admits_direct_membership_after_its_predecessor() {
+async fn merge_outbound_authorization_excludes_membership_accepted_after_its_predecessor() {
     let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
     let owner = UserKeypair::generate();
@@ -228,7 +228,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
     let store = TestStore::create(
         &owner_db,
         owner_db_store_dir.clone(),
-        "new-direct-predecessor-membership",
+        "later-admission-predecessor-membership",
         owner.clone(),
         crate::sync::test_helpers::test_cloud_home(),
     )
@@ -254,12 +254,16 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         .await
         .expect("load predecessor commit")
         .expect("predecessor commit exists")
-        .head
-        .value
         .commit
+        .value
+        .reference()
         .clone();
     assert_eq!(owner_device.drain_store_writes().await.unwrap(), 1);
 
+    let before_admission = owner_device
+        .membership_for_test()
+        .await
+        .expect("load membership at the exact predecessor");
     let new_member = UserKeypair::generate();
     let new_member_pubkey = pubkey_hex(&new_member);
     store
@@ -271,15 +275,17 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
             None,
             coven_protocol::membership::MemberRole::Member,
             &encryption,
-            "New Direct membership",
+            "Later accepted membership",
         )
         .await
-        .expect("publish new Direct membership");
+        .expect("publish later accepted membership");
     let candidate = owner_device
         .membership_for_test()
         .await
-        .expect("load candidate with new Direct membership");
+        .expect("load candidate with later accepted membership");
     assert!(candidate.can_write_now(&new_member_pubkey));
+    assert!(!before_admission.can_write_now(&new_member_pubkey));
+    assert_ne!(before_admission.head_refs(), candidate.head_refs());
 
     let coven_protocol::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
     let order = coven_protocol::store_commit::StoreCommitOrder {
@@ -290,10 +296,17 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
     let authorization = owner_device
         .authorize_retained_outbound_for_test(&order, candidate.head_refs())
         .await
-        .expect("authorize membership that causally extends the predecessor");
+        .expect("authorize the exact predecessor despite later known membership");
 
-    assert_eq!(authorization.membership.head_refs(), candidate.head_refs());
-    assert!(authorization.membership.can_write_now(&new_member_pubkey));
+    assert_eq!(
+        authorization.membership.head_refs(),
+        before_admission.head_refs()
+    );
+    assert_eq!(
+        authorization.membership.resolution_refs(),
+        before_admission.resolution_refs(),
+    );
+    assert!(!authorization.membership.can_write_now(&new_member_pubkey));
 }
 
 #[tokio::test]

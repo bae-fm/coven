@@ -6,6 +6,13 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::*;
 
+/// Package keys resolved against the installed state and verified prepared controls.
+/// Successor keys still require the historical roster to authorize the package author.
+pub enum CirclePackageAccess {
+    Exact(coven_protocol::circle_activation::CircleEpochAccess),
+    Historical(String),
+}
+
 /// The three states a Circle control's activating commit can be in when resolved
 /// from the retained authority: not an activation at all, a known activation whose
 /// materialization has been reclaimed, or a retained activation with its commit.
@@ -157,40 +164,82 @@ impl StoreSession<'_> {
         activation.epoch_access().map_err(DbError::from)
     }
 
-    fn circle_historical_package_keyring(
+    fn circle_package_access(
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
         circle_id: coven_protocol::circle::CircleId,
         expected_control: &coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
-    ) -> Result<Option<String>, DbError> {
-        let Some(state) = super::circle_operations::circle_current_state_on(self.conn, circle_id)?
+        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+    ) -> Result<Option<CirclePackageAccess>, DbError> {
+        let Some(state) =
+            self.circle_current_state_with_activations(root, circle_id, activations)?
         else {
             return Ok(None);
         };
+        if state.is_deleted() {
+            return Ok(None);
+        }
+        let exact = match activations.iter().find(|activation| {
+            activation.circle_id == circle_id && &activation.control.coord == expected_control
+        }) {
+            Some(activation) => activation.epoch_access().map_err(DbError::from)?,
+            None => self.circle_epoch_access(root, circle_id, expected_control)?,
+        };
+        if let Some(access) = exact {
+            // Exact access remains valid for packages within the accepted epoch
+            // cutoff even after a successor removes the local member.
+            return Ok(Some(CirclePackageAccess::Exact(access)));
+        }
+        self.circle_historical_package_keyring(
+            root,
+            state,
+            expected_control,
+            expected_key_fingerprint,
+            activations,
+        )
+        .map(|keyring| keyring.map(CirclePackageAccess::Historical))
+    }
+
+    fn circle_historical_package_keyring(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        state: coven_protocol::circle_activation::CircleCurrentState,
+        expected_control: &coven_protocol::circle::CircleControlCoord,
+        expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
+        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+    ) -> Result<Option<String>, DbError> {
+        let circle_id = state.circle_id();
+        if !state.verify() {
+            return Err(DbError::Message(
+                "invalid projected Circle package state".to_string(),
+            ));
+        }
         let Some(current) = state
             .authoring_state()
             .or_else(|| state.closing_authoring_state())
         else {
             return Ok(None);
         };
-        let Some(historical) = StoreDatabase::verified_circle_activation_on(
+        let Some(historical) = verified_circle_activation_with_prefix_on(
             crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
             self.verified_store_authority,
             root,
             circle_id,
             expected_control,
+            activations,
         )?
         else {
             return Ok(None);
         };
-        if !StoreDatabase::verified_circle_control_covers_on(
+        if !verified_circle_control_covers_with_prefix_on(
             crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
             self.verified_store_authority,
             root,
             circle_id,
             &current.control,
             expected_control,
+            activations,
         )? || current.control.value.epoch_id() != historical.control.value.epoch_id()
             || current.control.value.key_fingerprint() != expected_key_fingerprint
             || historical.control.value.key_fingerprint() != expected_key_fingerprint
@@ -217,6 +266,144 @@ impl StoreSession<'_> {
             return Ok(None);
         }
         Ok(Some(keyring.clone()))
+    }
+
+    fn circle_current_state_with_activations(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+    ) -> Result<Option<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
+        use coven_protocol::circle_activation::CircleCurrentState;
+
+        let records = StoreRecords::new(self.conn, self.store_dir);
+        let mut pending = std::collections::BTreeMap::new();
+        for activation in activations
+            .iter()
+            .filter(|activation| activation.circle_id == circle_id)
+        {
+            if activation.control.value.store_root_hash != root.store_root_hash
+                || activation.reference.circle_id() != circle_id
+                || activation.reference.control() != &activation.control.coord
+            {
+                return Err(DbError::Message(
+                    "prepared Circle activation differs from its Store or control reference"
+                        .to_string(),
+                ));
+            }
+            let next = CircleCurrentState::from_verified_reference(activation)?;
+            let coordinate = activation.control.coord.clone();
+            if let Some((prior, _)) = pending.insert(coordinate.clone(), (activation, next)) {
+                if prior != activation {
+                    return Err(DbError::Message(format!(
+                        "Circle {circle_id} prepared history has conflicting copies of control {coordinate:?}"
+                    )));
+                }
+            }
+        }
+        let dependencies = pending
+            .iter()
+            .map(|(coordinate, (activation, _))| {
+                let dependencies = activation
+                    .control
+                    .value
+                    .access_epoch()
+                    .covered_control_heads
+                    .iter()
+                    .map(|head| &head.coord)
+                    .filter(|coordinate| pending.contains_key(*coordinate))
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                (coordinate.clone(), dependencies)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut applied = std::collections::BTreeSet::new();
+        let mut state = super::circle_operations::circle_current_state_on(self.conn, circle_id)?;
+        while !pending.is_empty() {
+            let coordinate = coven_protocol::causal_grants::canonical_ready_checkpoint(
+                pending
+                    .keys()
+                    .map(|coordinate| (coordinate, &dependencies[coordinate])),
+                &applied,
+            )
+            .ok_or_else(|| {
+                DbError::Message(format!(
+                    "Circle {circle_id} prepared controls contain a causal cycle"
+                ))
+            })?;
+            let (activation, next) = pending.remove(&coordinate).ok_or_else(|| {
+                DbError::Message("ready prepared Circle control is absent".to_string())
+            })?;
+            applied.insert(coordinate);
+            let Some(current) = state.take() else {
+                if !activation.control.value.is_founder() {
+                    return Err(DbError::Message(format!(
+                        "Circle {circle_id} current state is absent for a prepared successor"
+                    )));
+                }
+                state = Some(next);
+                continue;
+            };
+            if current
+                .resolved_control()
+                .is_some_and(|head| head.coordinate() == &activation.control.coord)
+            {
+                // Snapshot recipient access can enrich the installed public
+                // control without publishing that control a second time.
+                state = Some(if activation.local_access.is_some() {
+                    next
+                } else {
+                    current
+                });
+                continue;
+            }
+            let heads = match &current {
+                CircleCurrentState::ControlConflict { branches } => branches
+                    .iter()
+                    .map(|branch| branch.coordinate())
+                    .collect::<Vec<_>>(),
+                _ => vec![current
+                    .resolved_control()
+                    .ok_or_else(|| {
+                        DbError::Message("resolved Circle control is absent".to_string())
+                    })?
+                    .coordinate()],
+            };
+            let mut already_covered = false;
+            for head in heads {
+                let covering = verified_circle_activation_with_prefix_on(
+                    records,
+                    self.verified_store_authority,
+                    root,
+                    circle_id,
+                    head,
+                    activations,
+                )?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "Circle {circle_id} current control has no verified activation"
+                    ))
+                })?;
+                if verified_circle_control_covers_with_prefix_on(
+                    records,
+                    self.verified_store_authority,
+                    root,
+                    circle_id,
+                    &covering.control,
+                    &activation.control.coord,
+                    activations,
+                )? {
+                    already_covered = true;
+                    break;
+                }
+            }
+            state = Some(if already_covered {
+                current
+            } else {
+                current.advance(next)?
+            });
+        }
+        Ok(state)
     }
 
     fn verified_circle_activation_context(
@@ -363,9 +550,75 @@ impl StoreSession<'_> {
             prior,
         )
     }
+
+    fn verify_circle_bootstrap_blob_authority(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        current: &coven_protocol::circle::PreparedCircleControl,
+        blobs: &[coven_protocol::blob::RowBlobRef],
+        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+    ) -> Result<(), DbError> {
+        let records = StoreRecords::new(self.conn, self.store_dir);
+        for binding in blobs {
+            let coven_protocol::blob::RowBlobAuthority::Remote(
+                coven_protocol::audience_package::PackageAudience::Circle {
+                    circle_id,
+                    control,
+                    key_fingerprint,
+                },
+            ) = binding.authority()
+            else {
+                return Err(DbError::Message(
+                    "Circle bootstrap row blob lacks Circle package authority".to_string(),
+                ));
+            };
+            let activation = verified_circle_activation_with_prefix_on(
+                records,
+                self.verified_store_authority,
+                root,
+                *circle_id,
+                control,
+                activations,
+            )?
+            .ok_or_else(|| {
+                DbError::Message("Circle bootstrap blob authority is not retained".to_string())
+            })?;
+            if *key_fingerprint != activation.control.value.key_fingerprint()
+                || !verified_circle_control_covers_with_prefix_on(
+                    records,
+                    self.verified_store_authority,
+                    root,
+                    *circle_id,
+                    current,
+                    control,
+                    activations,
+                )?
+            {
+                return Err(DbError::Message(
+                    "Circle bootstrap blob authority is outside its control history".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl StoreDatabase {
+    /// Verify bootstrap blob authority against retained controls and the caller's
+    /// verified candidate predecessor controls in one ancestry traversal owner.
+    pub async fn verify_circle_bootstrap_blob_authority(
+        &self,
+        root: coven_protocol::store_commit::StoreRootRef,
+        current: coven_protocol::circle::PreparedCircleControl,
+        blobs: Vec<coven_protocol::blob::RowBlobRef>,
+        activations: Vec<coven_protocol::circle_activation::VerifiedCircleReference>,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| {
+            session.verify_circle_bootstrap_blob_authority(&root, &current, &blobs, &activations)
+        })
+        .await
+    }
+
     /// Whether one activated Circle control strictly covers another in the retained
     /// control lineage — `covering` is a proper successor of `covered`. Bootstrap
     /// reclamation uses this to prove a removed recipient lost authority under a
@@ -401,19 +654,21 @@ impl StoreDatabase {
         .await
     }
 
-    pub async fn circle_historical_package_keyring(
+    pub async fn circle_package_access(
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
         circle_id: coven_protocol::circle::CircleId,
         expected_control: coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
-    ) -> Result<Option<String>, DbError> {
+        activations: Vec<coven_protocol::circle_activation::VerifiedCircleReference>,
+    ) -> Result<Option<CirclePackageAccess>, DbError> {
         self.call_store(move |session| {
-            session.circle_historical_package_keyring(
+            session.circle_package_access(
                 &root,
                 circle_id,
                 &expected_control,
                 expected_key_fingerprint,
+                &activations,
             )
         })
         .await
@@ -532,12 +787,13 @@ impl StoreDatabase {
             else {
                 continue;
             };
-            let materialization = Self::load_retained_merge_materialization_by_ref_on(
-                records,
-                root,
-                authority,
-                &activation_commit,
-            )?;
+            let materialization =
+                authority.retained_materialization_by_ref_on(records, &activation_commit)?;
+            if materialization.root() != root {
+                return Err(DbError::Message(
+                    "Circle activation belongs to another Store root".to_string(),
+                ));
+            }
             let reference = materialization.circle_activation(circle_id, coord)?;
             retained.push((coord.clone(), reference.control));
         }
@@ -583,12 +839,12 @@ impl StoreDatabase {
         else {
             return Ok(None);
         };
-        let retained = Self::load_retained_merge_materialization_by_ref_on(
-            records,
-            root,
-            authority,
-            &activation_commit,
-        )?;
+        let retained = authority.retained_materialization_by_ref_on(records, &activation_commit)?;
+        if retained.root() != root {
+            return Err(DbError::Message(
+                "Circle activation belongs to another Store root".to_string(),
+            ));
+        }
         retained.circle_activation(circle_id, control).map(Some)
     }
 
@@ -613,58 +869,110 @@ impl StoreDatabase {
         current: &coven_protocol::circle::PreparedCircleControl,
         prior: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
-        if current.value.circle_id != circle_id {
+        verified_circle_control_covers_with_prefix_on(
+            records,
+            authority,
+            root,
+            circle_id,
+            current,
+            prior,
+            &[],
+        )
+    }
+}
+
+fn verified_circle_activation_with_prefix_on(
+    records: StoreRecords<'_>,
+    authority: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
+    root: &coven_protocol::store_commit::StoreRootRef,
+    circle_id: coven_protocol::circle::CircleId,
+    coordinate: &coven_protocol::circle::CircleControlCoord,
+    activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
+    let mut matching = activations.iter().filter(|activation| {
+        activation.circle_id == circle_id && &activation.control.coord == coordinate
+    });
+    if let Some(activation) = matching.next() {
+        if activation.control.value.store_root_hash != root.store_root_hash
+            || activation.reference.circle_id() != circle_id
+            || activation.reference.control() != coordinate
+            || !activation.control.verify()
+        {
             return Err(DbError::Message(
-                "Circle control lineage starts outside its Circle".to_string(),
+                "prepared Circle lineage differs from its Store or control reference".to_string(),
             ));
         }
-        if current.coord == *prior {
+        if matching.any(|other| other != activation) {
+            return Err(DbError::Message(format!(
+                "Circle {circle_id} prepared history has conflicting copies of control {coordinate:?}"
+            )));
+        }
+        return Ok(Some(activation.clone()));
+    }
+    StoreDatabase::verified_circle_activation_on(records, authority, root, circle_id, coordinate)
+}
+
+fn verified_circle_control_covers_with_prefix_on(
+    records: StoreRecords<'_>,
+    authority: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
+    root: &coven_protocol::store_commit::StoreRootRef,
+    circle_id: coven_protocol::circle::CircleId,
+    current: &coven_protocol::circle::PreparedCircleControl,
+    prior: &coven_protocol::circle::CircleControlCoord,
+    activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+) -> Result<bool, DbError> {
+    if current.value.circle_id != circle_id {
+        return Err(DbError::Message(
+            "Circle control lineage starts outside its Circle".to_string(),
+        ));
+    }
+    if current.coord == *prior {
+        return Ok(true);
+    }
+    let mut pending = current
+        .value
+        .access_epoch()
+        .covered_control_heads
+        .iter()
+        .map(|head| (current.clone(), head.coord.clone()))
+        .collect::<Vec<_>>();
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some((successor, coordinate)) = pending.pop() {
+        if !visited.insert(coordinate.clone()) {
+            continue;
+        }
+        let predecessor = verified_circle_activation_with_prefix_on(
+            records,
+            authority,
+            root,
+            circle_id,
+            &coordinate,
+            activations,
+        )?
+        .ok_or_else(|| {
+            DbError::Message(format!(
+                "Circle {circle_id} control lineage omits retained control {coordinate:?}"
+            ))
+        })?;
+        if !successor.value.causally_covers(&predecessor.control.value) {
+            return Err(DbError::Message(format!(
+                "Circle {circle_id} control lineage contains a non-causal edge"
+            )));
+        }
+        if predecessor.control.coord == *prior {
             return Ok(true);
         }
-        let mut pending = current
-            .value
-            .access_epoch()
-            .covered_control_heads
-            .iter()
-            .map(|head| (current.clone(), head.coord.clone()))
-            .collect::<Vec<_>>();
-        let mut visited = std::collections::BTreeSet::new();
-        while let Some((successor, coordinate)) = pending.pop() {
-            if !visited.insert(coordinate.clone()) {
-                continue;
-            }
-            let predecessor = Self::verified_circle_activation_on(
-                records,
-                authority,
-                root,
-                circle_id,
-                &coordinate,
-            )?
-            .ok_or_else(|| {
-                DbError::Message(format!(
-                    "Circle {circle_id} control lineage omits retained control {coordinate:?}"
-                ))
-            })?;
-            if !successor.value.causally_covers(&predecessor.control.value) {
-                return Err(DbError::Message(format!(
-                    "Circle {circle_id} control lineage contains a non-causal edge"
-                )));
-            }
-            if predecessor.control.coord == *prior {
-                return Ok(true);
-            }
-            pending.extend(
-                predecessor
-                    .control
-                    .value
-                    .access_epoch()
-                    .covered_control_heads
-                    .iter()
-                    .map(|head| (predecessor.control.clone(), head.coord.clone())),
-            );
-        }
-        Ok(false)
+        pending.extend(
+            predecessor
+                .control
+                .value
+                .access_epoch()
+                .covered_control_heads
+                .iter()
+                .map(|head| (predecessor.control.clone(), head.coord.clone())),
+        );
     }
+    Ok(false)
 }
 
 pub(crate) fn circle_blob_opening_protection_on(

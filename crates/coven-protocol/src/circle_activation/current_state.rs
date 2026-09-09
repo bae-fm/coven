@@ -105,6 +105,24 @@ impl CircleCurrentState {
         candidate_family: CandidateFamilyId,
         activation: &VerifiedCircleReference,
     ) -> Result<Self, CircleStateError> {
+        if activation
+            .local_access
+            .as_ref()
+            .is_some_and(|access| access.leaf.value.candidate_family != candidate_family)
+        {
+            return Err(CircleStateError::Invariant(
+                "Circle access belongs to another candidate family".to_string(),
+            ));
+        }
+        Self::from_verified_reference(activation)
+    }
+
+    /// Project an already verified activation without its activating commit.
+    /// The access leaf owns its candidate family; commit acceptance separately
+    /// binds that family through `from_verified`.
+    pub fn from_verified_reference(
+        activation: &VerifiedCircleReference,
+    ) -> Result<Self, CircleStateError> {
         let current = CircleCurrentControl::from_verified(activation);
         // A deletion is terminal and carries no live access material; it reduces
         // to Deleted regardless of any retained access leaf.
@@ -128,7 +146,7 @@ impl CircleCurrentState {
             }) => Self::Inactive(Box::new(CircleInactiveState {
                 current,
                 access: CircleInactiveAccess::Inactive {
-                    candidate_family,
+                    candidate_family: leaf.value.candidate_family,
                     access: leaf.value.clone(),
                 },
             })),
@@ -139,7 +157,7 @@ impl CircleCurrentState {
             }) => {
                 let accessible = Box::new(CircleAccessibleState {
                     current,
-                    candidate_family,
+                    candidate_family: leaf.value.candidate_family,
                     access: leaf.value.clone(),
                     roster: active.roster.clone(),
                     metadata: active.metadata.clone(),

@@ -17,6 +17,8 @@ pub enum OwnerPromotionJournalError {
     PreparedCommit(#[from] crate::prepared_commit::PreparedCommitError),
     #[error("Owner promotion journal candidate: {0}")]
     Candidate(#[from] crate::remote_object::RemoteObjectRecordError),
+    #[error("Owner promotion journal protocol: {0}")]
+    Protocol(#[from] crate::store_commit::StoreProtocolError),
 }
 
 const TARGET_PREFIX: &str = "owner_promotion_target/";
@@ -38,7 +40,8 @@ use crate::store_commit::{
     membership_head_slot_prefix, owner_recovery_semantic_prefix, GrantStreamAnchor,
     OwnerPromotionAcceptance, OwnerPromotionAnchors, OwnerPromotionFinalization, OwnerPromotionId,
     OwnerPromotionRequest, OwnerPromotionRequestActivation, OwnerPromotionStaleReason,
-    StoreDeviceRegistrationRef, StreamActivation, StreamAnchorDomain,
+    RetainedOwnerPromotionRequestPublication, StoreDeviceRegistrationRef, StreamActivation,
+    StreamAnchorDomain,
 };
 use crate::wrapped_store_key::PreparedWrappedStoreKey;
 
@@ -60,17 +63,17 @@ pub enum OwnerPromotionJournalState {
         request: OwnerPromotionRequest,
         candidate: Box<PreparedStoreOperationCommit>,
     },
+    RequestAccepted {
+        request: OwnerPromotionRequest,
+        candidate: Box<PreparedStoreOperationCommit>,
+        publication: RetainedOwnerPromotionRequestPublication,
+    },
     AwaitingAcceptance {
         request: OwnerPromotionRequest,
         activation: OwnerPromotionRequestActivation,
     },
     AcceptanceReady {
         acceptance: OwnerPromotionAcceptance,
-    },
-    MergeMembershipPrepared {
-        acceptance: OwnerPromotionAcceptance,
-        wrapped_key: PreparedWrappedStoreKey,
-        transition: Box<PreparedMembershipTransition>,
     },
     MergeHeadPrepared {
         acceptance: OwnerPromotionAcceptance,
@@ -111,25 +114,7 @@ pub enum OwnerPromotionStaleEvidence {
     Candidate {
         nonactivation: crate::remote_object::CandidateNonactivation,
         receipt: Box<OwnerPromotionFinalizationReceipt>,
-        /// Every object the lost candidate owns, so the deletion this state owes
-        /// is stated rather than re-derived: whoever next reads this journal —
-        /// the retry of this attempt, or the attempt that replaces it — finishes
-        /// an interrupted cleanup from the list the transition validated.
-        published: Vec<crate::objects::ExactObjectRef>,
     },
-}
-
-pub fn owner_promotion_published_objects(
-    candidate: &PreparedStoreOperationCommit,
-    transition: &PreparedMembershipTransition,
-    publication: &PreparedMembershipPublication,
-    wrapped_key: &PreparedWrappedStoreKey,
-) -> Result<Vec<crate::objects::ExactObjectRef>, OwnerPromotionJournalError> {
-    Ok(candidate
-        .merge_owner_promotion_remote_objects(transition, publication, wrapped_key)?
-        .iter()
-        .map(|remote| remote.record().object().clone())
-        .collect())
 }
 
 fn prepared_candidate_is_exact_request(
@@ -157,7 +142,7 @@ fn request_activation_matches_candidate(
 ) -> bool {
     prepared_candidate_is_exact_request(candidate, request)
         && activation.commit == candidate.reference
-        && candidate.head_ref() == activation.head
+        && activation.publication.store_root_hash == request.store_root_hash
 }
 
 fn nonactivation_matches_candidate(
@@ -225,7 +210,7 @@ fn transition_matches_acceptance(
         && entry.previous_hash == *previous_hash
         && matches!(
             &entry.change,
-            crate::membership::MembershipChange::SetMember {
+            crate::membership::StoreAuthorityChange::SetMember {
                 user_pubkey,
                 role: StoreMembershipRoleGrant::Owner {
                     recovery: crate::membership::OwnerRecoveryAnchorRef::Promotion {
@@ -304,7 +289,7 @@ fn finalization_receipt_matches_acceptance(
         else {
             return false;
         };
-        let crate::membership::MembershipChange::SetMember { wrapped_key, .. } =
+        let crate::membership::StoreAuthorityChange::SetMember { wrapped_key, .. } =
             &publication.entry.change
         else {
             return false;
@@ -322,7 +307,7 @@ fn finalization_receipt_matches_acceptance(
                 .matches_head(&publication.head, &publication.head_ref)
             && matches!(
                 &publication.head.activation,
-                crate::membership::MembershipHeadActivation::StoreCommit { commit }
+                crate::membership::MembershipHeadActivation::StoreCommit { commit, .. }
                     if commit == &candidate.reference
             )
     }
@@ -495,6 +480,19 @@ impl OwnerPromotionJournal {
                 self.request_has_closed_shape(request)
                     && prepared_candidate_is_exact_request(candidate, request)
             }
+            OwnerPromotionJournalState::RequestAccepted {
+                request,
+                candidate,
+                publication,
+            } => {
+                publication.validate_for(&candidate.commit)?;
+                self.request_has_closed_shape(request)
+                    && request_activation_matches_candidate(
+                        request,
+                        candidate,
+                        publication.value.body(),
+                    )
+            }
             OwnerPromotionJournalState::AwaitingAcceptance {
                 request,
                 activation,
@@ -503,15 +501,6 @@ impl OwnerPromotionJournal {
             }
             OwnerPromotionJournalState::AcceptanceReady { acceptance } => {
                 self.acceptance_has_closed_shape(acceptance)
-            }
-            OwnerPromotionJournalState::MergeMembershipPrepared {
-                acceptance,
-                wrapped_key,
-                transition,
-            } => {
-                self.acceptance_has_closed_shape(acceptance)
-                    && wrapped_key_matches_acceptance(wrapped_key, acceptance)
-                    && transition_matches_acceptance(transition, &wrapped_key.reference, acceptance)
             }
             OwnerPromotionJournalState::MergeHeadPrepared {
                 acceptance,
@@ -532,7 +521,7 @@ impl OwnerPromotionJournal {
                         .matches_head(&publication.head, &publication.head_ref)
                     && matches!(
                         &publication.head.activation,
-                        crate::membership::MembershipHeadActivation::StoreCommit { commit }
+                        crate::membership::MembershipHeadActivation::StoreCommit { commit, .. }
                             if commit == &candidate.reference
                     )
             }
@@ -641,14 +630,31 @@ impl OwnerPromotionJournal {
             }
             (
                 OwnerPromotionJournalState::RequestPrepared { request, candidate },
+                OwnerPromotionJournalState::RequestAccepted {
+                    request: successor,
+                    candidate: successor_candidate,
+                    publication,
+                },
+            ) => {
+                request == successor
+                    && same_prepared_candidate(candidate, successor_candidate)
+                    && request_activation_matches_candidate(
+                        request,
+                        candidate,
+                        publication.value.body(),
+                    )
+            }
+            (
+                OwnerPromotionJournalState::RequestAccepted {
+                    request,
+                    publication,
+                    ..
+                },
                 OwnerPromotionJournalState::AwaitingAcceptance {
                     request: successor,
                     activation,
                 },
-            ) => {
-                request == successor
-                    && request_activation_matches_candidate(request, candidate, activation)
-            }
+            ) => request == successor && publication.value.body() == activation,
             (
                 OwnerPromotionJournalState::RequestPrepared { request, candidate },
                 OwnerPromotionJournalState::Nonactivated {
@@ -665,7 +671,7 @@ impl OwnerPromotionJournal {
             ) => request == acceptance.request.as_ref() && activation == &acceptance.activation,
             (
                 OwnerPromotionJournalState::AcceptanceReady { acceptance },
-                OwnerPromotionJournalState::MergeMembershipPrepared {
+                OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance: successor,
                     ..
                 },
@@ -686,36 +692,6 @@ impl OwnerPromotionJournal {
                     && matches!(
                         reason,
                         OwnerPromotionStaleReason::MergeFinalizationPointOccupied { .. }
-                    )
-            }
-            (
-                OwnerPromotionJournalState::MergeMembershipPrepared {
-                    acceptance,
-                    wrapped_key,
-                    transition,
-                },
-                OwnerPromotionJournalState::MergeHeadPrepared {
-                    acceptance: successor,
-                    wrapped_key: successor_key,
-                    transition: successor_transition,
-                    publication,
-                    candidate,
-                },
-            ) => {
-                acceptance == successor
-                    && wrapped_key.reference == successor_key.reference
-                    && transition.entry == publication.entry
-                    && transition.entry_ref == publication.entry_ref
-                    && transition.entry_ref == successor_transition.entry_ref
-                    && transition.transition == successor_transition.transition
-                    && merge_candidate_matches_finalization(candidate, transition, acceptance)
-                    && transition
-                        .transition
-                        .matches_head(&publication.head, &publication.head_ref)
-                    && matches!(
-                        &publication.head.activation,
-                        crate::membership::MembershipHeadActivation::StoreCommit { commit }
-                            if commit == &candidate.reference
                     )
             }
             (
@@ -748,7 +724,7 @@ impl OwnerPromotionJournal {
                         .matches_head(&successor_publication.head, &successor_publication.head_ref)
                     && matches!(
                         &successor_publication.head.activation,
-                        crate::membership::MembershipHeadActivation::StoreCommit { commit }
+                        crate::membership::MembershipHeadActivation::StoreCommit { commit, .. }
                             if commit == &successor_candidate.reference
                     )
             }
@@ -773,17 +749,16 @@ impl OwnerPromotionJournal {
                         .is_ok()
                     && matches!(
                         &publication.head.activation,
-                        crate::membership::MembershipHeadActivation::StoreCommit { commit }
+                        crate::membership::MembershipHeadActivation::StoreCommit { commit, .. }
                             if commit == &candidate.reference
                     )
             }
             (
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance,
-                    wrapped_key,
-                    transition,
                     publication,
                     candidate,
+                    ..
                 },
                 OwnerPromotionJournalState::Stale {
                     acceptance: successor,
@@ -798,20 +773,12 @@ impl OwnerPromotionJournal {
                         OwnerPromotionStaleEvidence::Candidate {
                             nonactivation,
                             receipt,
-                            published,
                         } if nonactivation_matches_candidate(candidate, nonactivation)
                             && receipt_matches_merge_preparation(
                                 receipt,
                                 candidate,
                                 publication,
                             )
-                            && owner_promotion_published_objects(
-                                candidate,
-                                transition,
-                                publication,
-                                wrapped_key,
-                            )
-                            .is_ok_and(|expected| expected == *published)
                     )
             }
             _ => false,
@@ -858,10 +825,36 @@ impl OwnerPromotionJournalPredecessor {
     pub fn transition_to(
         &self,
         next: &OwnerPromotionJournal,
-        remote_objects: Vec<crate::remote_object::ClosedRemoteObject>,
     ) -> Result<OwnerPromotionJournalTransition, OwnerPromotionJournalError> {
         let previous: OwnerPromotionJournal = serde_json::from_str(&self.previous_value)?;
         previous.validate_transition(next)?;
+        let remote_objects = match &next.state {
+            OwnerPromotionJournalState::RequestPrepared { candidate, .. } => {
+                vec![candidate.candidate_remote_object()?]
+            }
+            OwnerPromotionJournalState::RequestAccepted {
+                candidate,
+                publication,
+                ..
+            } => {
+                vec![crate::remote_object::RemoteObjectRecord::prepared_owner_promotion_request_publication(
+                    publication,
+                    &candidate.commit,
+                )?]
+            }
+            OwnerPromotionJournalState::MergeHeadPrepared {
+                wrapped_key,
+                transition,
+                publication,
+                candidate,
+                ..
+            } => candidate.merge_owner_promotion_remote_objects(
+                transition,
+                publication,
+                wrapped_key,
+            )?,
+            _ => Vec::new(),
+        };
         let next_value = serde_json::to_string(next)?;
         Ok(OwnerPromotionJournalTransition {
             journal_key: format!("owner_promotion/{}", self.promotion_id),

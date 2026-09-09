@@ -20,6 +20,32 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
         Self { commit_verifier }
     }
 
+    /// Retained history already owns these exact objects. Their readers still
+    /// perform the ordinary signature, reference, and activation checks.
+    pub(crate) fn remember_retained_proof(
+        &self,
+        proof: &coven_protocol::store_commit::RetainedMergeMembershipProof,
+    ) -> Result<(), StoreProtocolError> {
+        let mut objects = vec![
+            (&proof.entry.object, serde_json::to_vec(&proof.entry_value)?),
+            (&proof.head.object, serde_json::to_vec(&proof.head_value)?),
+        ];
+        match (&proof.resolution, &proof.resolution_value) {
+            (Some(reference), Some(value)) => {
+                objects.push((&reference.object, serde_json::to_vec(value)?));
+            }
+            (None, None) => {}
+            _ => return Err(StoreProtocolError::DeviceStateMismatch),
+        }
+        for (object, bytes) in &objects {
+            object.verify(bytes)?;
+        }
+        for (object, bytes) in objects {
+            self.commit_verifier.remember_exact_object(object, &bytes);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn load_entry(
         &self,
         reference: &MembershipEntryRef,
@@ -196,6 +222,113 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
             bytes,
             semantic_hash: reference.head_hash,
             object: reference.object.clone(),
+        })
+    }
+
+    pub(crate) async fn load_head_acceptance(
+        &self,
+        reference: &MembershipHeadRef,
+        head: &AuthorHead,
+    ) -> Result<
+        VerifiedObject<coven_protocol::membership::MembershipHeadAcceptance>,
+        crate::sync::store::membership::AnchoredChainError,
+    > {
+        self.load_head_acceptance_at(reference, head, None).await
+    }
+
+    pub(crate) async fn load_head_acceptance_at(
+        &self,
+        reference: &MembershipHeadRef,
+        head: &AuthorHead,
+        exact: Option<&coven_protocol::objects::ExactObjectRef>,
+    ) -> Result<
+        VerifiedObject<coven_protocol::membership::MembershipHeadAcceptance>,
+        crate::sync::store::membership::AnchoredChainError,
+    > {
+        let coven_protocol::membership::MembershipHeadActivation::StoreCommit {
+            acceptance_slot,
+            ..
+        } = &head.activation
+        else {
+            return Err(StoreObjectError::InvalidObject {
+                semantic_prefix: reference.object.slot().logical_key().to_string(),
+                key: reference.object.slot().logical_key().to_string(),
+                source: Box::new(StoreProtocolError::Malformed(
+                    "direct membership head has no Store acceptance result".into(),
+                )),
+            }
+            .into());
+        };
+        let prefix = coven_protocol::membership::membership_head_acceptance_semantic_prefix(
+            &reference.coord,
+        );
+        let context = ProtocolObjectContext::signed_plaintext(
+            self.commit_verifier.store_root_hash(),
+            ProtocolObjectDomain::StoreMembershipHeadAcceptance,
+        );
+        let read = match exact {
+            Some(object) => {
+                if object.slot() != acceptance_slot {
+                    return Err(
+                        crate::sync::store::membership::AnchoredChainError::LoadFailed(
+                            "successor names another predecessor acceptance slot".into(),
+                        ),
+                    );
+                }
+                self.commit_verifier
+                    .load_exact_object(&context, object, &prefix, object.stored_hash(), |_| Ok(()))
+                    .await
+                    .map(|loaded| (loaded.bytes, loaded.object))
+            }
+            None => self
+                .commit_verifier
+                .read_protocol_slot(&context, acceptance_slot, &prefix)
+                .await
+                .map_err(StoreObjectError::from),
+        };
+        let (bytes, object) = read.map_err(|source| match source {
+            StoreObjectError::Storage(
+                source @ coven_protocol::objects::StorageError::NotFound(_),
+            ) => crate::sync::store::membership::AnchoredChainError::IncompleteFinalization {
+                head: Box::new(reference.clone()),
+                source,
+            },
+            source => crate::sync::store::membership::AnchoredChainError::from_store_object(source),
+        })?;
+        let registration = self
+            .commit_verifier
+            .load_registration(&head.body.author_registration)
+            .await?;
+        let parse_bytes = bytes.clone();
+        let expected_root = self.commit_verifier.store_root_hash();
+        let expected_head = head.clone();
+        let expected_reference = reference.clone();
+        let value = run_blocking_object_verification(
+            &prefix,
+            &object,
+            Box::new(move || {
+                let value: coven_protocol::membership::MembershipHeadAcceptance =
+                    coven_protocol::objects::decode_protocol_object(&parse_bytes)?;
+                value.verify_for(
+                    expected_root,
+                    &expected_reference,
+                    &expected_head,
+                    &registration.value,
+                )?;
+                if value.to_bytes() != parse_bytes {
+                    return Err(StoreProtocolError::Malformed(
+                        "membership acceptance result is not canonical".into(),
+                    ));
+                }
+                Ok(value)
+            }),
+        )
+        .await?;
+        Ok(VerifiedObject {
+            value,
+            semantic_hash: coven_protocol::store_commit::ObjectHash::digest(&bytes),
+            bytes,
+            object,
         })
     }
 

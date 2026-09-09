@@ -19,31 +19,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         self.publisher().publish(operation_id, routing_key).await
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn prepare_circle_object_for_test(
-        &mut self,
-        context: &coven_protocol::objects::ProtocolObjectContext,
-        semantic_prefix: &str,
-        extension: &str,
-        bytes: Vec<u8>,
-    ) -> Result<coven_protocol::objects::PreparedExactObject, CircleOperationError> {
-        self.preparer()
-            .prepare_circle_object(context, semantic_prefix, extension, bytes)
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn prepare_circle_object_at_for_test(
-        &mut self,
-        context: &coven_protocol::objects::ProtocolObjectContext,
-        slot: coven_protocol::objects::ObjectSlot,
-        semantic_prefix: &str,
-        bytes: Vec<u8>,
-    ) -> Result<coven_protocol::objects::PreparedExactObject, CircleOperationError> {
-        self.preparer()
-            .prepare_circle_object_at(context, slot, semantic_prefix, bytes)
-    }
-
     #[cfg(test)]
     pub(crate) async fn resign_merge_journal_with_reference_for_test(
         &mut self,
@@ -52,7 +27,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         mutate_commit: impl FnOnce(&mut coven_protocol::store_commit::StoreBatchCommit),
     ) -> Result<(), CircleOperationError> {
         let old_commit = journal.commit()?;
-        let coord = journal.operation().commit_ref.coord.clone();
+        let coord = journal.operation().commit_ref().coord.clone();
         let mut commit = self.local_writer.sign_circle_commit_for_test(
             &old_commit,
             coord.clone(),
@@ -63,8 +38,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         self.local_writer.resign_store_commit_for_test(&mut commit);
         let coven_protocol::store_commit::StoreCommitCoord { stream_id, .. } = coord.clone();
         let commit_prepared = self
-            .preparer()
-            .prepare_circle_object(
+            .prepare_circle_object_for_test(
                 &ProtocolObjectContext::signed_plaintext(
                     commit.store_root_hash,
                     ProtocolObjectDomain::StoreCommit,
@@ -81,65 +55,67 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             .await?;
         let commit_ref = coven_protocol::store_commit::StoreBatchCommitRef::from_commit(
             &commit,
-            coord,
+            coord.clone(),
             commit_prepared.reference().clone(),
         )
         .map_err(CircleOperationError::from)?;
-        let old_head = journal.operation().policy.head.clone();
-        let history_evidence = journal.operation().policy.history_evidence.clone();
-        let head = self
+        let verified_commit = self.local_writer.verify_prepared_circle_commit(
+            &commit.to_bytes(),
+            commit.store_root_hash,
+            coord,
+            commit_prepared.reference().clone(),
+        )?;
+        let old_publication = journal.operation().store_commit.publication.clone();
+        let previous = coven_database::ObservedStorePublication::from_parts(
+            old_publication.previous.clone(),
+            old_publication.previous_version.clone(),
+        );
+        let publication_entry = self
             .local_writer
-            .sign_device_head(
-                commit.store_root_hash,
-                commit_ref.clone(),
-                old_head.successor.clone(),
+            .sign_store_publication_entry(&previous, &verified_commit)
+            .map_err(CircleOperationError::from)?;
+        let publication_prepared = self
+            .prepare_circle_object_for_test(
+                &ProtocolObjectContext::signed_plaintext(
+                    commit.store_root_hash,
+                    ProtocolObjectDomain::StorePublicationEntry,
+                ),
+                &coven_protocol::store_commit::store_publication_entry_semantic_prefix(
+                    &publication_entry,
+                ),
+                ".json",
+                publication_entry.to_bytes(),
+            )
+            .await?;
+        let publication_replacement = self
+            .local_writer
+            .advance_store_publication(
+                &previous,
+                &publication_entry,
+                &publication_prepared,
+                &verified_commit,
             )
             .map_err(CircleOperationError::from)?;
-        let head_slot = journal
-            .operation()
-            .prepared_objects
-            .get("store-head")
-            .ok_or_else(|| {
-                CircleOperationError::InvalidState(
-                    "Circle operation has no prepared Store head".to_string(),
-                )
-            })?
-            .slot()
-            .clone();
-        let head_prepared = self.preparer().prepare_circle_object_at(
-            &ProtocolObjectContext::signed_plaintext(
-                commit.store_root_hash,
-                ProtocolObjectDomain::StoreHead,
-            ),
-            head_slot,
-            &coven_protocol::store_commit::head_slot_prefix(
-                &commit.author_registration.device_id.to_string(),
-                commit.seq(),
-            ),
-            head.to_bytes(),
-        )?;
-        // The replacement objects must be installed before the journal takes
-        // ownership of their references.
-        for object in [&commit_prepared, &head_prepared] {
-            self.database
-                .install_payload_for_test(object.stored_bytes().to_vec())
-                .await
-                .map_err(CircleOperationError::from)?;
-        }
+        // The commit spool must exist before its journal references it.
+        self.database
+            .install_payload_for_test(commit_prepared.stored_bytes().to_vec())
+            .await
+            .map_err(CircleOperationError::from)?;
         let operation = journal.operation_mut();
-        operation.commit_bytes = commit.to_bytes();
-        operation.commit_ref = commit_ref;
+        operation.store_commit.common.commit = commit;
+        operation.store_commit.common.reference = commit_ref;
+        operation.store_commit.publication =
+            coven_protocol::prepared_commit::PreparedStorePublication {
+                previous: old_publication.previous,
+                previous_version: old_publication.previous_version,
+                entry: publication_entry,
+                entry_object: publication_prepared.reference().clone(),
+                replacement: publication_replacement,
+            };
         operation.prepared_objects.insert(
             "store-commit".to_string(),
             commit_prepared.reference().clone(),
         );
-        operation
-            .prepared_objects
-            .insert("store-head".to_string(), head_prepared.reference().clone());
-        operation.policy = CircleOperationPolicy {
-            head,
-            history_evidence,
-        };
         journal.uploaded.clear();
         Ok(())
     }
@@ -158,27 +134,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             reference,
             stream_activations,
         )
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn prepare_circle_activation_objects_for_test(
-        &mut self,
-        draft: coven_protocol::circle::CircleTransitionDraft,
-        history: &CircleTransitionHistory,
-        candidate_family: coven_protocol::store_commit::CandidateFamilyId,
-    ) -> Result<
-        (
-            coven_protocol::circle::PreparedCircleTransition,
-            coven_protocol::store_commit::CircleActivationObjects,
-            std::collections::BTreeMap<String, coven_protocol::objects::PreparedExactObject>,
-            Option<coven_protocol::objects::ExactObjectRef>,
-            Vec<coven_protocol::store_commit::StreamActivation>,
-        ),
-        CircleOperationError,
-    > {
-        self.preparer()
-            .prepare_circle_activation_objects(draft, history, &[], candidate_family)
-            .await
     }
 
     #[cfg(test)]

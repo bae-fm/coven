@@ -4,8 +4,7 @@ use rusqlite::OptionalExtension;
 
 use super::{StoreRecords, StoreTransaction};
 use crate::payload_store::{
-    circle_bootstrap_coverage_owner_key, payload_owner_claims_on, release_payload_owner_on,
-    set_payload_owner_claims_on,
+    circle_bootstrap_coverage_owner_key, payload_owner_claims_on, set_payload_owner_claims_on,
 };
 use crate::store::verified_store_authority::VerifiedStoreLookup;
 use crate::{DbError, ObjectHash, StoreDatabase};
@@ -50,39 +49,6 @@ impl StoreRecords<'_> {
         Ok(controls)
     }
 
-    /// Rebuild the stream-activation index from the retained materializations
-    /// before restore selection resolves control-stream authority.
-    pub(crate) fn seed_stream_activation_index_from_retained(
-        self,
-        registrations: &mut dyn crate::store::verified_store_authority::VerifiedRegistrationLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-    ) -> Result<(), DbError> {
-        let encoded_refs = crate::query_mapped_rows(
-            self.conn,
-            "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
-            [],
-            |row| row.get::<_, String>(0),
-        )?;
-        for encoded in encoded_refs {
-            let reference: coven_protocol::store_commit::StoreBatchCommitRef =
-                serde_json::from_str(&encoded).map_err(|error| {
-                    DbError::context("parse retained materialization commit ref", error)
-                })?;
-            let owned = StoreDatabase::load_retained_merge_materialization_by_ref_on(
-                self,
-                root,
-                registrations,
-                &reference,
-            )?;
-            crate::store::stream_activation_records::record_verified_stream_activations_on(
-                self.conn,
-                owned.circle_activations().stream_activations(),
-                &encoded,
-            )?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn claimed_circle_bootstrap_coverage_refs(
         self,
     ) -> Result<Vec<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
@@ -103,15 +69,6 @@ impl StoreRecords<'_> {
 }
 
 impl StoreTransaction<'_, '_> {
-    pub(crate) fn seed_stream_activation_index_from_retained(
-        self,
-        registrations: &mut dyn crate::store::verified_store_authority::VerifiedRegistrationLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-    ) -> Result<(), DbError> {
-        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
-            .seed_stream_activation_index_from_retained(registrations, root)
-    }
-
     pub(crate) fn record_circle_bootstrap_coverage(
         self,
         authority: &mut dyn VerifiedStoreLookup,
@@ -300,42 +257,6 @@ impl StoreTransaction<'_, '_> {
         )
         .map_err(DbError::from)?;
         set_payload_owner_claims_on(conn, &owner_key, &BTreeSet::from([installed_hash]))
-    }
-
-    pub(crate) fn clear_circle_bootstrap_coverage(
-        self,
-        circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<(), DbError> {
-        let conn = self.transaction;
-        let owner_key = circle_bootstrap_coverage_owner_key(circle_id);
-        let image_hash = conn
-            .query_row(
-                "SELECT image_hash FROM circle_bootstrap_coverage WHERE circle_id = ?1",
-                [circle_id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(DbError::from)?
-            .map(|hash| hash.parse::<ObjectHash>().map_err(DbError::from))
-            .transpose()?;
-        let expected_claims = image_hash.into_iter().collect::<BTreeSet<_>>();
-        if payload_owner_claims_on(conn, &owner_key)? != expected_claims {
-            return Err(DbError::Message(format!(
-                "Circle {circle_id} bootstrap row and payload claims disagree"
-            )));
-        }
-        let deleted = conn
-            .execute(
-                "DELETE FROM circle_bootstrap_coverage WHERE circle_id = ?1",
-                [circle_id.to_string()],
-            )
-            .map_err(DbError::from)?;
-        if deleted != usize::from(!expected_claims.is_empty()) {
-            return Err(DbError::Message(format!(
-                "Circle {circle_id} bootstrap row changed while it was being removed"
-            )));
-        }
-        release_payload_owner_on(conn, &owner_key)
     }
 
     pub(crate) fn clear_imported_circle_bootstrap_coverage(self) -> Result<(), DbError> {

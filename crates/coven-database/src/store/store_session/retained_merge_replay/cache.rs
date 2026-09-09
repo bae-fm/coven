@@ -1,10 +1,7 @@
 use super::*;
 use crate::store::retained_merge_replay::CircleReplayEpochIndex;
 use crate::store::store_session::{StoreRecords, StoreTransaction};
-use crate::{
-    activated_merge_membership_remote_objects, ObjectHash, PreparedMergeMaterialization,
-    PreparedMergeMaterializationPackage,
-};
+use crate::{ObjectHash, PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
 use coven_protocol::membership::LocalStoreMembership;
 use coven_protocol::store_commit::{CommitFrontier, StoreRootRef};
 use coven_protocol::synced_schema::SyncedTable;
@@ -41,26 +38,96 @@ impl VerifiedRegistrationLookup for ReplayVerifiedStoreLookup<'_, '_> {
 }
 
 impl VerifiedStoreLookup for ReplayVerifiedStoreLookup<'_, '_> {
+    fn retained_replay_object_coverage_on(
+        &mut self,
+        records: StoreRecords<'_>,
+    ) -> Result<crate::store::retained_merge_replay::RetainedReplayObjectCoverage<'_>, DbError>
+    {
+        crate::store::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(Some(
+            self.cache.baseline_on(records)?,
+        ))
+    }
+
+    fn pending_device_join_retention_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+        root: &StoreRootRef,
+        coverage: &coven_protocol::store_commit::CommitFrontier,
+    ) -> Result<
+        BTreeMap<
+            coven_protocol::store_commit::AcceptedStoreSnapshotRef,
+            std::collections::BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>,
+        >,
+        DbError,
+    > {
+        let baseline = self.cache.baseline_on(records)?.clone();
+        StoreDatabase::pending_device_join_retention_on(records, self, root, coverage, &baseline)
+    }
+
+    fn open_retained_materialization_on(
+        &mut self,
+        records: StoreRecords<'_>,
+        root: &StoreRootRef,
+        input: &crate::store::materialization_models::RetainedMergeMaterializationInput,
+        input_hash: ObjectHash,
+        materialization: &crate::VerifiedMergeMaterialization<'_>,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        if root != self.root {
+            return Err(DbError::Message(
+                "retained materialization belongs to another Store root".to_string(),
+            ));
+        }
+        StoreDatabase::open_retained_merge_materialization_input_with_verified_materialization_on(
+            records,
+            self.root,
+            self.registrations,
+            materialization.commit_ref(),
+            input,
+            input_hash,
+            materialization,
+        )
+    }
+
     fn retained_materialization_by_ref_on(
         &mut self,
         records: StoreRecords<'_>,
         reference: &StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        if let Some(materialization) = self.cache.cached_by_ref(reference)? {
-            return Ok(materialization.clone());
-        }
-        let materialization = StoreDatabase::load_retained_merge_materialization_by_ref_on(
-            records,
-            self.root,
-            self.registrations,
-            reference,
-        )?;
-        self.cache.insert_verified(materialization.clone())?;
-        Ok(materialization)
+        self.cache
+            .materialization_by_ref_on(records, self.root, self.registrations, reference)
     }
 }
 
 impl RetainedReplayCache {
+    pub(super) fn materialization_by_ref_on(
+        &mut self,
+        records: StoreRecords<'_>,
+        root: &StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        if let Some(materialization) = self.cached_by_ref(reference)? {
+            return Ok(materialization.clone());
+        }
+        let materialization = match &self.baseline {
+            Some(baseline) => StoreDatabase::load_retained_merge_materialization_at_baseline_on(
+                records,
+                root,
+                registrations,
+                reference,
+                Some(baseline),
+            )?,
+            None => StoreDatabase::load_retained_merge_materialization_by_ref_on(
+                records,
+                root,
+                registrations,
+                reference,
+            )?,
+        };
+        self.insert_verified(materialization.clone())?;
+        Ok(materialization)
+    }
+
     /// Forget everything derived from a baseline that has just been superseded.
     ///
     /// Advancing the baseline retires retained materializations, so both halves
@@ -238,47 +305,8 @@ impl RetainedReplayCache {
         root: &coven_protocol::store_commit::StoreRootRef,
         registrations: &mut dyn VerifiedRegistrationLookup,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        self.baseline_on(records)?;
         let rows = records.retained_materialization_rows()?;
-        self.replay_inputs_from_rows(rows, |row| {
-            StoreDatabase::load_retained_merge_materialization_on(
-                records,
-                root,
-                registrations,
-                &row.0,
-                row.1,
-                &row.2,
-                &row.3,
-            )
-        })
-    }
-
-    fn replay_inputs_in_transaction(
-        &mut self,
-        records: StoreTransaction<'_, '_>,
-        root: &StoreRootRef,
-        registrations: &mut dyn VerifiedRegistrationLookup,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        let rows = records.retained_materialization_rows()?;
-        self.replay_inputs_from_rows(rows, |row| {
-            records.load_retained_materialization(
-                root,
-                registrations,
-                &row.0,
-                row.1,
-                &row.2,
-                &row.3,
-                None,
-            )
-        })
-    }
-
-    fn replay_inputs_from_rows(
-        &mut self,
-        rows: Vec<(String, i64, String, String)>,
-        mut load: impl FnMut(
-            &(String, u64, StoreBatchCommitRef, String),
-        ) -> Result<OwnedVerifiedMergeMaterialization, DbError>,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let rows = rows
             .into_iter()
             .map(|(stream_id, sequence, encoded_ref, encoded_input_hash)| {
@@ -315,12 +343,15 @@ impl RetainedReplayCache {
                     )
                 }
                 _ => (
-                    load(&(
-                        stream_id.clone(),
+                    records.open_retained_merge_materialization(
+                        root,
+                        registrations,
+                        &stream_id,
                         sequence,
-                        commit_ref.clone(),
-                        encoded_input_hash.clone(),
-                    ))?,
+                        &commit_ref,
+                        &encoded_input_hash,
+                        self.baseline.as_ref(),
+                    )?,
                     false,
                 ),
             };
@@ -335,6 +366,19 @@ impl RetainedReplayCache {
         }
         self.verified = verified;
         Ok(replay_inputs)
+    }
+
+    fn replay_inputs_in_transaction(
+        &mut self,
+        records: StoreTransaction<'_, '_>,
+        root: &StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
+    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        self.replay_inputs_on(
+            StoreRecords::new(records.transaction, records.store_dir),
+            root,
+            registrations,
+        )
     }
 
     pub(super) fn verified_circle_activation_on(
@@ -470,7 +514,7 @@ impl RetainedReplayCache {
             .as_ref()
             .expect("retained replay baseline was installed in the cache")
             .clone();
-        let replay = transaction_records.open_replay_projection(&baseline)?;
+        let replay = transaction_records.open_replay_projection(&baseline, gates)?;
         let schema = replay.table_schema(synced_tables, gates)?;
         let mut private_rows = replay.private_rows(gates, &schema)?;
         let circle_bootstraps = transaction_records.claimed_circle_bootstrap_coverage_refs()?;
@@ -591,17 +635,15 @@ impl RetainedReplayCache {
             .filter(|materialization| retracted.contains(materialization.commit_ref()))
             .map(|materialization| materialization.commit().write_id.clone())
             .collect::<BTreeSet<_>>();
+        let rebase = matches!(&journal, crate::ReplayJournal::Rebase);
         let replay_journal = match journal {
             crate::ReplayJournal::Omit => transaction_records.merge_replay_associations(
-                &baseline.exact_cut,
+                &baseline,
                 &active_accepted_writes,
                 &retracted_writes,
             )?,
-            crate::ReplayJournal::Owed => transaction_records.merge_replay_journal(
-                &baseline.exact_cut,
-                &active_accepted_writes,
-                &retracted_writes,
-            )?,
+            crate::ReplayJournal::Owed | crate::ReplayJournal::Rebase => transaction_records
+                .merge_replay_journal(&baseline, &active_accepted_writes, &retracted_writes)?,
             crate::ReplayJournal::Folded(folded) => {
                 transaction_records.folded_replay_journal(folded)?
             }
@@ -727,41 +769,11 @@ impl RetainedReplayCache {
                         Ok(PreparedMergeMaterializationPackage { package, changeset })
                     })
                     .collect::<Result<Vec<_>, DbError>>()?;
-                let membership_remote_objects = if let Some(objects) =
-                    materialization.membership_objects()
-                {
-                    let family = materialization.commit().candidate_family();
-                    let owner = materialization.commit_ref();
-                    let entry_bytes = transaction_records
-                        .retained_membership_authority_bytes(&objects.entry().object, "entry")?;
-                    let head_bytes = transaction_records
-                        .retained_membership_authority_bytes(&objects.head().object, "head")?;
-                    let resolution_bytes = objects
-                        .resolution()
-                        .map(|resolution| {
-                            transaction_records.retained_membership_authority_bytes(
-                                &resolution.object,
-                                "resolution",
-                            )
-                        })
-                        .transpose()?;
-                    activated_merge_membership_remote_objects(
-                        family,
-                        objects,
-                        entry_bytes,
-                        head_bytes,
-                        resolution_bytes,
-                        owner,
-                    )
-                    .map_err(DbError::from)?
-                } else {
-                    Vec::new()
-                };
+                let membership_remote_objects = materialization.membership_remote_objects()?;
                 let replay_materialization = PreparedMergeMaterialization {
                     root: materialization.root().clone(),
                     verified_commit: materialization.verified_commit().clone(),
-                    activation_head: materialization.activation_head().clone(),
-                    activation_head_object: materialization.activation_head_object().clone(),
+                    acceptance: materialization.acceptance().clone(),
                     history_evidence: materialization.history_evidence().clone(),
                     membership_objects: materialization.membership_objects().cloned(),
                     membership_remote_objects,
@@ -849,9 +861,7 @@ impl RetainedReplayCache {
                         }
                         if watched == Some(&reference) {
                             watched_outcome =
-                                Some(crate::store::store_session::WatchedReplayOutcome::Applied {
-                                    max_updated_at: applied_max_updated_at,
-                                });
+                                Some(crate::store::store_session::WatchedReplayOutcome::Applied);
                         }
                         if consumed_associated_write {
                             replay_journal
@@ -960,7 +970,7 @@ impl RetainedReplayCache {
                 &mut replay_journal,
                 &applied,
                 &baseline.exact_cut,
-                true,
+                !rebase,
             )?
         };
         if let Some(reason) = reason {
@@ -978,7 +988,7 @@ impl RetainedReplayCache {
                 "retained local replay conflicts with accepted Store history: {reason:?}"
             )));
         }
-        if let Some(write) = replay_journal.front() {
+        if let Some(write) = replay_journal.front().filter(|_| !rebase) {
             return Err(DbError::Message(format!(
                 "retained local write {} cannot be placed in available Store history",
                 write.write_id()
@@ -994,7 +1004,8 @@ impl RetainedReplayCache {
             watched_outcome,
             applied_order,
             max_updated_at,
-        ))
+        )
+        .with_unaccepted_journal(replay_journal.into()))
     }
 }
 

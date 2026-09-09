@@ -60,163 +60,10 @@ pub struct SyncCycleResult {
     pub rotation_pending: Option<RotationPending>,
 }
 
-#[derive(Debug)]
-pub struct SyncCycleFailure {
-    kind: SyncCycleFailureKind,
-    operation: &'static str,
-    cause: Box<SyncCycleCause>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SyncCycleFailureKind {
-    Offline,
-    Failed,
-}
-
-impl SyncCycleFailure {
-    pub(crate) fn operation<E>(operation: &'static str, error: E) -> Self
-    where
-        E: Into<SyncCycleCause>,
-    {
-        let cause = error.into();
-        let kind = if super::error::error_chain_contains_transport(&cause) {
-            SyncCycleFailureKind::Offline
-        } else {
-            SyncCycleFailureKind::Failed
-        };
-        Self {
-            kind,
-            operation,
-            cause: Box::new(cause),
-        }
-    }
-
-    pub(crate) fn is_offline(&self) -> bool {
-        self.kind == SyncCycleFailureKind::Offline
-    }
-
-    fn concurrent(first: Self, second: Self) -> Self {
-        let kind = if first.is_offline() || second.is_offline() {
-            SyncCycleFailureKind::Offline
-        } else {
-            SyncCycleFailureKind::Failed
-        };
-        Self {
-            kind,
-            operation: "run Store publication and blob upload lanes",
-            cause: Box::new(SyncCycleCause::Concurrent {
-                first: Box::new(first),
-                second: Box::new(second),
-            }),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn contains(&self, pattern: &str) -> bool {
-        self.to_string().contains(pattern)
-    }
-}
-
-impl std::fmt::Display for SyncCycleFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}: {}", self.operation, self.cause)
-    }
-}
-
-impl std::error::Error for SyncCycleFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.cause.as_ref())
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum SyncCycleCause {
-    #[error("{first}; concurrently, {second}")]
-    Concurrent {
-        first: Box<SyncCycleFailure>,
-        second: Box<SyncCycleFailure>,
-    },
-    #[error("{0}")]
-    Database(#[from] coven_database::DbError),
-    #[error("{0}")]
-    Store(#[from] super::store::StoreError),
-    #[error("{0}")]
-    Registration(#[from] super::store::StoreRegistrationError),
-    #[error("{0}")]
-    Initialization(#[from] super::store::StoreInitializationError),
-    #[error("{0}")]
-    Circle(#[from] super::store::CircleOperationError),
-    #[error("{0}")]
-    DeviceExclusion(#[from] super::store::StoreDeviceExclusionError),
-    #[error("{0}")]
-    Reclaim(#[from] super::store::StoreReclaimError),
-    #[error("{0}")]
-    DeviceJoin(#[from] super::store::DeviceJoinError),
-    #[error("{0}")]
-    TombstoneDrain(#[from] crate::blob::delete::TombstoneDrainError),
-    #[error("{0}")]
-    TombstoneGc(#[from] super::store::commit_publication::operation::TombstoneGcError),
-    #[error("{0}")]
-    UploadFailures(#[from] crate::blob::UploadFailures),
-    #[error("{0}")]
-    WriterAuthorization(
-        #[from] super::store::commit_publication::operation::StoreWriterAuthorizationError,
-    ),
-    #[error("{0}")]
-    Acknowledgement(#[from] super::store::acknowledgements::StoreAckError),
-    #[error("{0}")]
-    Membership(#[from] super::store::MembershipOpsError),
-    #[error("{0}")]
-    Pull(#[from] super::store::StorePullError),
-    #[error("{0}")]
-    AuthorizationRefresh(
-        #[from] super::store::commit_publication::operation::AuthorizationRefreshError,
-    ),
-    #[error("{0}")]
-    PublishedBlobDrop(#[from] super::store::blob::PublishedBlobDropError),
-    #[error("{0}")]
-    StoreProtocol(#[from] coven_protocol::store_commit::StoreProtocolError),
-    #[error("{0}")]
-    RowRoutingKey(#[from] coven_protocol::circle::RowRoutingKeyError),
-    #[error("{0}")]
-    Snapshot(#[from] super::store::snapshots::SnapshotError),
-}
-
+mod failure;
 #[cfg(test)]
-mod sync_cycle_failure_tests {
-    use super::*;
-
-    #[test]
-    fn registration_transport_source_is_offline() {
-        let error = crate::sync::store::StoreRegistrationError::Object(
-            coven_protocol::objects::StoreObjectError::Storage(
-                coven_protocol::objects::StorageError::Storage("provider unavailable".to_string()),
-            ),
-        );
-
-        let object = std::error::Error::source(&error).expect("object source");
-        assert!(object
-            .downcast_ref::<coven_protocol::objects::StoreObjectError>()
-            .is_some());
-        let storage = object.source().expect("storage source");
-        assert!(storage
-            .downcast_ref::<coven_protocol::objects::StorageError>()
-            .is_some());
-
-        assert!(SyncCycleFailure::operation("register", error).is_offline());
-    }
-
-    #[test]
-    fn registration_configuration_source_is_failed() {
-        let error = crate::sync::store::StoreRegistrationError::Object(
-            coven_protocol::objects::StoreObjectError::Storage(
-                coven_protocol::objects::StorageError::Configuration("missing bucket".to_string()),
-            ),
-        );
-
-        assert!(!SyncCycleFailure::operation("register", error).is_offline());
-    }
-}
+pub(crate) use failure::SyncCycleCause;
+pub use failure::SyncCycleFailure;
 
 struct PreparedCycle {
     sync_time: String,
@@ -234,6 +81,7 @@ struct CompletedPullCycle {
 
 struct AuthorizedSyncCycle<'cycle, 'store> {
     device_id: &'cycle str,
+    snapshot_commit_threshold: std::num::NonZeroU64,
     clock: &'cycle dyn coven_foundation::clock::Clock,
     cipher: &'cycle dyn CloudSyncCipherStateAccess,
     pending_rotation: &'cycle dyn CloudSyncRotationStateAccess,
@@ -290,10 +138,7 @@ impl AuthorizedSyncCycle<'_, '_> {
                         "finalize epoch closes",
                         self.authorization
                             .circles()
-                            .finalize_ready_circle_epoch_closes(
-                                &completed.sync_time,
-                                routing_encryption,
-                            ),
+                            .finalize_ready_circle_epoch_closes(routing_encryption),
                     )
                     .await
                     .map_err(|error| {
@@ -304,7 +149,7 @@ impl AuthorizedSyncCycle<'_, '_> {
             timings
                 .stage(
                     "advance replay baseline",
-                    Box::pin(self.stand_on_acknowledged_snapshot(routing_encryption)),
+                    Box::pin(self.stand_on_accepted_snapshot(routing_encryption)),
                 )
                 .await?;
             timings
@@ -313,7 +158,7 @@ impl AuthorizedSyncCycle<'_, '_> {
                     Box::pin(
                         self.authorization
                             .acknowledgements()
-                            .stage_and_publish(&completed.sync_time, self.settled),
+                            .stage_and_publish(&completed.sync_time),
                     ),
                 )
                 .await?;
@@ -342,7 +187,7 @@ impl AuthorizedSyncCycle<'_, '_> {
             changesets_applied: completed.store_pull.changesets_applied,
             held_positions: completed.store_pull.held_positions,
             device_activity: super::status::other_device_activity(
-                &completed.store_pull.visible_heads,
+                &completed.store_pull.visible_commits,
                 self.device_id,
             ),
             sync_time: completed.sync_time,
@@ -591,6 +436,7 @@ impl AuthorizedSyncCycle<'_, '_> {
                     &sync_time,
                     self.routing_encryption,
                     rotation_pending.is_some(),
+                    self.snapshot_commit_threshold,
                 ),
             )
             .await?;
@@ -633,7 +479,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         Ok(())
     }
 
-    /// Stand on the snapshot this device has acknowledged, and say every cycle
+    /// Stand on the latest installed accepted snapshot, and say every cycle
     /// what that did — including, and especially, when it did nothing.
     ///
     /// Read this beside the reclaim line below it. A device whose baseline
@@ -641,7 +487,7 @@ impl AuthorizedSyncCycle<'_, '_> {
     /// wrote pinned for replay, which is what a reclaim run reporting every
     /// target as retained looks like from the log; without this line there is
     /// no way to tell that from a reclaim that simply had nothing to do.
-    async fn stand_on_acknowledged_snapshot(
+    async fn stand_on_accepted_snapshot(
         &mut self,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<(), SyncCycleFailure> {
@@ -650,7 +496,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         let outcome = self
             .authorization
             .acknowledgements()
-            .stand_on_acknowledged_snapshot(routing_encryption)
+            .stand_on_accepted_snapshot(routing_encryption)
             .await
             .map_err(|error| {
                 SyncCycleFailure::operation("advance the Store replay baseline", error)
@@ -660,15 +506,12 @@ impl AuthorizedSyncCycle<'_, '_> {
                 commits = advanced.retired_commits,
                 pins = advanced.released_pins,
                 writes = advanced.folded_writes,
-                "Advanced the replay baseline over an acknowledged snapshot"
+                "Advanced the replay baseline over an accepted snapshot"
             ),
-            // The steady state is the loudest of these only in the sense that
-            // it is the one printed most; it is also the only one that is not a
-            // problem, so it says so by naming the generation it stands at.
             ReplayBaselineAdvance::Declined(decline) => info!(
                 declined = decline.as_str(),
-                generation = decline.generation(),
-                acknowledged = !matches!(decline, ReplayBaselineDecline::NoAcknowledgedSnapshot),
+                snapshot = ?decline.snapshot(),
+                accepted_snapshot = !matches!(decline, ReplayBaselineDecline::NoAcceptedSnapshot),
                 "Did not advance the replay baseline"
             ),
         }
@@ -693,15 +536,14 @@ impl AuthorizedSyncCycle<'_, '_> {
         };
         let store = &result.store_packages;
         let coverage = match &store.coverage {
-            StorePackageReclaimCoverage::Snapshot { generation } => {
-                format!("snapshot generation {generation}")
+            StorePackageReclaimCoverage::Snapshot { snapshot } => {
+                format!(
+                    "accepted snapshot {} at publication {}",
+                    snapshot.snapshot.snapshot_hash,
+                    snapshot.publication.position.get()
+                )
             }
-            StorePackageReclaimCoverage::NoSnapshot => {
-                "no snapshot every active device has acknowledged".to_string()
-            }
-            StorePackageReclaimCoverage::MissingAcknowledgement { member, device_id } => {
-                format!("device {device_id} of member {member} has not acknowledged the snapshot")
-            }
+            StorePackageReclaimCoverage::NoSnapshot => "no accepted Store snapshot".to_string(),
             StorePackageReclaimCoverage::NotOwner => {
                 "this device is not the current owner".to_string()
             }
@@ -713,7 +555,6 @@ impl AuthorizedSyncCycle<'_, '_> {
             %coverage,
             considered = store.targets_considered,
             retained_for_replay = store.retained_for_replay,
-            retained_for_blob_reclaim = store.retained_for_blob_reclaim,
             already_authorized = store.already_authorized,
             authorized = store.authorized,
             packages = result.packages_deleted,
@@ -859,6 +700,7 @@ impl PreparedSyncComponents {
                     self.store_dir.clone(),
                     &self.database.stamp(),
                     &self.identity,
+                    self.routing_encryption.clone(),
                 )
                 .await
             }
@@ -871,6 +713,7 @@ impl PreparedSyncComponents {
                     self.store_dir.clone(),
                     &expected_store_root,
                     &self.identity,
+                    self.routing_encryption.clone(),
                 )
                 .await
             }
@@ -993,7 +836,13 @@ impl SyncComponents {
             .pending_writes()
             .await?
             .into_iter()
-            .filter(|write| matches!(write.status, coven_protocol::write::WriteStatus::Blocked(_)))
+            .filter(|write| {
+                matches!(
+                    write.status,
+                    coven_protocol::write::WriteStatus::Blocked(_)
+                        | coven_protocol::write::WriteStatus::LocalOnlyBlocked(_)
+                )
+            })
             .collect())
     }
 
@@ -1504,6 +1353,7 @@ impl SyncComponents {
         &self,
         clock: &dyn coven_foundation::clock::Clock,
         observer: Option<&dyn BlobTransitionObserver>,
+        snapshot_commit_threshold: std::num::NonZeroU64,
     ) -> Result<SyncCycleResult, SyncCycleFailure> {
         let authorization =
             self.store.authorize_writer().await.map_err(|error| {
@@ -1511,6 +1361,7 @@ impl SyncComponents {
             })?;
         AuthorizedSyncCycle {
             device_id: &self.device_id,
+            snapshot_commit_threshold,
             clock,
             cipher: self.storage.as_ref(),
             pending_rotation: self.storage.as_ref(),

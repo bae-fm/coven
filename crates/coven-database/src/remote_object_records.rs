@@ -355,10 +355,8 @@ pub(crate) fn record_reclaimed_store_package_on(
                 let owner = target.snapshot_owner(root_hash).map_err(DbError::from)?;
                 remote.validate_reclaimable_snapshot_image(&target.image, &owner)
             }
-            coven_protocol::reclaim::ReclaimTarget::StoreMembershipRollup(target) => remote
-                .validate_reclaimable_membership_rollup(&target.rollup, &target.snapshot_owner()),
             coven_protocol::reclaim::ReclaimTarget::AudienceBlob(target) => {
-                remote.validate_reclaimable_stored_blob(&target.blob)
+                remote.validate_reclaimable_stored_blob(target.blob())
             }
         }
         .map_err(|error| DbError::context(format!("close reclaimed package {object_id}"), error))?;
@@ -612,27 +610,6 @@ pub(crate) fn begin_remote_candidate_nonactivation_on(
     finish_remote_candidate_nonactivation_on(conn, object_id, remote, inert)
 }
 
-pub(crate) fn begin_remote_candidate_nonactivation_with_verified_head_on(
-    conn: &rusqlite::Transaction<'_>,
-    object_id: ObjectHash,
-    nonactivation: coven_protocol::remote_object::CandidateNonactivation,
-    head_nonactivation: &coven_protocol::remote_object::VerifiedCandidateHeadNonactivation,
-) -> Result<Option<ExactObjectRef>, DbError> {
-    let mut remote = load_remote_object_on(conn, object_id)?;
-    let inert = remote
-        .begin_candidate_nonactivation_with_verified_head_nonactivation(
-            nonactivation,
-            head_nonactivation,
-        )
-        .map_err(|error| {
-            DbError::context(
-                format!("record candidate nonactivation for {object_id}"),
-                error,
-            )
-        })?;
-    finish_remote_candidate_nonactivation_on(conn, object_id, remote, inert)
-}
-
 pub(crate) fn finish_remote_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
@@ -671,69 +648,6 @@ pub(crate) fn finish_remote_candidate_nonactivation_on(
         )));
     }
     Ok(None)
-}
-
-pub(crate) fn replace_prepared_merge_head_remote_on(
-    conn: &Connection,
-    store_dir: &StoreDir,
-    current: &ExactObjectRef,
-    winner: &StoreDeviceHead,
-    winner_object: &ExactObjectRef,
-    candidate: &StoreBatchCommitRef,
-) -> Result<(), DbError> {
-    // A Store head is signed plaintext, so the object it is published as names
-    // the digest of the head's own canonical bytes.
-    let winner_bytes = winner.to_bytes();
-    if winner_object.verify(&winner_bytes).is_err()
-        || winner_object.slot() != current.slot()
-        || winner_object == current
-        || winner.commit != *candidate
-    {
-        return Err(DbError::Message(
-            "alternate Merge head does not replace the prepared activation slot".to_string(),
-        ));
-    }
-    let old_object_id = remote_object_id(current);
-    let old_remote = load_remote_object_on(conn, old_object_id)?;
-    if !matches!(
-        &old_remote,
-        RemoteObjectRecord::RetainedAuthority(record)
-            if matches!(
-                &record.identity.domain,
-                coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead { .. }
-            ) && matches!(
-                &record.state,
-                coven_protocol::remote_object::RetainedAuthorityObjectState::Prepared { ownership }
-                    if ownership.pending == BTreeSet::from([candidate.clone()])
-            )
-    ) {
-        return Err(DbError::Message(
-            "prepared Merge head lost its candidate ownership".to_string(),
-        ));
-    }
-    if !delete_remote_object_on(conn, old_object_id)? {
-        return Err(DbError::Message(
-            "prepared Merge head disappeared during replacement".to_string(),
-        ));
-    }
-    let winner_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
-        head_hash: winner.head_hash(),
-        object: winner_object.clone(),
-    };
-    let winner_closed = RemoteObjectRecord::candidate_activated_store_head(
-        winner_ref,
-        &winner_bytes,
-        &winner_bytes,
-        candidate.clone(),
-    )
-    .map_err(|error| DbError::context("alternate Merge head", error))?;
-    let winner_closed = winner_closed
-        .map_record(|mut record| {
-            record.mark_uploaded_verified()?;
-            Ok(record)
-        })
-        .map_err(|error| DbError::context("mark alternate Merge head uploaded", error))?;
-    persist_exact_remote_object_on(conn, store_dir, &winner_closed, "alternate Merge head")
 }
 
 pub(crate) fn mark_remote_object_uploaded_on(
@@ -886,10 +800,9 @@ pub(crate) fn mark_reusable_retained_authority_uploaded_on(
             ownership,
         } => ownership.pending.contains(candidate) || ownership.activated.contains(candidate),
         coven_protocol::remote_object::RetainedAuthorityObjectState::CleanupPending { .. }
-        | coven_protocol::remote_object::RetainedAuthorityObjectState::AbsentVerified { .. }
-        | coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
-            ..
-        } => false,
+        | coven_protocol::remote_object::RetainedAuthorityObjectState::AbsentVerified { .. } => {
+            false
+        }
     };
     if !owns_candidate {
         return Err(DbError::Message(format!(

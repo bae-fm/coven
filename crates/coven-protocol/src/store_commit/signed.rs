@@ -71,6 +71,10 @@ struct SignedFields<'a, T> {
     body: &'a T,
 }
 
+pub(super) fn signed_body_hash<T: SignedBody>(version: u32, body: &T) -> ObjectHash {
+    ObjectHash::digest(&domain_json(T::DOMAIN, &SignedFields { version, body }))
+}
+
 impl<T: SignedBody> Signed<T> {
     /// Sign `body` under this build's protocol version.
     pub(crate) fn sign<A: keys::IdentityKeyAuthority + ?Sized>(body: T, signer: &A) -> Self {
@@ -108,15 +112,9 @@ impl<T: SignedBody> Signed<T> {
     }
 
     fn digest(&self) -> ObjectHash {
-        *self.digest.get_or_init(|| {
-            ObjectHash::digest(&domain_json(
-                T::DOMAIN,
-                &SignedFields {
-                    version: self.version,
-                    body: &self.body,
-                },
-            ))
-        })
+        *self
+            .digest
+            .get_or_init(|| signed_body_hash(self.version, &self.body))
     }
 
     pub(crate) fn body(&self) -> &T {

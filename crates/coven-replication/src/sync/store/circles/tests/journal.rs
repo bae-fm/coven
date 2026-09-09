@@ -50,6 +50,15 @@ async fn circle_preparation_leaves_payload_installation_to_the_database() {
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(claims, hashes);
+    let active = StoreDatabase::new(&db)
+        .active_store_publication()
+        .await
+        .expect("read active Store publication")
+        .expect("Circle operation must reserve Store publication with its journal");
+    assert_eq!(
+        active.owner(),
+        &coven_database::ActiveStorePublicationOwner::CircleOperation(operation_id)
+    );
 }
 
 #[tokio::test]
@@ -63,10 +72,13 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
         coven_protocol::write::WriteId::from_generated("another-circle-operation".to_string());
     let mut replacement = journal.clone();
     replacement.operation_id = CircleOperationId::from_write_id(replacement_write_id.clone());
-    let mut replacement_commit = replacement.commit().expect("parse replacement commit");
-    replacement_commit.body_mut().write_id = replacement_write_id;
-    replacement.operation_mut().commit_bytes =
-        serde_json::to_vec(&replacement_commit).expect("serialize replacement commit");
+    replacement
+        .operation_mut()
+        .store_commit
+        .common
+        .commit
+        .body_mut()
+        .write_id = replacement_write_id;
     db.replace_circle_operation_prepared_for_test(expected_operation_id, replacement)
         .await
         .expect("install mismatched Circle operation payload");
@@ -104,20 +116,24 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
 async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-    let (store, _home, signer, first) =
+    let (_store, _home, _signer, first) =
         persist_merge_operation(&db, db_store_dir.clone(), "circle-block-first").await;
-    let second = store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
+    let absent_operation_id = CircleOperationId::from_write_id(
+        coven_protocol::write::WriteId::from_generated("absent-circle-operation".to_string()),
+    );
+
+    let error = coven_database::StoreDatabase::new(&db)
+        .block_circle_operation(
+            &absent_operation_id,
+            coven_protocol::circle::CircleOperationBlock::AuthorityLost {
+                grant_id: coven_protocol::membership::MembershipGrantId(
+                    coven_protocol::store_commit::ObjectHash::digest(b"absent revoked grant"),
+                ),
+            },
+        )
         .await
-        .expect("bind Circle preparation Store")
-        .prepare_circle_operation("0000000002000-0000-creator", "Second household")
-        .await
-        .expect("prepare second Circle operation");
-    coven_database::StoreDatabase::new(&db)
-        .insert_circle_operation(second.journal.clone(), second.prepared_objects)
-        .await
-        .expect("persist second Circle operation");
-    let second = second.journal;
+        .expect_err("blocking requires the exact durable operation id");
+    assert!(error.to_string().contains("is absent"), "{error}");
 
     coven_database::StoreDatabase::new(&db)
         .block_circle_operation(
@@ -136,16 +152,10 @@ async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
         .await
         .expect("read first Circle operation")
         .expect("first Circle operation remains durable");
-    let second = coven_database::StoreDatabase::new(&db)
-        .circle_operation(&second.operation_id)
-        .await
-        .expect("read second Circle operation")
-        .expect("second Circle operation remains durable");
     assert!(matches!(
         first.state(),
         CircleOperationState::Blocked { .. }
     ));
-    assert_eq!(second.state(), CircleOperationState::Pending);
 }
 
 #[tokio::test]
@@ -178,5 +188,83 @@ async fn publishing_a_circle_operation_targets_its_exact_operation_id() {
             .expect("exact Circle operation remains durable")
             .state(),
         CircleOperationState::Pending
+    );
+}
+
+#[tokio::test]
+async fn circle_creation_retains_its_author_turn_until_the_candidate_is_durable() {
+    use futures_util::FutureExt;
+
+    let store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(store_dir.clone());
+    let signer = UserKeypair::generate();
+    let store = create_test_store_in_its_own_task(
+        &db,
+        store_dir.clone(),
+        "circle-durable-author-turn",
+        &signer,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
+    let owner = store
+        .bind_device_in(&db, store_dir, &signer)
+        .await
+        .expect("bind Circle owner");
+    let database = StoreDatabase::new(&db);
+    let before = database
+        .store_current_publication()
+        .await
+        .expect("read initial publication");
+    let (prepared, resume) =
+        database.arm_test_pause(coven_database::DatabaseTestPoint::CircleCandidatePrepared);
+    let creation = owner.create_circle("0000000001000-0000-creator", "Household");
+    tokio::pin!(creation);
+    tokio::select! {
+        _ = prepared.notified() => {},
+        result = &mut creation => panic!("Circle creation ended before candidate staging: {result:?}"),
+    }
+    assert!(database
+        .oldest_pending_circle_operation()
+        .await
+        .expect("read unstaged Circle journal")
+        .is_none());
+    assert!(database
+        .active_store_publication()
+        .await
+        .expect("read publication reservation")
+        .is_none());
+    assert_eq!(
+        database
+            .store_current_publication()
+            .await
+            .expect("read paused publication"),
+        before
+    );
+    assert!(
+        database.author_own_stream().now_or_never().is_none(),
+        "another local author must not take the captured position before the Circle candidate is durable"
+    );
+    resume.notify_one();
+    let circle_id = creation.await.expect("stage and publish Circle creation");
+    assert!(
+        database.author_own_stream().now_or_never().is_some(),
+        "Circle completion releases the author turn"
+    );
+    assert!(database
+        .active_store_publication()
+        .await
+        .expect("read completed publication reservation")
+        .is_none());
+    assert!(database
+        .oldest_pending_circle_operation()
+        .await
+        .expect("read completed Circle journal")
+        .is_none());
+    assert_eq!(
+        database
+            .circle_control_activation_count_for_test(circle_id)
+            .await
+            .expect("count accepted Circle control"),
+        1
     );
 }

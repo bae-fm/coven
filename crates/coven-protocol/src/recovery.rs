@@ -27,7 +27,6 @@ pub struct ActivatedContinuation {
     pub initial_ack_prepared: crate::objects::PreparedExactObject,
     pub activation: crate::store_commit::StoreDeviceRegistrationActivation,
     pub latest_ack: crate::store_commit::StoreAckRef,
-    pub latest_snapshot: Option<crate::store_commit::StoreSnapshotRef>,
     pub latest_position: Option<crate::store_commit::StoreBatchCommitRef>,
 }
 
@@ -53,7 +52,6 @@ impl std::fmt::Debug for RestoreAuthority {
                 .field("initial_ack", &value.initial_ack)
                 .field("activation", &value.activation)
                 .field("latest_ack", &value.latest_ack)
-                .field("latest_snapshot", &value.latest_snapshot)
                 .field("latest_position", &value.latest_position)
                 .finish(),
             Self::OwnerRecovery(value) => f

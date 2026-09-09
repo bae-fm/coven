@@ -389,9 +389,8 @@ impl StoreDir {
     }
 
     /// The two-level partition shard for `id`: `{ab}/{cd}/{id}`, where `{ab}`/`{cd}`
-    /// are the first two byte-pairs of the dash-stripped id. The single home for the
-    /// partition scheme — every blob path (cloud key and on-disk file, hashed or
-    /// pinned/cache) is this shard under some root.
+    /// are the first two byte-pairs of the dash-stripped id. Cached and pinned
+    /// blobs use this shard with their locator hash as the id.
     ///
     /// `id` is validated as a single path token and must be long enough (and
     /// char-boundary aligned) to take the two leading byte-pairs. An id that fails
@@ -405,38 +404,6 @@ impl StoreDir {
             return Err(PathTokenError::Unindexable);
         }
         Ok(format!("{}/{}/{id}", &hex[..2], &hex[2..4]))
-    }
-
-    /// Content-addressed relative path `{prefix}/{ab}/{cd}/{id}`, partitioning by
-    /// the first two byte-pairs of the dash-stripped id. The single home for the
-    /// partition scheme — shared by the local blob store and the cloud layout.
-    ///
-    /// Both `prefix` and `id` are validated as single path tokens, and the id must
-    /// be long enough (and char-boundary aligned) to take the two leading
-    /// byte-pairs the prefix needs. An id that fails is bad data — it could escape
-    /// the directory or crash the slice — so this returns [`PathTokenError`] rather
-    /// than interpolating it or panicking; the caller refuses the blob.
-    pub fn hashed_path(prefix: &str, id: &str) -> Result<String, PathTokenError> {
-        validate_path_token(prefix)?;
-        Ok(format!("{prefix}/{}", Self::id_shard(id)?))
-    }
-
-    /// The cloud object key for a Hashed-scheme blob under the device that
-    /// uploaded it: `{namespace}/{uploader}/{ab}/{cd}/{id}`. The `{uploader}`
-    /// segment is what aligns the blob keyspace to the storage-access rule (a
-    /// member writes only under its own public key), so a bucket ACL can scope each
-    /// member to `{namespace}/{self}/`. Only the *cloud* key carries it; the local
-    /// cache keeps the un-prefixed `{namespace}/{ab}/{cd}/{id}` layout because it is
-    /// per-device. `namespace` and `uploader` are validated as single path tokens;
-    /// the id must be indexable (see `id_shard`).
-    pub fn uploader_hashed_key(
-        namespace: &str,
-        uploader: &str,
-        id: &str,
-    ) -> Result<String, PathTokenError> {
-        validate_path_token(namespace)?;
-        validate_path_token(uploader)?;
-        Ok(format!("{namespace}/{uploader}/{}", Self::id_shard(id)?))
     }
 
     pub fn storage_dir(&self) -> PathBuf {

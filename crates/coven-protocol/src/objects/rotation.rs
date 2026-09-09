@@ -99,8 +99,6 @@ pub enum RotationGateError {
     CommittedGenerationZero,
     #[error("rotation loss does not own the pending candidate gate")]
     LossDoesNotOwnCandidate,
-    #[error("rotation candidate replacement lost its exact owner")]
-    ReplacementLostOwner,
     #[error("rotation adoption cannot close while a candidate is pending")]
     CandidatePendingDuringAdoption,
     #[error("rotation adoption does not own the committed gate")]
@@ -293,32 +291,6 @@ impl RotationGate {
             return Err(RotationGateError::LossDoesNotOwnCandidate);
         }
         Ok(Self::from_parts(None, self.peer()))
-    }
-
-    pub fn replace_candidate_mutation(
-        self,
-        generation: u64,
-        previous: crate::store_commit::ObjectHash,
-        replacement: crate::store_commit::ObjectHash,
-    ) -> Result<Self, RotationGateError> {
-        let Some(generation) = NonZeroU64::new(generation) else {
-            return Err(RotationGateError::ReplacementLostOwner);
-        };
-        if self.local()
-            != Some(LocalRotation::Candidate {
-                generation,
-                mutation: previous,
-            })
-        {
-            return Err(RotationGateError::ReplacementLostOwner);
-        }
-        Ok(Self::with_local(
-            LocalRotation::Candidate {
-                generation,
-                mutation: replacement,
-            },
-            self.peer(),
-        ))
     }
 
     pub fn complete_local_adoption(

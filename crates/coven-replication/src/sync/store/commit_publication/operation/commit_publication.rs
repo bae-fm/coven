@@ -1,37 +1,64 @@
 use super::*;
 
-impl<'storage> AuthorizedWriterOperation<'storage> {
-    pub(super) async fn reject_excluded_merge_candidate(
-        &self,
-        candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
-        author: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-    ) -> Result<(), StoreError> {
-        if self
-            .database
-            .author_exclusion_activation_for_candidate(
-                self.history.root().clone(),
-                candidate.clone(),
-                author.clone(),
-            )
-            .await?
-            .is_some()
-        {
-            return Err(StoreError::AuthorExcluded {
-                device_id: author.device_id,
-            });
+pub(crate) enum StoreOperationPublicationOutcome {
+    Accepted(coven_database::AcceptedStoreCommitEvidence),
+    SnapshotRetired(coven_protocol::store_commit::AcceptedStoreSnapshotRef),
+}
+
+impl StoreOperationPublicationOutcome {
+    fn require_accepted(self) -> Result<coven_database::AcceptedStoreCommitEvidence, StoreError> {
+        match self {
+            Self::Accepted(accepted) => Ok(accepted),
+            Self::SnapshotRetired(_) => Err(StoreError::InvalidOutbound(
+                "Store operation requires candidate replacement after snapshot retirement".into(),
+            )),
         }
-        Ok(())
+    }
+}
+
+impl<'storage> AuthorizedWriterOperation<'storage> {
+    pub(crate) async fn prepare_publication_boundary(
+        &mut self,
+    ) -> Result<coven_database::ObservedStorePublication, StoreError> {
+        match self.database.store_current_publication().await? {
+            coven_database::StorePublicationBoundary::Observed(observed) => Ok(observed),
+            coven_database::StorePublicationBoundary::AcceptedPrefix(_) => {
+                self.refresh_membership_publication().await?;
+                Ok(self
+                    .database
+                    .store_current_publication()
+                    .await?
+                    .require_observed()?
+                    .clone())
+            }
+        }
     }
 
     pub(crate) async fn prepare_plan(
         &mut self,
     ) -> Result<commit_plan::StoreOperationCommitPlan, StoreError> {
+        let authorship = self.database.author_own_stream().await;
+        self.prepare_plan_with_authorship(authorship).await
+    }
+
+    pub(crate) async fn prepare_plan_with_authorship(
+        &mut self,
+        authorship: coven_database::OwnStreamAuthorship,
+    ) -> Result<commit_plan::StoreOperationCommitPlan, StoreError> {
         let root = self.store_root().clone();
-        let candidate_membership_heads = self.membership.head_refs().to_vec();
         let author = self.writer.author_pubkey();
         let stream_id = self.announcement_stream_id();
-        let base = self.database.local_commit_base(stream_id).await?;
-        let (authorship, previous, frontier) = base.into_parts();
+        self.prepare_publication_boundary().await?;
+        let base = authorship.local_commit_base(stream_id).await?;
+        let (authorship, state) = base.into_parts();
+        let (previous, frontier, membership, publication) = state.into_parts();
+        let publication_previous = publication.require_observed()?.clone();
+        let candidate_membership_heads = membership.head_refs;
+        if publication_previous.record().store_root_hash != root.store_root_hash {
+            return Err(StoreError::InvalidOutbound(
+                "Store publication boundary belongs to another Store root".to_string(),
+            ));
+        }
         let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(frontier)
             .map(|frontier| frontier.commits().clone())
             .map_err(StoreError::from)?;
@@ -47,9 +74,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         };
         let authorization = self
             .writer
-            .authorize_retained_outbound(&self.history, &order, &candidate_membership_heads)
+            .authorize_retained_preparation(&self.history, &order, &candidate_membership_heads)
             .await
             .map_err(StoreError::from)?;
+        self.membership = authorization.membership.clone();
         let owner_grant = authorization.membership.active_owner_grant(&author);
         let predecessor = authorization
             .membership
@@ -66,6 +94,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 root,
                 coord,
                 order,
+                publication_previous,
                 authorization.membership_state,
                 authorization.device_state_ref,
                 coven_protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
@@ -93,10 +122,19 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         candidate_membership_heads: &[coven_protocol::membership::MembershipHeadRef],
     ) -> Result<MergeConflictResolutionCommitPlan, StoreError> {
+        let authorship = self.database.author_own_stream().await;
         let root = self.store_root().clone();
         let stream_id = self.announcement_stream_id();
-        let base = self.database.local_commit_base(stream_id).await?;
-        let (authorship, previous, frontier) = base.into_parts();
+        self.prepare_publication_boundary().await?;
+        let base = authorship.local_commit_base(stream_id).await?;
+        let (authorship, state) = base.into_parts();
+        let (previous, frontier, _membership, publication) = state.into_parts();
+        let publication_previous = publication.require_observed()?.clone();
+        if publication_previous.record().store_root_hash != root.store_root_hash {
+            return Err(StoreError::InvalidOutbound(
+                "Store publication boundary belongs to another Store root".to_string(),
+            ));
+        }
         let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(frontier)
             .map_err(StoreError::from)?;
         let seq = commit_plan::next_store_sequence(previous.as_ref())?;
@@ -124,35 +162,18 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             root,
             coord,
             order,
+            publication_previous,
             authorization,
         ))
-    }
-
-    pub(crate) async fn prepare_candidate(
-        &mut self,
-        plan: commit_plan::StoreOperationCommitPlan,
-        batch: commit_plan::StoreOperationBatch,
-    ) -> Result<commit_plan::PreparedStoreOperationCommit, StoreError> {
-        self.prepare_candidate_borrowed(&plan, batch).await
-    }
-
-    pub(crate) async fn activate(
-        &mut self,
-        plan: commit_plan::StoreOperationCommitPlan,
-        batch: commit_plan::StoreOperationBatch,
-    ) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, StoreError> {
-        let prepared = self.prepare_candidate_borrowed(&plan, batch).await?;
-        require_activated_publication(
-            self.publish_prepared(Box::new(prepared), None, None)
-                .await?,
-        )
     }
 
     pub(crate) async fn activate_uploaded(
         &mut self,
         uploaded: commit_plan::UploadedStoreOperationActivation,
     ) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, StoreError> {
-        require_activated_publication(self.publish_uploaded(uploaded, None, None).await?)
+        self.publish_uploaded(uploaded, None, None)
+            .await
+            .map(|accepted| accepted.commit_ref().clone())
     }
 
     pub(crate) async fn publish_prepared(
@@ -162,9 +183,43 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         membership_completion: Option<
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         >,
-    ) -> Result<commit_plan::StoreOperationPublicationOutcome, StoreError> {
-        let uploaded = self.upload_prepared(candidate).await?;
-        self.publish_uploaded(uploaded, membership_objects, membership_completion)
+    ) -> Result<coven_database::AcceptedStoreCommitEvidence, StoreError> {
+        self.publish_prepared_attempt(candidate, membership_objects, membership_completion)
+            .await?
+            .require_accepted()
+    }
+
+    pub(crate) async fn publish_prepared_attempt(
+        &mut self,
+        candidate: Box<commit_plan::PreparedStoreOperationCommit>,
+        membership_objects: Option<coven_database::VerifiedMergeMembershipObjects>,
+        membership_completion: Option<
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
+        >,
+    ) -> Result<StoreOperationPublicationOutcome, StoreError> {
+        let verified_commit = self
+            .history
+            .authenticate_commit_bytes(&candidate.reference, &candidate.commit.to_bytes())
+            .await?;
+        if let Some(accepted) = self
+            .database
+            .installed_store_commit_evidence(verified_commit.clone())
+            .await?
+        {
+            return self
+                .complete_installed_operation(
+                    &candidate,
+                    verified_commit,
+                    accepted,
+                    membership_completion,
+                )
+                .await
+                .map(StoreOperationPublicationOutcome::Accepted);
+        }
+        let uploaded = self
+            .upload_authenticated(candidate, verified_commit)
+            .await?;
+        self.publish_uploaded_attempt(uploaded, membership_objects, membership_completion)
             .await
     }
 
@@ -172,19 +227,20 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         candidate: Box<commit_plan::PreparedStoreOperationCommit>,
     ) -> Result<commit_plan::UploadedStoreOperationActivation, StoreError> {
-        let retained_operation_objects = candidate
-            .commit
-            .retained_operation_objects()
-            .map_err(StoreError::from)?;
-        let activation = commit_plan::PreparedStoreOperationActivation {
-            candidate,
-            retained_operation_objects,
-        };
-        let reference = activation.candidate.reference.clone();
         let verified_commit = self
             .history
-            .authenticate_commit_bytes(&reference, &activation.candidate.commit.to_bytes())
+            .authenticate_commit_bytes(&candidate.reference, &candidate.commit.to_bytes())
             .await?;
+        self.upload_authenticated(candidate, verified_commit).await
+    }
+
+    async fn upload_authenticated(
+        &mut self,
+        candidate: Box<commit_plan::PreparedStoreOperationCommit>,
+        verified_commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
+    ) -> Result<commit_plan::UploadedStoreOperationActivation, StoreError> {
+        candidate.commit.retained_operation_objects()?;
+        let reference = candidate.reference.clone();
         let commit = verified_commit.value();
         let circle_activations = if commit.control().is_some() {
             self.history
@@ -195,9 +251,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             coven_protocol::circle_activation::VerifiedCircleActivations::none(commit, &reference)
                 .map_err(StoreError::from)?
         };
-        self.upload_commit(&activation.candidate).await?;
+        self.upload_commit(&candidate).await?;
         Ok(commit_plan::UploadedStoreOperationActivation {
-            activation,
+            candidate,
             verified_commit,
             circle_activations,
         })
@@ -210,19 +266,70 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         membership_completion: Option<
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         >,
-    ) -> Result<commit_plan::StoreOperationPublicationOutcome, StoreError> {
+    ) -> Result<coven_database::AcceptedStoreCommitEvidence, StoreError> {
+        self.publish_uploaded_attempt(uploaded, membership_objects, membership_completion)
+            .await?
+            .require_accepted()
+    }
+
+    async fn publish_uploaded_attempt(
+        &mut self,
+        uploaded: commit_plan::UploadedStoreOperationActivation,
+        membership_objects: Option<coven_database::VerifiedMergeMembershipObjects>,
+        membership_completion: Option<
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
+        >,
+    ) -> Result<StoreOperationPublicationOutcome, StoreError> {
         let commit_plan::UploadedStoreOperationActivation {
-            mut activation,
+            mut candidate,
             verified_commit,
             circle_activations,
         } = uploaded;
+        if let Some(accepted) = self
+            .database
+            .installed_store_commit_evidence(verified_commit.clone())
+            .await?
+        {
+            return self
+                .complete_installed_operation(
+                    &candidate,
+                    verified_commit,
+                    accepted,
+                    membership_completion,
+                )
+                .await
+                .map(StoreOperationPublicationOutcome::Accepted);
+        }
+        self.database
+            .mark_candidate_commit_uploaded(candidate.reference.clone())
+            .await?;
+        let accepted_publication = match self
+            .publish_store_commit_publication(&verified_commit)
+            .await?
+        {
+            crate::sync::store::authorization::history::publication::StoreCommitPublicationAttemptOutcome::SnapshotRetired(snapshot) => {
+                return Ok(StoreOperationPublicationOutcome::SnapshotRetired(snapshot));
+            }
+            outcome => outcome.require_published()?,
+        };
+        let accepted_publication = match accepted_publication {
+            coven_database::StoreCommitPublicationOutcome::Installed(accepted) => {
+                return self
+                    .complete_installed_operation(
+                        &candidate,
+                        verified_commit,
+                        accepted,
+                        membership_completion,
+                    )
+                    .await
+                    .map(StoreOperationPublicationOutcome::Accepted);
+            }
+            accepted => accepted,
+        };
         let database = self.database.clone();
         let root = self.store_root().clone();
-        let reference = activation.candidate.reference.clone();
         let commit = verified_commit.value().clone();
-        let head = activation.candidate.head.clone();
-        let head_object = activation.candidate.head_object.clone();
-        let history_evidence = activation.candidate.history_evidence.clone();
+        let history_evidence = candidate.history_evidence.clone();
         let membership_heads = &commit.membership_state.heads;
         let authorization = self
             .history
@@ -243,78 +350,154 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             )
             .await
             .map_err(StoreError::from)?;
-        let has_tracked_remote_objects =
-            !activation.retained_operation_objects.is_empty() || membership_completion.is_some();
-        if has_tracked_remote_objects {
-            database
-                .mark_candidate_commit_uploaded(reference.clone())
-                .await?;
-        }
-        let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            commit.store_root_hash,
-            coven_protocol::objects::ProtocolObjectDomain::StoreHead,
-        );
-        let head_prefix = coven_protocol::store_commit::head_slot_prefix(
-            &commit.author_registration.device_id.to_string(),
-            commit.seq(),
-        );
-        // The head's bytes are what it serializes to, so the upload rebuilds
-        // them under the object the candidate names; `new` re-checks them
-        // against that reference before any of them leave this device.
-        let prepared_head =
-            coven_protocol::objects::PreparedExactObject::new(head_object.clone(), head.to_bytes())
-                .map_err(coven_protocol::objects::StoreObjectError::from)?;
-        match self
-            .storage
-            .as_ref()
-            .create_verified_protocol_object(
-                &head_context,
-                &prepared_head,
-                &head_prefix,
-                &head.to_bytes(),
-            )
-            .await
-        {
-            Ok(()) => {}
-            Err(coven_protocol::objects::StorageError::SlotCollision(_)) => {
-                return self
-                    .resolve_head_collision(
-                        activation.candidate,
-                        verified_commit,
-                        reference,
-                        head,
-                        head_object,
-                        head_prefix,
-                    )
-                    .await;
+        let accepted: coven_database::AcceptedStoreCommitEvidence = match &accepted_publication {
+            coven_database::StoreCommitPublicationOutcome::Accepted { interval, .. } => {
+                interval.accepted_commit(&verified_commit)?.into()
             }
-            Err(error) => {
-                return Err(coven_protocol::objects::StoreObjectError::from(error).into());
-            }
-        }
-        let activation_head = coven_protocol::store_commit::StoreDeviceHeadRef {
-            head_hash: head.head_hash(),
-            object: head_object.clone(),
+            coven_database::StoreCommitPublicationOutcome::Installed(evidence) => evidence.clone(),
         };
-        let operation_object_ids = if has_tracked_remote_objects {
-            database
-                .mark_store_head_uploaded(activation_head.clone())
+        let (operation_object_ids, membership_completion) = self
+            .finalize_store_operation_authority(
+                &candidate,
+                &verified_commit,
+                &accepted_publication,
+                membership_completion,
+            )
+            .await?;
+        let registrations = candidate
+            .registration_activation
+            .take()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let membership_after = if let Some(proof) = &history_evidence.membership_proof {
+            // A competing publication may have refreshed this chain while the
+            // candidate kept its original predecessor. Extend the current chain.
+            let mut membership = self.membership.clone();
+            if let (Some(reference), Some(resolution)) =
+                (&proof.resolution, &proof.resolution_value)
+            {
+                if !membership.resolution_refs().contains(reference) {
+                    membership
+                        .apply_resolutions(
+                            root.store_root_hash,
+                            &[(reference.clone(), resolution.clone())],
+                        )
+                        .map_err(MembershipMutationError::from)?;
+                }
+            }
+            membership = membership
+                .with_exact_entry(&proof.entry_value)
+                .map_err(MembershipMutationError::from)?;
+            if !membership.covers_heads(std::slice::from_ref(&proof.head)) {
+                membership
+                    .activate_head_ref(proof.head.clone())
+                    .map_err(MembershipMutationError::from)?;
+            }
+            Some(membership)
+        } else {
+            None
+        };
+        let materialization = database
+            .materialize_published_store_operation(
+                root,
+                verified_commit,
+                registrations,
+                device_operations,
+                circle_activations,
+                accepted_publication,
+                history_evidence,
+                membership_objects,
+                operation_object_ids,
+                membership_completion,
+            )
+            .await?;
+        if let Some(materialization) = materialization {
+            self.history
+                .admit_materialized_publication(&materialization)
+                .map_err(StoreError::from)?;
+            if let Some(membership) = membership_after {
+                self.membership = membership;
+            }
+        } else if membership_after.is_some() {
+            // A different pull installed this control and may have advanced
+            // further. Its current accepted chain owns the resulting authority.
+            self.refresh_installed_membership().await?;
+        }
+        Ok(StoreOperationPublicationOutcome::Accepted(accepted))
+    }
+
+    async fn finalize_store_operation_authority(
+        &mut self,
+        candidate: &commit_plan::PreparedStoreOperationCommit,
+        verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        publication: &coven_database::StoreCommitPublicationOutcome,
+        membership_completion: Option<
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
+        >,
+    ) -> Result<
+        (
+            Option<Vec<coven_protocol::store_commit::ObjectHash>>,
+            Option<coven_protocol::membership_mutation::StoreMembershipJournalCompletion>,
+        ),
+        StoreError,
+    > {
+        let reference = verified_commit.reference();
+        let mut membership_completion = membership_completion;
+        if let Some(completion) = &mut membership_completion {
+            if let coven_protocol::membership_mutation::StoreMembershipJournalCompletion::MembershipCandidateAbandoned { original, publication, .. } = completion {
+                publication.candidate_object_refs(&original.commit, &original.reference)?;
+                coven_protocol::remote_object::CandidateNonactivation::validate_durable_shape(
+                    &original.reference,
+                    &original.commit,
+                    coven_protocol::remote_object::CandidateNonactivationProof::AcceptedAbandonment {
+                        abandonment: coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
+                            coord: candidate.reference.coord.clone(),
+                            object: candidate.reference.object.clone(),
+                            canonical_signed_bytes: candidate.commit.to_bytes(),
+                        },
+                    },
+                )?;
+            } else {
+            let proof = candidate
+                .history_evidence
+                .membership_proof
+                .as_ref()
+                .ok_or_else(|| {
+                    StoreError::InvalidOutbound(
+                        "membership finalization omits its prepared authority proof".into(),
+                    )
+                })?;
+            let result = self
+                .finalize_membership_head_acceptance(verified_commit, proof, publication)
                 .await?;
-            membership_completion.is_none().then(|| {
+            completion.retain_acceptance_result(result);
+            }
+        }
+        let operation_object_ids = if membership_completion.is_none() {
+            Some(
                 std::iter::once(coven_protocol::remote_object::remote_object_id(
                     &reference.object,
                 ))
                 .chain(
-                    activation
-                        .retained_operation_objects
+                    candidate
+                        .commit
+                        .retained_operation_objects()?
                         .iter()
                         .map(coven_protocol::remote_object::remote_object_id),
                 )
-                .chain(std::iter::once(
-                    coven_protocol::remote_object::remote_object_id(&head_object),
-                ))
-                .collect::<Vec<_>>()
-            })
+                .chain(
+                    candidate
+                        .history_evidence
+                        .acknowledgement
+                        .iter()
+                        .flat_map(|proof| {
+                            proof.predecessors.iter().map(|(reference, _)| {
+                                coven_protocol::remote_object::remote_object_id(&reference.object)
+                            })
+                        }),
+                )
+                .collect(),
+            )
         } else {
             None
         };
@@ -328,9 +511,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 || !completion_ids.contains(&coven_protocol::remote_object::remote_object_id(
                     &reference.object,
                 ))
-                || !completion_ids.contains(&coven_protocol::remote_object::remote_object_id(
-                    &head_object,
-                ))
             {
                 return Err(StoreError::InvalidOutbound(
                     "membership journal completion does not cover its exact Store candidate"
@@ -338,36 +518,88 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 ));
             }
         }
-        let registrations = activation
-            .candidate
-            .registration_activation
-            .take()
-            .into_iter()
-            .collect::<Vec<_>>();
-        database
-            .materialize_published_store_operation(
-                root,
+        Ok((operation_object_ids, membership_completion))
+    }
+
+    async fn complete_installed_operation(
+        &mut self,
+        candidate: &commit_plan::PreparedStoreOperationCommit,
+        verified_commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        accepted: coven_database::AcceptedStoreCommitEvidence,
+        membership_completion: Option<
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
+        >,
+    ) -> Result<coven_database::AcceptedStoreCommitEvidence, StoreError> {
+        candidate.validate_closed_shape()?;
+        let (operation_object_ids, membership_completion) = self
+            .finalize_store_operation_authority(
+                candidate,
+                &verified_commit,
+                &coven_database::StoreCommitPublicationOutcome::Installed(accepted.clone()),
+                membership_completion,
+            )
+            .await?;
+        let accepted = self
+            .database
+            .complete_installed_store_operation(
                 verified_commit,
-                registrations,
-                device_operations,
-                circle_activations,
-                head,
-                activation_head.object,
-                history_evidence,
-                membership_objects,
+                accepted,
                 operation_object_ids,
                 membership_completion,
             )
             .await?;
-        Ok(commit_plan::StoreOperationPublicationOutcome::Activated(
-            reference,
-        ))
+        if candidate.history_evidence.membership_proof.is_some() {
+            self.refresh_installed_membership().await?;
+        }
+        Ok(accepted)
     }
 
-    pub(super) async fn prepare_candidate_borrowed(
+    async fn refresh_installed_membership(&mut self) -> Result<(), StoreError> {
+        let founder = self.protocol_root().descriptor.founder_pubkey.clone();
+        self.membership = self
+            .history
+            .load_current_membership(&founder)
+            .await
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation(
+                    "load installed membership authority",
+                    error,
+                )
+            })?;
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_candidate(
         &mut self,
         plan: &commit_plan::StoreOperationCommitPlan,
         batch: commit_plan::StoreOperationBatch,
+    ) -> Result<commit_plan::PreparedStoreOperationCommit, StoreError> {
+        self.prepare_candidate_for_write(plan, batch, self.database.new_store_write_id())
+            .await
+    }
+
+    pub(crate) async fn prepare_replacement_candidate(
+        &mut self,
+        plan: &commit_plan::StoreOperationCommitPlan,
+        batch: commit_plan::StoreOperationBatch,
+        previous: &commit_plan::PreparedStoreOperationCommit,
+    ) -> Result<commit_plan::PreparedStoreOperationCommit, StoreError> {
+        if plan.coord() != &previous.reference.coord
+            || !plan.is_local_registration(&previous.commit.author_registration)
+        {
+            return Err(StoreError::InvalidOutbound(
+                "replacement operation differs from its reserved author position".into(),
+            ));
+        }
+        self.prepare_candidate_for_write(plan, batch, previous.commit.write_id.clone())
+            .await
+    }
+
+    pub(crate) async fn prepare_candidate_for_write(
+        &mut self,
+        plan: &commit_plan::StoreOperationCommitPlan,
+        batch: commit_plan::StoreOperationBatch,
+        write_id: coven_protocol::write::WriteId,
     ) -> Result<commit_plan::PreparedStoreOperationCommit, StoreError> {
         let storage = self.storage.as_ref();
         let acknowledgement_evidence = match &batch {
@@ -377,7 +609,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             _ => None,
         };
         let retained_registration_evidence = match &batch {
-            commit_plan::StoreOperationBatch::JoinActivation { registration } => {
+            commit_plan::StoreOperationBatch::JoinActivation { registration, .. } => {
                 vec![registration.registration().clone()]
             }
             commit_plan::StoreOperationBatch::SamePrincipalDeviceJoin { registration, .. } => {
@@ -386,13 +618,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             _ => Vec::new(),
         };
         let retained_device_operations = match &batch {
-            commit_plan::StoreOperationBatch::DeviceExclusionProposal(proposal) => Some(
+            commit_plan::StoreOperationBatch::DeviceExclusionProposal { proposal, .. } => Some(
                 coven_protocol::store_commit::RetainedStoreDeviceOperations::from_sources(
                     vec![proposal.clone()],
                     Vec::new(),
                 ),
             ),
-            commit_plan::StoreOperationBatch::DeviceExclusionOutcome(outcome) => Some(
+            commit_plan::StoreOperationBatch::DeviceExclusionOutcome { outcome, .. } => Some(
                 coven_protocol::store_commit::RetainedStoreDeviceOperations::from_sources(
                     Vec::new(),
                     vec![outcome.clone()],
@@ -400,8 +632,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             ),
             _ => None,
         };
-        let (commit, registration_activation) =
-            plan.sign_batch(self.database.new_store_write_id(), batch)?;
+        let (commit, registration_activation) = plan.sign_batch(write_id, batch)?;
         let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             plan.root().store_root_hash,
             coven_protocol::objects::ProtocolObjectDomain::StoreCommit,
@@ -471,160 +702,61 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         ))
         .await
         .map_err(StoreError::from)?;
-        let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            common.commit.store_root_hash,
-            coven_protocol::objects::ProtocolObjectDomain::StoreHead,
-        );
-        let device_id = plan.device_id().to_string();
         let successor = self
             .history
             .prepare_merge_history_successor(
                 &verified_commit,
                 plan.membership(),
                 None,
-                state_after,
+                plan.predecessor_state(),
+                &state_after,
                 merge_history_evidence,
             )
             .await
             .map_err(StoreError::from)?;
-        let next_prefix = coven_protocol::store_commit::head_slot_prefix(
-            &device_id,
-            commit_plan::successor_store_sequence(common.commit.seq())?,
+        let publication_entry = self
+            .writer
+            .sign_store_publication_entry(plan.publication_previous(), &verified_commit)
+            .map_err(StoreError::from)?;
+        let publication_prefix =
+            coven_protocol::store_commit::store_publication_entry_semantic_prefix(
+                &publication_entry,
+            );
+        let publication_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            common.commit.store_root_hash,
+            coven_protocol::objects::ProtocolObjectDomain::StorePublicationEntry,
         );
-        let next_slot = storage
-            .allocate_protocol_slot(&head_context, &next_prefix, ".json")
+        let publication_slot = storage
+            .allocate_protocol_slot(&publication_context, &publication_prefix, ".json")
             .await
             .map_err(coven_protocol::objects::StoreObjectError::from)?;
-        let head = plan.sign_device_head(
-            common.reference.clone(),
-            coven_protocol::store_commit::SuccessorLink {
-                activation: plan.announcement_activation_id()?,
-                predecessor: successor.predecessor_head.map(|reference| reference.object),
-                next_slot,
-            },
-        )?;
-        let head_prefix =
-            coven_protocol::store_commit::head_slot_prefix(&device_id, common.commit.seq());
-        let prepared_head = storage
+        let prepared_publication = storage
             .prepare_protocol_object(
-                &head_context,
-                successor.head_slot,
-                &head_prefix,
-                head.to_bytes(),
+                &publication_context,
+                publication_slot,
+                &publication_prefix,
+                publication_entry.to_bytes(),
             )
             .map_err(coven_protocol::objects::StoreObjectError::from)?;
-        Ok(commit_plan::PreparedStoreOperationCommit {
-            common,
-            head,
-            head_object: prepared_head.reference().clone(),
-            history_evidence: successor.history_evidence,
-        })
-    }
-
-    pub(crate) async fn finish_nonactivating_acknowledgement(
-        &self,
-        acknowledgement: coven_protocol::store_commit::StoreAckRef,
-    ) -> Result<(), StoreError> {
-        let target = self
-            .database
-            .acknowledgement_cleanup_target(acknowledgement.clone())
-            .await?;
-        crate::sync::store::authorization::delete_candidate_cleanup_targets::<StoreError>(
-            self.storage.as_ref(),
-            &self.database,
-            target,
-        )
-        .await?;
-        self.database
-            .complete_nonactivating_acknowledgement(acknowledgement)
-            .await?;
-        Ok(())
-    }
-
-    pub(super) async fn resolve_head_collision(
-        &mut self,
-        mut candidate: Box<commit_plan::PreparedStoreOperationCommit>,
-        commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        reference: coven_protocol::store_commit::StoreBatchCommitRef,
-        head: coven_protocol::store_commit::StoreDeviceHead,
-        head_object: coven_protocol::objects::ExactObjectRef,
-        head_prefix: String,
-    ) -> Result<commit_plan::StoreOperationPublicationOutcome, StoreError> {
-        let database = self.database.clone();
-        let observation = self
-            .history
-            .merge_conflict()
-            .observe_occupied_merge_head(&head, &commit, head_object.slot(), &head_prefix)
-            .await?;
-        if observation.winner().commit == reference {
-            let (winner, winner_prepared) = observation.into_head();
-            if let Some(acknowledgement) = commit.acknowledgement().cloned() {
-                database
-                    .adopt_acknowledgement_head(acknowledgement, winner, winner_prepared)
-                    .await?;
-                return Ok(commit_plan::StoreOperationPublicationOutcome::Reprepared);
-            }
-            candidate.adopt_merge_head(winner, winner_prepared.reference().clone())?;
-            return Ok(
-                commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(candidate),
-            );
-        }
-        let registration = database
-            .activated_store_device_registration(commit.author_registration.clone())
-            .await?;
-        let nonactivation = observation
-            .verified_nonactivation(
-                coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
-                    coord: reference.coord.clone(),
-                    object: reference.object.clone(),
-                    canonical_signed_bytes: commit.to_bytes(),
-                },
-                registration.value(),
+        let replacement = self
+            .writer
+            .advance_store_publication(
+                plan.publication_previous(),
+                &publication_entry,
+                &prepared_publication,
+                &verified_commit,
             )
             .map_err(StoreError::from)?;
-        let Some(acknowledgement) = commit.acknowledgement().cloned() else {
-            return Ok(
-                commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate {
-                    candidate,
-                    nonactivation: Box::new(nonactivation),
-                },
-            );
-        };
-        database
-            .begin_acknowledgement_nonactivation(acknowledgement.clone(), nonactivation)
-            .await?;
-        self.finish_nonactivating_acknowledgement(acknowledgement)
-            .await?;
-        Ok(commit_plan::StoreOperationPublicationOutcome::Nonactivated(
-            reference,
-        ))
-    }
-}
-
-fn require_activated_publication(
-    outcome: commit_plan::StoreOperationPublicationOutcome,
-) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, StoreError> {
-    match outcome {
-        commit_plan::StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
-        commit_plan::StoreOperationPublicationOutcome::Nonactivated(reference) => {
-            Err(StoreError::InvalidOutbound(format!(
-                "Store operation candidate {} did not activate",
-                reference.commit_hash
-            )))
-        }
-        commit_plan::StoreOperationPublicationOutcome::Reprepared => {
-            Err(StoreError::InvalidOutbound(
-                "Store operation was reprepared during immediate activation".to_string(),
-            ))
-        }
-        commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(_) => {
-            Err(StoreError::InvalidOutbound(
-                "Store operation adopted a published head for a candidate composed in this call"
-                    .to_string(),
-            ))
-        }
-        commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
-            Err(StoreError::ActivationConflict)
-        }
+        Ok(commit_plan::PreparedStoreOperationCommit {
+            common,
+            publication: coven_protocol::prepared_commit::PreparedStorePublication {
+                previous: plan.publication_previous().record().clone(),
+                previous_version: plan.publication_previous().version().clone(),
+                entry: publication_entry,
+                entry_object: prepared_publication.reference().clone(),
+                replacement,
+            },
+            history_evidence: successor.history_evidence,
+        })
     }
 }

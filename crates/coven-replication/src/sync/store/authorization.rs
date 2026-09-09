@@ -18,7 +18,9 @@ mod store_test_support;
 
 use crate::sync::store::device_join::transport;
 pub(crate) use authorized_store::AuthorizedStore;
-pub(crate) use candidate_cleanup::delete_candidate_cleanup_targets;
+pub(crate) use candidate_cleanup::{
+    delete_candidate_cleanup_targets, retire_store_write_candidates,
+};
 use history::AuthorizedStoreHistory;
 pub use history_construction::HistoryConstructionAuthority;
 pub use keyring::StoreKeyrings;
@@ -33,6 +35,7 @@ pub struct Store {
     blob_cache: crate::sync::store::blob::StoreBlobCache,
     identity: UserKeypair,
     device_id: Option<String>,
+    routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
 }
 
@@ -233,6 +236,7 @@ impl Store {
         store_dir: StoreDir,
         founder_timestamp: &str,
         identity: &UserKeypair,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<InitializedStore, StoreInitializationError> {
         let blob_cache =
             crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
@@ -243,6 +247,7 @@ impl Store {
             blob_cache,
             founder_timestamp,
             identity,
+            routing_encryption,
         )
         .await
         .execute()
@@ -255,6 +260,7 @@ impl Store {
         store_dir: StoreDir,
         expected_root: &StoreRootRef,
         identity: &UserKeypair,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<InitializedStore, StoreInitializationError> {
         let root = crate::sync::store::protocol_root::VerifiedStoreRoot::open(
             &database,
@@ -276,6 +282,7 @@ impl Store {
             crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
         AuthorizedStoreHistory::new(
             database,
+            routing_encryption,
             &storage,
             &store_dir,
             blob_cache,
@@ -293,6 +300,7 @@ impl Store {
         storage: Arc<dyn CloudSyncObjectStorage>,
         store_dir: StoreDir,
         identity: UserKeypair,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<Self, StoreError> {
         let store_root =
             database
@@ -312,7 +320,13 @@ impl Store {
             .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
             .await?;
         Ok(Self::new(
-            database, storage, store_dir, identity, device_id, root,
+            database,
+            storage,
+            store_dir,
+            identity,
+            device_id,
+            root,
+            routing_encryption,
         ))
     }
 
@@ -323,6 +337,7 @@ impl Store {
         identity: UserKeypair,
         device_id: Option<String>,
         root: crate::sync::store::protocol_root::VerifiedStoreRoot,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Self {
         let blob_cache =
             crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
@@ -334,6 +349,7 @@ impl Store {
             identity,
             device_id,
             root,
+            routing_encryption,
         }
     }
     pub(crate) fn store_root(&self) -> &StoreRootRef {
@@ -409,36 +425,31 @@ impl Store {
     pub(crate) async fn discard_blocked_write(
         &self,
         write_id: coven_protocol::write::WriteId,
-        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        _routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<Vec<coven_protocol::write::WriteId>, crate::sync::store::StoreError> {
-        if let BlockedWriteDiscard::Discarded(discarded) =
-            self.database.discard_blocked_write(&write_id).await?
-        {
-            return Ok(discarded);
-        }
-
-        match self
-            .abandon_merge_candidate(write_id.clone(), routing_encryption)
-            .await?
-        {
-            crate::sync::store::merge_conflict::MergeCandidateAbandonment::NotRequired => {
-                return Err(StoreError::InvalidOutbound(
-                    "blocked Merge candidate has no abandonment authority".to_string(),
-                ));
-            }
-            crate::sync::store::merge_conflict::MergeCandidateAbandonment::Abandoned => {}
-            crate::sync::store::merge_conflict::MergeCandidateAbandonment::CandidateActivated => {
-                return Err(StoreError::InvalidOutbound(
-                    "Merge candidate activated before abandonment and cannot be discarded"
-                        .to_string(),
-                ));
+        let _authorship = self.database.author_own_stream().await;
+        if let Some(active) = self.database.active_store_publication().await? {
+            if active.owner()
+                == &coven_database::ActiveStorePublicationOwner::StoreWrite(write_id.clone())
+                && (active.is_awaiting_preparation() || active.is_discarding())
+            {
+                let active = self
+                    .database
+                    .begin_retired_store_write_discard(active)
+                    .await?;
+                candidate_cleanup::retire_store_write_candidates(
+                    &self.database,
+                    self.storage.as_ref(),
+                    active,
+                )
+                .await?;
             }
         }
-
         match self.database.discard_blocked_write(&write_id).await? {
             BlockedWriteDiscard::Discarded(discarded) => Ok(discarded),
             BlockedWriteDiscard::RemoteResolutionRequired => Err(StoreError::InvalidOutbound(
-                "Merge candidate remains unresolved after abandonment".to_string(),
+                "Store publication outcome must be settled before the blocked write can be discarded"
+                    .to_string(),
             )),
         }
     }
@@ -536,28 +547,6 @@ impl Store {
             .map_err(device_exclusion::StoreDeviceExclusionError::from)
     }
 
-    pub(crate) async fn abandon_merge_candidate(
-        &self,
-        write_id: coven_protocol::write::WriteId,
-        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-    ) -> Result<crate::sync::store::merge_conflict::MergeCandidateAbandonment, StoreError> {
-        if self.device_id.is_none() {
-            let mut authority = self.authorize_history().await.map_err(StoreError::from)?;
-            return authority
-                .abandon_excluded_merge_candidate(write_id)
-                .await?
-                .ok_or_else(|| {
-                    StoreError::InvalidOutbound(
-                        "unregistered Store cannot publish Merge abandonment authority".to_string(),
-                    )
-                });
-        }
-        let mut writer = self.authorize_writer().await.map_err(StoreError::from)?;
-        writer
-            .abandon_merge_candidate(write_id, routing_encryption)
-            .await
-    }
-
     #[doc(hidden)]
     pub async fn members(
         &self,
@@ -628,15 +617,20 @@ impl Store {
         );
         let keyrings =
             keyring::StoreKeyrings::new(self.storage.as_ref(), self.root.reference().clone());
-        Ok(AuthorizedStoreHistory::new(
+        let mut history = AuthorizedStoreHistory::new(
             self.database.clone(),
+            self.routing_encryption.clone(),
             &self.storage,
             &self.store_dir,
             self.blob_cache.clone(),
             history_verifier,
             blob_source,
             keyrings,
-        ))
+        );
+        history.seed_retained_history().await.map_err(|error| {
+            SyncCycleFailure::operation("load installed Store history authority", error)
+        })?;
+        Ok(history)
     }
 
     pub(crate) async fn authorize(&self) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {

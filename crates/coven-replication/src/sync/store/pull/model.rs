@@ -13,14 +13,6 @@ pub enum HeldStorePositionReason {
         required: u32,
     },
     Unauthorized,
-    DeviceExclusionFreeze {
-        proposal: coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
-        target_cut: StoreHistoryCut,
-    },
-    InactiveDevice {
-        terminals: Vec<coven_protocol::store_commit::StoreDeviceExclusionRef>,
-        accepted_cut: StoreHistoryCut,
-    },
     InvalidChangeset(String),
     InvalidChangesetIdentity(std::sync::Arc<coven_database::ChangesetIdentityError>),
     InvalidChangesetDatabase(std::sync::Arc<DbError>),
@@ -41,9 +33,6 @@ pub enum HeldStorePositionReason {
         table: String,
         row_id: String,
         commit: StoreBatchCommitRef,
-    },
-    InvalidLocalCircleContext {
-        circle_id: coven_protocol::circle::CircleId,
     },
     HashMismatch {
         referenced_device_id: String,
@@ -81,10 +70,6 @@ impl PartialEq for HeldStorePositionReason {
             | (Reason::CirclePackageMismatch, Reason::CirclePackageMismatch)
             | (Reason::ForeignKeyDependency, Reason::ForeignKeyDependency)
             | (Reason::InvalidSignature, Reason::InvalidSignature) => true,
-            (
-                Reason::InvalidLocalCircleContext { circle_id: left },
-                Reason::InvalidLocalCircleContext { circle_id: right },
-            ) => left == right,
             (Reason::MissingPredecessor(left), Reason::MissingPredecessor(right)) => left == right,
             (
                 Reason::MissingDependency {
@@ -106,26 +91,6 @@ impl PartialEq for HeldStorePositionReason {
                     required: rr,
                 },
             ) => ll == rl && lr == rr,
-            (
-                Reason::DeviceExclusionFreeze {
-                    proposal: lp,
-                    target_cut: lc,
-                },
-                Reason::DeviceExclusionFreeze {
-                    proposal: rp,
-                    target_cut: rc,
-                },
-            ) => lp == rp && lc == rc,
-            (
-                Reason::InactiveDevice {
-                    terminals: lt,
-                    accepted_cut: lc,
-                },
-                Reason::InactiveDevice {
-                    terminals: rt,
-                    accepted_cut: rc,
-                },
-            ) => lt == rt && lc == rc,
             (Reason::InvalidChangeset(left), Reason::InvalidChangeset(right))
             | (Reason::WrongSlot(left), Reason::WrongSlot(right))
             | (Reason::InvalidObject(left), Reason::InvalidObject(right)) => left == right,
@@ -222,8 +187,6 @@ impl PartialEq for HeldStorePositionReason {
 }
 
 impl Eq for HeldStorePositionReason {}
-
-pub(crate) type ApplyOutcome = coven_protocol::membership::ApplyOutcome<HeldStorePositionReason>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeldStoreCoordinate {
@@ -330,17 +293,11 @@ impl HeldStorePosition {
 pub struct StorePullResult {
     pub changesets_applied: u64,
     pub held_positions: Vec<HeldStorePosition>,
-    pub visible_heads: Vec<VerifiedStoreDeviceHead>,
+    pub visible_commits: Vec<VerifiedStoreBatchCommit>,
     pub row_changes: Vec<RowChange>,
     pub local_blob_cleanup_pending: bool,
     #[cfg(any(test, feature = "test-utils"))]
     pub frontier: BTreeMap<String, StoreBatchCommitRef>,
-}
-
-#[derive(Debug, Clone)]
-pub struct VerifiedStoreDeviceHead {
-    pub head: StoreDeviceHead,
-    pub author: StoreDeviceRegistration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -406,6 +363,14 @@ pub enum StorePullError {
     Membership(#[source] StorePullMembershipError),
     #[error("storage: {0}")]
     Storage(#[from] StorageError),
+    #[error("snapshot restoration: {0}")]
+    SnapshotRestoration(#[source] Box<crate::sync::store::snapshots::SnapshotError>),
+    #[error("snapshot preparation cleanup failed: {cleanup} (operation: {operation})")]
+    SnapshotPreparationCleanup {
+        #[source]
+        operation: Box<StorePullError>,
+        cleanup: DbError,
+    },
     #[error("Circle package: {0}")]
     CirclePackage(#[source] Box<crate::sync::store::CirclePackageReadError>),
 }

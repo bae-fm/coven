@@ -23,8 +23,8 @@
 //! the replication layer. The last of them is enforced here, because it is a rule about a
 //! row's `(blob id, cloud path)` pair and this is the one place coven reads that pair off
 //! a row: a replaceable blob's readable path must name its blob, and a write-once row may
-//! never be repointed. Together they are what keeps a cloud object from ever being
-//! rewritten with different bytes.
+//! never be repointed. These are declaration constraints. Immutable cloud-object
+//! identity comes from the blob locator and retained exact object reference.
 
 use std::collections::HashMap;
 
@@ -65,17 +65,15 @@ pub enum BlobDeclError {
         changed_blob_id: String,
         row_blob_id: String,
     },
-    /// A [`Replaceable`](BlobReplacement::Replaceable) blob's readable cloud path does not
-    /// name the blob it carries, so the row's next blob would be keyed at this blob's
-    /// cloud object and overwrite it. See `cloud_path_names_blob`.
+    /// A [`Replaceable`](BlobReplacement::Replaceable) blob's readable cloud path
+    /// does not satisfy the declared naming policy. See `cloud_path_names_blob`.
     CloudPathNotKeyedByBlob {
         table: String,
         blob_id: String,
         cloud_path: String,
     },
-    /// A [`WriteOnce`](BlobReplacement::WriteOnce) row was repointed at a different blob.
-    /// Its cloud path is a stable readable name — that is what write-once buys — so the
-    /// new blob would be keyed at the old blob's cloud object and overwrite it.
+    /// A [`WriteOnce`](BlobReplacement::WriteOnce) changeset update changed the
+    /// row's blob-id column, contrary to its declaration.
     WriteOnceBlobRepointed { table: String, blob_id: String },
 }
 
@@ -107,7 +105,10 @@ impl std::fmt::Display for BlobDeclError {
                 "blob declaration changeset walk mismatch: old={old_count}, new={new_count}"
             ),
             BlobDeclError::MissingPublicationPrimaryKey { table } => {
-                write!(f, "blob-bearing Store write row in {table:?} has no primary key")
+                write!(
+                    f,
+                    "blob-bearing Store write row in {table:?} has no primary key"
+                )
             }
             BlobDeclError::MissingPublicationRow { table, primary_key } => write!(
                 f,
@@ -135,15 +136,13 @@ impl std::fmt::Display for BlobDeclError {
                 f,
                 "replaceable blob {blob_id} in {table} has cloud path {cloud_path:?}, which does \
                  not name it: the path's file name must be the blob id, or end with -{blob_id} \
-                 before its extension, so that replacing the blob moves its cloud key rather \
-                 than overwriting its cloud object"
+                 before its extension"
             ),
             BlobDeclError::WriteOnceBlobRepointed { table, blob_id } => write!(
                 f,
-                "write-once row in {table} was repointed at blob {blob_id}: a write-once blob's \
-                 cloud path is a stable readable name, so the new blob would overwrite the cloud \
-                 object of the blob it replaced. Declare the table replaceable (and key its path \
-                 by its blob id) if its rows are meant to be repointed"
+                "write-once row in {table} was repointed at blob {blob_id}: its declaration \
+                 forbids changing the blob-id column. Declare the table replaceable if its \
+                 rows are meant to be repointed"
             ),
         }
     }
@@ -189,9 +188,8 @@ struct TableBlob {
     cloud_path_col: Option<usize>,
     /// The encryption scope, fixed per table by the declaration.
     scope: BlobScope,
-    /// Whether this table's row may be repointed at a different blob, and so which rule
-    /// keeps its cloud object from ever being rewritten. See [`TableBlob::blob_ref`] and
-    /// [`TableBlob::ref_from_change`].
+    /// This table's row-repointing and readable-name policy. See
+    /// [`TableBlob::blob_ref`] and [`TableBlob::ref_from_change`].
     replacement: BlobReplacement,
 }
 
@@ -200,14 +198,12 @@ impl TableBlob {
     /// `scope`, and `cloud_path` plus this table's fixed namespace, provenance, and
     /// cache fill. Shared by changeset and live-row readers.
     ///
-    /// The gate a [`Replaceable`](BlobReplacement::Replaceable) blob's readable cloud path
-    /// passes through: it must name the blob ([`cloud_path_names_blob`]), so that a row
-    /// repointed at a new blob keys it at a *new* cloud object rather than over the one it
-    /// replaced. Every blob set coven derives — the push scan, the pull scan, the snapshot
-    /// backfill, the transitions — is built here, so there is no path around it. A
-    /// [`WriteOnce`](BlobReplacement::WriteOnce) blob is exempt: its row is never
-    /// repointed ([`TableBlob::ref_from_change`] refuses that), so its object is written
-    /// once and its path is free to be a stable readable name.
+    /// Enforce the [`Replaceable`](BlobReplacement::Replaceable) declaration's
+    /// readable-name policy through [`cloud_path_names_blob`]. A
+    /// [`WriteOnce`](BlobReplacement::WriteOnce) declaration does not require the
+    /// id in its readable name; [`TableBlob::ref_from_change`] instead refuses
+    /// updates to its blob-id column. Locator construction determines the final
+    /// immutable cloud-object key independently of these row constraints.
     fn blob_ref(
         &self,
         table: &str,
@@ -242,8 +238,7 @@ impl TableBlob {
     /// changeset UPDATE marks only the columns whose values changed. The decoded row
     /// also carries old values for unchanged columns, so write-once enforcement must
     /// inspect that marker before treating its blob id as a repointing. A real repoint
-    /// is refused here, where the change is read, rather than discovered as a corrupted
-    /// bucket later.
+    /// is refused here, where the change is read and the declaration is available.
     fn ref_from_change(
         &self,
         table: &str,

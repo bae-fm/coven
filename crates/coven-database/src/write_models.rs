@@ -64,6 +64,9 @@ pub(crate) enum ReplayJournal<'a> {
     /// Everything the journal still owes to a projection that will replace the
     /// live database.
     Owed,
+    /// Replay accepted work and the settled local prefix, leaving the unresolved
+    /// journal suffix to the recorded-edit capture owner.
+    Rebase,
     /// The settled prefix a baseline at this cut absorbs.
     Folded(&'a [SettledStoreWrite]),
 }
@@ -148,6 +151,17 @@ pub struct StoreWriteBase {
     pub dependencies: BTreeMap<String, StoreBatchCommitRef>,
 }
 
+/// Current publication inputs produced by reapplying the recorded edit. The
+/// journal's original base, changeset and blob facts remain the capture record.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RebasedStoreWrite {
+    pub base: StoreWriteBase,
+    pub publication_base: coven_protocol::store_commit::StorePublicationBase,
+    pub changeset_hash: ObjectHash,
+    pub blob_facts: StoreWriteBlobFacts,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreWriteBlobFacts {
@@ -202,97 +216,7 @@ impl StoreWriteBlobFact {
 pub struct PreparedStoreWriteCommit {
     pub audiences: PreparedAudienceObjects,
     pub commit: ExactProtocolObject<VerifiedStoreBatchCommit>,
-    pub head: ExactProtocolObject<StoreDeviceHead>,
-}
-
-/// A candidate whose activation is blocked: the commit and head it would have
-/// activated, each named by the reference that identifies it.
-///
-/// The upload bytes are deliberately absent. A blocked candidate is only ever
-/// examined and cleaned up — its objects are deleted from storage by reference,
-/// never written again — so carrying them would be carrying what no reader
-/// reads.
-#[derive(Debug, Clone)]
-pub struct BlockedMergeCandidate {
-    pub commit: VerifiedStoreBatchCommit,
-    pub commit_bytes: Vec<u8>,
-    pub commit_object: ExactObjectRef,
-    pub head: StoreDeviceHead,
-    pub head_object: ExactObjectRef,
-}
-
-#[derive(Debug, Clone)]
-pub struct PreparedMergeAbandonmentCandidates {
-    pub candidate: BlockedMergeCandidate,
-    pub authority: BlockedMergeCandidate,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompletePreparedStoreWriteOutcome {
-    Published,
-    AuthorExcluded {
-        device_id: coven_protocol::store_commit::StoreDeviceId,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthorExclusionActivationLocator {
-    exclusion: coven_protocol::store_commit::StoreDeviceExclusionRef,
-    accepted_cut: BTreeMap<coven_protocol::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
-    activation_commit: StoreBatchCommitRef,
-    activation_head: coven_protocol::store_commit::StoreDeviceHeadRef,
-}
-
-impl AuthorExclusionActivationLocator {
-    pub fn verified(
-        exclusion: coven_protocol::store_commit::StoreDeviceExclusionRef,
-        accepted_cut: BTreeMap<coven_protocol::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
-        activation_commit: StoreBatchCommitRef,
-        activation_head: coven_protocol::store_commit::StoreDeviceHeadRef,
-    ) -> Self {
-        Self {
-            exclusion,
-            accepted_cut,
-            activation_commit,
-            activation_head,
-        }
-    }
-
-    pub fn exclusion(&self) -> &coven_protocol::store_commit::StoreDeviceExclusionRef {
-        &self.exclusion
-    }
-
-    pub fn accepted_cut(
-        &self,
-    ) -> &BTreeMap<coven_protocol::causal_grants::AuthorStreamId, StoreBatchCommitRef> {
-        &self.accepted_cut
-    }
-
-    pub fn activation_head(&self) -> &coven_protocol::store_commit::StoreDeviceHeadRef {
-        &self.activation_head
-    }
-
-    pub fn activation_commit(&self) -> &StoreBatchCommitRef {
-        &self.activation_commit
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum TerminalCandidateAuthority {
-    AuthorExclusion(AuthorExclusionActivationLocator),
-    MembershipGrantRevocation {
-        grant_id: coven_protocol::membership::MembershipGrantId,
-        membership: coven_protocol::circle_control::StoreMembershipStateRef,
-        activation_commit: StoreBatchCommitRef,
-        activation_head: coven_protocol::store_commit::StoreDeviceHeadRef,
-    },
-    DependencyRetraction(coven_protocol::remote_object::VerifiedDependencyRetractionAuthority),
-}
-
-#[derive(Debug, Clone)]
-pub struct TerminalCandidateCleanupVerification {
-    pub authority: TerminalCandidateAuthority,
-    pub candidate: BlockedMergeCandidate,
+    pub publication: coven_protocol::prepared_commit::PreparedStorePublication,
 }
 
 #[derive(Debug)]
@@ -386,16 +310,6 @@ impl InitialStoreMembershipAuthority {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MergeAbandonmentState {
-    None,
-    Prepared,
-    Accepted,
-    CandidateWon,
-    OtherWon,
-    AuthorExcluded,
-}
-
 #[derive(Debug, Clone)]
 pub struct OutboundStoreAck {
     pub reference: StoreAckRef,
@@ -408,8 +322,8 @@ pub struct OutboundStoreAck {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum OutboundStoreAckActivation {
     AwaitingCandidate,
+    Created,
     Prepared(coven_protocol::prepared_commit::PreparedStoreOperationCommit),
-    Nonactivating(coven_protocol::prepared_commit::PreparedStoreOperationCommit),
 }
 
 #[derive(Debug, Clone)]

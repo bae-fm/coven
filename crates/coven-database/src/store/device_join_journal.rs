@@ -125,47 +125,27 @@ fn owner_adjacent(previous: &OwnerJoinProgress, next: &OwnerJoinProgress) -> boo
     {
         return ready == bootstrap.as_ref();
     }
+    if let OwnerJoinProgress::StorePublicationPrepared(prepared) = previous {
+        return prepared
+            .validates_accepted_progress(prepared_operation_attempt_id(&prepared.operation), next);
+    }
+    if let OwnerJoinProgress::StorePublicationPrepared(prepared) = next {
+        return owner_publication_follows(previous, &prepared.operation);
+    }
     matches!(
         (previous, next),
         (
             OwnerJoinProgress::Offered(_),
             OwnerJoinProgress::AccessRequested(_)
         ) | (
-            OwnerJoinProgress::AccessRequested(_),
-            OwnerJoinProgress::AccessGrantPrepared { .. }
-        ) | (
-            OwnerJoinProgress::AccessGrantPrepared { .. },
+            OwnerJoinProgress::AccessGrantActivated { .. },
             OwnerJoinProgress::ApprovalPrepared(_)
         ) | (
             OwnerJoinProgress::ApprovalPrepared(_),
             OwnerJoinProgress::RegistrationRequested(_)
         ) | (
-            OwnerJoinProgress::RegistrationRequested(_),
-            OwnerJoinProgress::AttemptActivated(_)
-        ) | (
-            OwnerJoinProgress::RegistrationRequested(_),
-            OwnerJoinProgress::SamePrincipalActivationCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::SamePrincipalActivationCreateIntent { .. },
+            OwnerJoinProgress::SamePrincipalActivated { .. },
             OwnerJoinProgress::SamePrincipalCompleted { .. }
-        ) | (
-            OwnerJoinProgress::Offered(_),
-            OwnerJoinProgress::AbandonmentCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::AccessRequested(_),
-            OwnerJoinProgress::AbandonmentCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::AccessGrantPrepared { .. },
-            OwnerJoinProgress::AbandonmentCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::ApprovalPrepared(_),
-            OwnerJoinProgress::AbandonmentCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::RegistrationRequested(_),
-            OwnerJoinProgress::AbandonmentCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::AbandonmentCreateIntent { .. },
-            OwnerJoinProgress::Abandoned(_)
         ) | (
             OwnerJoinProgress::AttemptActivated(_),
             OwnerJoinProgress::ChallengeCreateIntent(_)
@@ -178,14 +158,64 @@ fn owner_adjacent(previous: &OwnerJoinProgress, next: &OwnerJoinProgress) -> boo
         ) | (
             OwnerJoinProgress::ResponseObserved(_),
             OwnerJoinProgress::Completed(_)
-        ) | (
-            OwnerJoinProgress::Completed(_),
-            OwnerJoinProgress::ActivationCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::ActivationCreateIntent { .. },
-            OwnerJoinProgress::ActivationPrepared { .. }
         )
     )
+}
+
+fn owner_publication_follows(
+    previous: &OwnerJoinProgress,
+    operation: &coven_protocol::store_commit::device_join_journal::OwnerJoinPublication,
+) -> bool {
+    use coven_protocol::store_commit::device_join_journal::OwnerJoinPublication;
+
+    match (previous, operation) {
+        (
+            OwnerJoinProgress::AccessRequested(previous),
+            OwnerJoinPublication::ProviderAccessGrant { request, .. },
+        ) => previous == request,
+        (
+            OwnerJoinProgress::RegistrationRequested(previous),
+            OwnerJoinPublication::Attempt { request }
+            | OwnerJoinPublication::SamePrincipalActivation { request },
+        ) => previous == request,
+        (
+            OwnerJoinProgress::Completed(previous),
+            OwnerJoinPublication::JoinActivation { completion },
+        ) => previous == completion,
+        (previous, OwnerJoinPublication::Abandonment { offer, .. }) => {
+            let durable_offer = match previous {
+                OwnerJoinProgress::Offered(durable) => Some(durable),
+                OwnerJoinProgress::AccessRequested(request) => Some(request.offer.as_ref()),
+                OwnerJoinProgress::AccessGrantActivated { request, .. } => {
+                    Some(request.offer.as_ref())
+                }
+                OwnerJoinProgress::ApprovalPrepared(approval) => {
+                    Some(approval.request.offer.as_ref())
+                }
+                OwnerJoinProgress::RegistrationRequested(request) => {
+                    Some(request.approval().request.offer.as_ref())
+                }
+                _ => None,
+            };
+            durable_offer == Some(offer)
+        }
+        _ => false,
+    }
+}
+
+fn prepared_operation_attempt_id(
+    operation: &coven_protocol::store_commit::device_join_journal::OwnerJoinPublication,
+) -> coven_protocol::store_commit::DeviceJoinAttemptId {
+    use coven_protocol::store_commit::device_join_journal::OwnerJoinPublication;
+    match operation {
+        OwnerJoinPublication::ProviderAccessGrant { request, .. } => request.offer.attempt_id,
+        OwnerJoinPublication::Attempt { request }
+        | OwnerJoinPublication::SamePrincipalActivation { request } => {
+            request.approval().request.offer.attempt_id
+        }
+        OwnerJoinPublication::Abandonment { offer, .. } => offer.attempt_id,
+        OwnerJoinPublication::JoinActivation { completion } => completion.attempt_id(),
+    }
 }
 
 fn joiner_adjacent(previous: &JoinerJoinProgress, next: &JoinerJoinProgress) -> bool {

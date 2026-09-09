@@ -168,17 +168,11 @@ impl ResolvedStoreDeviceState {
         &self,
         reference: StoreDeviceExclusionProposalRef,
         proposal: &StoreDeviceExclusionProposal,
-        predecessor_ref: &StoreDeviceStateRef,
     ) -> Result<Self, StoreProtocolError> {
         reference.verify_proposal(proposal)?;
-        if &proposal.frozen_device_state != predecessor_ref
-            || predecessor_ref.state_hash() != self.state_hash
-        {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-        let mut devices = self.devices.clone();
-        let record = devices
-            .get_mut(&reference.target.device_id)
+        let record = self
+            .devices
+            .get(&reference.target.device_id)
             .ok_or(StoreProtocolError::DeviceStateMismatch)?;
         if record.registration != reference.target
             || !matches!(record.status, StoreDeviceStatus::Active)
@@ -186,46 +180,42 @@ impl ResolvedStoreDeviceState {
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
-        record.proposals.insert(
-            reference.proposal_id,
-            StoreDeviceProposalState::Pending {
+        Self::merge([
+            self.clone(),
+            Self::exclusion_effect(StoreDeviceProposalState::Pending {
                 proposal: reference,
-            },
-        );
-        Self::from_parts(devices, self.recovery.clone())
+            })?,
+        ])
     }
 
     pub fn cancel_exclusion(
         &self,
         cancellation: StoreDeviceExclusionCancellationRef,
     ) -> Result<Self, StoreProtocolError> {
-        let mut devices = self.devices.clone();
-        let record = devices
-            .get_mut(&cancellation.proposal.target.device_id)
+        let record = self
+            .devices
+            .get(&cancellation.proposal.target.device_id)
             .ok_or(StoreProtocolError::DeviceStateMismatch)?;
         let state = record
             .proposals
-            .get_mut(&cancellation.proposal.proposal_id)
+            .get(&cancellation.proposal.proposal_id)
             .ok_or(StoreProtocolError::DeviceStateMismatch)?;
         if !matches!(state, StoreDeviceProposalState::Pending { proposal } if proposal == &cancellation.proposal)
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
-        *state = StoreDeviceProposalState::Cancelled {
-            outcome: cancellation,
-        };
-        Self::from_parts(devices, self.recovery.clone())
+        Self::merge([
+            self.clone(),
+            Self::exclusion_effect(StoreDeviceProposalState::Cancelled {
+                outcome: cancellation,
+            })?,
+        ])
     }
 
-    pub fn exclude(
-        &self,
-        exclusion: StoreDeviceExclusionRef,
-        accepted_cut: StoreHistoryCut,
-    ) -> Result<Self, StoreProtocolError> {
-        validate_store_history_cut(&accepted_cut)?;
-        let mut devices = self.devices.clone();
-        let record = devices
-            .get_mut(&exclusion.proposal.target.device_id)
+    pub fn exclude(&self, exclusion: StoreDeviceExclusionRef) -> Result<Self, StoreProtocolError> {
+        let record = self
+            .devices
+            .get(&exclusion.proposal.target.device_id)
             .ok_or(StoreProtocolError::DeviceStateMismatch)?;
         if record.registration != exclusion.proposal.target
             || !matches!(record.status, StoreDeviceStatus::Active)
@@ -236,13 +226,48 @@ impl ResolvedStoreDeviceState {
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
-        let terminals = vec![exclusion];
-        supersede_pending_proposals(&mut record.proposals, &terminals);
-        record.status = StoreDeviceStatus::Inactive {
-            terminals,
-            accepted_cut,
+        Self::merge([
+            self.clone(),
+            Self::exclusion_effect(StoreDeviceProposalState::Superseded {
+                proposal: exclusion.proposal.clone(),
+                terminals: vec![exclusion],
+            })?,
+        ])
+    }
+
+    /// The continuing effect of one authenticated exclusion operation. This
+    /// describes its state contribution; its caller establishes acceptance.
+    pub(super) fn exclusion_effect(
+        effect: StoreDeviceProposalState,
+    ) -> Result<Self, StoreProtocolError> {
+        let (proposal, status) = match &effect {
+            StoreDeviceProposalState::Pending { proposal } => (proposal, StoreDeviceStatus::Active),
+            StoreDeviceProposalState::Cancelled { outcome } => {
+                (&outcome.proposal, StoreDeviceStatus::Active)
+            }
+            StoreDeviceProposalState::Superseded {
+                proposal,
+                terminals,
+            } => (
+                proposal,
+                StoreDeviceStatus::Inactive {
+                    terminals: terminals.clone(),
+                },
+            ),
         };
-        Self::from_parts(devices, self.recovery.clone())
+        let registration = proposal.target.clone();
+        let proposals = BTreeMap::from([(proposal.proposal_id, effect)]);
+        Self::from_parts(
+            BTreeMap::from([(
+                registration.device_id,
+                StoreDeviceRecord {
+                    registration,
+                    proposals,
+                    status,
+                },
+            )]),
+            Vec::new(),
+        )
     }
 
     pub fn merge(states: impl IntoIterator<Item = Self>) -> Result<Self, StoreProtocolError> {
@@ -424,35 +449,15 @@ pub(crate) fn merge_device_status(
 ) -> Result<StoreDeviceStatus, StoreProtocolError> {
     match (left, right) {
         (StoreDeviceStatus::Active, StoreDeviceStatus::Active) => Ok(StoreDeviceStatus::Active),
+        (StoreDeviceStatus::Inactive { terminals }, StoreDeviceStatus::Active)
+        | (StoreDeviceStatus::Active, StoreDeviceStatus::Inactive { terminals }) => {
+            Ok(StoreDeviceStatus::Inactive { terminals })
+        }
         (
-            StoreDeviceStatus::Inactive {
-                terminals,
-                accepted_cut,
-            },
-            StoreDeviceStatus::Active,
-        )
-        | (
-            StoreDeviceStatus::Active,
-            StoreDeviceStatus::Inactive {
-                terminals,
-                accepted_cut,
-            },
+            StoreDeviceStatus::Inactive { terminals: left },
+            StoreDeviceStatus::Inactive { terminals: right },
         ) => Ok(StoreDeviceStatus::Inactive {
-            terminals,
-            accepted_cut,
-        }),
-        (
-            StoreDeviceStatus::Inactive {
-                terminals: left_terminals,
-                accepted_cut: left_cut,
-            },
-            StoreDeviceStatus::Inactive {
-                terminals: right_terminals,
-                accepted_cut: right_cut,
-            },
-        ) => Ok(StoreDeviceStatus::Inactive {
-            terminals: merge_terminal_refs(left_terminals, right_terminals)?,
-            accepted_cut: intersect_terminal_history_cuts(left_cut, right_cut)?,
+            terminals: merge_terminal_refs(left, right)?,
         }),
     }
 }
@@ -499,35 +504,6 @@ pub(crate) fn merge_history_cuts(
     }
 }
 
-fn intersect_terminal_history_cuts(
-    left: StoreHistoryCut,
-    right: StoreHistoryCut,
-) -> Result<StoreHistoryCut, StoreProtocolError> {
-    {
-        let StoreHistoryCut(left) = left;
-        let StoreHistoryCut(right) = right;
-        let mut intersection = BTreeMap::new();
-        for (stream, left_reference) in left {
-            let Some(right_reference) = right.get(&stream) else {
-                continue;
-            };
-            let left_sequence = left_reference.coord.sequence();
-            let right_sequence = right_reference.coord.sequence();
-            let reference = if left_sequence < right_sequence {
-                left_reference
-            } else if right_sequence < left_sequence {
-                right_reference.clone()
-            } else if left_reference == *right_reference {
-                left_reference
-            } else {
-                return Err(StoreProtocolError::DeviceStateMismatch);
-            };
-            intersection.insert(stream, reference);
-        }
-        Ok(StoreHistoryCut(intersection))
-    }
-}
-
 fn validate_store_device_records(
     devices: &BTreeMap<StoreDeviceId, StoreDeviceRecord>,
 ) -> Result<(), StoreProtocolError> {
@@ -551,13 +527,8 @@ fn validate_store_device_records(
                 validate_terminal_refs(terminals)?;
             }
         }
-        if let StoreDeviceStatus::Inactive {
-            terminals,
-            accepted_cut,
-        } = &record.status
-        {
+        if let StoreDeviceStatus::Inactive { terminals } = &record.status {
             validate_terminal_refs(terminals)?;
-            validate_store_history_cut(accepted_cut)?;
             if record
                 .proposals
                 .values()

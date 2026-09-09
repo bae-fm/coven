@@ -1,12 +1,10 @@
 use super::merge_history::predecessor_verifies_owner;
 use super::merge_history::registration::{
-    device_state_has_active_registration, device_state_has_pending_proposal,
-    registration_attempt_error, RegistrationLoadError,
+    device_state_has_active_registration, device_state_has_pending_proposal, RegistrationLoadError,
 };
 use crate::sync::store::pull::*;
-use crate::sync::store::StoreError;
 use coven_database::{activated_merge_membership_remote_objects, MembershipAuthorityBytes};
-use coven_protocol::membership::{MembershipChain, MembershipChange, MembershipHeadRef};
+use coven_protocol::membership::{MembershipChain, MembershipHeadRef, StoreAuthorityChange};
 use coven_protocol::objects::{
     decode_protocol_object, verify_store_root, StoreObjectError, VerifiedObject,
 };
@@ -24,73 +22,22 @@ use coven_protocol::store_commit::{
     ack_slot_prefix, device_exclusion_outcome_semantic_prefix,
     device_exclusion_proposal_semantic_prefix, founder_registration_semantic_prefix,
     package_semantic_prefix, provider_access_grant_semantic_prefix, registration_semantic_prefix,
-    snapshot_slot_prefix, SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef,
-    StoreDeviceExclusionProposal, StoreDeviceExclusionProposalRef, StoreDeviceHeadRef,
-    StoreSnapshotRef,
+    SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef,
+    StoreDeviceExclusionProposal, StoreDeviceExclusionProposalRef, StoreSnapshotRef,
 };
 use coven_storage::run_blocking_object_verification;
 use coven_storage::CloudSyncObjectStorage;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 mod membership;
+mod owner_promotion_publication;
 
 mod acknowledgements_snapshots;
-mod announcements;
 mod commits;
 mod device_lifecycle;
 mod registrations;
+mod snapshot_retirement;
 pub(crate) use membership::StoreMembershipObjectVerifier;
-
-pub(crate) enum DeviceStateResolver<'a> {
-    Database(&'a coven_database::StoreDatabase),
-    Loaded {
-        genesis: &'a ResolvedStoreDeviceState,
-        states: &'a BTreeMap<StoreBatchCommitRef, ResolvedStoreDeviceState>,
-    },
-}
-
-impl DeviceStateResolver<'_> {
-    async fn resolve(
-        &self,
-        reference: &StoreDeviceStateRef,
-    ) -> Result<ResolvedStoreDeviceState, RegistrationLoadError> {
-        let state = match self {
-            DeviceStateResolver::Database(database) => {
-                return database
-                    .resolved_store_device_state(reference)
-                    .await
-                    .map_err(RegistrationLoadError::from);
-            }
-            DeviceStateResolver::Loaded { genesis, states } => {
-                let frontier = &reference.frontier().0;
-                if frontier.is_empty() {
-                    (*genesis).clone()
-                } else {
-                    ResolvedStoreDeviceState::merge(
-                        frontier
-                            .values()
-                            .map(|commit| {
-                                states.get(commit).cloned().ok_or_else(|| {
-                                    RegistrationLoadError::Invalid(
-                                        "device state references an unloaded predecessor snapshot"
-                                            .to_string(),
-                                    )
-                                })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
-                    )
-                    .map_err(RegistrationLoadError::from)?
-                }
-            }
-        };
-        if state.state_hash != reference.state_hash() || state.recovery != reference.recovery() {
-            return Err(RegistrationLoadError::Invalid(
-                "device state differs from its exact predecessor snapshots".to_string(),
-            ));
-        }
-        Ok(state)
-    }
-}
 
 /// How many protocol slots a reader fetches at once.
 ///
@@ -152,7 +99,6 @@ pub(crate) struct StoreCommitVerifier<'a> {
     /// `registrations` with every other one — this names the entry rather than
     /// holding a second copy of it.
     founder_registration: std::sync::OnceLock<StoreDeviceRegistrationRef>,
-    verified_heads: std::sync::Mutex<BTreeMap<StoreDeviceHeadRef, VerifiedObject<StoreDeviceHead>>>,
     /// Store acknowledgements authenticated under this verifier's root, keyed by
     /// the exact object that carries them so both ways of asking reach one
     /// entry: by reference, which is how a commit names the ack it activates,
@@ -166,15 +112,6 @@ pub(crate) struct StoreCommitVerifier<'a> {
     /// the whole history keeps naming, so without this the same few objects were
     /// read once per acknowledging commit.
     snapshots: std::sync::Mutex<BTreeMap<StoreSnapshotRef, SnapshotMeta>>,
-    /// Each device's snapshot stream as far as this verifier has walked it.
-    ///
-    /// A stream is read by walking one slot per generation until a slot is
-    /// absent, so re-walking costs a read per generation every time — and a
-    /// cycle walks each stream several times, from publication, from history
-    /// loading, and from reclaim. The walk resumes from the prefix here and
-    /// probes on from its end, so generations already read are not read again
-    /// and a generation published since is still found. Same shape as the
-    /// accepted announcement path, for the same reason.
     /// Bytes of every content-addressed protocol object this verifier has read.
     ///
     /// `load_exact_object` is the one place a verified object is fetched by
@@ -205,34 +142,6 @@ pub(crate) struct StoreCommitVerifier<'a> {
     /// A stream that has grown since is not a problem: what is missing here is
     /// read from the provider, so this decides round trips and never contents.
     prefetched_slot_streams: std::sync::Mutex<BTreeMap<String, StreamSlotReads>>,
-    snapshot_streams: std::sync::Mutex<
-        BTreeMap<StoreDeviceRegistrationRef, Vec<coven_database::PublishedStoreSnapshot>>,
-    >,
-    accepted_announcements:
-        BTreeMap<StoreDeviceRegistrationRef, Vec<VerifiedAcceptedStoreAnnouncement>>,
-    /// Where each author's announcement chain has been restated by the Store
-    /// snapshot this device stands on, so a walk resumes there instead of at
-    /// the anchor slot.
-    ///
-    /// The chain is a slot-linked list: sequence one names the slot of two, and
-    /// so on, so a walker cannot skip into the middle of it — it either holds a
-    /// position already or reads every head from the anchor. A device whose
-    /// replay baseline advanced holds no row under the snapshot's cut, and
-    /// without a resume point the only place left to start is the anchor: the
-    /// whole chain re-read on every pull, forever, growing with the store's
-    /// history. The snapshot's history summary carries the accepted
-    /// announcement at each covered tip, signed by the owner alongside the
-    /// state it restates, and that is the resume point.
-    covered_announcements: BTreeMap<StoreDeviceRegistrationRef, CoveredStoreAnnouncement>,
-    /// Announcement heads found at positions the installed snapshot covers.
-    ///
-    /// The accepted path holds only what stands above the coverage, so a query
-    /// about an older position — a join activation, an exclusion-history walk —
-    /// has to read the chain from the anchor to reach it. It is the same walk
-    /// every time it is asked, so one per verifier is enough; without this the
-    /// per-commit questions those walks ask turn one chain read into one per
-    /// commit.
-    covered_walk: BTreeMap<(StoreDeviceRegistrationRef, u64), VerifiedAcceptedStoreAnnouncement>,
 }
 
 pub(crate) struct VerifiedMergeMembershipClosure {
@@ -242,6 +151,40 @@ pub(crate) struct VerifiedMergeMembershipClosure {
 }
 
 impl VerifiedMergeMembershipClosure {
+    pub(super) fn from_verified_proof(
+        proof: RetainedMergeMembershipProof,
+    ) -> Result<Self, StorePullError> {
+        let objects = coven_database::VerifiedMergeMembershipObjects::verify(
+            &proof.commit_value,
+            &proof.commit,
+            &proof.entry_value,
+            &proof.head_value,
+            proof.head.clone(),
+        )
+        .map_err(StorePullError::Database)?;
+        let entry_bytes = serde_json::to_vec(&proof.entry_value)?;
+        let head_bytes = serde_json::to_vec(&proof.head_value)?;
+        let resolution_bytes = proof
+            .resolution_value
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()?;
+        let remote_objects = activated_merge_membership_remote_objects(
+            proof.commit_value.candidate_family(),
+            &objects,
+            MembershipAuthorityBytes::new(entry_bytes.clone(), entry_bytes),
+            MembershipAuthorityBytes::new(head_bytes.clone(), head_bytes),
+            resolution_bytes.map(|bytes| MembershipAuthorityBytes::new(bytes.clone(), bytes)),
+            &proof.commit,
+        )
+        .map_err(StorePullError::RemoteObject)?;
+        Ok(Self {
+            objects,
+            remote_objects,
+            proof,
+        })
+    }
+
     pub(crate) fn objects(&self) -> &coven_database::VerifiedMergeMembershipObjects {
         &self.objects
     }
@@ -249,35 +192,6 @@ impl VerifiedMergeMembershipClosure {
     pub(crate) fn into_remote_objects(self) -> Vec<remote_object::ClosedRemoteObject> {
         self.remote_objects
     }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-struct VerifiedAcceptedStoreAnnouncement {
-    commit: StoreBatchCommitRef,
-    head: StoreDeviceHeadRef,
-    next_slot: coven_protocol::objects::ObjectSlot,
-}
-
-/// One author's announcement position as of the installed snapshot: the
-/// accepted head at the covered tip, and the slot its successor occupies.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct CoveredStoreAnnouncement {
-    pub(crate) sequence: u64,
-    pub(crate) commit: StoreBatchCommitRef,
-    pub(crate) head: StoreDeviceHeadRef,
-    pub(crate) next_slot: coven_protocol::objects::ObjectSlot,
-}
-
-pub(crate) struct VerifiedAcceptedStoreAnnouncementPrefix {
-    pub(crate) commits: Vec<(
-        StoreDeviceHeadRef,
-        StoreDeviceHead,
-        StoreBatchCommitRef,
-        StoreBatchCommit,
-    )>,
-    pub(crate) next_slot: coven_protocol::objects::ObjectSlot,
-    pub(crate) predecessor: Option<ExactObjectRef>,
-    pub(crate) next_sequence: u64,
 }
 
 #[derive(Debug)]
@@ -326,7 +240,6 @@ impl<'a> StoreCommitVerifier<'a> {
             )
             .await
             .map_err(StorePullError::Object)?;
-        let head_bytes = loaded_head.bytes;
         let head_object = loaded_head.object;
         let head = loaded_head.value;
         let head_ref = MembershipHeadRef {
@@ -334,45 +247,23 @@ impl<'a> StoreCommitVerifier<'a> {
             head_hash: head.head_hash(),
             object: head_object,
         };
-        let objects = coven_database::VerifiedMergeMembershipObjects::verify(
-            commit,
-            commit_ref,
-            &entry.value,
-            &head,
-            head_ref.clone(),
-        )
-        .map_err(StorePullError::Database)?;
-        let family = commit.candidate_family();
         let resolution = match &entry.value.change {
-            MembershipChange::ResolutionActivation { resolution } => Some(resolution.clone()),
+            StoreAuthorityChange::ResolutionActivation { resolution } => Some(resolution.clone()),
             _ => None,
         };
-        let resolution_loaded = if let Some(resolution) = &resolution {
+        let resolution_value = if let Some(resolution) = &resolution {
             let loaded = self
                 .membership_objects()
                 .load_resolution(resolution)
                 .await
                 .map_err(StorePullError::Object)?;
-            Some((loaded.bytes, loaded.value))
+            Some(loaded.value)
         } else {
             None
         };
-        let remote_objects = activated_merge_membership_remote_objects(
-            family,
-            &objects,
-            MembershipAuthorityBytes::new(entry.bytes.clone(), entry.bytes),
-            MembershipAuthorityBytes::new(head_bytes.clone(), head_bytes),
-            resolution_loaded
-                .as_ref()
-                .map(|(bytes, _)| MembershipAuthorityBytes::new(bytes.clone(), bytes.clone())),
-            commit_ref,
-        )
-        .map_err(StorePullError::RemoteObject)?;
-        let resolution_value = resolution_loaded.map(|(_, value)| value);
         let proof = RetainedMergeMembershipProof {
             commit: commit_ref.clone(),
             commit_value: commit.clone(),
-            announcement: None,
             entry: transition.body.entry.clone(),
             entry_value: entry.value,
             head: head_ref,
@@ -380,11 +271,7 @@ impl<'a> StoreCommitVerifier<'a> {
             resolution,
             resolution_value,
         };
-        Ok(Some(VerifiedMergeMembershipClosure {
-            objects,
-            remote_objects,
-            proof,
-        }))
+        VerifiedMergeMembershipClosure::from_verified_proof(proof).map(Some)
     }
 
     pub(crate) fn from_verified_root(
@@ -398,15 +285,10 @@ impl<'a> StoreCommitVerifier<'a> {
             commits: BTreeMap::new(),
             registrations: std::sync::Mutex::new(BTreeMap::new()),
             founder_registration: std::sync::OnceLock::new(),
-            verified_heads: std::sync::Mutex::new(BTreeMap::new()),
             acknowledgements: std::sync::Mutex::new(BTreeMap::new()),
             snapshots: std::sync::Mutex::new(BTreeMap::new()),
             exact_objects: std::sync::Mutex::new(BTreeMap::new()),
             prefetched_slot_streams: std::sync::Mutex::new(BTreeMap::new()),
-            snapshot_streams: std::sync::Mutex::new(BTreeMap::new()),
-            accepted_announcements: BTreeMap::new(),
-            covered_announcements: BTreeMap::new(),
-            covered_walk: BTreeMap::new(),
         }
     }
 }

@@ -1,14 +1,10 @@
-use super::{
-    candidate_records::parse_prepared_merge_candidate_parts_on,
-    publication_state::PreparedStoreWriteState, StoreDatabase, StoreSession,
-};
+use super::{publication_state::PreparedStoreWriteState, StoreDatabase, StoreSession};
 use crate::{
     load_prepared_audience_objects_on, DbError, ExactProtocolObject, PreparedStoreWriteCommit,
-    StoreWriteBase,
 };
 use coven_protocol::membership::AuthorStreamId;
 use coven_protocol::store_commit::{
-    CommitFrontier, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
+    CommitFrontier, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceRegistrationRef, VerifiedStoreBatchCommit,
 };
 use coven_protocol::write::WriteId;
@@ -21,24 +17,68 @@ use std::collections::BTreeMap;
 ///
 /// The turn is part of the reading rather than something a caller remembers to
 /// take: the position is only true for as long as no other local writer can
-/// take it. Hold this value until the commit composed from it has published its
-/// head, or until the candidate is durably persisted for a later publisher to
-/// activate.
+/// take it. Hold this value until the commit composed from it has advanced the
+/// shared publication record, or until the candidate is durably persisted for
+/// a later publisher to activate.
 pub struct LocalCommitBase {
     authorship: super::OwnStreamAuthorship,
+    state: LocalCommitState,
+}
+
+/// The accepted local position, authority cursors and publication observation
+/// captured by one database read while the caller owns the author's turn.
+pub struct LocalCommitState {
     predecessor: Option<StoreBatchCommitRef>,
     frontier: BTreeMap<String, StoreBatchCommitRef>,
+    membership: crate::InitialStoreMembershipAuthority,
+    publication: crate::StorePublicationBoundary,
 }
 
 impl LocalCommitBase {
+    pub fn into_parts(self) -> (super::OwnStreamAuthorship, LocalCommitState) {
+        (self.authorship, self.state)
+    }
+}
+
+impl LocalCommitState {
     pub fn into_parts(
         self,
     ) -> (
-        super::OwnStreamAuthorship,
         Option<StoreBatchCommitRef>,
         BTreeMap<String, StoreBatchCommitRef>,
+        crate::InitialStoreMembershipAuthority,
+        crate::StorePublicationBoundary,
     ) {
-        (self.authorship, self.predecessor, self.frontier)
+        (
+            self.predecessor,
+            self.frontier,
+            self.membership,
+            self.publication,
+        )
+    }
+}
+
+impl super::OwnStreamAuthorship {
+    /// Read the ledger belonging to this uninterrupted local author claim.
+    pub async fn local_commit_base(
+        self,
+        stream_id: AuthorStreamId,
+    ) -> Result<LocalCommitBase, DbError> {
+        let state = self.read_local_commit_state(stream_id).await?;
+        Ok(LocalCommitBase {
+            authorship: self,
+            state,
+        })
+    }
+
+    /// Capture preparation inputs while retaining this claim through row staging.
+    pub async fn read_local_commit_state(
+        &self,
+        stream_id: AuthorStreamId,
+    ) -> Result<LocalCommitState, DbError> {
+        self.database
+            .call_store(move |session| session.local_commit_ledger_base(&stream_id))
+            .await
     }
 }
 
@@ -46,20 +86,20 @@ impl StoreSession<'_> {
     fn local_commit_ledger_base(
         &self,
         stream_id: &AuthorStreamId,
-    ) -> Result<
-        (
-            Option<StoreBatchCommitRef>,
-            BTreeMap<String, StoreBatchCommitRef>,
-        ),
-        DbError,
-    > {
+    ) -> Result<LocalCommitState, DbError> {
         let stream_id = stream_id.to_string();
-        Ok((
-            crate::store::materialized_commit_index::latest_position_for_device_on(
+        Ok(LocalCommitState {
+            predecessor: crate::store::materialized_commit_index::latest_position_for_device_on(
                 self.conn, &stream_id,
             )?,
-            crate::store::materialized_commit_index::materialized_frontier_on(self.conn, None)?,
-        ))
+            frontier: crate::store::materialized_commit_index::materialized_frontier_on(
+                self.conn, None,
+            )?,
+            membership: crate::InitialStoreMembershipAuthority::load_on(self.conn)?,
+            publication: super::observed_store_publication::load_store_current_publication_on(
+                self.conn,
+            )?,
+        })
     }
 
     fn latest_local_store_position(
@@ -97,15 +137,7 @@ impl StoreSession<'_> {
             })?;
             let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
                 .map_err(|error| DbError::context("prepared Store write", error))?;
-            let (commit, head, graph_commit) = match &prepared {
-                PreparedStoreWriteState::Publication { commit, head, .. } => (commit, head, None),
-                PreparedStoreWriteState::MergeAbandonment {
-                    candidate_commit,
-                    authority_commit,
-                    authority_head,
-                    ..
-                } => (authority_commit, authority_head, Some(candidate_commit)),
-            };
+            let PreparedStoreWriteState { commit, .. } = &prepared;
             let write_id = WriteId::from_generated(write_id);
             let unverified_commit: StoreBatchCommit =
                 serde_json::from_slice(commit.semantic_bytes())
@@ -159,15 +191,27 @@ impl StoreSession<'_> {
             )
             .map_err(|error| DbError::context("verify prepared Store commit", error))?;
             let commit_ref = commit_value.reference().clone();
-            let head_value = StoreDeviceHead::parse_at(
-                head.semantic_bytes(),
-                root.store_root_hash,
-                registration,
-                &commit_ref,
-            )
-            .map_err(|error| DbError::context("verify prepared Store head", error))?;
-            let base: StoreWriteBase = serde_json::from_str(&base)
-                .map_err(|error| DbError::context("prepared write base", error))?;
+            let active =
+                super::active_store_publication::load_active_store_publication_on(self.conn)?
+                    .ok_or_else(|| {
+                        DbError::Message(format!(
+                            "publishing write {write_id} has no active Store publication"
+                        ))
+                    })?;
+            if active.owner() != &crate::ActiveStorePublicationOwner::StoreWrite(write_id.clone())
+                || active.commit_reservation()
+                    != Some((&write_id, registration_ref, &commit_ref.coord))
+            {
+                return Err(DbError::Message(format!(
+                    "publishing write {write_id} differs from active Store publication {:?}",
+                    active.owner()
+                )));
+            }
+            let publication = active.attempt()?;
+            publication
+                .verify_commit(&commit_value)
+                .map_err(|error| DbError::context("verify prepared Store publication", error))?;
+            let base = records.effective_store_write_base(&write_id, &base)?;
             let mut dependencies = CommitFrontier::from_refs(base.dependencies)
                 .map_err(|error| DbError::context("prepared dependency frontier", error))?;
             let observed_predecessor = dependencies.0.remove(&stream_id);
@@ -191,26 +235,7 @@ impl StoreSession<'_> {
             let partitions = records.store_write_partitions(write_id.as_str())?;
             let audiences =
                 load_prepared_audience_objects_on(self.conn, self.store_dir, &write_id)?;
-            let graph_commit = match graph_commit {
-                Some(graph_commit) => {
-                    let candidate_head = match &prepared {
-                        PreparedStoreWriteState::MergeAbandonment { candidate_head, .. } => {
-                            candidate_head
-                        }
-                        _ => unreachable!("matched Merge abandonment"),
-                    };
-                    let candidate = parse_prepared_merge_candidate_parts_on(
-                        records,
-                        self.verified_store_authority,
-                        graph_commit.semantic_bytes(),
-                        graph_commit.prepared().reference(),
-                        candidate_head.semantic_bytes(),
-                        candidate_head.prepared().reference(),
-                    )?;
-                    candidate.commit
-                }
-                None => commit_value.clone(),
-            };
+            let graph_commit = &commit_value;
             let expected_package_count = usize::from(graph_commit.store_package().is_some())
                 .checked_add(graph_commit.circle_packages().len())
                 .ok_or_else(|| DbError::Message("package count overflow".to_string()))?;
@@ -299,11 +324,7 @@ impl StoreSession<'_> {
                     bytes: commit.semantic_bytes().to_vec(),
                     prepared: commit.prepared().clone(),
                 },
-                head: ExactProtocolObject {
-                    value: head_value,
-                    bytes: head.semantic_bytes().to_vec(),
-                    prepared: head.prepared().clone(),
-                },
+                publication: publication.clone(),
             })
         })
         .transpose()
@@ -314,24 +335,41 @@ impl StoreDatabase {
     pub async fn oldest_prepared_store_write(
         &self,
     ) -> Result<Option<PreparedStoreWriteCommit>, DbError> {
-        let loaded = self
-            .call_store(move |session| session.oldest_prepared_store_write())
+        let (loaded, covered) = self
+            .call_store(move |session| {
+                let loaded = session.oldest_prepared_store_write()?;
+                let covered = match &loaded {
+                    Some(batch) => super::StoreRecords::new(session.conn, session.store_dir)
+                        .covered_store_write(&batch.commit.value)?
+                        .is_some(),
+                    None => false,
+                };
+                Ok((loaded, covered))
+            })
             .await?;
-        if let Some(batch) = &loaded {
-            for blob in &batch.audiences.blobs {
-                if let Some(spool_path) = blob.spool_path() {
-                    {
-                        let (size, digest) = coven_foundation::local_file::file_facts(spool_path)
-                            .await
-                            .map_err(|error| DbError::context("prepared blob spool", error))?;
-                        blob.blob()
-                            .object()
-                            .verify_stored_facts(
-                                spool_path,
-                                size,
-                                coven_protocol::store_commit::ObjectHash::from_digest(digest),
-                            )
-                            .map_err(|error| DbError::context("prepared blob spool", error))?;
+        // Snapshot coverage makes the pending upload obsolete. A terminal cleanup
+        // retry may already have removed these files before its SQL transaction
+        // rolled back, and never needs their bytes to complete the receipt.
+        if !covered {
+            if let Some(batch) = &loaded {
+                for blob in &batch.audiences.blobs {
+                    if let Some(spool_path) = blob.spool_path() {
+                        {
+                            let (size, digest) =
+                                coven_foundation::local_file::file_facts(spool_path)
+                                    .await
+                                    .map_err(|error| {
+                                        DbError::context("prepared blob spool", error)
+                                    })?;
+                            blob.blob()
+                                .object()
+                                .verify_stored_facts(
+                                    spool_path,
+                                    size,
+                                    coven_protocol::store_commit::ObjectHash::from_digest(digest),
+                                )
+                                .map_err(|error| DbError::context("prepared blob spool", error))?;
+                        }
                     }
                 }
             }
@@ -359,15 +397,10 @@ impl StoreDatabase {
         &self,
         stream_id: AuthorStreamId,
     ) -> Result<LocalCommitBase, DbError> {
-        let authorship = self.author_own_stream().await;
-        let (predecessor, frontier) = self
-            .call_store(move |session| session.local_commit_ledger_base(&stream_id))
-            .await?;
-        Ok(LocalCommitBase {
-            authorship,
-            predecessor,
-            frontier,
-        })
+        self.author_own_stream()
+            .await
+            .local_commit_base(stream_id)
+            .await
     }
 
     pub async fn latest_local_store_position(

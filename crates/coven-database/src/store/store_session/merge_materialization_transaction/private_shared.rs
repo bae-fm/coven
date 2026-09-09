@@ -51,10 +51,7 @@ impl MergeMaterializationTransaction<'_, '_> {
                 Ok((key, PrivateRowState { columns }))
             })
             .collect::<Result<_, DbError>>()?;
-        Ok(ReplayRows {
-            private,
-            adopted_by: BTreeMap::new(),
-        })
+        Ok(ReplayRows { private })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -119,51 +116,32 @@ impl MergeMaterializationTransaction<'_, '_> {
     pub(super) fn record_adopted_rows(
         replay_rows: &mut ReplayRows,
         adopted: &BTreeSet<(String, String)>,
-        commit: &StoreBatchCommitRef,
     ) {
         for key in adopted {
             replay_rows.private.remove(key);
-            replay_rows.adopted_by.insert(key.clone(), commit.clone());
         }
     }
 
-    pub(super) fn record_accepted_rows(
-        &self,
-        gates: &crate::Gates,
-        replay_rows: &mut ReplayRows,
-        rows: &[WinningRow],
-        commit: &StoreBatchCommitRef,
-    ) -> Result<(), DbError> {
-        let shared = gates.shared_rows(self.store.transaction)?;
-        for row in rows {
-            if crate::is_routing_table(&row.table) || !gates.row_can_be_private(&row.table) {
-                continue;
-            }
-            let key = (row.table.clone(), row.row_id.clone());
-            if row.row_stamp.is_some() && shared.contains(&row.table, &row.row_id)? {
-                replay_rows.adopted_by.insert(key, commit.clone());
-            } else {
-                replay_rows.adopted_by.remove(&key);
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn record_private_row(
+    pub(super) fn record_replayed_row(
         &self,
         schema: &TableSchema,
         replay_rows: &mut ReplayRows,
         table: &str,
         row_id: &str,
     ) -> Result<(), DbError> {
-        let columns = self.row_columns(schema, table, row_id)?.ok_or_else(|| {
-            DbError::Message(format!(
-                "local replay row {table}/{row_id} disappeared after application"
-            ))
-        })?;
+        // Replay may omit an update whose target was deleted, or merge only
+        // some columns while preserving another writer's stamp. Track the
+        // resulting row, not the existence implied by the captured operation.
+        let columns = self.row_columns(schema, table, row_id)?;
         let key = (table.to_string(), row_id.to_string());
-        replay_rows.adopted_by.remove(&key);
-        replay_rows.private.insert(key, PrivateRowState { columns });
+        match columns {
+            Some(columns) => {
+                replay_rows.private.insert(key, PrivateRowState { columns });
+            }
+            None => {
+                replay_rows.private.remove(&key);
+            }
+        }
         Ok(())
     }
 

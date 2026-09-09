@@ -2,7 +2,11 @@ use tracing::debug;
 
 use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use crate::sync::store::pull::{LoadedCirclePackage, LocalStoreMembership};
+use coven_database::store::CirclePackageAccess;
 use coven_database::{DbError, StoreDatabase};
+use coven_protocol::circle_activation::{
+    VerifiedCircleActivations, VerifiedStreamActivationPrefix,
+};
 use coven_protocol::objects::VerifiedObject;
 use coven_protocol::store_commit::{
     CirclePackageRef, StoreDeviceRegistration, StoreProtocolError, VerifiedStoreBatchCommit,
@@ -138,15 +142,48 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
     pub(crate) async fn load_applicable(
         &mut self,
         verified: &VerifiedStoreBatchCommit,
-        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+        prepared: &[&VerifiedCircleActivations],
+        snapshot_access: &[coven_database::StagedCircleAccess],
+        author: &StoreDeviceRegistration,
+        local_store_membership: LocalStoreMembership,
+    ) -> Result<Vec<LoadedCirclePackage>, CirclePackageReadError> {
+        self.load_selected(
+            verified,
+            verified.value().circle_packages(),
+            prepared,
+            snapshot_access,
+            author,
+            local_store_membership,
+        )
+        .await
+    }
+
+    pub(crate) async fn load_selected(
+        &mut self,
+        verified: &VerifiedStoreBatchCommit,
+        references: &[CirclePackageRef],
+        prepared: &[&VerifiedCircleActivations],
+        snapshot_access: &[coven_database::StagedCircleAccess],
         author: &StoreDeviceRegistration,
         local_store_membership: LocalStoreMembership,
     ) -> Result<Vec<LoadedCirclePackage>, CirclePackageReadError> {
         let root = self.root().clone();
         let commit_ref = verified.reference();
         let commit = verified.value();
-        if commit.circle_packages().is_empty() {
+        if references.is_empty() {
             return Ok(Vec::new());
+        }
+        let activations = prepared
+            .iter()
+            .flat_map(|group| group.circles())
+            .chain(snapshot_access.iter().map(|access| &access.activation))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut verified_prefix = VerifiedStreamActivationPrefix::empty();
+        for group in prepared {
+            verified_prefix
+                .include(group.stream_activations())
+                .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
         }
         let mut replay_epochs = self
             .database
@@ -154,14 +191,10 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
             .await
             .map_err(CirclePackageReadError::Database)?;
         replay_epochs
-            .include_verified_activations(activations)
+            .include_verified_activations(&activations)
             .map_err(CirclePackageReadError::Database)?;
         let mut loaded = Vec::new();
-        for reference in commit.circle_packages() {
-            let same_commit = activations.iter().find(|activation| {
-                activation.circle_id == reference.circle_id
-                    && activation.control.coord == reference.control
-            });
+        for reference in references {
             if !replay_epochs
                 .permits(commit_ref, reference.circle_id, &reference.control)
                 .map_err(CirclePackageReadError::Database)?
@@ -170,19 +203,6 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                     circle_id = %reference.circle_id,
                     control = ?reference.control,
                     "skipping Circle package beyond its accepted epoch cutoff"
-                );
-                continue;
-            }
-            if self
-                .database
-                .circle_is_deleted(reference.circle_id)
-                .await
-                .map_err(CirclePackageReadError::Database)?
-            {
-                debug!(
-                    circle_id = %reference.circle_id,
-                    control = ?reference.control,
-                    "skipping Circle package for a deleted Circle"
                 );
                 continue;
             }
@@ -211,78 +231,95 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                     self.database.schema_version()
                 )));
             }
-            let exact_access = if let Some(activation) = same_commit {
-                activation
-                    .epoch_access()
-                    .map_err(CirclePackageReadError::from)?
-            } else {
-                self.database
-                    .circle_epoch_access(
-                        root.clone(),
-                        reference.circle_id,
-                        reference.control.clone(),
-                    )
-                    .await
-                    .map_err(CirclePackageReadError::Database)?
-            };
-            let access = if let Some(access) = exact_access {
-                access
-            } else {
-                let Some(keyring) = self
-                    .database
-                    .circle_historical_package_keyring(
-                        root.clone(),
-                        reference.circle_id,
-                        reference.control.clone(),
-                        reference.key_fingerprint,
-                    )
-                    .await
-                    .map_err(CirclePackageReadError::Database)?
-                else {
-                    debug!(
-                        circle_id = %reference.circle_id,
-                        control = ?reference.control,
-                        "skipping Circle package without active local or successor access"
-                    );
-                    continue;
-                };
-                let Some((historical, historical_commit_ref)) = self
-                    .database
-                    .verified_circle_activation_context(
-                        root.clone(),
-                        reference.circle_id,
-                        reference.control.clone(),
-                    )
-                    .await
-                    .map_err(CirclePackageReadError::Database)?
-                else {
-                    return Err(CirclePackageReadError::Invalid(format!(
-                        "Circle {} historical package control is not retained",
-                        reference.circle_id
-                    )));
-                };
-                let historical_commit = self.history.load_ref(&historical_commit_ref).await?;
-                let roster_chain = super::activation::CircleActivationVerifier::new(
-                    self.database,
-                    self.storage,
-                    self.history,
-                )
-                .load_control_roster_chain(
-                    &historical_commit,
-                    &historical.reference,
-                    &historical.control,
-                    &keyring,
+            let Some(package_access) = self
+                .database
+                .circle_package_access(
+                    root.clone(),
+                    reference.circle_id,
+                    reference.control.clone(),
+                    reference.key_fingerprint,
+                    activations.clone(),
                 )
                 .await
-                .map_err(CirclePackageReadError::from)?;
-                let roster = roster_chain.try_resolved()?;
-                coven_protocol::circle_activation::CircleEpochAccess::from_historical(
-                    reference.circle_id,
-                    reference.key_fingerprint,
-                    &keyring,
-                    &roster,
-                )
-                .map_err(CirclePackageReadError::from)?
+                .map_err(CirclePackageReadError::Database)?
+            else {
+                debug!(circle_id = %reference.circle_id, control = ?reference.control,
+                    "skipping Circle package without applicable local access");
+                continue;
+            };
+            let access = match package_access {
+                CirclePackageAccess::Exact(access) => access,
+                CirclePackageAccess::Historical(keyring) => {
+                    let prepared_historical = prepared
+                        .iter()
+                        .find_map(|group| {
+                            group
+                                .circles()
+                                .iter()
+                                .find(|activation| {
+                                    activation.circle_id == reference.circle_id
+                                        && activation.control.coord == reference.control
+                                })
+                                .map(|activation| {
+                                    (
+                                        activation.clone(),
+                                        group.stream_activations().activating_commit().clone(),
+                                    )
+                                })
+                        })
+                        .or_else(|| {
+                            snapshot_access
+                                .iter()
+                                .find(|access| {
+                                    access.activation.circle_id == reference.circle_id
+                                        && access.activation.control.coord == reference.control
+                                })
+                                .map(|access| {
+                                    (access.activation.clone(), access.activating_commit.clone())
+                                })
+                        });
+                    let historical_context = match prepared_historical {
+                        Some(context) => Some(context),
+                        None => self
+                            .database
+                            .verified_circle_activation_context(
+                                root.clone(),
+                                reference.circle_id,
+                                reference.control.clone(),
+                            )
+                            .await
+                            .map_err(CirclePackageReadError::Database)?,
+                    };
+                    let Some((historical, historical_commit_ref)) = historical_context else {
+                        return Err(CirclePackageReadError::Invalid(format!(
+                            "Circle {} historical package control is not retained",
+                            reference.circle_id
+                        )));
+                    };
+                    let historical_commit = self.history.load_ref(&historical_commit_ref).await?;
+                    let roster_chain = super::activation::CircleActivationVerifier::new(
+                        self.database,
+                        self.storage,
+                        self.history,
+                    )
+                    .load_control_roster_chain_with_prefix(
+                        &historical_commit,
+                        &historical.reference,
+                        &historical.control,
+                        &keyring,
+                        &verified_prefix,
+                    )
+                    .await
+                    .map_err(CirclePackageReadError::from)?;
+                    let roster = roster_chain.try_resolved()?;
+                    coven_protocol::circle_activation::CircleEpochAccess::from_historical(
+                        reference.circle_id,
+                        reference.key_fingerprint,
+                        &keyring,
+                        &roster,
+                    )
+                    .map_err(CirclePackageReadError::from)?
+                }
             };
             let package = self
                 .open_package(&access, verified, reference, author)

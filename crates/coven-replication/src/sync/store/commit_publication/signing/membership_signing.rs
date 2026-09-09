@@ -1,6 +1,23 @@
 use super::*;
 
 impl LocalStoreWriter {
+    pub(crate) fn membership_publication_signer(&self) -> crate::sync::store::authorization::history::membership_publication::MembershipPublicationSigner<'_>{
+        crate::sync::store::authorization::history::membership_publication::MembershipPublicationSigner::device(&self.registration, &self.device_signer)
+    }
+
+    pub(crate) fn sign_authority_change(
+        &self,
+        chain: &coven_protocol::membership::MembershipChain,
+        stream_id: coven_protocol::membership::AuthorStreamId,
+        change: coven_protocol::membership::StoreAuthorityChange,
+        timestamp: String,
+    ) -> Result<
+        coven_protocol::membership::MembershipEntry,
+        coven_protocol::membership::MembershipError,
+    > {
+        chain.signed_change_in_stream(&self.identity, stream_id, change, timestamp)
+    }
+
     pub(crate) async fn seal_keyring_for_member(
         &self,
         store_id: String,
@@ -94,7 +111,7 @@ impl LocalStoreWriter {
         )
     }
 
-    pub(crate) fn sign_direct_removal(
+    pub(crate) fn sign_member_removal(
         &self,
         chain: &coven_protocol::membership::MembershipChain,
         stream_id: coven_protocol::membership::AuthorStreamId,
@@ -130,80 +147,6 @@ impl LocalStoreWriter {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn build_membership_transition(
-        &self,
-        store_root_hash: coven_protocol::store_commit::ObjectHash,
-        entry: &coven_protocol::membership::MembershipEntry,
-        entry_ref: coven_protocol::membership::MembershipEntryRef,
-        predecessor: Option<coven_protocol::membership::MembershipHeadRef>,
-        anchor: coven_protocol::store_commit::GrantStreamAnchor,
-        next_slot: coven_protocol::objects::ObjectSlot,
-        head_slot: coven_protocol::objects::ObjectSlot,
-    ) -> Result<
-        coven_protocol::membership::MergeMembershipHeadTransition,
-        crate::sync::store::membership::MembershipMutationError,
-    > {
-        if self.registration.value().author_pubkey != entry.author_pubkey
-            || self.registration.reference().device_id != self.registration.value().device_id
-        {
-            return Err(
-                crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
-                    "membership author differs from the active exact device registration"
-                        .to_string(),
-                ),
-            );
-        }
-        let coord = entry.coord();
-        Ok(coven_protocol::membership::MergeMembershipHeadTransition {
-            body: coven_protocol::membership::MembershipHeadBody {
-                author_registration: self.registration.reference().clone(),
-                entry: entry_ref,
-                predecessor: predecessor.clone(),
-                resolutions: entry.resolution_dependencies.clone(),
-                successor: coven_protocol::store_commit::SuccessorLink {
-                    activation: coven_protocol::store_commit::StreamActivation::grant_authorized(
-                        store_root_hash,
-                        self.registration.reference().clone(),
-                        coord.author_owner_grant.clone(),
-                        anchor,
-                    )
-                    .activation_id(),
-                    predecessor: predecessor.map(|reference| reference.object),
-                    next_slot,
-                },
-            },
-            head_slot,
-        })
-    }
-
-    pub(crate) fn sign_membership_head(
-        &self,
-        entry: &coven_protocol::membership::MembershipEntry,
-        transition: &coven_protocol::membership::MergeMembershipHeadTransition,
-        activation: coven_protocol::membership::MembershipHeadActivation,
-    ) -> Result<
-        coven_protocol::membership::AuthorHead,
-        crate::sync::store::membership::MembershipMutationError,
-    > {
-        if self.registration.value().author_pubkey != entry.author_pubkey
-            || self.registration.reference() != &transition.body.author_registration
-        {
-            return Err(
-                crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
-                    "membership transition author differs from the active exact device registration"
-                        .to_string(),
-                ),
-            );
-        }
-        Ok(coven_protocol::membership::AuthorHead::signed(
-            entry.store_id.clone(),
-            transition.body.clone(),
-            activation,
-            &self.device_signer,
-        ))
-    }
-
     pub(crate) fn verify_membership_head(
         &self,
         head: &coven_protocol::membership::AuthorHead,
@@ -234,6 +177,7 @@ impl LocalStoreWriter {
         membership_state: coven_protocol::circle_control::StoreMembershipStateRef,
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
         finalization: coven_protocol::store_commit::OwnerPromotionFinalization,
+        publication_slot: coven_protocol::objects::ObjectSlot,
     ) -> Result<coven_protocol::store_commit::OwnerPromotionRequest, crate::sync::store::StoreError>
     {
         coven_protocol::store_commit::OwnerPromotionRequest::signed(
@@ -248,6 +192,7 @@ impl LocalStoreWriter {
             membership_state,
             device_state,
             finalization,
+            publication_slot,
             &self.identity,
         )
         .map_err(crate::sync::store::StoreError::from)
@@ -269,6 +214,24 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.identity,
         )
+    }
+
+    pub(crate) fn sign_owner_promotion_request_publication(
+        &self,
+        commit: &coven_protocol::store_commit::StoreBatchCommit,
+        accepted: &coven_database::AcceptedStoreCommitPublication,
+    ) -> Result<
+        coven_protocol::store_commit::OwnerPromotionRequestPublication,
+        crate::sync::store::StoreError,
+    > {
+        coven_protocol::store_commit::OwnerPromotionRequestPublication::signed(
+            commit,
+            accepted.entry(),
+            accepted.reference(),
+            self.registration.value(),
+            &self.device_signer,
+        )
+        .map_err(crate::sync::store::StoreError::from)
     }
 
     #[allow(clippy::too_many_arguments)]

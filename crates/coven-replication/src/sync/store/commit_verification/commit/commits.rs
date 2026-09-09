@@ -204,7 +204,6 @@ impl<'a> StoreCommitVerifier<'a> {
 
     pub(crate) async fn load_commit_device_operations(
         &mut self,
-        resolver: Option<&DeviceStateResolver<'_>>,
         commit: &StoreBatchCommit,
         predecessor_state: &ResolvedStoreDeviceState,
         predecessor_membership: Option<&MembershipChain>,
@@ -228,8 +227,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 .await
                 .map_err(RegistrationLoadError::Object)?;
             let proposal = &opened.object.value;
-            if proposal.frozen_device_state != commit.device_state
-                || !device_state_has_active_registration(predecessor_state, &proposal.target)
+            if !device_state_has_active_registration(predecessor_state, &proposal.target)
                 || !device_state_has_active_registration(
                     predecessor_state,
                     &proposal.owner_registration,
@@ -285,179 +283,6 @@ impl<'a> StoreCommitVerifier<'a> {
                         .to_string(),
                 ));
             }
-            match (&outcome.object.value, reference) {
-                (
-                    StoreDeviceExclusionOutcome::Cancelled(_),
-                    StoreDeviceExclusionOutcomeRef::Cancelled(_),
-                ) => {}
-                (
-                    StoreDeviceExclusionOutcome::Excluded(exclusion),
-                    StoreDeviceExclusionOutcomeRef::Excluded(_),
-                ) => {
-                    let StoreDeviceExclusionProof {
-                        frozen_device_state,
-                        remaining_device_acks,
-                        cutoff,
-                    } = &exclusion.proof;
-                    if frozen_device_state != &proposal.object.value.frozen_device_state {
-                        return Err(RegistrationLoadError::Invalid(
-                            "device exclusion proof names another frozen device state".to_string(),
-                        ));
-                    }
-                    let resolver = resolver.ok_or_else(|| {
-                        RegistrationLoadError::Invalid(
-                            "Merge device exclusion proof has no materialized state resolver"
-                                .to_string(),
-                        )
-                    })?;
-                    let frozen = resolver
-                        .resolve(&proposal.object.value.frozen_device_state)
-                        .await?;
-                    if !device_state_has_active_registration(&frozen, &proposal.object.value.target)
-                    {
-                        return Err(RegistrationLoadError::Invalid(
-                            "device exclusion proposal frozen state does not contain its active target"
-                                .to_string(),
-                        ));
-                    }
-                    let required = frozen
-                        .devices
-                        .values()
-                        .filter(|record| {
-                            record.registration != proposal.object.value.target
-                                && matches!(record.status, StoreDeviceStatus::Active)
-                        })
-                        .map(|record| (record.registration.clone(), record))
-                        .collect::<BTreeMap<_, _>>();
-                    let target_stream = StreamActivation::device_authorized_stream_id(
-                        self.root.reference().store_root_hash,
-                        &proposal.object.value.target,
-                        StreamAnchorDomain::StoreAnnouncements,
-                    );
-                    let mut certified = BTreeSet::new();
-                    let mut joined = BTreeMap::new();
-                    for reference in remaining_device_acks {
-                        let required_record = required.get(&reference.registration).ok_or_else(|| {
-                            RegistrationLoadError::Invalid(
-                                "device exclusion proof contains an acknowledgement from an ineligible registration"
-                                    .to_string(),
-                            )
-                        })?;
-                        if !certified.insert(reference.registration.clone()) {
-                            return Err(RegistrationLoadError::Invalid(
-                                "device exclusion proof repeats a remaining registration"
-                                    .to_string(),
-                            ));
-                        }
-                        let registration = self
-                            .load_registration(&required_record.registration)
-                            .await
-                            .map_err(RegistrationLoadError::Object)?
-                            .value;
-                        let ack = self
-                            .load_store_ack(reference, &registration)
-                            .await
-                            .map_err(RegistrationLoadError::Object)?;
-                        if !self
-                            .predecessor_activates_acknowledgement(&commit.order, reference, &ack)
-                            .await
-                            .map_err(registration_attempt_error)?
-                        {
-                            return Err(RegistrationLoadError::Invalid(
-                                "device exclusion proof acknowledgement is not activated in the outcome predecessor"
-                                    .to_string(),
-                            ));
-                        }
-                        let ack_state = resolver.resolve(&ack.device_state).await?;
-                        if !device_state_has_pending_proposal(&ack_state, &proposal.reference) {
-                            return Err(RegistrationLoadError::Invalid(
-                                "device exclusion proof acknowledgement does not observe the pending proposal"
-                                    .to_string(),
-                            ));
-                        }
-                        let freeze = ack
-                            .exclusions
-                            .proposal_freezes
-                            .iter()
-                            .find(|freeze| freeze.proposal == proposal.reference)
-                            .ok_or_else(|| {
-                                RegistrationLoadError::Invalid(
-                                    "device exclusion proof acknowledgement omits the exact proposal freeze"
-                                        .to_string(),
-                                )
-                            })?;
-                        let target_cut = &freeze.target_cut.0;
-                        if target_cut.len() > 1
-                            || target_cut.keys().any(|stream| stream != &target_stream)
-                        {
-                            return Err(RegistrationLoadError::Invalid(
-                                "device exclusion proof acknowledgement includes a non-target stream"
-                                    .to_string(),
-                            ));
-                        }
-                        if !ack
-                            .store_cut
-                            .frontier()
-                            .covers(&freeze.target_cut.frontier())
-                        {
-                            return Err(RegistrationLoadError::Invalid(
-                                "device exclusion proof acknowledgement target cut exceeds its Store cut"
-                                    .to_string(),
-                            ));
-                        }
-                        if let Some(reference) = target_cut.get(&target_stream) {
-                            match joined.entry(target_stream) {
-                                std::collections::btree_map::Entry::Vacant(entry) => {
-                                    entry.insert(reference.clone());
-                                }
-                                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                                    let current = entry.get();
-                                    if reference.coord.sequence() > current.coord.sequence() {
-                                        entry.insert(reference.clone());
-                                    } else if reference.coord.sequence() == current.coord.sequence()
-                                        && reference != current
-                                    {
-                                        return Err(RegistrationLoadError::Invalid(
-                                            "device exclusion proof target cuts fork at one sequence"
-                                                .to_string(),
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if certified != required.into_keys().collect()
-                        || cutoff != &StoreHistoryCut(joined)
-                    {
-                        return Err(RegistrationLoadError::Invalid(
-                            "device exclusion proof does not certify every remaining registration and exact cutoff"
-                                .to_string(),
-                        ));
-                    }
-                    let predecessor_cut = commit
-                        .order
-                        .predecessor_cut()
-                        .map_err(RegistrationLoadError::from)?;
-                    let predecessor_target = predecessor_cut
-                        .0
-                        .get(&target_stream)
-                        .map(|reference| BTreeMap::from([(target_stream, reference.clone())]));
-                    let target_predecessor_cut =
-                        StoreHistoryCut(predecessor_target.unwrap_or_default());
-                    if !cutoff.frontier().covers(&target_predecessor_cut.frontier()) {
-                        return Err(RegistrationLoadError::Invalid(
-                            "device exclusion outcome predecessor advances the target beyond its certified cutoff"
-                                .to_string(),
-                        ));
-                    }
-                }
-                _ => {
-                    return Err(RegistrationLoadError::Invalid(
-                        "device exclusion outcome variant differs from its exact reference"
-                            .to_string(),
-                    ))
-                }
-            }
             outcomes.push(
                 RetainedStoreDeviceExclusionOutcome::from_verified(
                     reference,
@@ -480,6 +305,18 @@ impl<'a> StoreCommitVerifier<'a> {
     ) -> Result<Vec<u8>, StoreObjectError> {
         self.storage
             .read_protocol_object(context, object, semantic_prefix)
+            .await
+            .map_err(StoreObjectError::from)
+    }
+
+    pub(crate) async fn read_versioned_protocol_record(
+        &self,
+        context: &ProtocolObjectContext,
+        slot: &coven_protocol::objects::ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, coven_protocol::objects::ExactObjectVersion), StoreObjectError> {
+        self.storage
+            .read_versioned_protocol_record(context, slot, semantic_prefix)
             .await
             .map_err(StoreObjectError::from)
     }

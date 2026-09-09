@@ -13,19 +13,22 @@ pub(super) fn validate_membership_retirement_barriers(
             continue;
         }
         let (retired, barriers) = match &entry.change {
-            MembershipChange::SetMember {
+            StoreAuthorityChange::SetMember {
                 replaces,
                 retirement_barriers,
                 ..
             } => (replaces, retirement_barriers),
-            MembershipChange::RemoveMember {
+            StoreAuthorityChange::RemoveMember {
                 removes,
                 retirement_barriers,
                 ..
             } => (removes, retirement_barriers),
-            MembershipChange::Founder { .. }
-            | MembershipChange::ProviderAdmin
-            | MembershipChange::ResolutionActivation { .. } => continue,
+            StoreAuthorityChange::Founder { .. }
+            | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+            | StoreAuthorityChange::DeviceExclusionProposal { .. }
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::ProviderAdmin
+            | StoreAuthorityChange::ResolutionActivation { .. } => continue,
         };
         if retired != &barriers.keys().cloned().collect::<BTreeSet<_>>() {
             let barrier_grants = barriers.keys().cloned().collect::<BTreeSet<_>>();
@@ -89,7 +92,7 @@ pub(super) fn validate_membership_wrapped_keys(
         let included = causal_grants::history_closure(entries, &entry.dependencies);
         let causal_generation = membership_causal_generation(entries, &entry.dependencies);
         let references = match &entry.change {
-            MembershipChange::SetMember {
+            StoreAuthorityChange::SetMember {
                 user_pubkey,
                 wrapped_key,
                 ..
@@ -103,14 +106,17 @@ pub(super) fn validate_membership_wrapped_keys(
                 }
                 continue;
             }
-            MembershipChange::RemoveMember {
+            StoreAuthorityChange::RemoveMember {
                 user_pubkey,
                 wrapped_keys,
                 ..
             } => (user_pubkey, wrapped_keys),
-            MembershipChange::Founder { .. }
-            | MembershipChange::ProviderAdmin
-            | MembershipChange::ResolutionActivation { .. } => continue,
+            StoreAuthorityChange::Founder { .. }
+            | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+            | StoreAuthorityChange::DeviceExclusionProposal { .. }
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::ProviderAdmin
+            | StoreAuthorityChange::ResolutionActivation { .. } => continue,
         };
         let (removed_pubkey, wrapped_keys) = references;
         let rotation_generation = wrapped_keys.first().map(|reference| reference.generation);
@@ -172,11 +178,16 @@ pub(super) fn membership_causal_generation(
         .iter()
         .filter(|candidate| included.contains(&candidate.coord()))
         .flat_map(|candidate| match &candidate.change {
-            MembershipChange::SetMember { wrapped_key, .. } => std::slice::from_ref(wrapped_key),
-            MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.as_slice(),
-            MembershipChange::Founder { .. }
-            | MembershipChange::ProviderAdmin
-            | MembershipChange::ResolutionActivation { .. } => &[],
+            StoreAuthorityChange::SetMember { wrapped_key, .. } => {
+                std::slice::from_ref(wrapped_key)
+            }
+            StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.as_slice(),
+            StoreAuthorityChange::Founder { .. }
+            | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+            | StoreAuthorityChange::DeviceExclusionProposal { .. }
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::ProviderAdmin
+            | StoreAuthorityChange::ResolutionActivation { .. } => &[],
         })
         .map(|reference| reference.generation)
         .max()
@@ -280,7 +291,7 @@ pub(super) fn normalize_store_membership(
                 .map(|coord| (coord.stream_key(), coord))
                 .collect();
             let change = match &entry.change {
-                MembershipChange::Founder {
+                StoreAuthorityChange::Founder {
                     creation_id,
                     owner_pubkey,
                     owner_grant_id,
@@ -297,7 +308,7 @@ pub(super) fn normalize_store_membership(
                         provider_account_email: None,
                     },
                 },
-                MembershipChange::SetMember {
+                StoreAuthorityChange::SetMember {
                     user_pubkey,
                     provider_account_email,
                     role,
@@ -323,7 +334,7 @@ pub(super) fn normalize_store_membership(
                         })
                         .collect(),
                 },
-                MembershipChange::RemoveMember {
+                StoreAuthorityChange::RemoveMember {
                     user_pubkey,
                     removes,
                     retirement_barriers,
@@ -340,8 +351,13 @@ pub(super) fn normalize_store_membership(
                         })
                         .collect(),
                 },
-                MembershipChange::ProviderAdmin => CausalChange::Control,
-                MembershipChange::ResolutionActivation { .. } => CausalChange::ResolutionActivation,
+                StoreAuthorityChange::ProviderAdmin
+                | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+                | StoreAuthorityChange::DeviceExclusionProposal { .. }
+                | StoreAuthorityChange::DeviceExclusionOutcome { .. } => CausalChange::Control,
+                StoreAuthorityChange::ResolutionActivation { .. } => {
+                    CausalChange::ResolutionActivation
+                }
             };
             CausalEntry {
                 coord: entry.coord(),
@@ -458,17 +474,20 @@ pub(super) fn membership_retirement_barrier(
 ) -> Option<MergeMembershipGrantRetirementBarrier> {
     let entry = entries.iter().find(|entry| entry.coord() == *authority)?;
     let barriers = match &entry.change {
-        MembershipChange::SetMember {
+        StoreAuthorityChange::SetMember {
             retirement_barriers,
             ..
         }
-        | MembershipChange::RemoveMember {
+        | StoreAuthorityChange::RemoveMember {
             retirement_barriers,
             ..
         } => retirement_barriers,
-        MembershipChange::Founder { .. }
-        | MembershipChange::ProviderAdmin
-        | MembershipChange::ResolutionActivation { .. } => return None,
+        StoreAuthorityChange::Founder { .. }
+        | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+        | StoreAuthorityChange::DeviceExclusionProposal { .. }
+        | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+        | StoreAuthorityChange::ProviderAdmin
+        | StoreAuthorityChange::ResolutionActivation { .. } => return None,
     };
     barriers.get(grant).cloned()
 }

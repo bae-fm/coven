@@ -7,32 +7,6 @@ impl StoreSync {
         Some(connected_sync!(self)?.host_write_blob_staging(tokio::runtime::Handle::current()))
     }
 
-    /// The cloud object key `blob` has, or would have, under this store's home.
-    ///
-    /// The `{uploader}` segment is this store's established identity, read from
-    /// custody in every connection state. A connected cloud storage holds a
-    /// copy of that same keypair, taken when it was opened, so deriving the
-    /// segment from the identity itself leaves one authority rather than two
-    /// that agree.
-    pub(crate) fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
-        let scheme = match connected_sync!(self) {
-            Some(sync) => sync.blob_path_scheme(),
-            None => BlobPathScheme::for_storage(self.config().cloud_home.storage),
-        };
-        let uploader = self
-            .security
-            .identity_public_key()
-            .map_err(StorageError::Key)?
-            .map(hex::encode);
-        CloudSyncConnection::blob_key(
-            scheme,
-            &blob.namespace,
-            uploader.as_deref(),
-            &blob.id,
-            blob.cloud_path.as_deref(),
-        )
-    }
-
     pub(crate) async fn make_remote(
         &self,
         root_table: &str,

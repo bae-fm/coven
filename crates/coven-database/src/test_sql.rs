@@ -1592,8 +1592,8 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn latest_published_store_snapshot(&self) -> Result<(i64, Vec<u8>), DbError> {
         self.connection
             .query_row(
-                "SELECT generation, meta_bytes FROM published_store_snapshot
-                 ORDER BY generation DESC LIMIT 1",
+                "SELECT publication_position, meta_bytes FROM published_store_snapshot
+                 ORDER BY publication_position DESC LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1604,7 +1604,7 @@ impl DatabaseTestSql<'_> {
         self.connection
             .query_row(
                 "SELECT meta_bytes FROM published_store_snapshot
-                 ORDER BY generation DESC LIMIT 1",
+                 ORDER BY publication_position DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )

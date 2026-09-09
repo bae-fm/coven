@@ -52,129 +52,53 @@ pub(super) fn snapshot_supersedes_seed(cut: &CommitFrontier, seed: &CommitFronti
     cut.covers(seed) && cut != seed
 }
 
-#[derive(Clone)]
-pub(super) struct VerifiedReclaimSnapshot {
-    pub(super) snapshot: coven_database::PublishedStoreSnapshot,
-    pub(super) acknowledgements: Vec<StoreAckRef>,
-    /// Every generation the selection considered, kept so the legs that reason
-    /// about superseded generations do not read the same streams again.
-    pub(super) authorized: Vec<coven_database::PublishedStoreSnapshot>,
-}
+pub(super) type VerifiedReclaimSnapshot =
+    crate::sync::store::commit_verification::merge_history::AcceptedStoreSnapshot;
 
 impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
     pub(super) async fn drive_candidate(
         &mut self,
-        mut operation: DurableStoreReclaimOperation,
-    ) -> Result<(), StoreReclaimError> {
-        let database = self.database.clone();
-        loop {
-            let (object, candidate) = match &operation {
-                DurableStoreReclaimOperation::AuthorizationCandidate { object, candidate }
-                | DurableStoreReclaimOperation::ReceiptCandidate {
-                    object, candidate, ..
-                } => (object.clone(), candidate.clone()),
-                _ => {
-                    return Err(StoreReclaimError::Authorization(
-                        "Store reclaim journal has no publication candidate".to_string(),
-                    ));
-                }
-            };
-            Box::pin(create_reclaim_exact_objects(
-                object.as_ref(),
-                self.storage.as_ref(),
-            ))
-            .await
-            .map_err(StoreReclaimError::from)?;
-            for remote in object
-                .remote_objects(&candidate)
-                .map_err(StoreReclaimError::from)?
-            {
-                if matches!(
-                    remote.record(),
-                    coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
-                        if matches!(
-                            record.identity.domain,
-                            coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
-                                | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
-                                | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
-                        )
-                ) {
-                    database
-                        .mark_reusable_retained_authority_uploaded(remote.into_record())
-                        .await?;
-                }
-            }
-            // Scoped to the publication alone: the arms below re-derive a plan,
-            // which takes this same turn.
-            let outcome = {
-                let _authorship = database.author_own_stream().await;
-                Box::pin(self.writer.publish_prepared(candidate, None, None)).await?
-            };
-            match outcome {
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Activated(_) => {
-                    return Ok(());
-                }
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(
-                    replacement,
-                ) => {
-                    operation =
-                        Box::pin(database.replace_store_reclaim_candidate(operation, *replacement))
-                            .await?;
-                }
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate {
-                    nonactivation,
-                    ..
-                } => {
-                    let plan = self.writer.prepare_plan().await?;
-                    let batch = match &*object {
-                        DurableStoreReclaimObject::Authorization {
-                            authorization_ref, ..
-                        } => crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ReclaimAuthorization(
-                            Box::new(authorization_ref.clone()),
-                        ),
-                        DurableStoreReclaimObject::Receipt { receipt_ref, .. } => {
-                            crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ReclaimReceipt(Box::new(
-                                receipt_ref.clone(),
-                            ))
-                        }
-                    };
-                    let replacement = self.writer.prepare_candidate(plan, batch).await?;
-                    operation = Box::pin(database.begin_store_reclaim_candidate_replacement(
-                        operation,
-                        replacement,
-                        *nonactivation,
-                    ))
-                    .await?;
-                    Box::pin(self.finish_candidate_replacement(operation)).await?;
-                    return Ok(());
-                }
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Nonactivated(_)
-                | crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Reprepared => {
-                    return Err(StoreReclaimError::Authorization(
-                        "Store reclaim publication returned acknowledgement-only state".to_string(),
-                    ));
-                }
-            }
-        }
-    }
-
-    pub(super) async fn finish_candidate_replacement(
-        &self,
         operation: DurableStoreReclaimOperation,
     ) -> Result<(), StoreReclaimError> {
-        let database = &self.database;
-        let targets = database
-            .store_reclaim_replacement_cleanup_targets(operation.clone())
-            .await?;
-        crate::sync::store::authorization::delete_candidate_cleanup_targets::<StoreReclaimError>(
+        let database = self.database.clone();
+        let (object, candidate) = match &operation {
+            DurableStoreReclaimOperation::AuthorizationCandidate { object, candidate }
+            | DurableStoreReclaimOperation::ReceiptCandidate {
+                object, candidate, ..
+            } => (object.clone(), candidate.clone()),
+            _ => {
+                return Err(StoreReclaimError::Authorization(
+                    "Store reclaim journal has no publication candidate".to_string(),
+                ));
+            }
+        };
+        Box::pin(create_reclaim_exact_objects(
+            object.as_ref(),
             self.storage.as_ref(),
-            database,
-            targets,
-        )
-        .await?;
-        database
-            .complete_store_reclaim_candidate_replacement(operation)
-            .await?;
+        ))
+        .await
+        .map_err(StoreReclaimError::from)?;
+        for remote in object
+            .remote_objects(&candidate)
+            .map_err(StoreReclaimError::from)?
+        {
+            if matches!(
+                remote.record(),
+                coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+                    if matches!(
+                        record.identity.domain,
+                        coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
+                            | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
+                            | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
+                    )
+            ) {
+                database
+                    .mark_reusable_retained_authority_uploaded(remote.into_record())
+                    .await?;
+            }
+        }
+        let _authorship = database.author_own_stream().await;
+        Box::pin(self.writer.publish_prepared(candidate, None, None)).await?;
         Ok(())
     }
 
@@ -239,7 +163,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         let candidate = self
             .writer
             .prepare_candidate(
-                plan,
+                &plan,
                 crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ReclaimReceipt(Box::new(
                     receipt_ref.clone(),
                 )),
@@ -269,7 +193,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         // its absence is confirmed through the same exact-object verification the blob
         // primitives use.
         if let ReclaimTarget::AudienceBlob(blob) = target {
-            return match storage.verify_blob_object(&blob.blob).await {
+            return match storage.verify_blob_object(blob.blob()).await {
                 Err(StorageError::NotFound(_)) => Ok(()),
                 Ok(()) => Err(StoreReclaimError::Authorization(
                     "reclaim target remains readable after exact deletion".to_string(),
@@ -379,18 +303,6 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                     .map_err(StoreReclaimError::from)?,
                 )
             }
-            ReclaimTarget::StoreMembershipRollup(target) => (
-                ProtocolObjectContext::signed_plaintext(
-                    root.store_root_hash,
-                    ProtocolObjectDomain::StoreMembershipRollup,
-                ),
-                coven_protocol::store_commit::semantic_prefix_from_exact_object(
-                    &target.rollup.object,
-                    coven_protocol::objects::ProtectedObjectDomain::StoreMembershipRollup
-                        .extension(),
-                )
-                .map_err(StoreReclaimError::from)?,
-            ),
             ReclaimTarget::AudienceBlob(_) => {
                 return Err(StoreReclaimError::Authorization(
                     "audience blob reclaim target has no protocol object prefix".to_string(),
@@ -411,41 +323,15 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
 
     pub(super) async fn choose_snapshot(
         &mut self,
-        registrations: &[coven_protocol::store_commit::ReferencedStoreDeviceRegistration],
     ) -> Result<VerifiedReclaimSnapshot, StoreReclaimError> {
         let storage = self.storage.clone();
         let root = self.root.clone();
-        let members = self.membership.clone();
-        let mut history = self.history();
-        let mut authorized = Vec::new();
-        for registration in registrations {
-            for snapshot in history
-                .load_store_snapshot_stream(registration.reference(), registration.value())
-                .await
-                .map_err(StoreReclaimError::from)?
-            {
-                authorized.push(snapshot);
-            }
-        }
-        let selected = match history
-            .select_maximal_acknowledged_store_snapshot(authorized.clone(), &members)
-            .await
-        {
-            Ok(Some(selected)) => selected,
-            Ok(None) => return Err(StoreReclaimError::NoSnapshot),
-            Err(crate::sync::store::pull::StorePullError::SnapshotNotStable {
-                member,
-                device_id,
-            }) => {
-                return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
-            }
-            Err(
-                crate::sync::store::pull::StorePullError::SnapshotAuthorInactive
-                | crate::sync::store::pull::StorePullError::SnapshotAuthorNotOwner,
-            ) => return Err(StoreReclaimError::NoSnapshot),
-            Err(error) => return Err(StoreReclaimError::from(error)),
-        };
-        let snapshot = selected.snapshot;
+        let selected = self
+            .history()
+            .current_accepted_snapshot()
+            .await?
+            .ok_or(StoreReclaimError::NoSnapshot)?;
+        let snapshot = selected.snapshot();
         let image = storage
             .read_protocol_object(
                 &ProtocolObjectContext::store_encrypted(
@@ -454,7 +340,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 ),
                 &snapshot.meta.image.object,
                 &snapshot_image_semantic_prefix(
-                    &snapshot.meta.author_registration.device_id.to_string(),
+                    snapshot.reference.object.slot(),
                     snapshot.meta.image.image_hash,
                 ),
             )
@@ -465,14 +351,6 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 "snapshot image differs from its signed exact reference".to_string(),
             ));
         }
-        let acknowledgements = selected
-            .verified
-            .acknowledgement_refs()
-            .map_err(StoreReclaimError::from)?;
-        Ok(VerifiedReclaimSnapshot {
-            snapshot,
-            acknowledgements,
-            authorized,
-        })
+        Ok(selected)
     }
 }

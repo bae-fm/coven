@@ -1,6 +1,13 @@
 use super::*;
 
 impl Store {
+    #[cfg(test)]
+    pub(crate) async fn authorize_history_for_test(
+        &self,
+    ) -> Result<AuthorizedStoreHistory<'_>, SyncCycleFailure> {
+        self.authorize_history().await
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn execute_unscoped_host_sql_for_test(
         &self,
@@ -31,6 +38,7 @@ impl Store {
             self.identity.clone(),
             self.device_id.clone(),
             self.root.clone(),
+            self.routing_encryption.clone(),
         )
     }
 
@@ -91,16 +99,6 @@ impl Store {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn sign_device_head_for_test(
-        &self,
-        commit: coven_protocol::store_commit::StoreBatchCommitRef,
-        successor: coven_protocol::store_commit::SuccessorLink,
-    ) -> Result<coven_protocol::store_commit::StoreDeviceHead, StoreError> {
-        let writer = self.authorize_writer().await.map_err(StoreError::from)?;
-        writer.sign_device_head_for_test(commit, successor)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn resign_snapshot_meta_for_test(
         &self,
         meta: coven_protocol::store_commit::SnapshotMeta,
@@ -151,36 +149,6 @@ impl Store {
     ) -> Result<coven_protocol::store_commit::StoreDeviceRegistrationRef, StoreError> {
         let writer = self.authorize_writer().await.map_err(StoreError::from)?;
         Ok(writer.local_registration_ref_for_test())
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn observe_excluded_candidate_head_for_test(
-        &self,
-        candidate: &coven_protocol::store_commit::StoreDeviceHead,
-        candidate_commit: &coven_protocol::store_commit::StoreBatchCommit,
-        candidate_object: &coven_protocol::objects::ExactObjectRef,
-    ) -> Result<crate::sync::store::merge_conflict::ExcludedCandidateHeadObservation, StoreError>
-    {
-        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
-        let verified_commit = history
-            .authenticate_commit_bytes(&candidate.commit, &candidate_commit.to_bytes())
-            .await?;
-        history
-            .merge_conflict()
-            .observe_excluded_candidate_head(candidate, &verified_commit, candidate_object)
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn cleanup_merge_candidate_for_test(
-        &self,
-        write_id: coven_protocol::write::WriteId,
-    ) -> Result<(), StoreError> {
-        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
-        history
-            .cleanup_merge_candidate(write_id)
-            .await
-            .map_err(StoreError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -301,25 +269,6 @@ impl Store {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn exact_next_announcement_slot_for_test(
-        &self,
-        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-        previous: Option<&coven_protocol::store_commit::StoreBatchCommitRef>,
-    ) -> Result<
-        (
-            coven_protocol::objects::ObjectSlot,
-            Option<coven_protocol::store_commit::StoreDeviceHeadRef>,
-        ),
-        StoreError,
-    > {
-        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
-        history
-            .exact_next_announcement_slot_for_test(registration_ref, registration, previous)
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn load_commit_for_test(
         &self,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
@@ -392,8 +341,6 @@ impl Store {
             String,
             coven_protocol::store_commit::StoreBatchCommitRef,
         >,
-        device_state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
-        exclusion_freezes: &[coven_protocol::store_commit::StoreDeviceProposalAck],
         commit_ref: &coven_protocol::store_commit::StoreBatchCommitRef,
         commit: &coven_protocol::store_commit::StoreBatchCommit,
     ) -> Result<pull::Readiness, pull::StorePullError> {
@@ -402,14 +349,7 @@ impl Store {
             .await
             .expect("authorize Store history");
         history
-            .pull_readiness_for_test(
-                coverage,
-                frontier,
-                device_state,
-                exclusion_freezes,
-                commit_ref,
-                commit,
-            )
+            .pull_readiness_for_test(coverage, frontier, commit_ref, commit)
             .await
     }
 
@@ -582,6 +522,7 @@ impl Store {
             .authorize_history()
             .await
             .map_err(crate::sync::store::CircleOperationError::from)?;
+        history.prepare_store_publication_history_for_test().await?;
         history
             .circles()
             .activations()
@@ -593,7 +534,7 @@ impl Store {
     pub(crate) async fn load_applicable_circle_packages_for_test(
         &self,
         verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+        activations: &[&coven_protocol::circle_activation::VerifiedCircleActivations],
         author: &coven_protocol::store_commit::StoreDeviceRegistration,
         local_store_membership: pull::LocalStoreMembership,
     ) -> Result<Vec<pull::LoadedCirclePackage>, circles::CirclePackageReadError> {
@@ -601,10 +542,11 @@ impl Store {
             .authorize_history()
             .await
             .map_err(circles::CirclePackageReadError::from)?;
+        history.prepare_store_publication_history_for_test().await?;
         history
             .circles()
             .packages()
-            .load_applicable(verified, activations, author, local_store_membership)
+            .load_applicable(verified, activations, &[], author, local_store_membership)
             .await
     }
 
@@ -701,13 +643,17 @@ impl Store {
             .await
             .map_err(crate::sync::store::acknowledgements::StoreAckError::from)?;
         writer
+            .seed_retained_history()
+            .await
+            .map_err(crate::sync::store::snapshots::SnapshotError::from)?;
+        writer
             .acknowledgements()
             .stage_acknowledgement(frontier, sync_time)
             .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn stand_on_acknowledged_snapshot_for_test(
+    pub(crate) async fn stand_on_accepted_snapshot_for_test(
         &self,
     ) -> Result<
         crate::sync::store::ReplayBaselineAdvance,
@@ -726,9 +672,9 @@ impl Store {
             .map_err(crate::sync::store::snapshots::SnapshotError::from)?;
         writer
             .acknowledgements()
-            .stand_on_acknowledged_snapshot(Some(
-                &coven_keys::encryption::EncryptionService::from_key([42; 32]),
-            ))
+            .stand_on_accepted_snapshot(Some(&coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )))
             .await
     }
 
@@ -747,11 +693,21 @@ impl Store {
     pub(crate) async fn prepare_acknowledgement_activation_for_test(
         &self,
         acknowledgement: coven_protocol::store_commit::StoreAckRef,
+        object: coven_protocol::objects::ExactProtocolObject<
+            coven_protocol::store_commit::StoreAck,
+        >,
         candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<(), coven_database::DbError> {
-        self.database
-            .prepare_acknowledgement_activation(acknowledgement, candidate)
-            .await
+        let claimed = self
+            .database
+            .prepare_acknowledgement_activation(acknowledgement, object, candidate)
+            .await?;
+        if !claimed {
+            return Err(coven_database::DbError::Message(
+                "test acknowledgement activation was deferred by another publication".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -873,19 +829,6 @@ impl Store {
         let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .load_store_ack_for_test(reference, registration)
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn load_head_for_test(
-        &self,
-        reference: &coven_protocol::store_commit::StoreDeviceHeadRef,
-        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-        commit: &coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<coven_protocol::store_commit::StoreDeviceHead, StoreError> {
-        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
-        history
-            .load_head_for_test(reference, registration, commit)
             .await
     }
 }

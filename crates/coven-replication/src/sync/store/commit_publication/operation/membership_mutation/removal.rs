@@ -1,20 +1,17 @@
 use super::{
     decode_membership_mutation, exact_owned_remote, MembershipMutationError,
-    MembershipMutationPlan, MembershipMutationProgress, ReplacementWrappedKey,
-    RevokeMembershipPublication, RevokeMutationPlan,
+    MembershipMutationPlan, MembershipMutationProgress, MembershipRevocation,
+    PreparedMembershipActivation, ReplacementWrappedKey, RevokeMutationPlan,
 };
 use coven_keys::encryption::{self, EncryptionService};
 use coven_keys::keys;
-use coven_protocol::membership::{
-    self, AuthorStreamId, MemberRole, MembershipChain, MembershipChange,
-};
+use coven_protocol::membership::{MemberRole, StoreAuthorityChange};
 use coven_storage as cloud_storage;
 use coven_storage::cloud::{CloudAccessOutcome, CloudAccessState, RevokeOutcome};
 
 pub(crate) struct AuthorizedMembershipRevocation<'operation, 'storage, 'input> {
     operation:
         &'operation mut crate::sync::store::commit_publication::AuthorizedWriterOperation<'storage>,
-    chain: &'input mut MembershipChain,
     revokee_pubkey: &'input str,
     store_id: &'input str,
     timestamp: &'input str,
@@ -26,19 +23,13 @@ pub(crate) struct AuthorizedMembershipRevocation<'operation, 'storage, 'input> {
 /// Build a removal that revokes provider access, rotates the Store key, and
 /// publishes the signed membership change as one durable operation.
 ///
-/// An Owner removal composes a Store candidate against this device's next stream
-/// position and returns it for staging; the turn that claimed the position is
-/// released with the plan, and the publication below takes its own. A writer that
-/// takes the position in between is not a lost operation: publication reads the
-/// occupant, verifies it, and returns a nonactivated candidate, which
-/// the revocation operation ends on — restoring provider access, deleting what
-/// the candidate published, and clearing the staged mutation, so the next removal
-/// composes at the position that follows.
+/// The operation keeps its author turn through durable candidate staging.
+/// Once staged, the active publication reservation protects that exact candidate
+/// while provider access and key rotation proceed and publication takes its turn.
 impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 'storage, 'input> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn begin(
         operation: &'operation mut crate::sync::store::commit_publication::AuthorizedWriterOperation<'storage>,
-        chain: &'input mut MembershipChain,
         revokee_pubkey: &'input str,
         store_id: &'input str,
         timestamp: &'input str,
@@ -48,7 +39,6 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         let permit = operation.membership_mutation_permit().await;
         Self {
             operation,
-            chain,
             revokee_pubkey,
             store_id,
             timestamp,
@@ -60,9 +50,14 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
 
     async fn build_revoke_mutation(
         &mut self,
-        stream_id: AuthorStreamId,
+        plan: &crate::sync::store::commit_publication::operation::commit_plan::StoreOperationCommitPlan,
+        write_id: coven_protocol::write::WriteId,
     ) -> Result<RevokeMutationPlan, MembershipMutationError> {
-        let chain = self.chain.clone();
+        let chain = plan.membership().clone();
+        let stream_id = self
+            .operation
+            .select_membership_author_stream(&chain)
+            .await?;
         let revokee_pubkey = self.revokee_pubkey;
         let store_id = self.store_id;
         let timestamp = self.timestamp;
@@ -89,7 +84,8 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         }
         let current_keyring = self
             .operation
-            .open_keyring_or_for_membership(&chain, current_encryption)
+            .keyrings
+            .open_or(&chain, current_encryption)
             .await?;
         let new_keyring = current_keyring
             .with_appended_generation(
@@ -127,66 +123,45 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             .iter()
             .map(|wrap| wrap.prepared.reference.clone())
             .collect();
-        let publication = if chain.is_owner_now(revokee_pubkey) {
-            let plan = self
-                .operation
-                .prepare_plan()
-                .await
-                .map_err(MembershipMutationError::from)?;
-            let entry = self.operation.sign_owner_barrier_removal(
+        let entry = if chain.is_owner_now(revokee_pubkey) {
+            self.operation.sign_owner_barrier_removal(
                 &chain,
                 stream_id,
                 revokee_pubkey.to_string(),
                 wrapped_keys,
                 plan.device_state().clone(),
                 timestamp.to_string(),
-            )?;
-            let transition = self
-                .operation
-                .prepare_membership_transition(&chain, entry)
-                .await?;
-            let mut candidate = self
-                .operation
-                .prepare_candidate(
-                plan,
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::MergeMembershipActivation {
-                    transition: transition.transition.clone(),
-                    stream_activations: Vec::new(),
-                },
-            )
-            .await
-            .map_err(MembershipMutationError::from)?;
-            let head = self
-                .operation
-                .finish_membership_transition(
-                    transition.clone(),
-                    membership::MembershipHeadActivation::StoreCommit {
-                        commit: candidate.reference.clone(),
-                    },
-                )
-                .await?;
-            self.operation
-                .attach_membership_proof(&mut candidate, &head)?;
-            RevokeMembershipPublication::StoreActivated {
-                transition: Box::new(transition),
-                candidate: Box::new(candidate),
-                publication: Box::new(head),
-            }
+            )?
         } else {
-            let entry = self.operation.sign_direct_removal(
+            self.operation.sign_member_removal(
                 &chain,
                 stream_id,
                 revokee_pubkey.to_string(),
                 wrapped_keys,
                 timestamp.to_string(),
-            )?;
-            RevokeMembershipPublication::Direct {
-                publication: Box::new(
-                    self.operation
-                        .prepare_membership_publication(&chain, entry)
-                        .await?,
-                ),
-            }
+            )?
+        };
+        let transition = self
+            .operation
+            .prepare_membership_transition(&chain, entry)
+            .await?;
+        let mut candidate = self.operation.prepare_candidate_for_write(
+            plan,
+            crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::MergeMembershipActivation {
+                transition: transition.transition.clone(), stream_activations: Vec::new(),
+            },
+            write_id,
+        ).await.map_err(MembershipMutationError::from)?;
+        let publication = self
+            .operation
+            .finish_store_membership_transition(transition.clone(), candidate.reference.clone())
+            .await?;
+        self.operation
+            .attach_membership_proof(&mut candidate, &publication)?;
+        let publication = PreparedMembershipActivation {
+            transition: Box::new(transition),
+            candidate: Box::new(candidate),
+            publication: Box::new(publication),
         };
         let provider_account_email = chain
             .current_member_provider_email(revokee_pubkey)
@@ -209,8 +184,8 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         })
     }
 
-    pub(crate) async fn execute(mut self) -> Result<EncryptionService, MembershipMutationError> {
-        let (mut plan, mut progress, intent_hash) = match self
+    pub(crate) async fn execute(mut self) -> Result<MembershipRevocation, MembershipMutationError> {
+        let (mut plan, mut progress, mut intent_hash) = match self
             .operation
             .outbound_membership_mutation()
             .await?
@@ -235,21 +210,28 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 (plan, progress, intent_hash)
             }
             None => {
+                self.operation
+                    .refresh_membership_publication()
+                    .await
+                    .map_err(MembershipMutationError::from)?;
+                self.operation.membership.ensure_resolved()?;
                 let is_current = self
-                    .chain
+                    .operation
+                    .membership
                     .current_members()
                     .iter()
                     .any(|(pubkey, _)| pubkey == self.revokee_pubkey);
-                let was_removed = self.chain.entries().iter().any(|entry| {
+                let was_removed = self.operation.membership.entries().iter().any(|entry| {
                     matches!(
                         &entry.change,
-                        MembershipChange::RemoveMember { user_pubkey, .. }
+                        StoreAuthorityChange::RemoveMember { user_pubkey, .. }
                             if user_pubkey == self.revokee_pubkey
                     )
                 });
                 if !is_current && was_removed {
                     if !self
-                        .chain
+                        .operation
+                        .membership
                         .current_members()
                         .into_iter()
                         .any(|(_, role)| role == MemberRole::Owner)
@@ -258,7 +240,8 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     }
                     let keyring = self
                         .operation
-                        .open_keyring_for_membership(self.chain)
+                        .keyrings
+                        .open(&self.operation.membership)
                         .await?;
                     match self
                         .operation
@@ -281,40 +264,147 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                             ));
                         }
                     }
-                    return Ok(keyring);
+                    return Ok(MembershipRevocation::AlreadyRemoved(keyring));
                 }
-                let stream_id = self
+                let operation_plan = self
                     .operation
-                    .select_membership_author_stream(self.chain)
-                    .await?;
-                let plan = Box::pin(self.build_revoke_mutation(stream_id)).await?;
+                    .prepare_plan()
+                    .await
+                    .map_err(MembershipMutationError::from)?;
+                let write_id = self.operation.database.new_store_write_id();
+                let plan = Box::pin(self.build_revoke_mutation(&operation_plan, write_id)).await?;
                 plan.validate_closed_shape()?;
                 let encoded = MembershipMutationPlan::Revoke(plan.clone()).encode()?;
                 let progress = MembershipMutationProgress::Pending;
                 let progress_bytes = progress.encode()?;
-                let pending_generation =
-                    EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
-                        .map_err(MembershipMutationError::Encryption)?
-                        .current_generation();
                 let intent_hash = self
                     .operation
                     .stage_membership_mutation(
                         encoded,
                         progress_bytes,
                         plan.candidate_remote_objects()?,
-                        Some(pending_generation),
+                        (*plan.publication.candidate).clone(),
                     )
                     .await?;
                 (plan, progress, intent_hash)
             }
         };
-        let Self {
-            operation,
-            chain,
-            pending_rotation,
-            _permit,
-            ..
-        } = self;
+        loop {
+            let active = self.operation.database.active_store_publication().await?;
+            let continuing = active.as_ref().is_some_and(|active| {
+                active.owner() == &coven_database::ActiveStorePublicationOwner::MembershipMutation
+                    && (active.is_awaiting_preparation()
+                        || active.membership_abandonment().is_some())
+            });
+            if !continuing {
+                match self
+                    .execute_plan(plan.clone(), progress.clone(), intent_hash)
+                    .await
+                {
+                    Ok(keyring) => return Ok(MembershipRevocation::Activated(keyring)),
+                    Err(error)
+                        if super::publication_predecessor_changed(
+                            &error,
+                            &plan.publication.entry().coord(),
+                        ) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let active = self
+                .operation
+                .abandon_membership_candidate(
+                    intent_hash,
+                    &plan.publication.candidate,
+                    &plan.publication.publication,
+                )
+                .await?;
+            let operation_plan = self.operation.prepare_plan().await?;
+            if !operation_plan
+                .membership()
+                .current_members()
+                .iter()
+                .any(|(pubkey, _)| pubkey == self.revokee_pubkey)
+            {
+                let keyring = self
+                    .operation
+                    .keyrings
+                    .open(operation_plan.membership())
+                    .await?;
+                match self
+                    .operation
+                    .set_membership_access(plan.desired_access.clone())
+                    .await?
+                {
+                    CloudAccessOutcome::Absent(_) => {}
+                    CloudAccessOutcome::Present(_) => {
+                        return Err(MembershipMutationError::InvalidDurableMutation(
+                            "provider returned present for an accepted member removal".into(),
+                        ))
+                    }
+                }
+                self.operation
+                    .database
+                    .complete_satisfied_membership_mutation(
+                        intent_hash,
+                        active,
+                        operation_plan.publication_previous().record().clone(),
+                        operation_plan.membership().clone(),
+                    )
+                    .await?;
+                self.pending_rotation
+                    .install_durable_gate(self.operation.database.load_rotation_gate().await?);
+                return Ok(MembershipRevocation::AlreadyRemoved(keyring));
+            }
+            let replacement = Box::pin(self.build_revoke_mutation(
+                &operation_plan,
+                plan.publication.candidate.commit.write_id.clone(),
+            ))
+            .await?;
+            replacement.validate_closed_shape()?;
+            intent_hash = self
+                .operation
+                .database
+                .replace_membership_candidate_mutation(
+                    intent_hash,
+                    active,
+                    (*replacement.publication.candidate).clone(),
+                    MembershipMutationPlan::Revoke(replacement.clone()).encode()?,
+                    MembershipMutationProgress::Pending.encode()?,
+                    replacement.candidate_remote_objects()?,
+                )
+                .await?;
+            self.pending_rotation
+                .install_durable_gate(self.operation.database.load_rotation_gate().await?);
+            drop(operation_plan);
+            plan = replacement;
+            let row = self
+                .operation
+                .outbound_membership_mutation()
+                .await?
+                .ok_or_else(|| {
+                    MembershipMutationError::InvalidDurableMutation(
+                        "reprepared membership mutation lost its durable journal".into(),
+                    )
+                })?;
+            if row.intent_hash != intent_hash {
+                return Err(MembershipMutationError::InvalidDurableMutation(
+                    "reprepared membership mutation changed its durable owner".into(),
+                ));
+            }
+            let (_, retained_progress) = decode_membership_mutation(row)?;
+            progress = retained_progress;
+        }
+    }
+
+    async fn execute_plan(
+        &mut self,
+        plan: RevokeMutationPlan,
+        mut progress: MembershipMutationProgress,
+        intent_hash: coven_protocol::store_commit::ObjectHash,
+    ) -> Result<EncryptionService, MembershipMutationError> {
+        let operation = &mut *self.operation;
+        let pending_rotation = self.pending_rotation;
+
         let pending_generation =
             EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
                 .map_err(MembershipMutationError::Encryption)?
@@ -326,45 +416,36 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             _ => pending_rotation.mark_candidate(pending_generation, intent_hash),
         }
         .map_err(MembershipMutationError::RotationState)?;
-        let mut persistence = operation.membership_mutation_persistence(intent_hash);
+        let persistence = operation.membership_mutation_persistence(intent_hash);
         plan.validate_closed_shape()?;
         if matches!(
             progress,
             MembershipMutationProgress::AdmissionGranted { .. }
+                | MembershipMutationProgress::AdmissionActivated { .. }
         ) {
             return Err(MembershipMutationError::InvalidDurableMutation(
                 "removal carries admission progress".to_string(),
             ));
         }
-        let mut validated_chain = chain.with_exact_entry(plan.publication.entry())?;
+        let mut validated_chain = operation
+            .membership
+            .with_exact_entry(plan.publication.entry())?;
         if let MembershipMutationProgress::RevokeActivated { candidate } = &progress {
-            let (expected, publication) = match &plan.publication {
-                RevokeMembershipPublication::Direct { publication } => (None, publication),
-                RevokeMembershipPublication::StoreActivated {
-                    candidate,
-                    publication,
-                    ..
-                } => (Some(&candidate.reference), publication),
-            };
-            if candidate.as_ref() != expected {
+            let publication = &plan.publication.publication;
+            if candidate != &plan.publication.candidate.reference {
                 return Err(MembershipMutationError::InvalidDurableMutation(
                     "membership activation names another candidate".to_string(),
                 ));
             }
             validated_chain.activate_head_ref(publication.head_ref.clone())?;
-            *chain = validated_chain;
+            operation.membership = validated_chain;
             return EncryptionService::from_keyring_payload(plan.keyring_payload)
                 .map_err(MembershipMutationError::Encryption);
         }
         if let MembershipMutationProgress::RevokeCandidateNonactivating { nonactivation } =
             &progress
         {
-            let RevokeMembershipPublication::StoreActivated { candidate, .. } = &plan.publication
-            else {
-                return Err(MembershipMutationError::InvalidDurableMutation(
-                    "direct removal carries Store-candidate nonactivation".to_string(),
-                ));
-            };
+            let candidate = &plan.publication.candidate;
             nonactivation
                 .validate()
                 .map_err(MembershipMutationError::from)?;
@@ -388,10 +469,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 "membership removal candidate did not activate".to_string(),
             ));
         }
-        let publication = plan.publication.publication().clone();
-        let author = operation
-            .verify_membership_publication_author(&publication)
-            .await?;
+        let publication = plan.publication.publication.clone();
         let keyring = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
             .map_err(MembershipMutationError::Encryption)?;
         let remaining = validated_chain.current_members();
@@ -432,7 +510,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             }
         }
         let authority_refs = match &publication.entry.change {
-            MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys,
+            StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => wrapped_keys,
             _ => {
                 return Err(MembershipMutationError::InvalidDurableMutation(
                     "planned removal publication is not a removal".to_string(),
@@ -450,37 +528,27 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             ));
         }
         let remote_objects = plan.candidate_remote_objects()?;
-        for wrapped in &plan.wraps {
-            if let Some(remotes) = &remote_objects {
-                let expected = exact_owned_remote(remotes, &wrapped.prepared.reference.object)?;
-                persistence
-                    .mark_remote_object_uploaded(expected.into_record())
-                    .await?;
-            }
-        }
         let prepared_wraps = plan
             .wraps
             .iter()
             .map(|wrap| wrap.prepared.clone())
             .collect::<Vec<_>>();
-        match &plan.publication {
-            RevokeMembershipPublication::Direct { .. } => {
-                operation
-                    .publish_direct_membership_authority(&plan.wraps, &publication)
-                    .await?;
-            }
-            RevokeMembershipPublication::StoreActivated { transition, .. } => {
-                operation
-                    .publish_membership_authority(transition, &prepared_wraps)
-                    .await?;
-            }
-        }
-        if let Some(remotes) = &remote_objects {
-            let expected = exact_owned_remote(remotes, &publication.entry_ref.object)?;
+        operation
+            .publish_membership_authority(&plan.publication.transition, &prepared_wraps)
+            .await?;
+        for wrapped in &plan.wraps {
             persistence
-                .mark_remote_object_uploaded(expected.into_record())
+                .mark_remote_object_uploaded(
+                    exact_owned_remote(&remote_objects, &wrapped.prepared.reference.object)?
+                        .into_record(),
+                )
                 .await?;
         }
+        persistence
+            .mark_remote_object_uploaded(
+                exact_owned_remote(&remote_objects, &publication.entry_ref.object)?.into_record(),
+            )
+            .await?;
         match operation
             .set_membership_access(plan.desired_access.clone())
             .await?
@@ -496,56 +564,35 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             progress = MembershipMutationProgress::RevokeAccessRemoved;
             persistence.record_progress(&progress).await?;
         }
-        match plan.publication.clone() {
-            RevokeMembershipPublication::Direct { publication } => {
-                operation
-                    .publish_direct_membership_head(&publication, &author)
-                    .await?;
-                validated_chain.activate_head_ref(publication.head_ref.clone())?;
-                persistence
-                    .record_direct_revoke_activation(keyring.current_generation())
-                    .await?;
-                pending_rotation
-                    .mark_committed_mutation(
-                        keyring.current_generation(),
-                        persistence.intent_hash(),
+        let PreparedMembershipActivation {
+            transition,
+            candidate,
+            publication,
+        } = plan.publication;
+        // Every publication attempt re-derives this from the candidate it
+        // is about to publish, and a reprepare changes the candidate.
+        let candidate_remotes =
+            |candidate: &coven_protocol::prepared_commit::PreparedStoreOperationCommit| {
+                candidate
+                    .merge_membership_activation_remote_objects(
+                        &transition,
+                        &publication,
+                        &prepared_wraps,
                     )
-                    .map_err(MembershipMutationError::RotationState)?;
-                *chain = validated_chain;
-                Ok(keyring)
-            }
-            RevokeMembershipPublication::StoreActivated {
-                transition,
-                mut candidate,
-                publication,
-            } => {
-                // Every publication attempt re-derives this from the candidate it
-                // is about to publish, and a reprepare changes the candidate.
-                let candidate_remotes =
-                    |candidate: &coven_protocol::prepared_commit::PreparedStoreOperationCommit| {
-                        candidate
-                            .merge_membership_activation_remote_objects(
-                                &transition,
-                                &publication,
-                                &prepared_wraps,
-                            )
-                            .map_err(MembershipMutationError::from)
-                    };
-                let initial_remotes = candidate_remotes(&candidate)?;
-                operation
-                    .upload_commit(&candidate)
-                    .await
-                    .map_err(MembershipMutationError::from)?;
-                persistence
-                    .mark_remote_object_uploaded(
-                        exact_owned_remote(&initial_remotes, &candidate.reference.object)?
-                            .into_record(),
-                    )
-                    .await?;
-                loop {
-                    let previous_candidate = candidate.as_ref().clone();
-                    let current_remotes = candidate_remotes(&candidate)?;
-                    let outcome = operation
+                    .map_err(MembershipMutationError::from)
+            };
+        let initial_remotes = candidate_remotes(&candidate)?;
+        operation
+            .upload_commit(&candidate)
+            .await
+            .map_err(MembershipMutationError::from)?;
+        persistence
+            .mark_remote_object_uploaded(
+                exact_owned_remote(&initial_remotes, &candidate.reference.object)?.into_record(),
+            )
+            .await?;
+        let current_remotes = candidate_remotes(&candidate)?;
+        let reference = operation
                     .publish_membership_activation(
                         &transition,
                         &publication,
@@ -553,7 +600,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         coven_protocol::membership_mutation::StoreMembershipJournalCompletion::RotationMutation {
                         intent_hash: persistence.intent_hash(),
                         progress_bytes: MembershipMutationProgress::RevokeActivated {
-                            candidate: Some(candidate.reference.clone()),
+                            candidate: candidate.reference.clone(),
                         }
                         .encode()?,
                         generation: keyring.current_generation(),
@@ -564,101 +611,14 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     },
                     )
                     .await?;
-                    match outcome {
-                    crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Activated(reference) => {
-                        if reference != candidate.reference {
-                            return Err(MembershipMutationError::InvalidDurableMutation(
-                                "membership removal activated another Store candidate".to_string(),
-                            ));
-                        }
-                        validated_chain.activate_head_ref(publication.head_ref.clone())?;
-                        pending_rotation
-                            .mark_committed_mutation(
-                                keyring.current_generation(),
-                                persistence.intent_hash(),
-                            )
-                            .map_err(MembershipMutationError::RotationState)?;
-                        *chain = validated_chain;
-                        return Ok(keyring);
-                    }
-                    crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(
-                        replacement,
-                    ) => {
-                        if replacement.reference != candidate.reference {
-                            return Err(MembershipMutationError::InvalidDurableMutation(
-                                "membership removal reprepare changed its signed candidate"
-                                    .to_string(),
-                            ));
-                        }
-                        let previous_remotes = candidate_remotes(&previous_candidate)?;
-                        candidate = replacement;
-                        let replacement_remotes = candidate_remotes(&candidate)?;
-                        let previous_head = previous_candidate.head_ref();
-                        let replacement_head = candidate.head_ref();
-                        plan.publication = RevokeMembershipPublication::StoreActivated {
-                            transition: transition.clone(),
-                            candidate: candidate.clone(),
-                            publication: publication.clone(),
-                        };
-                        let plan_bytes = MembershipMutationPlan::Revoke(plan.clone()).encode()?;
-                        let (previous_intent_hash, replacement_intent_hash) = persistence
-                            .adopt_candidate_head(
-                                plan_bytes,
-                                exact_owned_remote(&previous_remotes, &previous_head.object)?
-                                    .into_record(),
-                                exact_owned_remote(&replacement_remotes, &replacement_head.object)?,
-                                Some(keyring.current_generation()),
-                            )
-                            .await?;
-                        pending_rotation
-                            .replace_candidate_mutation(
-                                keyring.current_generation(),
-                                previous_intent_hash,
-                                replacement_intent_hash,
-                            )
-                            .map_err(MembershipMutationError::RotationState)?;
-                    }
-                    crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate {
-                        candidate: returned,
-                        nonactivation,
-                    } => {
-                        if *returned != *candidate {
-                            return Err(MembershipMutationError::InvalidDurableMutation(
-                                "membership removal nonactivation returned another candidate"
-                                    .to_string(),
-                            ));
-                        }
-                        let verified = *nonactivation;
-                        persistence
-                            .begin_nonactivating_revoke(&plan, verified)
-                            .await?;
-                        pending_rotation
-                            .remove_candidate(
-                                keyring.current_generation(),
-                                persistence.intent_hash(),
-                            )
-                            .map_err(MembershipMutationError::RotationState)?;
-                        return Err(MembershipMutationError::InvalidDurableMutation(
-                            "membership removal candidate did not activate".to_string(),
-                        ));
-                    }
-                    crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Nonactivated(
-                        reference,
-                    ) => {
-                        return Err(MembershipMutationError::InvalidDurableMutation(format!(
-                            "membership removal candidate {} lost without exact evidence",
-                            reference.commit_hash
-                        )))
-                    }
-                    crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Reprepared => {
-                        return Err(MembershipMutationError::InvalidDurableMutation(
-                            "membership removal returned acknowledgement-only reprepare state"
-                                .to_string(),
-                        ))
-                    }
-                }
-                }
-            }
+        if reference != candidate.reference {
+            return Err(MembershipMutationError::InvalidDurableMutation(
+                "membership removal accepted another Store candidate".to_string(),
+            ));
         }
+        pending_rotation
+            .mark_committed_mutation(keyring.current_generation(), persistence.intent_hash())
+            .map_err(MembershipMutationError::RotationState)?;
+        Ok(keyring)
     }
 }

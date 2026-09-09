@@ -1,36 +1,30 @@
 //! Apply a changeset to the connection, resolving conflicts as each row lands.
 //!
-//! Two stages. First a column-level three-way premerge
-//! (`premerge_losing_update_columns`): when an incoming UPDATE loses row
-//! arbitration, the columns it moved away from a base the local row still holds
-//! are folded into the local row, so concurrent edits to *different* columns of
-//! one row both survive. Then the changeset is applied with
-//! `arbitrate_row_conflict` as the conflict handler, which picks the winning row
-//! by `_updated_at` (remove-wins for deletes, a future-skew bound on the
-//! comparison) for every collision the premerge did not already fold in.
+//! Prepare column merges in the changeset before applying any live rows. When
+//! an incoming UPDATE loses row arbitration, preserve columns it changed from a
+//! base the local row still holds, together with the local winning values and
+//! timestamp. SQLite applies the combined changeset as one operation, including
+//! constraint retries. Other collisions use `arbitrate_row_conflict`.
 //!
-//! Within a single changeset, SQLite defers FK checks — parent and child rows in
-//! the same changeset are applied in recording order. Cross-changeset FK
-//! dependencies are handled by applying changesets in seq order (parents are
-//! always in earlier changesets than children).
-//!
-//! If a FK violation remains after applying a changeset, the conflict handler
-//! reports it via `FOREIGN_KEY`. The production materializer validates the
-//! deferred foreign keys after its whole atomic replay step; the test wrapper
-//! also returns a flag so isolated changeset tests can roll back. A non-FK
+//! Captured row effects include their synced trigger and foreign-key effects.
+//! Native constraint retries must not run those actions again: an UPDATE cycle
+//! may temporarily delete and reinsert a parent while its children survive.
+//! The production materializer validates foreign keys after its whole atomic
+//! replay step; the test wrapper also reports unresolved foreign keys so isolated
+//! changeset tests can roll back. The canonical scheduler handles dependencies
+//! between changesets. A non-FK
 //! constraint conflict marks the whole changeset rejected; the caller rolls its
 //! transaction back instead of committing the rows that happened not to conflict.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
-#[cfg(any(test, feature = "test-utils"))]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use fallible_streaming_iterator::FallibleStreamingIterator;
 use rusqlite::hooks::Action;
 use rusqlite::session::{ChangesetItem, ChangesetIter, ConflictAction, ConflictType};
 use rusqlite::types::{Value, ValueRef};
-use rusqlite::{params_from_iter, Connection, OptionalExtension, ToSql};
+use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use tracing::warn;
 
 use super::conflict::{
@@ -38,12 +32,26 @@ use super::conflict::{
 };
 use crate::changeset::{value_ref_to_string, UpdateValue};
 use crate::changeset_identity::validate_changeset_row_identities;
+use crate::store::store_session::replay_sql::ReplaySql;
 use crate::{quote_ident, ChangesetIdentityError, DbError};
 use coven_protocol::hlc::Timestamp;
 #[cfg(any(test, feature = "test-utils"))]
 use coven_protocol::synced_schema::SyncedTable;
 
 use super::MergeMaterializationTransaction;
+
+#[path = "column_merge.rs"]
+mod column_merge;
+use column_merge::ColumnMergeEncoder;
+
+#[path = "recorded_changeset.rs"]
+mod recorded_changeset;
+#[cfg(test)]
+#[path = "recorded_changeset_tests.rs"]
+mod recorded_changeset_tests;
+#[cfg(test)]
+#[path = "three_way_tests.rs"]
+mod three_way_tests;
 
 /// Result of applying a changeset.
 #[cfg_attr(
@@ -52,8 +60,8 @@ use super::MergeMaterializationTransaction;
     doc = "Public when the `test-utils` feature exposes changeset application."
 )]
 pub struct ApplyResult {
-    /// True if any FK violations were reported. The caller may retry this
-    /// changeset after applying other changesets that contain the missing parent
+    /// True if the resulting database has unresolved foreign keys. The caller
+    /// may retry after applying changesets that contain the missing parent
     /// rows.
     #[cfg(any(test, feature = "test-utils"))]
     pub had_fk_violations: bool,
@@ -111,7 +119,7 @@ impl<B: AsRef<[u8]>> ValidatedChangeset<B> {
     }
 }
 
-/// Apply `bytes` to `conn`, resolving conflicts (premerge + row arbitration),
+/// Apply `bytes` to `conn`, resolving column and row conflicts,
 /// building the [`TableSchema`] from `tables` once. A convenience wrapper over
 /// `resolve_and_apply_changeset_with_schema` for callers that apply a single
 /// changeset and don't already hold a schema (tests, snapshot round-trips).
@@ -131,17 +139,16 @@ pub fn resolve_and_apply_changeset(
 }
 
 /// Apply `bytes` to `conn`, resolving conflicts against a pre-built
-/// [`TableSchema`]: a column-level premerge of losing UPDATEs
-/// (`premerge_losing_update_columns`) followed by an apply whose conflict
-/// closure arbitrates every remaining row collision.
+/// [`TableSchema`]: prepare losing UPDATE column merges in the changeset, then
+/// apply once with a conflict closure for remaining row collisions.
 ///
 /// The schema's per-table `_updated_at` column index map is derived once (from
 /// the live schema, so future migrations that add columns are safe) and reused
 /// across every changeset in a pull, rather than re-querying `PRAGMA table_info`
 /// per changeset. The conflict closure resolves each conflicting row's table from
 /// its operation and decides REPLACE/OMIT by comparing `_updated_at`;
-/// FK violations flip a shared flag for the caller to retry; non-FK constraint
-/// conflicts are collected so the caller can surface the rejected changeset.
+/// Non-FK constraint conflicts are collected so the caller can surface the
+/// rejected changeset; unresolved foreign keys are checked after application.
 ///
 /// `schema` is an `Arc` so the same map moves into the `'static` conflict closure
 /// without re-deriving it per call. `receiver_wall_ms` is the receiver's current
@@ -184,80 +191,76 @@ impl MergeMaterializationTransaction<'_, '_> {
         #[cfg(any(test, feature = "test-utils"))]
         let incoming_rows = incoming_rows(bytes, &schema)?;
 
-        #[cfg(any(test, feature = "test-utils"))]
-        let fk_flag = Arc::new(AtomicBool::new(false));
         let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
-        let premerged_updates =
-            premerge_losing_update_columns(conn, bytes, &schema, timestamp_policy)?;
+        let (prepared_bytes, merged_updates) =
+            prepare_column_merges(conn, bytes, &schema, timestamp_policy)?;
 
-        #[cfg(any(test, feature = "test-utils"))]
-        let closure_flag = fk_flag.clone();
         let closure_constraint_conflict_tables = constraint_conflict_tables.clone();
         let closure_schema = schema.clone();
-        conn.apply_strm(
-            &mut &bytes[..],
-            None::<fn(&str) -> bool>,
-            move |conflict_type, item| {
-                // A FOREIGN_KEY conflict's iterator supports ONLY `fk_conflicts()`;
-                // calling `op()`/`new_value()`/`conflict()` on it is undefined (it
-                // crashes the process). Resolve it first, without touching the row.
-                if conflict_type == ConflictType::SQLITE_CHANGESET_FOREIGN_KEY {
-                    #[cfg(any(test, feature = "test-utils"))]
-                    closure_flag.store(true, Ordering::Relaxed);
-                    return ConflictAction::SQLITE_CHANGESET_OMIT;
-                }
-                // Every other conflict type exposes the operation, so the table name
-                // (needed to find the `_updated_at` column) is readable.
-                let (table, op_code) = match item.op() {
-                    Ok(op) => (op.table_name().to_string(), op.code()),
-                    Err(error) => {
-                        warn!(error = %error, "failed to read changeset conflict operation; aborting apply");
-                        return ConflictAction::SQLITE_CHANGESET_ABORT;
+        ReplaySql::begin(conn)?.run(|| {
+            conn.apply_strm(
+                &mut prepared_bytes.as_ref(),
+                None::<fn(&str) -> bool>,
+                move |conflict_type, item| {
+                    // A FOREIGN_KEY conflict's iterator supports ONLY `fk_conflicts()`;
+                    // calling `op()`/`new_value()`/`conflict()` on it is undefined (it
+                    // crashes the process). Resolve it first, without touching the row.
+                    if conflict_type == ConflictType::SQLITE_CHANGESET_FOREIGN_KEY {
+                        return ConflictAction::SQLITE_CHANGESET_OMIT;
                     }
-                };
-                if conflict_type == ConflictType::SQLITE_CHANGESET_CONSTRAINT {
-                    warn!(
-                        table = %table,
-                        "changeset hit a non-retryable SQLite constraint conflict; rejecting changeset"
-                    );
-                    match closure_constraint_conflict_tables.lock() {
-                        Ok(mut tables) => tables.push(table),
+                    // Every other conflict type exposes the operation, so the table name
+                    // (needed to find the `_updated_at` column) is readable.
+                    let (table, op_code) = match item.op() {
+                        Ok(op) => (op.table_name().to_string(), op.code()),
                         Err(error) => {
-                            warn!(error = %error, "failed to record changeset constraint conflict; aborting apply");
+                            warn!(error = %error, "failed to read changeset conflict operation; aborting apply");
                             return ConflictAction::SQLITE_CHANGESET_ABORT;
                         }
+                    };
+                    if conflict_type == ConflictType::SQLITE_CHANGESET_CONSTRAINT {
+                        warn!(
+                            table = %table,
+                            "changeset hit a non-retryable SQLite constraint conflict; rejecting changeset"
+                        );
+                        match closure_constraint_conflict_tables.lock() {
+                            Ok(mut tables) => tables.push(table),
+                            Err(error) => {
+                                warn!(error = %error, "failed to record changeset constraint conflict; aborting apply");
+                                return ConflictAction::SQLITE_CHANGESET_ABORT;
+                            }
+                        }
+                        return ConflictAction::SQLITE_CHANGESET_OMIT;
                     }
-                    return ConflictAction::SQLITE_CHANGESET_OMIT;
-                }
-                if conflict_type == ConflictType::SQLITE_CHANGESET_DATA
-                    && op_code == Action::SQLITE_UPDATE
-                {
-                    match update_pk_key(&item, &table).map(|pk| {
-                        premerged_updates.contains(&RowKey {
-                            table: table.clone(),
-                            pk,
-                        })
-                    }) {
-                        Ok(true) => return ConflictAction::SQLITE_CHANGESET_OMIT,
-                        Ok(false) => {}
-                        Err(error) => {
-                            warn!(table, error = %error, "failed to read premerged UPDATE primary key; aborting apply");
-                            return ConflictAction::SQLITE_CHANGESET_ABORT;
+                    if conflict_type == ConflictType::SQLITE_CHANGESET_DATA
+                        && op_code == Action::SQLITE_UPDATE
+                    {
+                        match update_pk_key(&item, &table).map(|pk| {
+                            merged_updates.contains(&RowKey {
+                                table: table.clone(),
+                                pk,
+                            })
+                        }) {
+                            Ok(true) => return ConflictAction::SQLITE_CHANGESET_REPLACE,
+                            Ok(false) => {}
+                            Err(error) => {
+                                warn!(table, error = %error, "failed to read merged UPDATE primary key; aborting apply");
+                                return ConflictAction::SQLITE_CHANGESET_ABORT;
+                            }
                         }
                     }
-                }
-                arbitrate_row_conflict(
-                    conflict_type,
-                    item,
-                    &table,
-                    &closure_schema,
-                    timestamp_policy,
-                )
-            },
-        )
-        .map_err(DbError::from)?;
+                    arbitrate_row_conflict(
+                        conflict_type,
+                        item,
+                        &table,
+                        &closure_schema,
+                        timestamp_policy,
+                    )
+                },
+            )
+            .map_err(DbError::from)
+        })?;
         #[cfg(any(test, feature = "test-utils"))]
-        let had_fk_violations = fk_flag.load(Ordering::Relaxed);
+        let had_fk_violations = self.has_foreign_key_violations()?;
         let constraint_conflict_tables = constraint_conflict_tables
             .lock()
             .map_err(|_| {
@@ -342,7 +345,7 @@ fn incoming_rows(bytes: &[u8], schema: &TableSchema) -> Result<Vec<IncomingRow>,
             code => {
                 return Err(DbError::Message(format!(
                     "changeset for {table:?} contains unsupported operation {code:?}"
-                )))
+                )));
             }
         };
         let row_id = required_text_changeset_value(item, table, 0, id_side, "row id")?;
@@ -435,35 +438,46 @@ struct IncomingUpdate {
     pk: String,
     changed_columns: Vec<ChangedColumn>,
     incoming_updated_at: Timestamp,
+    incoming_updated_at_value: Value,
 }
 
-fn premerge_losing_update_columns(
+fn prepare_column_merges<'bytes>(
     conn: &Connection,
-    bytes: &[u8],
+    bytes: &'bytes [u8],
     schema: &TableSchema,
     timestamp_policy: IncomingTimestampPolicy,
-) -> Result<HashSet<RowKey>, DbError> {
+) -> Result<(Cow<'bytes, [u8]>, HashSet<RowKey>), DbError> {
     if bytes.is_empty() {
-        return Ok(HashSet::new());
+        return Ok((Cow::Borrowed(bytes), HashSet::new()));
     }
-
     let input: &mut dyn std::io::Read = &mut &bytes[..];
-    let mut iter = ChangesetIter::start_strm(&input).map_err(DbError::from)?;
+    let mut iter = ChangesetIter::start_strm(&input)?;
     let mut handled = HashSet::new();
-
-    while let Some(item) = iter.next().map_err(DbError::from)? {
+    let mut encoder = None;
+    while let Some(item) = iter.next()? {
         let Some(update) = incoming_update(item, schema)? else {
             continue;
         };
-        if merge_losing_update(conn, schema, &update, timestamp_policy)? {
+        if prepare_losing_update(
+            conn,
+            schema,
+            &update,
+            timestamp_policy,
+            item.op()?.indirect(),
+            &mut encoder,
+            bytes,
+        )? {
             handled.insert(RowKey {
                 table: update.table,
                 pk: update.pk,
             });
         }
     }
-
-    Ok(handled)
+    let prepared = match encoder {
+        Some(encoder) => Cow::Owned(encoder.finish()?),
+        None => Cow::Borrowed(bytes),
+    };
+    Ok((prepared, handled))
 }
 
 fn incoming_update(
@@ -499,6 +513,23 @@ fn incoming_update(
 
     let pk = update_pk_key(item, table)?;
 
+    let changed_columns = changed_update_columns(item, updated_at)?;
+
+    Ok(Some(IncomingUpdate {
+        table: table.to_string(),
+        pk,
+        changed_columns,
+        incoming_updated_at,
+        incoming_updated_at_value,
+    }))
+}
+
+fn changed_update_columns(
+    item: &ChangesetItem,
+    updated_at: usize,
+) -> Result<Vec<ChangedColumn>, DbError> {
+    let op = item.op()?;
+    let table = op.table_name();
     let mut changed_columns = Vec::new();
     for index in 0..op.number_of_columns() as usize {
         if index == 0 || index == updated_at {
@@ -521,26 +552,24 @@ fn incoming_update(
         }
     }
 
-    Ok(Some(IncomingUpdate {
-        table: table.to_string(),
-        pk,
-        changed_columns,
-        incoming_updated_at,
-    }))
+    Ok(changed_columns)
 }
 
-fn merge_losing_update(
+fn prepare_losing_update(
     conn: &Connection,
     schema: &TableSchema,
     update: &IncomingUpdate,
     timestamp_policy: IncomingTimestampPolicy,
+    indirect: bool,
+    encoder: &mut Option<ColumnMergeEncoder>,
+    bytes: &[u8],
 ) -> Result<bool, DbError> {
     let columns = schema.columns(&update.table).ok_or_else(|| {
         DbError::Message(format!("synced table {} has no column map", update.table))
     })?;
-    let updated_at_index = schema.updated_at(&update.table).ok_or_else(|| {
+    let updated_at = schema.updated_at(&update.table).ok_or_else(|| {
         DbError::Message(format!(
-            "synced table {} has no _updated_at column index",
+            "synced table {} has no _updated_at column",
             update.table
         ))
     })?;
@@ -548,96 +577,66 @@ fn merge_losing_update(
         .changed_columns
         .iter()
         .any(|c| c.index >= columns.len())
-        || updated_at_index >= columns.len()
+        || updated_at >= columns.len()
     {
         return Err(DbError::Message(format!(
             "UPDATE changeset for {} names a column outside the local schema",
             update.table
         )));
     }
-
-    let mut selected_indices = update
-        .changed_columns
-        .iter()
-        .map(|column| column.index)
-        .collect::<Vec<_>>();
-    selected_indices.push(updated_at_index);
-    let select_columns = selected_indices
-        .iter()
-        .map(|index| quote_ident(&columns[*index]))
-        .collect::<Vec<_>>()
-        .join(", ");
     let sql = format!(
-        "SELECT {select_columns} FROM {} WHERE {} = ?1",
+        "SELECT {} FROM {} WHERE {} = ?1",
+        columns
+            .iter()
+            .map(|column| quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", "),
         quote_ident(&update.table),
-        quote_ident(&columns[0])
+        quote_ident(&columns[0]),
     );
-    let local_values = conn
-        .query_row(&sql, rusqlite::params![&update.pk], |row| {
-            (0..selected_indices.len())
+    let local = conn
+        .query_row(&sql, [&update.pk], |row| {
+            (0..columns.len())
                 .map(|index| row.get::<_, Value>(index))
                 .collect::<rusqlite::Result<Vec<_>>>()
         })
-        .optional()
-        .map_err(DbError::from)?;
-    let Some(local_values) = local_values else {
-        return Ok(false);
-    };
-
-    let local_updated_at = local_values
-        .last()
-        .and_then(timestamp_from_value)
-        .ok_or_else(|| {
-            DbError::Message(format!(
-                "local row in {} has no parseable _updated_at",
-                update.table
-            ))
-        })?;
+        .optional()?;
+    let Some(local) = local else { return Ok(false) };
+    let local_stamp = timestamp_from_value(&local[updated_at]).ok_or_else(|| {
+        DbError::Message(format!(
+            "local row in {} has no parseable _updated_at",
+            update.table
+        ))
+    })?;
     match compare_lww_stamps(
         &update.table,
         update.incoming_updated_at.clone(),
-        local_updated_at,
+        local_stamp,
         timestamp_policy,
     ) {
         LwwComparison::IncomingWins | LwwComparison::IncomingGrossFuture => return Ok(false),
         LwwComparison::LocalWins => {}
     }
-
-    let mut applied = Vec::new();
-    for (column, local_value) in update.changed_columns.iter().zip(local_values.iter()) {
-        if *local_value == column.base {
-            applied.push(column);
+    // Encode incoming -> merged as a correction to the original changeset. The
+    // live rows stay untouched until SQLite applies the combined changeset, so
+    // its constraint retry sees every update and deletion in the same operation.
+    let mut incoming = local.clone();
+    let mut merged = local.clone();
+    incoming[updated_at] = update.incoming_updated_at_value.clone();
+    for column in &update.changed_columns {
+        incoming[column.index] = column.incoming.clone();
+        if local[column.index] == column.base {
+            merged[column.index] = column.incoming.clone();
         }
     }
-    if !applied.is_empty() {
-        // Fold the losing writer's columns into the local row WITHOUT bumping its
-        // `_updated_at`. The local row won row arbitration, so its stamp already
-        // dominates the incoming one; re-stamping the merged row could only lower
-        // it, and the row winner's stamp is what future arbitration must compare
-        // against. The merge changes a losing column's value, not the row's clock.
-        let assignments = applied
-            .iter()
-            .enumerate()
-            .map(|(offset, column)| {
-                format!("{} = ?{}", quote_ident(&columns[column.index]), offset + 1)
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "UPDATE {} SET {assignments} WHERE {} = ?{}",
-            quote_ident(&update.table),
-            quote_ident(&columns[0]),
-            applied.len() + 1
-        );
-        let mut params: Vec<&dyn ToSql> = applied
-            .iter()
-            .map(|column| &column.incoming as &dyn ToSql)
-            .collect();
-        params.push(&update.pk);
-        conn.execute(&sql, params_from_iter(params))
-            .map_err(DbError::from)?;
+    if merged == local {
+        return Ok(false);
     }
-
+    let encoder = match encoder {
+        Some(encoder) => encoder,
+        slot @ None => slot.insert(ColumnMergeEncoder::new(bytes)?),
+    };
+    encoder.record(&update.table, columns, &incoming, &merged, indirect)?;
     Ok(true)
 }
 

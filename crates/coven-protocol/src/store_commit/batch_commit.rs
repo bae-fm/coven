@@ -104,6 +104,24 @@ impl StoreBatchCommit {
                     .map(|reference| reference.object.clone()),
             )
             .chain(
+                self.provider_access_grants()
+                    .iter()
+                    .map(|reference| reference.object.clone()),
+            )
+            .chain(self.device_join_attempt_decisions().iter().filter_map(
+                |decision| match decision {
+                    DeviceJoinAttemptDecisionRef::Attempt(_) => None,
+                    DeviceJoinAttemptDecisionRef::Abandoned(reference) => {
+                        Some(reference.object.clone())
+                    }
+                },
+            ))
+            .chain(
+                self.device_registrations()
+                    .iter()
+                    .map(|activation| activation.registration.object.clone()),
+            )
+            .chain(
                 self.device_exclusion_proposals()
                     .iter()
                     .map(|reference| reference.object.clone()),

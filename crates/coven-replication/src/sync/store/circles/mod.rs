@@ -4,8 +4,7 @@ use coven_protocol::circle_activation::CircleAuthoringState;
 #[cfg(test)]
 use coven_protocol::circle_activation::VerifiedCircleActivations;
 use coven_protocol::circle_journal::{
-    CircleOperationIntent, CircleOperationJournal, CircleOperationPolicy, CircleTransitionHistory,
-    PreparedCircleOperation,
+    CircleOperationIntent, CircleOperationJournal, CircleTransitionHistory, PreparedCircleOperation,
 };
 pub use error::CircleOperationError;
 use exact_object::read_exact_circle_object;

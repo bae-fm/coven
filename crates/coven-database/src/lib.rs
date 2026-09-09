@@ -24,9 +24,7 @@ pub(crate) use crate::local_state::{
 use crate::local_store_identity::pin_host_device_id_on;
 use crate::local_store_identity::validate_host_device_id_on;
 pub(crate) use crate::remote_object_records::begin_remote_candidate_nonactivation_on;
-pub(crate) use crate::remote_object_records::begin_remote_candidate_nonactivation_with_verified_head_on;
 pub use crate::remote_object_records::candidate_graph_exact_objects;
-pub(crate) use crate::remote_object_records::finish_remote_candidate_nonactivation_on;
 pub(crate) use crate::remote_object_records::index_retained_replay_owner_on;
 pub(crate) use crate::remote_object_records::load_protocol_inert_object_on;
 pub(crate) use crate::remote_object_records::load_remote_object_on;
@@ -36,7 +34,6 @@ pub(crate) use crate::remote_object_records::persist_exact_remote_object_on;
 pub(crate) use crate::remote_object_records::persist_prepared_remote_object_on;
 pub(crate) use crate::remote_object_records::record_reclaimed_store_package_on;
 pub(crate) use crate::remote_object_records::reopen_remote_object_on;
-pub(crate) use crate::remote_object_records::replace_prepared_merge_head_remote_on;
 pub(crate) use crate::remote_object_records::update_remote_object_on;
 pub(crate) use crate::remote_object_records::{
     validate_prepared_blob_on, validate_prepared_package_on, validate_remote_object_on,
@@ -48,12 +45,8 @@ pub(crate) use crate::snapshot_objects::{
 };
 pub use crate::snapshot_objects::{
     snapshot_generation_as_i64, validate_snapshot_author, validate_snapshot_image,
-    verify_snapshot_blob_spools,
 };
 pub(crate) use crate::snapshot_records::load_outbound_store_snapshot_on;
-pub(crate) use crate::snapshot_records::load_published_store_snapshot_on;
-pub(crate) use crate::snapshot_records::load_published_store_snapshots_on;
-pub use crate::store_ack_records::store_snapshot_first_slot;
 pub(crate) use crate::store_ack_records::{
     finish_outbound_store_ack_on, load_published_store_ack_on, verify_next_local_store_ack_on,
 };
@@ -66,6 +59,7 @@ pub(crate) use crate::store_reclaim_records::{
 pub use crate::store_reclaim_records::{
     parse_store_reclaim_operation, store_reclaim_journal_error,
 };
+use coven_protocol::store_commit::CommitFrontier;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -87,8 +81,7 @@ use coven_protocol::remote_object::{
 use coven_protocol::store_commit::{
     ack_slot_prefix, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef, SnapshotMeta,
     StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot,
-    StoreSnapshotRef,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot, StoreSnapshotRef,
 };
 use coven_protocol::synced_schema::SyncedTable;
 use coven_protocol::write::{WriteId, WriteStatus};
@@ -139,6 +132,10 @@ mod local_store_identity;
 mod make_remote;
 mod migration;
 mod operation_models;
+pub use operation_models::{
+    ActiveStorePublication, ActiveStorePublicationAttempt, ActiveStorePublicationOwner,
+    RetiredStoreCandidate, RetiredStoreCandidateInputs,
+};
 mod prepared_audience_objects;
 mod prepared_external_blob;
 mod remote_object_records;
@@ -189,6 +186,7 @@ pub(crate) use circle_operation_records::{
 };
 pub use circle_operation_records::{parse_circle_operation_row, PreparedCircleOperationRow};
 pub use coven_protocol::objects::{ExactProtocolObject, PreparedProtocolObject};
+pub use database_connection::PreparedStoreSnapshot;
 pub(crate) use database_connection::{DatabaseConnection, DatabaseCore};
 use database_open::CovenMetadataOpen;
 pub use database_runtime::Database;
@@ -222,6 +220,7 @@ pub use operation_models::{
     DurableSnapshotPublication, LocalDeviceRegistrationJournalRow, LocalDeviceRegistrationState,
     MembershipMutationActivation, OwnerRecoveryPublication, PreparedLocalDeviceRegistrationRow,
     PreparedSnapshotBlob, PublishedCircleSnapshot, PublishedStoreSnapshot,
+    StoreSnapshotPublicationStage,
 };
 pub use prepared_audience_objects::{
     validate_prepared_audience_blob_graph, BlobActivation, MakeRemoteIntentState,
@@ -244,9 +243,6 @@ pub enum MaterializationHold {
         row_id: String,
         commit: coven_protocol::store_commit::StoreBatchCommitRef,
     },
-    InvalidLocalCircleContext {
-        circle_id: coven_protocol::circle::CircleId,
-    },
 }
 
 pub type MaterializationOutcome = coven_protocol::membership::ApplyOutcome<MaterializationHold>;
@@ -261,11 +257,10 @@ pub use store::device_join_journal::DeviceJoinJournalError;
 pub(crate) use store::payload_store;
 pub use store::PayloadStoreError;
 pub use store::{
-    activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
-    DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, DeviceJoinBootstrapRowData,
-    MembershipAuthorityBytes, PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
-    ResolvedDeviceJoinBootstrap, VerifiedAcknowledgedStoreSnapshot,
-    VerifiedReplayBaselineRetirementProof, VerifiedStoreSnapshotAuthority,
+    activated_merge_membership_remote_objects, DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan,
+    DeviceJoinBootstrapRowData, MembershipAuthorityBytes, PreparedMergeMaterialization,
+    PreparedMergeMaterializationPackage, ResolvedDeviceJoinBootstrap,
+    VerifiedStoreSnapshotAuthority,
 };
 pub use store::{
     audience_moves_by_row, local_blob_cleanup_intents, AudienceBlobMoveStaging, PostUpload,
@@ -276,26 +271,25 @@ pub(crate) use store::{
     install_circle_bootstrap_remote_objects_on,
 };
 pub use store::{
-    projection_table_names, AdvancedReplayBaseline, BlobTransitionRoot, BlobUploadDrainPermit,
-    BlockedWriteDiscard, CandidateCleanupObject, CircleAckPublicationInput, CreatedSnapshot,
-    DeviceJoinJournalStore, DurableStoreReclaimObject, DurableStoreReclaimOperation,
-    HostWriteBlobTransaction, HostWriteError, HostWriteOperation, IncomingTimestampPolicy,
-    InstalledReplayBaseline, LocalBlobCleanup, MakeRemoteAdmission, MaterializedLocalBlob,
-    MergeCandidateAbandonmentPreparation, ObservedStorePublication, OutboxEntry, OutboxFailure,
-    OutboxFailureKind, OutboxOperation, OutboxUploadState, OwnStreamAuthorship,
-    OwnedVerifiedMergeMaterialization, PreparedCircleObjects, ReclaimCommitActivation,
-    ReclaimedStorePackage, RetainedAudiencePackage, RetainedMergeHistoryCheckpoint,
-    RetainedMergeMaterializationKey, RetainedPackageApplication, RetainedReplayAuthority,
-    RetainedReplayBaseline, RetainedReplayGenesisAuthority, SnapshotBlobAudience, SnapshotBlobFact,
-    SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,
-    SnapshotPublicationPermit, StoreDatabase, StoreReclaimJournalError, StoreRowWrites,
-    StoreWritePreparation, StuckReclaimOperation, TableSchema, ValidatedChangeset,
+    projection_table_names, AcceptedStoreCommitEvidence, AcceptedStoreCommitPublication,
+    AcceptedStorePublicationInterval, AdvancedReplayBaseline, BlobTransitionRoot,
+    BlobUploadDrainPermit, BlockedWriteDiscard, CandidateCleanupObject, CircleAckPublicationInput,
+    CreatedSnapshot, DeviceJoinJournalStore, DurableStoreReclaimObject,
+    DurableStoreReclaimOperation, HostWriteBlobTransaction, HostWriteError, HostWriteOperation,
+    IncomingTimestampPolicy, InstalledReplayBaseline, LocalBlobCleanup, MakeRemoteAdmission,
+    MaterializedLocalBlob, ObservedStorePublication, OutboxEntry, OutboxFailure, OutboxFailureKind,
+    OutboxOperation, OutboxUploadState, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
+    PreparedCircleObjects, ReclaimedStorePackage, RetainedAudiencePackage,
+    RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
+    RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
+    SnapshotBlobFact, SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,
+    SnapshotPublicationPermit, StoreCommitPublicationOutcome, StoreDatabase,
+    StorePublicationBoundary, StorePublicationPreparation, StoreReclaimJournalError,
+    StoreRowWrites, StoreWritePreparation, StuckReclaimOperation, TableSchema, ValidatedChangeset,
     VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow, GENERATION_ZERO,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use store::{resolve_and_apply_changeset, ApplyResult};
-#[cfg(any(test, feature = "test-utils"))]
-pub use store::{select_author_exclusion_activation_locator, AuthorExclusionLocatorTamper};
 pub use store::{BlobFileFailure, BlobFileFailures, SqlContext, SqlReadContext, WriteBatch};
 pub use store::{
     CloudOutboxSnapshot, MakeRemoteProgress, QueuedDelete, QueuedMakeRemote, QueuedUpload,
@@ -310,13 +304,10 @@ pub use store_authority_records::{
     DurableFounderGraph, DurableFounderMembership, FounderMembershipRefs, StoreOwnerAnchor,
 };
 pub use write_models::{
-    ActivatedStoreAck, AuthorExclusionActivationLocator, BlockedMergeCandidate,
-    CompletePreparedStoreWriteOutcome, InitialStoreMembershipAuthority, MergeAbandonmentState,
-    OutboundStoreAck, OutboundStoreAckActivation, PreparedMergeAbandonmentCandidates,
-    PreparedStoreWrite, PreparedStoreWriteCommit, PreparedStoreWritePartitions, PublishedStoreAck,
-    StoreWriteBase, StoreWriteBlobFact, StoreWriteBlobFacts, StoreWriteBlobMoveDestination,
-    StoreWriteRemoteBlob, StoreWriteRouting, TerminalCandidateAuthority,
-    TerminalCandidateCleanupVerification,
+    ActivatedStoreAck, InitialStoreMembershipAuthority, OutboundStoreAck,
+    OutboundStoreAckActivation, PreparedStoreWrite, PreparedStoreWriteCommit,
+    PreparedStoreWritePartitions, PublishedStoreAck, StoreWriteBase, StoreWriteBlobFact,
+    StoreWriteBlobFacts, StoreWriteBlobMoveDestination, StoreWriteRemoteBlob, StoreWriteRouting,
 };
 pub(crate) use write_models::{
     MergeReplayWrite, MergeReplayWriteEffect, ReplayJournal, SettledStoreWrite, SettledWriteFold,
@@ -497,8 +488,14 @@ pub enum DbError {
     Message(String),
     #[error("Store writes depend on state being removed: {writes:?}")]
     WriteDependencyConflict { writes: Vec<WriteId> },
+    #[error("{0}")]
+    WriteRebaseConflict(#[source] Box<coven_protocol::write::WriteRebaseConflict>),
     #[error("replay retirement cut is not a canonical application prefix")]
     ReplayRetirementCutNotPrefix,
+    /// The prepared pull no longer starts at the installed publication.
+    /// Its transaction made no changes; the initiator must prepare it again.
+    #[error("Store publication changed while the pull was being prepared")]
+    StorePublicationChanged,
     #[error(
         "write callback prepared no INSERT, UPDATE, or DELETE statement; pure reads belong on read"
     )]
@@ -564,8 +561,6 @@ pub enum DbError {
     AuthorStreamId(#[from] coven_protocol::causal_grants::AuthorStreamIdParseError),
     #[error("{0}")]
     RowBlobRef(#[from] coven_protocol::blob::RowBlobRefError),
-    #[error("{0}")]
-    WriteRetraction(#[source] Box<coven_protocol::write::WriteRetractionError>),
     #[error("{0}")]
     RotationGate(#[from] coven_protocol::objects::RotationGateError),
     #[error("{0}")]
@@ -671,6 +666,19 @@ pub enum DbError {
 }
 
 impl DbError {
+    pub fn write_rebase_conflict(&self) -> Option<&coven_protocol::write::WriteRebaseConflict> {
+        match self {
+            Self::WriteRebaseConflict(conflict) => Some(conflict),
+            Self::Context { source, .. } => source.write_rebase_conflict(),
+            Self::PayloadCleanupFailed { operation, .. }
+            | Self::ChangeCaptureFailed { operation, .. }
+            | Self::AudienceBlobRollbackFailed { operation, .. } => {
+                operation.write_rebase_conflict()
+            }
+            _ => None,
+        }
+    }
+
     /// Name the operation `source` failed in without flattening it: the cause
     /// stays a [`DbError`] the caller can still match on.
     pub fn context(context: impl Into<String>, source: impl Into<DbError>) -> DbError {
@@ -704,7 +712,10 @@ boxed_db_error_from!(
     coven_protocol::remote_object::RemoteObjectRecordError,
     RemoteObject
 );
-boxed_db_error_from!(coven_protocol::write::WriteRetractionError, WriteRetraction);
+boxed_db_error_from!(
+    coven_protocol::write::WriteRebaseConflict,
+    WriteRebaseConflict
+);
 boxed_db_error_from!(crate::store::SnapshotImageError, SnapshotImage);
 boxed_db_error_from!(coven_protocol::store_commit::StoreProtocolError, Protocol);
 boxed_db_error_from!(
@@ -765,6 +776,12 @@ pub enum OpenError {
     Migration(#[from] MigrationError),
     #[error(transparent)]
     Db(#[from] DbError),
+    #[error("{operation}; snapshot preparation cleanup failed: {cleanup}")]
+    PreparationCleanup {
+        #[source]
+        operation: Box<OpenError>,
+        cleanup: Box<DbError>,
+    },
 }
 
 /// Test-only checkpoints reached by database operations whose ordering matters.
@@ -786,10 +803,14 @@ pub enum DatabaseTestPoint {
     StoreWriteCommitUploaded {
         write_id: WriteId,
     },
-    StoreWriteHeadReadBack {
+    StoreWritePublicationAccepted {
         write_id: WriteId,
     },
+    CoveredWriteCleanupPrepared,
+    ReceivedSnapshotInstallRequested,
     StoreDeviceExclusionCandidateStaged,
+    OwnerPromotionCandidatePrepared,
+    CircleCandidatePrepared,
     /// The owner's device-join acceptance has read the position its attempt
     /// will be bound to and holds the turn to author it, but has not yet
     /// published the head that takes it.
@@ -801,7 +822,6 @@ pub enum DatabaseTestPoint {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MergeMaterializationFailurePoint {
     SummaryMaterialization,
-    RetractionDeletion,
     ProjectionReplacement,
 }
 
@@ -898,9 +918,100 @@ pub struct StagedCircleInstall {
     pub image: coven_protocol::circle_activation::VerifiedCircleImage,
 }
 
+/// Recipient-specific access resolved from an exact retained Circle activation.
+/// Its leaf bootstrap remains bound to the leaf even if a newer image is selected.
+pub struct StagedCircleAccess {
+    pub activating_commit: StoreBatchCommitRef,
+    pub activation: coven_protocol::circle_activation::VerifiedCircleReference,
+    pub leaf_bootstrap: Option<coven_protocol::circle_activation::VerifiedCircleImage>,
+    pub local_exclusion: Option<coven_protocol::circle_activation::LocalCircleExclusion>,
+}
+
+/// The verified starting state for one accessible Circle.
+pub enum StagedCircleBase {
+    Founder {
+        circle_id: coven_protocol::circle::CircleId,
+        control: coven_protocol::circle::CircleControlCoord,
+    },
+    Image(StagedCircleInstall),
+}
+
+pub struct StagedCircleRestore {
+    pub access: Vec<StagedCircleAccess>,
+    pub bases: Vec<StagedCircleBase>,
+    pub packages: Option<StagedCirclePackageRestore>,
+}
+
+impl StagedCircleRestore {
+    /// Package replay starts at the selected image, or at the authenticated
+    /// founding control when the recipient held active access from creation.
+    pub fn coverage_cuts(
+        &self,
+    ) -> Result<BTreeMap<coven_protocol::circle::CircleId, CommitFrontier>, DbError> {
+        let mut cuts = BTreeMap::new();
+        for base in &self.bases {
+            let (circle_id, cut) = match base {
+                StagedCircleBase::Image(image) => (
+                    image.image.circle_id(),
+                    image.image.reference().coverage.clone(),
+                ),
+                StagedCircleBase::Founder { circle_id, control } => {
+                    let access = self
+                        .access
+                        .iter()
+                        .find(|access| {
+                            access.activation.circle_id == *circle_id
+                                && access.activation.control.coord == *control
+                        })
+                        .ok_or_else(|| {
+                            DbError::Message(
+                                "Circle founder restore base has no exact recipient access".into(),
+                            )
+                        })?;
+                    if !access.activation.control.value.is_founder()
+                        || !matches!(
+                            access.activation.control.value.active_common().origin,
+                            coven_protocol::circle::CircleEpochOrigin::Founder
+                        )
+                        || !access
+                            .activation
+                            .local_access
+                            .as_ref()
+                            .is_some_and(|local| {
+                                local.active.is_some()
+                                    && matches!(
+                                        local.leaf.value.disposition,
+                                        coven_protocol::circle::CircleAccessDisposition::Active {
+                                            bootstrap: None,
+                                            ..
+                                        }
+                                    )
+                            })
+                        || access.leaf_bootstrap.is_some()
+                    {
+                        return Err(DbError::Message(
+                            "Circle restore requires its recipient bootstrap image".into(),
+                        ));
+                    }
+                    (*circle_id, CommitFrontier(BTreeMap::new()))
+                }
+            };
+            if cuts.insert(circle_id, cut).is_some() {
+                return Err(DbError::Message("Circle restoration repeats a base".into()));
+            }
+        }
+        Ok(cuts)
+    }
+}
+
+pub struct StagedCirclePackageRestore {
+    pub routing_key: coven_protocol::circle::RowRoutingKey,
+    pub packages: BTreeMap<StoreBatchCommitRef, Vec<AudiencePackage>>,
+}
+
 enum CircleRestoreSelection {
     Pending,
-    Selected(Vec<StagedCircleInstall>),
+    Selected(StagedCircleRestore),
 }
 
 pub struct VerifiedSnapshotBootstrapInstall {
@@ -952,7 +1063,6 @@ impl VerifiedSnapshotBootstrapInstall {
             || authority.founder_registration != founder_reference
             || authority.snapshot != snapshot.reference
             || authority.metadata != snapshot.meta
-            || snapshot.meta.successor.next_slot != snapshot.successor_slot
         {
             return Err(DbError::Message(
                 "bootstrap snapshot differs from its verified authority authority".to_string(),
@@ -981,7 +1091,7 @@ impl VerifiedSnapshotBootstrapInstall {
     /// through this same authority. Kept separate from `new` so one verified
     /// install can first query and then install for real without re-verifying the
     /// Store authority.
-    pub fn with_circle_installs(mut self, circle_installs: Vec<StagedCircleInstall>) -> Self {
+    pub fn with_circle_installs(mut self, circle_installs: StagedCircleRestore) -> Self {
         self.circle_selection = CircleRestoreSelection::Selected(circle_installs);
         self
     }

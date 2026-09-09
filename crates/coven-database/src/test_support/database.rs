@@ -315,25 +315,6 @@ impl Database {
             .expect("count row blob bindings")
     }
 
-    pub async fn bind_circle_row_blob_for_test(&self, row_id: &str) {
-        let row_id = row_id.to_string();
-        let object_id = "0".repeat(64);
-        self.test_sql(move |database| {
-            database.install_blob_binding(
-                &object_id,
-                "{}",
-                &"1".repeat(64),
-                "notes",
-                &row_id,
-                "attachment",
-                "0000000002000-0000-owner",
-                "{}",
-            )
-        })
-        .await
-        .expect("bind Circle row blob");
-    }
-
     pub async fn table_has_rows_for_test(
         &self,
         table: crate::DatabaseTestTable,

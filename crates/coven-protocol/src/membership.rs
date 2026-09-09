@@ -39,7 +39,15 @@ mod authority;
 mod chain;
 mod conflict;
 mod entry;
+mod head_acceptance;
+mod head_predecessor;
+pub use head_predecessor::MembershipHeadPredecessor;
 mod reduction;
+
+pub use head_acceptance::{
+    membership_head_acceptance_semantic_prefix, MembershipHeadAcceptance,
+    MembershipHeadAcceptanceBody, MembershipHeadAcceptanceIssuer,
+};
 
 pub use conflict::{
     derive_store_resolution_grant, resolve_store_membership_conflict, MembershipConflict,
@@ -128,7 +136,7 @@ pub struct MemberInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub enum MembershipChange {
+pub enum StoreAuthorityChange {
     Founder {
         creation_id: StoreCreationId,
         owner_pubkey: String,
@@ -157,20 +165,32 @@ pub enum MembershipChange {
         retirement_device_state: Option<StoreDeviceStateRef>,
         wrapped_keys: Vec<WrappedStoreKeyRef>,
     },
+    DeviceRegistrationActivation {
+        registration: super::store_commit::ActivatedStoreDeviceRegistrationRef,
+    },
+    DeviceExclusionProposal {
+        proposal: super::store_commit::StoreDeviceExclusionProposalRef,
+    },
+    DeviceExclusionOutcome {
+        outcome: super::store_commit::StoreDeviceExclusionOutcomeRef,
+    },
     ProviderAdmin,
     ResolutionActivation {
         resolution: StoreMembershipConflictResolutionRef,
     },
 }
 
-impl MembershipChange {
+impl StoreAuthorityChange {
     pub fn membership_anchor(&self) -> Option<GrantStreamAnchor> {
         match self {
             Self::Founder { membership, .. } => Some(membership.clone()),
             Self::SetMember { membership, .. } => membership.clone(),
-            Self::RemoveMember { .. } | Self::ProviderAdmin | Self::ResolutionActivation { .. } => {
-                None
-            }
+            Self::RemoveMember { .. }
+            | Self::DeviceRegistrationActivation { .. }
+            | Self::DeviceExclusionProposal { .. }
+            | Self::DeviceExclusionOutcome { .. }
+            | Self::ProviderAdmin
+            | Self::ResolutionActivation { .. } => None,
         }
     }
 }
@@ -309,7 +329,7 @@ pub struct MembershipEntryBody {
     pub dependencies: Vec<MembershipCoord>,
     pub resolution_dependencies: Vec<StoreMembershipConflictResolutionRef>,
     pub created_at: String,
-    pub change: MembershipChange,
+    pub change: StoreAuthorityChange,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_admin: Option<super::provider::ProviderAdminMembershipChange>,
 }
@@ -359,16 +379,27 @@ pub type AuthorHead = Signed<AuthorHeadBody>;
 pub struct MembershipHeadBody {
     pub author_registration: StoreDeviceRegistrationRef,
     pub entry: MembershipEntryRef,
-    pub predecessor: Option<MembershipHeadRef>,
+    pub predecessor: Option<MembershipHeadPredecessor>,
     pub resolutions: Vec<StoreMembershipConflictResolutionRef>,
     pub successor: SuccessorLink,
+}
+
+impl MembershipHeadBody {
+    pub fn predecessor_head(&self) -> Option<&MembershipHeadRef> {
+        self.predecessor
+            .as_ref()
+            .map(MembershipHeadPredecessor::head)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MembershipHeadActivation {
     Direct,
-    StoreCommit { commit: StoreBatchCommitRef },
+    StoreCommit {
+        commit: StoreBatchCommitRef,
+        acceptance_slot: crate::objects::ObjectSlot,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,6 +435,8 @@ pub enum MembershipFloorError {
     SequenceZero,
     #[error("membership floor is not strictly ordered by author stream")]
     NotStrictlyOrdered,
+    #[error("membership floor has conflicting exact heads at the same stream sequence")]
+    ConflictingHeads,
 }
 
 pub fn validate_membership_floor(floor: &[MembershipHeadRef]) -> Result<(), MembershipFloorError> {
@@ -495,7 +528,9 @@ pub enum MembershipError {
     GrantSetMismatch { index: usize, pubkey: String },
     #[error("membership entry {index} removes no exact grants")]
     EmptyRemoval { index: usize },
-    #[error("membership entry {index} removes Owner grant {grant} without its exact observed-through coordinate")]
+    #[error(
+        "membership entry {index} removes Owner grant {grant} without its exact observed-through coordinate"
+    )]
     MissingOwnerRevocationBarrier {
         index: usize,
         grant: MembershipGrantId,
@@ -557,6 +592,8 @@ pub enum MembershipError {
     InvalidProviderAdminChange(usize),
     #[error("membership has an unresolved semantic conflict")]
     Conflict,
+    #[error("membership entry {coord:?} was prepared against different accepted authority")]
+    PublicationPredecessorChanged { coord: Box<MembershipCoord> },
     #[error("membership conflict is missing its exact signed raw heads")]
     MissingConflictHeads,
     #[error("membership conflict resolution does not name exact validated conflict evidence")]
@@ -672,7 +709,7 @@ fn test_provider_admin_genesis(
     let founder = entries
         .iter()
         .find_map(|entry| match &entry.change {
-            MembershipChange::Founder { provider_admin, .. } => Some((entry, provider_admin)),
+            StoreAuthorityChange::Founder { provider_admin, .. } => Some((entry, provider_admin)),
             _ => None,
         })
         .ok_or(MembershipError::InvalidFounder)?;
@@ -745,8 +782,7 @@ impl AuthorHead {
             && self.body.successor.predecessor
                 == self
                     .body
-                    .predecessor
-                    .as_ref()
+                    .predecessor_head()
                     .map(|reference| reference.object.clone())
             && self.verify_by(&registration.device_signing_pubkey).is_ok()
     }
@@ -760,6 +796,8 @@ impl AuthorHead {
     }
 }
 
+#[cfg(test)]
+mod floor_tests;
 #[cfg(test)]
 mod tests;
 
@@ -815,6 +853,46 @@ pub enum ApplyOutcome<R> {
 pub struct MembershipFloor(pub Vec<MembershipHeadRef>);
 
 impl MembershipFloor {
+    /// Normalize head references by stream. Acceptance and hash-linked ancestry
+    /// remain the responsibility of the authority supplying these references.
+    pub fn from_heads(
+        references: impl IntoIterator<Item = MembershipHeadRef>,
+    ) -> Result<Self, MembershipFloorError> {
+        let mut heads = BTreeMap::<MembershipStreamKey, BTreeMap<u64, MembershipHeadRef>>::new();
+        for reference in references {
+            if reference.coord.seq == 0 {
+                return Err(MembershipFloorError::SequenceZero);
+            }
+            match heads
+                .entry(reference.coord.stream_key())
+                .or_default()
+                .entry(reference.coord.seq)
+            {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(reference);
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    if reference != *entry.get() {
+                        return Err(MembershipFloorError::ConflictingHeads);
+                    }
+                }
+            }
+        }
+        let floor = Self(
+            heads
+                .into_values()
+                .map(|mut stream| {
+                    stream
+                        .pop_last()
+                        .expect("every recorded stream has a head")
+                        .1
+                })
+                .collect(),
+        );
+        floor.validate()?;
+        Ok(floor)
+    }
+
     pub fn validate(&self) -> Result<(), MembershipFloorError> {
         crate::membership::validate_membership_floor(&self.0)
     }

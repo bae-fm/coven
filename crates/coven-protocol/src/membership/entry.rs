@@ -58,6 +58,21 @@ pub(super) fn store_membership_anchor_stream(
         .ok()
 }
 
+impl MembershipStreamKey {
+    /// Resolve the Store membership stream named by this exact grant anchor.
+    pub fn from_anchor(
+        author_pubkey: &str,
+        author_owner_grant: &MembershipGrantId,
+        anchor: &GrantStreamAnchor,
+    ) -> Option<Self> {
+        Some(Self {
+            author_pubkey: author_pubkey.to_string(),
+            author_owner_grant: author_owner_grant.clone(),
+            stream_id: store_membership_anchor_stream(author_pubkey, author_owner_grant, anchor)?,
+        })
+    }
+}
+
 pub fn derive_grant_id(
     store_id: &str,
     author_pubkey: &str,
@@ -96,7 +111,7 @@ pub fn founder_entry_for_creation(
             dependencies: Vec::new(),
             resolution_dependencies: Vec::new(),
             created_at: created_at.to_string(),
-            change: MembershipChange::Founder {
+            change: StoreAuthorityChange::Founder {
                 creation_id,
                 owner_pubkey,
                 owner_grant_id,
@@ -131,7 +146,7 @@ pub fn founder_entry(
 
 pub fn verify_membership_entry(entry: &MembershipEntry) -> bool {
     let activation_position_is_valid = match &entry.change {
-        MembershipChange::ResolutionActivation { .. } => causal_grants::starts_author_stream(
+        StoreAuthorityChange::ResolutionActivation { .. } => causal_grants::starts_author_stream(
             entry.seq,
             entry.previous_hash,
             &entry.coord().stream_key(),

@@ -25,7 +25,6 @@ pub(crate) struct AuthorizedCircleWriter<'writer, 'storage> {
     storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
     store_dir: &'storage coven_foundation::store_dir::StoreDir,
     root: coven_protocol::store_commit::StoreRootRef,
-    membership: coven_protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
 }
 
@@ -37,7 +36,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         root: coven_protocol::store_commit::StoreRootRef,
-        membership: coven_protocol::membership::MembershipChain,
         local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     ) -> Self {
         Self {
@@ -46,7 +44,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             storage,
             store_dir,
             root,
-            membership,
             local_writer,
         }
     }
@@ -54,32 +51,21 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(super) fn publisher(&mut self) -> publication::CircleCandidatePublisher<'_, 'storage> {
         let database = self.database.clone();
         let storage = self.storage.clone();
-        let membership = self.membership.clone();
-        let history = self.writer.circle_history();
         publication::CircleCandidatePublisher::new(
             database,
             storage,
-            membership,
             std::sync::Arc::clone(&self.local_writer),
-            history,
+            self.writer,
         )
     }
 
     pub(super) fn preparer(&mut self) -> preparation::CircleCandidatePreparer<'_, 'storage> {
-        let announcement_stream_id = self.writer.announcement_stream_id();
-        let database = self.database.clone();
-        let membership = self.membership.clone();
-        let root = self.root.clone();
-        let storage = self.storage.clone();
-        let history = self.writer.circle_history();
         preparation::CircleCandidatePreparer::new(
-            announcement_stream_id,
-            database,
-            membership,
-            root,
-            storage,
+            self.database.clone(),
+            self.root.clone(),
+            self.storage.clone(),
             std::sync::Arc::clone(&self.local_writer),
-            history,
+            self.writer,
         )
     }
 

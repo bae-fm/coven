@@ -292,6 +292,7 @@ struct UploadFixture {
     device: crate::sync::test_helpers::TestDevice,
     storage: Arc<CloudSyncConnection>,
     home: Arc<InstrumentedHome>,
+    owner: UserKeypair,
 }
 
 /// What the fixture's Store synchronizes: rows with a blob column, or rows
@@ -384,7 +385,7 @@ impl UploadFixture {
             db_store_dir.clone(),
             storage.clone(),
             "upload-store",
-            owner,
+            owner.clone(),
         )
         .await
         .expect("initialize exact local blob authority");
@@ -397,6 +398,7 @@ impl UploadFixture {
             device,
             storage,
             home,
+            owner,
         }
     }
 

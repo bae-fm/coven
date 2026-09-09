@@ -1,6 +1,11 @@
 use super::*;
 
 impl StoreDatabase {
+    pub async fn row_blob_bindings_for_test(&self) -> Result<String, DbError> {
+        self.call_store(|session| session.row_blob_bindings_for_test())
+            .await
+    }
+
     pub async fn replace_blob_row_stamp_for_test(
         &self,
         table: &str,
@@ -74,5 +79,20 @@ impl StoreDatabase {
             session.plant_note_cover_blob_row_for_test(&id, &note_id, size, &hash)
         })
         .await
+    }
+}
+
+impl StoreSession<'_> {
+    fn row_blob_bindings_for_test(&self) -> Result<String, DbError> {
+        self.conn
+            .query_row(
+                "SELECT json_group_array(json_array(
+                    table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id))
+                 FROM (SELECT * FROM row_blob_locators
+                       ORDER BY table_name, row_id, column_name, row_stamp)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
     }
 }

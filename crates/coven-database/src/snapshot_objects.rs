@@ -1,7 +1,6 @@
 use crate::blob_records::live_blob_row;
 use crate::blob_records::load_activated_registration_on;
 use crate::blob_records::validate_live_blob_locator;
-use crate::blob_records::validate_stored_locator_on;
 use crate::blob_records::validate_stored_row_binding_on;
 use crate::remote_object_records::load_remote_object_on;
 use crate::PreparedSnapshotBlob;
@@ -11,50 +10,18 @@ use super::*;
 pub(crate) fn validate_snapshot_object_owners_on(
     conn: &Connection,
     root: &coven_protocol::store_commit::StoreRootRef,
+    reference: &StoreSnapshotRef,
     meta: &SnapshotMeta,
 ) -> Result<(), DbError> {
-    let registration = load_activated_registration_on(conn, root, &meta.author_registration)?;
-    let expected = coven_protocol::remote_object::SnapshotObjectOwner {
-        activation: registration
-            .store_snapshot_activation(&meta.author_registration)
-            .map_err(DbError::from)?
-            .activation_id(),
-        generation: meta.generation,
+    load_activated_registration_on(conn, root, &meta.author_registration)?;
+    let expected = coven_protocol::remote_object::SnapshotObjectOwner::Store {
+        metadata_slot: reference.object.slot().clone(),
     };
-    if meta.successor.activation != expected.activation {
-        return Err(DbError::Message(
-            "verified snapshot successor differs from its author stream activation".to_string(),
-        ));
-    }
-    validate_snapshot_object_owner_records_on(conn, &expected)
-}
-
-pub async fn verify_snapshot_blob_spools(
-    blobs: &[PreparedSnapshotBlob],
-    label: &str,
-) -> Result<(), DbError> {
-    for blob in blobs {
-        if let Some(spool_path) = &blob.spool_path {
-            {
-                let (size, digest) = coven_foundation::local_file::file_facts(spool_path)
-                    .await
-                    .map_err(|error| {
-                        DbError::context(format!("{label} snapshot blob spool"), error)
-                    })?;
-                blob.remote
-                    .object()
-                    .verify_stored_facts(
-                        spool_path,
-                        size,
-                        coven_protocol::store_commit::ObjectHash::from_digest(digest),
-                    )
-                    .map_err(|error| {
-                        DbError::context(format!("{label} snapshot blob spool"), error)
-                    })?;
-            }
-        }
-    }
-    Ok(())
+    validate_snapshot_object_owner_records_on(
+        conn,
+        &expected,
+        &meta.history_summary.pending_device_join_snapshot_slots(),
+    )
 }
 
 pub fn validate_snapshot_author(
@@ -108,8 +75,7 @@ pub(crate) fn validate_snapshot_blob_plans_on(
         let owners = blob.remote.snapshot_owners().collect::<Vec<_>>();
         if owners != [owner] {
             return Err(DbError::Message(
-                "snapshot blob owner differs from the verified snapshot stream activation"
-                    .to_string(),
+                "snapshot blob owner differs from the prepared snapshot".to_string(),
             ));
         }
         if blob.bindings.is_empty()
@@ -117,10 +83,6 @@ pub(crate) fn validate_snapshot_blob_plans_on(
                 binding.blob().object() != blob.remote.object()
                     || binding.blob().locator().audience() != blob.authority.remote_audience()
             })
-            || blob
-                .spool_path
-                .as_ref()
-                .is_some_and(|path| !path.is_absolute())
         {
             return Err(DbError::Message(
                 "snapshot blob plan has inconsistent exact references".to_string(),
@@ -180,12 +142,7 @@ pub(crate) fn persist_snapshot_image_on(
     persist_exact_remote_object_on(conn, store_dir, &image, label)
 }
 
-/// Record the generation's ownership of the membership rollup it published.
-///
-/// Merged rather than inserted: a rollup is content-addressed over the
-/// membership frontier, so a generation published while membership has not
-/// changed names the object an earlier generation already owns. Both
-/// generations own it, and it is reclaimable only once neither does.
+/// Persist this snapshot candidate's exact membership rollup ownership.
 pub(crate) fn persist_membership_rollup_on(
     conn: &Connection,
     store_dir: &coven_foundation::store_dir::StoreDir,
@@ -193,21 +150,6 @@ pub(crate) fn persist_membership_rollup_on(
     owner: coven_protocol::remote_object::SnapshotObjectOwner,
     label: &str,
 ) -> Result<(), DbError> {
-    let object_id = coven_protocol::remote_object::remote_object_id(&rollup.object);
-    let exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-            [object_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
-    if exists {
-        let mut remote = load_remote_object_on(conn, object_id)?;
-        remote
-            .merge_snapshot_ownership(rollup, owner)
-            .map_err(|error| DbError::context(format!("{label} ownership"), error))?;
-        return update_remote_object_on(conn, object_id, &remote);
-    }
     let rollup = RemoteObjectRecord::snapshot_activated_membership_rollup(rollup, owner)
         .map_err(|error| DbError::context(format!("{label} ownership"), error))?;
     persist_exact_remote_object_on(conn, store_dir, &rollup, label)
@@ -221,6 +163,7 @@ pub fn snapshot_generation_as_i64(generation: u64, label: &str) -> Result<i64, D
 pub(crate) fn validate_snapshot_object_owner_records_on(
     conn: &Connection,
     expected: &coven_protocol::remote_object::SnapshotObjectOwner,
+    pending_store_snapshots: &BTreeSet<coven_protocol::objects::ObjectSlot>,
 ) -> Result<(), DbError> {
     let mut statement = conn
         .prepare("SELECT object_id FROM remote_objects ORDER BY object_id")
@@ -237,9 +180,26 @@ pub(crate) fn validate_snapshot_object_owner_records_on(
         })?;
         let remote = load_remote_object_on(conn, parsed)?;
         for owner in remote.snapshot_owners() {
-            if owner.activation != expected.activation || owner.generation > expected.generation {
+            let matches = match (owner, expected) {
+                (
+                    coven_protocol::remote_object::SnapshotObjectOwner::Store { metadata_slot },
+                    coven_protocol::remote_object::SnapshotObjectOwner::Store { .. },
+                ) => owner == expected || pending_store_snapshots.contains(metadata_slot),
+                (
+                    coven_protocol::remote_object::SnapshotObjectOwner::Circle {
+                        activation,
+                        generation,
+                    },
+                    coven_protocol::remote_object::SnapshotObjectOwner::Circle {
+                        activation: expected_activation,
+                        generation: expected_generation,
+                    },
+                ) => activation == expected_activation && generation <= expected_generation,
+                _ => owner == expected,
+            };
+            if !matches {
                 return Err(DbError::Message(format!(
-                    "snapshot remote object {object_id} belongs to another stream or a later generation"
+                    "snapshot remote object {object_id} belongs to another snapshot"
                 )));
             }
         }
@@ -247,10 +207,34 @@ pub(crate) fn validate_snapshot_object_owner_records_on(
     Ok(())
 }
 
-pub(crate) fn install_snapshot_blob_plan_on(
+pub(crate) fn replace_snapshot_object_owners_on(
     conn: &Connection,
-    blob: &PreparedSnapshotBlob,
+    owner: &coven_protocol::remote_object::SnapshotObjectOwner,
+    blobs: &[PreparedSnapshotBlob],
+    pending_store_snapshots: &BTreeSet<coven_protocol::objects::ObjectSlot>,
 ) -> Result<(), DbError> {
+    let mut statement = conn.prepare("SELECT object_id FROM remote_objects ORDER BY object_id")?;
+    let object_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for object_id in object_ids {
+        let object_id = object_id
+            .parse()
+            .map_err(|error| DbError::context("snapshot remote object id", error))?;
+        let mut remote = load_remote_object_on(conn, object_id)?;
+        let retained = blobs
+            .iter()
+            .any(|blob| blob.remote.object_id() == object_id);
+        remote
+            .replace_snapshot_owners_for_image(retained.then_some(owner), pending_store_snapshots)
+            .map_err(|error| DbError::context("replace exported snapshot ownership", error))?;
+        update_remote_object_on(conn, object_id, &remote)?;
+    }
+    Ok(())
+}
+
+fn retain_snapshot_blob_on(conn: &Connection, blob: &PreparedSnapshotBlob) -> Result<(), DbError> {
     let object_id = blob.remote.object_id();
     let exists: bool = conn
         .query_row(
@@ -278,16 +262,17 @@ pub(crate) fn install_snapshot_blob_plan_on(
         rusqlite::params![object_id.to_string(), encoded],
     )
     .map_err(DbError::from)?;
-    conn.execute(
-        "INSERT INTO blob_locators (remote_object_id, locator_hash) VALUES (?1, ?2)
-         ON CONFLICT(remote_object_id) DO NOTHING",
-        rusqlite::params![
-            object_id.to_string(),
-            blob.bindings[0].blob().locator().locator_hash().to_string(),
-        ],
-    )
-    .map_err(DbError::from)?;
-    validate_stored_locator_on(conn, blob.bindings[0].blob())?;
+    crate::blob_records::record_stored_locator_on(conn, blob.bindings[0].blob())?;
+    Ok(())
+}
+
+/// Install the snapshot's row bindings only into its own database image.
+pub(crate) fn install_snapshot_blob_plan_on(
+    conn: &Connection,
+    blob: &PreparedSnapshotBlob,
+) -> Result<(), DbError> {
+    retain_snapshot_blob_on(conn, blob)?;
+    let object_id = blob.remote.object_id();
     let authority = serde_json::to_string(&blob.authority)
         .map_err(|error| DbError::context("serialize snapshot blob authority", error))?;
     for binding in &blob.bindings {
@@ -311,20 +296,60 @@ pub(crate) fn install_snapshot_blob_plan_on(
     Ok(())
 }
 
+/// Publication retains the snapshot's payloads without changing current row
+/// bindings: unpublished edits may have replaced or removed those rows.
 pub(crate) fn install_snapshot_blob_plans_on(
     conn: &Connection,
     blobs: &[PreparedSnapshotBlob],
 ) -> Result<(), DbError> {
     for blob in blobs {
-        install_snapshot_blob_plan_on(conn, blob)?;
-        if let Some(path) = &blob.spool_path {
-            conn.execute(
-                "INSERT INTO snapshot_blob_spool_cleanup (path) VALUES (?1)
-                 ON CONFLICT(path) DO NOTHING",
-                [path.to_string_lossy().as_ref()],
-            )
-            .map_err(DbError::from)?;
+        retain_snapshot_blob_on(conn, blob)?;
+    }
+    Ok(())
+}
+
+/// A locally reconstructed cut retains only its live Store blobs for the
+/// accepted snapshot. Current rows may include later edits, and importing the
+/// cut's entire inventory would restore objects reclaimed after that cut.
+pub(crate) fn retain_reconstructed_snapshot_blobs_on(
+    conn: &Connection,
+    image: &Connection,
+    tables: &[SyncedTable],
+    snapshot: &StoreSnapshotRef,
+) -> Result<(), DbError> {
+    let gates = Gates::from_tables(image, tables)?;
+    let owner = coven_protocol::remote_object::SnapshotObjectOwner::Store {
+        metadata_slot: snapshot.object.slot().clone(),
+    };
+    for encoded in crate::query_mapped_rows(
+        image,
+        "SELECT remote_object_id FROM blob_locators ORDER BY remote_object_id",
+        [],
+        |row| row.get::<_, String>(0),
+    )? {
+        let object_id = encoded.parse()?;
+        let captured = load_remote_object_on(image, object_id)?;
+        let locator = crate::blob_records::carried_blob_locator(
+            &captured,
+            "reconstructed snapshot inventory",
+        )?;
+        if locator.audience() != RemoteAudience::Store {
+            continue;
         }
+        let stored =
+            coven_protocol::blob::locator::StoredBlobRef::new(locator, captured.object().clone())?;
+        match Database::stored_blob_reference_state_on(image, &gates, tables, &stored)? {
+            crate::StoredBlobReferenceState::NotLiveRemote => continue,
+            crate::StoredBlobReferenceState::Unresolved => {
+                return Err(DbError::Message(format!(
+                    "reconstructed snapshot blob {object_id} has unresolved locality"
+                )));
+            }
+            crate::StoredBlobReferenceState::LiveRemote => {}
+        }
+        let mut remote = load_remote_object_on(conn, object_id)?;
+        remote.merge_snapshot_owner(&stored, owner.clone())?;
+        update_remote_object_on(conn, object_id, &remote)?;
     }
     Ok(())
 }

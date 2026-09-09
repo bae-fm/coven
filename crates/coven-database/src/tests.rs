@@ -1,9 +1,9 @@
+#[path = "tests/captured_identity.rs"]
+mod captured_identity;
 #[path = "tests/coven_migration.rs"]
 mod coven_migration;
 #[path = "tests/fixtures.rs"]
-mod fixtures;
-#[path = "tests/history.rs"]
-mod history;
+pub(crate) mod fixtures;
 #[path = "tests/open.rs"]
 mod open;
 #[path = "tests/remote_objects.rs"]

@@ -153,3 +153,35 @@ Non-foreign-key constraint conflicts (a uniqueness violation, a CHECK failure)
 are different: retrying cannot make them valid, so the conflicting rows are
 omitted, the affected tables are surfaced in
 `ApplyResult::constraint_conflict_tables`, and the changeset is not retried.
+
+### Rebasing recorded edits
+
+When a snapshot retires an unpublished write's shared base, Coven reapplies
+the write's captured row changes against the accepted state. It preserves
+untouched peer columns and reports a typed conflict if a target disappeared,
+a touched column conflicts, or the resulting write violates a declared SQLite
+`CHECK`, `UNIQUE`, `NOT NULL`, or foreign-key constraint. Failure rolls back the
+whole rebase and retains the unresolved write and its dependent suffix.
+
+The retained input is the transaction's net row changes, including changes
+made by application triggers to synced tables. It does not retain the original
+statements, their grouping, or assignments that left a column unchanged.
+Rebase applies those recorded effects and refreshes their timestamps without
+running the application triggers again. A captured audit row therefore keeps
+its captured values; it is not generated a second time using newer peer data.
+Ordinary host writes continue to execute their triggers.
+
+A trigger's `RAISE` condition checks execution of a host statement. It is not
+a declarative constraint on every state obtained by combining recorded edits.
+For example, a trigger rejecting `length(title) + length(body) > 10` does not
+prevent two separately valid column edits from exceeding that limit on rebase.
+Declare that row invariant as a SQLite `CHECK` when it must also reject the
+combined state. Coven does not infer post-state validators from trigger bodies
+or rerun arbitrary application commands during rebase.
+
+Installing the reconstructed state also derives foreign-key actions on the
+device's existing local descendants. Those are new local row effects, not
+trigger effects captured on another device. Their installation does not run
+application triggers either: a local audit or validation trigger will not
+execute for a derived cascade. Declared SQLite constraints still apply to the
+result, and trigger settings are restored before subsequent host commands.

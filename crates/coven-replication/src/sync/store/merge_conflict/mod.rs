@@ -1,42 +1,26 @@
-//! Resolution of Merge candidates that lost their activation slot: observing
-//! who occupies a contested Store head, and proving that a candidate can never
-//! activate.
+use crate::sync::store::pull;
+use coven_protocol::membership::MembershipChain;
 
-mod abandonment;
-mod nonactivation;
-mod observation;
-
-pub use abandonment::ExcludedCandidateHeadObservation;
-pub use abandonment::MergeCandidateAbandonment;
-pub(crate) use abandonment::VerifiedMergeWinner;
-pub(crate) use nonactivation::validate_retained_membership_floors;
-pub(crate) use nonactivation::MergeConflictResolutionAuthorization;
-pub(crate) use nonactivation::TerminalNonactivationCandidate;
-
-use coven_database::StoreDatabase;
-use coven_storage::CloudSyncObjectStorage;
-
-use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
-
-/// The Merge-conflict operations, holding exactly the capabilities they use:
-/// the database that records candidate outcomes, the storage the contested
-/// heads live in, and the verifier that authenticates them.
-pub(crate) struct MergeConflictHistory<'operation, 'storage> {
-    database: &'operation StoreDatabase,
-    storage: &'storage dyn CloudSyncObjectStorage,
-    history: &'operation mut MergeHistoryVerifier<'storage>,
+pub(crate) struct MergeConflictResolutionAuthorization {
+    pub(crate) membership: MembershipChain,
+    pub(crate) device_state_ref: coven_protocol::store_commit::StoreDeviceStateRef,
+    pub(crate) device_state: coven_protocol::store_commit::ResolvedStoreDeviceState,
 }
 
-impl<'operation, 'storage> MergeConflictHistory<'operation, 'storage> {
-    pub(crate) fn new(
-        database: &'operation StoreDatabase,
-        storage: &'storage dyn CloudSyncObjectStorage,
-        history: &'operation mut MergeHistoryVerifier<'storage>,
-    ) -> Self {
-        Self {
-            database,
-            storage,
-            history,
-        }
+pub(crate) fn validate_retained_membership_floors(
+    checkpoints: &[coven_database::RetainedMergeHistoryCheckpoint],
+    membership: &MembershipChain,
+) -> Result<(), pull::StorePullError> {
+    if checkpoints.iter().any(|checkpoint| {
+        matches!(
+            checkpoint,
+            coven_database::RetainedMergeHistoryCheckpoint::Snapshot(checkpoint)
+                if !checkpoint.summary.membership_floor.is_included_in(membership)
+        )
+    }) {
+        return Err(pull::StorePullError::InvalidState(
+            "Merge membership omits retained effective predecessor authority".to_string(),
+        ));
     }
+    Ok(())
 }

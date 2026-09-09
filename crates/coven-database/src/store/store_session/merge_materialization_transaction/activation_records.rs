@@ -127,57 +127,33 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         materialization: &VerifiedMergeMaterialization<'_>,
     ) -> Result<(), DbError> {
         let conn = self.store.transaction;
-        let commit_ref = materialization.commit_ref();
-        let activation_head = materialization.activation_head();
-        let activation_head = coven_protocol::store_commit::StoreDeviceHeadRef {
-            head_hash: activation_head.head_hash(),
-            object: materialization.activation_head_object().clone(),
-        };
-        let activation_commit = serde_json::to_string(commit_ref).map_err(|error| {
-            DbError::context("serialize author exclusion activation commit", error)
-        })?;
-        for (exclusion, accepted_cut) in materialization.device_operations().exclusions() {
-            let StoreHistoryCut(accepted_cut) = accepted_cut;
+        let activation_commit =
+            serde_json::to_string(materialization.commit_ref()).map_err(|error| {
+                DbError::context("serialize author exclusion activation commit", error)
+            })?;
+        for exclusion in materialization.device_operations().exclusions() {
             let exclusion_json = serde_json::to_string(exclusion)
                 .map_err(|error| DbError::context("serialize author exclusion reference", error))?;
-            let accepted_cut_json = serde_json::to_string(accepted_cut).map_err(|error| {
-                DbError::context("serialize author exclusion accepted cut", error)
-            })?;
-            let activation_head_json =
-                serde_json::to_string(&activation_head).map_err(|error| {
-                    DbError::context("serialize author exclusion activation head", error)
-                })?;
             let inserted = conn
                 .execute(
                     "INSERT INTO store_author_exclusion_activations (
-                         exclusion_ref, accepted_cut, activation_commit, activation_head
-                     ) VALUES (?1, ?2, ?3, ?4)
+                         exclusion_ref, activation_commit
+                     ) VALUES (?1, ?2)
                      ON CONFLICT(exclusion_ref) DO NOTHING",
-                    (
-                        &exclusion_json,
-                        &accepted_cut_json,
-                        &activation_commit,
-                        &activation_head_json,
-                    ),
+                    (&exclusion_json, &activation_commit),
                 )
                 .map_err(DbError::from)?;
             if inserted == 0 {
-                let stored: (String, String, String) = conn
+                let stored: String = conn
                     .query_row(
-                        "SELECT accepted_cut, activation_commit, activation_head
+                        "SELECT activation_commit
                          FROM store_author_exclusion_activations
                          WHERE exclusion_ref = ?1",
                         [&exclusion_json],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| row.get(0),
                     )
                     .map_err(DbError::from)?;
-                if stored
-                    != (
-                        accepted_cut_json,
-                        activation_commit.clone(),
-                        activation_head_json,
-                    )
-                {
+                if stored != activation_commit {
                     return Err(DbError::Message(
                         "author exclusion already names different activation evidence".to_string(),
                     ));
@@ -311,24 +287,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 ],
             )
             .map_err(DbError::from)?;
-            if let Some(access) = &activation.local_access {
-                let disposition = match access.leaf.value.disposition {
-                    coven_protocol::circle::CircleAccessDisposition::Active { .. } => "active",
-                    coven_protocol::circle::CircleAccessDisposition::Inactive => "inactive",
-                };
-                conn.execute(
-                    "INSERT INTO circle_access_cache
-                     (circle_id, control_coord, owner_pubkey, disposition)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![
-                        &circle_id,
-                        &control_coord,
-                        &access.leaf.value.owner_pubkey,
-                        disposition,
-                    ],
-                )
-                .map_err(DbError::from)?;
-            }
+            self.store.record_circle_access(activation)?;
             conn.execute(
                 "INSERT INTO circle_current_state (circle_id, state) VALUES (?1, ?2)
                  ON CONFLICT(circle_id) DO UPDATE SET state = excluded.state",

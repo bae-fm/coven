@@ -6,9 +6,8 @@ use coven_protocol::objects::{ProtocolObjectDomain, StoreObjectError};
 use coven_protocol::store_commit::{
     ack_slot_prefix, membership_head_slot_prefix, owner_recovery_semantic_prefix, CommitFrontier,
     DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, ResolvedStoreDeviceState, StoreAck,
-    StoreAckExclusionState, StoreAckRef, StoreCreationId, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot,
-    SuccessorLink,
+    StoreAckRef, StoreCreationId, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
+    StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot, SuccessorLink,
 };
 use coven_protocol::store_creation::*;
 use std::sync::Arc;
@@ -27,6 +26,7 @@ pub(crate) struct FounderStoreCreation<'operation> {
     blob_cache: crate::sync::store::blob::StoreBlobCache,
     founder_timestamp: &'operation str,
     identity: &'operation UserKeypair,
+    routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     _permit: coven_database::store::StoreCreationPermit,
 }
 
@@ -51,33 +51,12 @@ fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority
         StoreCreationAttempt::DescriptorReserved(reservation) => {
             &reservation.membership.founder.root.authority
         }
-        StoreCreationAttempt::FounderStoreCommitsReserved(reservation) => {
-            &reservation.descriptor.membership.founder.root.authority
-        }
         StoreCreationAttempt::FounderAcknowledgementsReserved(reservation) => {
-            &reservation
-                .store_commits
-                .descriptor
-                .membership
-                .founder
-                .root
-                .authority
-        }
-        StoreCreationAttempt::FounderSnapshotsReserved(reservation) => {
-            &reservation
-                .acknowledgements
-                .store_commits
-                .descriptor
-                .membership
-                .founder
-                .root
-                .authority
+            &reservation.descriptor.membership.founder.root.authority
         }
         StoreCreationAttempt::FounderNextAckReserved(reservation) => {
             &reservation
-                .snapshots
                 .acknowledgements
-                .store_commits
                 .descriptor
                 .membership
                 .founder
@@ -139,6 +118,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         blob_cache: crate::sync::store::blob::StoreBlobCache,
         founder_timestamp: &'operation str,
         identity: &'operation UserKeypair,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Self {
         let permit = database.store_creation_permit().await;
         Self {
@@ -148,6 +128,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             blob_cache,
             founder_timestamp,
             identity,
+            routing_encryption,
             _permit: permit,
         }
     }
@@ -326,20 +307,12 @@ impl<'operation> FounderStoreCreation<'operation> {
                     "Store creation attempt did not reserve its recovery slot".to_string(),
                 ))
             }
-            StoreCreationAttempt::FounderStoreCommitsReserved(reservation) => {
+            StoreCreationAttempt::FounderAcknowledgementsReserved(reservation) => {
                 Ok(reservation.descriptor)
             }
-            StoreCreationAttempt::FounderAcknowledgementsReserved(reservation) => {
-                Ok(reservation.store_commits.descriptor)
+            StoreCreationAttempt::FounderNextAckReserved(reservation) => {
+                Ok(reservation.acknowledgements.descriptor)
             }
-            StoreCreationAttempt::FounderSnapshotsReserved(reservation) => {
-                Ok(reservation.acknowledgements.store_commits.descriptor)
-            }
-            StoreCreationAttempt::FounderNextAckReserved(reservation) => Ok(reservation
-                .snapshots
-                .acknowledgements
-                .store_commits
-                .descriptor),
             StoreCreationAttempt::FounderGraphReserved(reservation) => Ok(reservation.descriptor),
             _ => Err(StoreProtocolRootError::Invariant(
                 "Store creation attempt did not reach descriptor reservation".to_string(),
@@ -382,33 +355,9 @@ impl<'operation> FounderStoreCreation<'operation> {
                     "founder graph reservation belongs to another descriptor".to_string(),
                 ));
             }
-            let store_commits = DeviceStreamAnchor::StoreAnnouncements {
-                first_slot: storage
-                    .allocate_protocol_slot(
-                        &coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-                            root.store_root_hash,
-                            ProtocolObjectDomain::StoreHead,
-                        ),
-                        &coven_protocol::store_commit::head_slot_prefix(&device, 1),
-                        ".json",
-                    )
-                    .await
-                    .map_err(StoreObjectError::from)?,
-            };
-            let next =
-                StoreCreationAttempt::FounderStoreCommitsReserved(FounderStoreCommitsReservation {
-                    descriptor: descriptor.clone(),
-                    store_commits,
-                });
-            db.advance_store_creation_attempt(attempt.clone(), next.clone())
-                .await
-                .map_err(StoreProtocolRootError::Database)?;
-            attempt = next;
-        }
-        if let StoreCreationAttempt::FounderStoreCommitsReserved(current) = &attempt {
             let next = StoreCreationAttempt::FounderAcknowledgementsReserved(
                 FounderAcknowledgementsReservation {
-                    store_commits: current.clone(),
+                    descriptor: current.clone(),
                     acknowledgements: DeviceStreamAnchor::StoreAcknowledgements {
                         first_slot: storage
                             .allocate_protocol_slot(
@@ -427,31 +376,8 @@ impl<'operation> FounderStoreCreation<'operation> {
             attempt = next;
         }
         if let StoreCreationAttempt::FounderAcknowledgementsReserved(current) = &attempt {
-            let next =
-                StoreCreationAttempt::FounderSnapshotsReserved(FounderSnapshotsReservation {
-                    acknowledgements: current.clone(),
-                    snapshots: DeviceStreamAnchor::StoreSnapshots {
-                        first_slot: storage
-                            .allocate_protocol_slot(
-                                &coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-                                    root.store_root_hash,
-                                    ProtocolObjectDomain::StoreSnapshotMeta,
-                                ),
-                                &coven_protocol::store_commit::snapshot_slot_prefix(&device, 0),
-                                ".json",
-                            )
-                            .await
-                            .map_err(StoreObjectError::from)?,
-                    },
-                });
-            db.advance_store_creation_attempt(attempt.clone(), next.clone())
-                .await
-                .map_err(StoreProtocolRootError::Database)?;
-            attempt = next;
-        }
-        if let StoreCreationAttempt::FounderSnapshotsReserved(current) = &attempt {
             let next = StoreCreationAttempt::FounderNextAckReserved(FounderNextAckReservation {
-                snapshots: current.clone(),
+                acknowledgements: current.clone(),
                 next_ack_slot: storage
                     .allocate_protocol_slot(&ack_context, &ack_slot_prefix(&device, 2), ".json")
                     .await
@@ -487,20 +413,8 @@ impl<'operation> FounderStoreCreation<'operation> {
                     .map_err(StoreObjectError::from)?,
             };
             let reservation = FounderGraphReservation {
-                descriptor: current
-                    .snapshots
-                    .acknowledgements
-                    .store_commits
-                    .descriptor
-                    .clone(),
-                store_commits: current
-                    .snapshots
-                    .acknowledgements
-                    .store_commits
-                    .store_commits
-                    .clone(),
-                acknowledgements: current.snapshots.acknowledgements.acknowledgements.clone(),
-                snapshots: current.snapshots.snapshots.clone(),
+                descriptor: current.acknowledgements.descriptor.clone(),
+                acknowledgements: current.acknowledgements.acknowledgements.clone(),
                 next_ack_slot: current.next_ack_slot.clone(),
                 membership,
             };
@@ -594,9 +508,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             root_ref.clone(),
             origin,
             authority.binding.device.clone(),
-            graph_reservation.store_commits.clone(),
             graph_reservation.acknowledgements.clone(),
-            graph_reservation.snapshots.clone(),
             signer,
         )
         .map_err(StoreProtocolRootError::Protocol)?;
@@ -640,9 +552,6 @@ impl<'operation> FounderStoreCreation<'operation> {
             &resolved_devices,
         )
         .map_err(StoreProtocolRootError::Protocol)?;
-        let exclusions = StoreAckExclusionState {
-            proposal_freezes: Vec::new(),
-        };
         let acknowledgement_activation = registration_value
             .store_acknowledgement_activation(&registration_ref)
             .map_err(StoreProtocolRootError::Protocol)?
@@ -654,8 +563,6 @@ impl<'operation> FounderStoreCreation<'operation> {
                 registration: registration_ref.clone(),
                 store_cut: frontier,
                 device_state,
-                snapshot: None,
-                exclusions,
             },
             founder_timestamp.to_string(),
             SuccessorLink {
@@ -1035,6 +942,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let keyrings = StoreKeyrings::new(storage_access, root);
         Ok(AuthorizedStoreHistory::new(
             database.clone(),
+            self.routing_encryption.clone(),
             storage,
             self.store_dir,
             self.blob_cache.clone(),
@@ -1079,6 +987,7 @@ impl StagedFounderStoreCreation<'_> {
                 self.creation.store_dir.clone(),
                 &root,
                 self.creation.identity,
+                self.creation.routing_encryption,
             )
             .await;
         }

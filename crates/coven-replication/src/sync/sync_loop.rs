@@ -980,7 +980,11 @@ impl SyncLoopHandleInner {
         &self,
     ) -> Result<super::cycle::SyncCycleResult, super::cycle::SyncCycleFailure> {
         self.components
-            .run_cycle(self.clock.as_ref(), self.observer.as_deref())
+            .run_cycle(
+                self.clock.as_ref(),
+                self.observer.as_deref(),
+                self.config.snapshot_commit_threshold,
+            )
             .await
     }
 }

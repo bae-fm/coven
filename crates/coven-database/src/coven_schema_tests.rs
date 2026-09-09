@@ -7,13 +7,16 @@ fn schema_sql_normalization_ignores_formatting_but_keeps_constraints() {
                 id INTEGER PRIMARY KEY, -- explanatory text
                 value TEXT CHECK (length(value) = 64)
              ) STRICT",
-    );
+    )
+    .expect("normalize schema");
     let compact = normalize_schema_sql(
         "create table t(id integer primary key,value text check(length(value)=64)) strict",
-    );
+    )
+    .expect("normalize schema");
     let changed = normalize_schema_sql(
         "create table t(id integer primary key,value text check(length(value)=32)) strict",
-    );
+    )
+    .expect("normalize schema");
 
     assert_eq!(formatted, compact);
     assert_ne!(formatted, changed);
@@ -35,6 +38,21 @@ fn every_bookkeeping_table_is_strict() {
             .unwrap_or_else(|e| panic!("PRAGMA table_list({name}): {e}"));
         assert_eq!(strict, 1, "{name} must be STRICT");
     }
+}
+
+#[test]
+fn accepted_store_publication_interval_has_canonical_entry_storage() {
+    let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+    apply_coven_schema(&conn).expect("apply coven schema");
+    let columns = conn
+        .prepare("PRAGMA table_info(store_publication_entries)")
+        .expect("prepare publication entry table_info")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query publication entry table_info")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("read publication entry columns");
+
+    assert_eq!(columns, ["position", "entry_ref", "entry_bytes"]);
 }
 
 #[test]
@@ -67,9 +85,9 @@ fn bookkeeping_blob_columns_are_the_explicit_payload_allowlist() {
             "retained_merge_materializations",
             "canonical_input".to_string(),
         ),
-        ("merge_retraction_cleanups", "canonical_cleanup".to_string()),
         ("stream_activations", "activation".to_string()),
         ("store_publication_current", "record_bytes".to_string()),
+        ("store_publication_entries", "entry_bytes".to_string()),
         ("outbound_membership_mutation", "plan_bytes".to_string()),
         ("outbound_membership_mutation", "progress_bytes".to_string()),
         ("outbound_store_snapshot", "meta_bytes".to_string()),
@@ -123,7 +141,7 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
                 |row| row.get(0),
             )
             .unwrap_or_else(|error| panic!("read CREATE TABLE for {table}: {error}"));
-        let normalized = normalize_schema_sql(&create_sql);
+        let normalized = normalize_schema_sql(&create_sql).expect("normalize schema");
         let table_info = format!("PRAGMA table_info({})", crate::quote_ident(table));
         let columns = conn
             .prepare(&table_info)
@@ -140,7 +158,7 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
                 .filter(|(column, declared_type)| {
                     declared_type.eq_ignore_ascii_case("TEXT")
                         && normalized
-                            .contains(&format!("json_valid({})", column.to_ascii_lowercase()))
+                            .contains(&format!("json_valid ( {} )", column.to_ascii_lowercase()))
                 })
                 .map(|(column, _)| (table, column)),
         );
@@ -156,11 +174,11 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
         ("outbound_store_snapshot", "meta_prepared".to_string()),
         ("outbound_store_snapshot", "blobs".to_string()),
         ("outbound_circle_snapshot", "meta_prepared".to_string()),
-        ("outbound_circle_snapshot", "blobs".to_string()),
         ("outbound_store_acks", "prepared_object".to_string()),
         ("outbound_circle_acks", "prepared_object".to_string()),
         ("outbound_store_device_exclusion", "state".to_string()),
         ("store_reclaim_operations", "state".to_string()),
+        ("active_store_publication", "state".to_string()),
         ("local_store_protocol_root", "prepared_object".to_string()),
         (
             "local_store_device_registration",
@@ -188,11 +206,11 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
         ("circle_close_exclusions", "successor_control".to_string()),
         ("circle_close_exclusions", "activating_commit".to_string()),
         ("retained_merge_materializations", "commit_ref".to_string()),
-        ("merge_retraction_cleanups", "commit_ref".to_string()),
         ("materialized_commits", "commit_ref".to_string()),
         ("materialized_commits", "retained_commit_ref".to_string()),
         ("stream_activations", "activating_commit".to_string()),
         ("snapshot_coverage", "commit_ref".to_string()),
+        ("store_publication_entries", "entry_ref".to_string()),
         ("cloud_outbox", "row_ref".to_string()),
         ("cloud_outbox", "upload_state".to_string()),
         ("cloud_outbox", "stored_ref".to_string()),
@@ -200,6 +218,7 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
         ("store_writes", "affected_rows".to_string()),
         ("store_writes", "base".to_string()),
         ("store_writes", "blob_facts".to_string()),
+        ("store_writes", "rebased".to_string()),
         ("store_write_partitions", "control_coord".to_string()),
         ("retained_replay_objects", "commit_ref".to_string()),
         ("reclaimed_store_packages", "state".to_string()),
@@ -208,7 +227,6 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
         ("outbound_store_snapshot", "image_ref".to_string()),
         ("outbound_store_snapshot", "rollup_ref".to_string()),
         ("published_store_snapshot", "snapshot_ref".to_string()),
-        ("published_store_snapshot", "successor_slot".to_string()),
         ("outbound_circle_snapshot", "snapshot_ref".to_string()),
         ("outbound_circle_snapshot", "image_ref".to_string()),
         ("published_circle_snapshot", "snapshot_ref".to_string()),
@@ -228,8 +246,6 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
         ("activated_circle_acks", "activating_commit".to_string()),
         ("activated_store_acks", "ack_ref".to_string()),
         ("activated_store_acks", "activating_commit".to_string()),
-        ("store_device_exclusion_freezes", "proposal_ref".to_string()),
-        ("store_device_exclusion_freezes", "target_cut".to_string()),
         (
             "store_protocol_root_authority",
             "store_root_object".to_string(),
@@ -255,15 +271,7 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
         ),
         (
             "store_author_exclusion_activations",
-            "accepted_cut".to_string(),
-        ),
-        (
-            "store_author_exclusion_activations",
             "activation_commit".to_string(),
-        ),
-        (
-            "store_author_exclusion_activations",
-            "activation_head".to_string(),
         ),
         ("circle_control_activations", "control_coord".to_string()),
         ("circle_operations", "phase".to_string()),
@@ -395,7 +403,6 @@ fn snapshot_and_write_journals_name_payloads_instead_of_carrying_bytes() {
             "meta_prepared",
             "image_ref",
             "meta_bytes",
-            "blobs",
         ]
     );
     assert_eq!(
@@ -408,6 +415,7 @@ fn snapshot_and_write_journals_name_payloads_instead_of_carrying_bytes() {
             "changeset_hash",
             "base",
             "blob_facts",
+            "rebased",
             "prepared",
         ]
     );
@@ -418,7 +426,7 @@ fn snapshot_and_write_journals_name_payloads_instead_of_carrying_bytes() {
 }
 
 #[test]
-fn author_exclusion_activation_locator_has_one_exact_row_shape() {
+fn device_exclusion_activation_retains_its_exact_commit() {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
     apply_coven_schema(&conn).expect("apply coven schema");
     let columns = conn
@@ -435,11 +443,24 @@ fn author_exclusion_activation_locator_has_one_exact_row_shape() {
         columns,
         [
             ("exclusion_ref".to_string(), 1),
-            ("accepted_cut".to_string(), 0),
             ("activation_commit".to_string(), 0),
-            ("activation_head".to_string(), 0),
         ]
     );
+}
+
+#[test]
+fn active_store_publication_has_one_closed_row_shape() {
+    let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+    apply_coven_schema(&conn).expect("apply coven schema");
+    let columns = conn
+        .prepare("PRAGMA table_info(active_store_publication)")
+        .expect("prepare active publication table_info")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query active publication columns")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("read active publication columns");
+
+    assert_eq!(columns, ["singleton", "state"]);
 }
 
 #[test]

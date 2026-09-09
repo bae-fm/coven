@@ -29,7 +29,7 @@ impl UploadedBlobSpool {
                     operation: "remove uploaded prepared blob spool",
                     path: self.path.clone(),
                     source,
-                })
+                });
             }
         }
         database.sync_store_parent_dir(&self.path).await
@@ -54,9 +54,8 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::context("prepared remote graph", error))?;
         let commit = self
             .verified_store_authority
-            .prepared_merge_candidate_on(records, &prepared)?
-            .commit;
-        let mut ids = candidate_graph_exact_objects(&commit)?
+            .verified_prepared_store_commit_on(records, &prepared)?;
+        let mut ids = candidate_graph_exact_objects(commit.value())?
             .iter()
             .map(|object| (remote_object_id(object).to_string(), None))
             .collect::<Vec<_>>();
@@ -88,6 +87,95 @@ impl StoreSession<'_> {
                 })
             })
             .collect()
+    }
+
+    fn stage_membership_head_acceptance(
+        &self,
+        accepted: AcceptedStoreCommitEvidence,
+        closed: coven_protocol::remote_object::ClosedRemoteObject,
+    ) -> Result<RemoteObjectRecord, DbError> {
+        use coven_protocol::remote_object::{
+            RetainedAuthorityObjectDomain, RetainedAuthorityObjectState,
+        };
+        let RemoteObjectRecord::RetainedAuthority(proposed) = closed.record() else {
+            return Err(DbError::Message(
+                "membership acceptance is not retained authority".into(),
+            ));
+        };
+        let RetainedAuthorityObjectDomain::MembershipHeadAcceptance { publication, .. } =
+            &proposed.identity.domain
+        else {
+            return Err(DbError::Message(
+                "membership acceptance has another object domain".into(),
+            ));
+        };
+        let RetainedAuthorityObjectState::Prepared { ownership } = &proposed.state else {
+            return Err(DbError::Message(
+                "membership acceptance has no prepared owner".into(),
+            ));
+        };
+        if ownership.pending.len() != 1 || !ownership.pending.contains(accepted.commit_ref()) {
+            return Err(DbError::Message(
+                "membership acceptance belongs to another accepted commit".into(),
+            ));
+        }
+        if let Some(exact) = accepted.exact_publication() {
+            if exact.reference() != publication {
+                return Err(DbError::Message(
+                    "membership acceptance names another winning publication".into(),
+                ));
+            }
+        }
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                [closed.object_id().to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        let remote = if exists {
+            let existing = load_remote_object_on(&tx, closed.object_id())?;
+            let RemoteObjectRecord::RetainedAuthority(record) = &existing else {
+                return Err(DbError::Message(
+                    "membership acceptance changed ownership domain".into(),
+                ));
+            };
+            let owned = match &record.state {
+                RetainedAuthorityObjectState::Prepared { ownership } => {
+                    ownership.pending.contains(accepted.commit_ref())
+                }
+                RetainedAuthorityObjectState::UploadedVerified { ownership } => {
+                    ownership.pending.contains(accepted.commit_ref())
+                        || ownership.activated.contains(accepted.commit_ref())
+                }
+                _ => false,
+            };
+            if record.identity != proposed.identity
+                || record.payloads != proposed.payloads
+                || !owned
+            {
+                return Err(DbError::Message(
+                    "membership acceptance differs from its durable finalization owner".into(),
+                ));
+            }
+            existing
+        } else {
+            if accepted.exact_publication().is_none() {
+                return Err(DbError::Message(
+                    "covered membership acceptance has no durable finalization owner".into(),
+                ));
+            }
+            persist_exact_remote_object_on(
+                &tx,
+                self.store_dir,
+                &closed,
+                "accepted membership head result",
+            )?;
+            closed.record().clone()
+        };
+        tx.commit().map_err(DbError::from)?;
+        Ok(remote)
     }
 
     fn mark_remote_object_uploaded(
@@ -217,32 +305,6 @@ impl StoreSession<'_> {
         Ok(())
     }
 
-    fn mark_store_head_uploaded(
-        &self,
-        head: coven_protocol::store_commit::StoreDeviceHeadRef,
-    ) -> Result<(), DbError> {
-        let conn = self.conn;
-        let object_id = remote_object_id(&head.object);
-        let current = load_remote_object_on(conn, object_id)?;
-        if !matches!(
-            &current,
-            RemoteObjectRecord::RetainedAuthority(record)
-                if matches!(
-                    &record.identity.domain,
-                    coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
-                        reference,
-                        ..
-                    } if reference == &head
-                )
-        ) {
-            return Err(DbError::Message(format!(
-                "remote object {object_id} is not the exact prepared Store head"
-            )));
-        }
-        mark_remote_object_uploaded_on(conn, current)?;
-        Ok(())
-    }
-
     #[cfg(any(test, feature = "test-utils"))]
     fn prepared_audience_objects(
         &self,
@@ -280,6 +342,15 @@ impl StoreDatabase {
     ) -> Result<Vec<PreparedRemoteObject>, DbError> {
         let write_id = write_id.clone();
         self.call_store(move |session| session.prepared_remote_objects(&write_id))
+            .await
+    }
+
+    pub async fn stage_membership_head_acceptance(
+        &self,
+        accepted: AcceptedStoreCommitEvidence,
+        closed: coven_protocol::remote_object::ClosedRemoteObject,
+    ) -> Result<RemoteObjectRecord, DbError> {
+        self.call_store(move |session| session.stage_membership_head_acceptance(accepted, closed))
             .await
     }
 
@@ -321,14 +392,6 @@ impl StoreDatabase {
         commit: StoreBatchCommitRef,
     ) -> Result<(), DbError> {
         self.call_store(move |session| session.mark_candidate_commit_uploaded(commit))
-            .await
-    }
-
-    pub async fn mark_store_head_uploaded(
-        &self,
-        head: coven_protocol::store_commit::StoreDeviceHeadRef,
-    ) -> Result<(), DbError> {
-        self.call_store(move |session| session.mark_store_head_uploaded(head))
             .await
     }
 

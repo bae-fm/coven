@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "device_join_retention.rs"]
+mod device_join_retention;
+
 impl<'a> MergeHistoryVerifier<'a> {
     /// The attempts this commit activates a registration under.
     ///
@@ -108,53 +111,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(())
     }
 
-    pub(crate) async fn verify_author_exclusion_nonactivation(
-        &mut self,
-        locator: &coven_database::AuthorExclusionActivationLocator,
-        activation_head: &StoreDeviceHead,
-        activation_head_object: &ExactObjectRef,
-        activation_commit: &VerifiedStoreBatchCommit,
-        activation_predecessor_state: &ResolvedStoreDeviceState,
-        operations: &VerifiedStoreDeviceOperations,
-        candidate: &VerifiedStoreBatchCommit,
-        candidate_head: &StoreDeviceHead,
-        candidate_head_object: &ExactObjectRef,
-    ) -> Result<remote_object::VerifiedCandidateNonactivation, StorePullError> {
-        self.commit_verifier
-            .verify_author_exclusion_nonactivation(
-                locator,
-                activation_head,
-                activation_head_object,
-                activation_commit,
-                activation_predecessor_state,
-                operations,
-                candidate,
-                candidate_head,
-                candidate_head_object,
-            )
-            .await
-    }
-
-    pub(crate) async fn authenticate_blocked_candidate(
-        &mut self,
-        candidate: &coven_database::BlockedMergeCandidate,
-    ) -> Result<VerifiedStoreBatchCommit, StoreError> {
-        let reference = &candidate.head.commit;
-        let verified = self
-            .commit_verifier
-            .authenticate_bytes(reference, &candidate.commit_bytes)
-            .await?;
-        if verified.value() != candidate.commit.value()
-            || verified.reference().object != candidate.commit_object
-            || verified.value().to_bytes() != candidate.commit_bytes
-        {
-            return Err(StoreError::InvalidOutbound(
-                "blocked Merge candidate differs from its authenticated commit".to_string(),
-            ));
-        }
-        Ok(verified)
-    }
-
     /// Verify the attempt this device is joining under and build the history
     /// it has to carry.
     ///
@@ -184,6 +140,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         attempt_id: store_commit::DeviceJoinAttemptId,
         attempt_activation: &StoreBatchCommitRef,
         installed: &CommitFrontier,
+        publication: coven_database::AcceptedStorePublicationInterval,
     ) -> Result<(StoreHistoryCut, DeviceJoinBootstrapPlan), StorePullError> {
         self.verify_refs([attempt_activation.clone()]).await?;
         let activation = self.load_ref(attempt_activation).await?;
@@ -215,6 +172,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 attempt_activation,
                 &membership_state,
                 installed,
+                publication,
             )
             .await?;
         Ok((bootstrap_cut, plan))
@@ -241,6 +199,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         attempt_activation: &StoreBatchCommitRef,
         membership_state: &StoreMembershipStateRef,
         installed: &CommitFrontier,
+        publication: coven_database::AcceptedStorePublicationInterval,
     ) -> Result<DeviceJoinBootstrapPlan, StorePullError> {
         let membership = self
             .load_predecessor_membership(membership_state)
@@ -248,14 +207,26 @@ impl<'a> MergeHistoryVerifier<'a> {
             .map_err(StorePullError::from)?;
         let mut pending = history_cut_references(bootstrap_cut);
         pending.push(attempt_activation.clone());
+        pending.extend(
+            publication
+                .interval()
+                .entries()
+                .iter()
+                .filter_map(|accepted| match &accepted.entry().payload {
+                    store_commit::StorePublicationPayload::Commit(reference) => {
+                        Some(reference.clone())
+                    }
+                    store_commit::StorePublicationPayload::Snapshot(_) => None,
+                }),
+        );
         self.verify_refs(pending.clone()).await?;
         self.prepare_device_join_bootstrap_from_verified_parts(
             bootstrap_cut,
             attempt_activation,
             membership_state,
             membership,
-            pending,
             installed,
+            publication,
         )
         .await
     }
@@ -267,8 +238,8 @@ impl<'a> MergeHistoryVerifier<'a> {
         attempt_activation: &StoreBatchCommitRef,
         membership_state: &StoreMembershipStateRef,
         membership: MembershipChain,
-        mut pending: Vec<StoreBatchCommitRef>,
         installed: &CommitFrontier,
+        publication: coven_database::AcceptedStorePublicationInterval,
     ) -> Result<DeviceJoinBootstrapPlan, StorePullError> {
         // The bootstrap carries the founder registration itself, so this is one
         // of the few places that wants the object rather than its reference.
@@ -304,63 +275,33 @@ impl<'a> MergeHistoryVerifier<'a> {
             ));
         }
 
-        let mut required = BTreeSet::new();
-        while let Some(reference) = pending.pop() {
-            if installed.covers_commit(&reference) || !required.insert(reference.clone()) {
-                continue;
-            }
-            let verified = self.history.commits.get(&reference).ok_or_else(|| {
-                StorePullError::InvalidState(format!(
-                    "verified device join bootstrap is missing required commit {}/{}",
-                    reference.coord.stream_id, reference.coord.sequence,
-                ))
-            })?;
-            pending.extend(commit_predecessor_references(verified.verified.value()));
-        }
-
-        let mut emitted = BTreeSet::new();
-        let mut ordered = Vec::with_capacity(required.len());
-        while emitted.len() != required.len() {
-            let next = required.iter().find_map(|reference| {
-                let verified = &self.history.commits[reference];
-                (!emitted.contains(reference)
-                    && commit_predecessor_references(verified.verified.value())
-                        .iter()
-                        .all(|dependency| {
-                            installed.covers_commit(dependency) || emitted.contains(dependency)
-                        }))
-                .then(|| reference.clone())
-            });
-            let Some(reference) = next else {
-                return Err(StorePullError::InvalidState(
-                    "verified device join bootstrap history has an unresolved predecessor"
-                        .to_string(),
-                ));
-            };
-            let verified = &self.history.commits[&reference];
-            ordered.push(DeviceJoinBootstrapCommit {
-                reference: reference.clone(),
-                commit: verified.verified.clone(),
-                registrations: verified.registrations.clone(),
-                device_operations: verified.operations.clone(),
-                activation: DeviceJoinBootstrapActivation {
-                    head: verified.activation_head.clone(),
-                    object: verified.activation_head_object.clone(),
-                    history_evidence: verified.history_evidence.clone(),
-                },
-            });
-            emitted.insert(reference);
-        }
-
-        Ok(DeviceJoinBootstrapPlan {
-            founder_reference,
-            founder: founder.value,
-            founder_bytes: founder.bytes,
+        let commits = self
+            .history
+            .commits
+            .iter()
+            .map(|(reference, verified)| {
+                (
+                    reference.clone(),
+                    DeviceJoinBootstrapCommit {
+                        reference: reference.clone(),
+                        commit: verified.verified.clone(),
+                        registrations: verified.registrations.clone(),
+                        device_operations: verified.operations.clone(),
+                        history_evidence: verified.history_evidence.clone(),
+                    },
+                )
+            })
+            .collect();
+        DeviceJoinBootstrapPlan::from_verified_commits(
+            ReferencedStoreDeviceRegistration::verified(founder_reference, founder.value)?,
             genesis,
-            membership: coven_database::InitialStoreMembershipAuthority {
+            coven_database::InitialStoreMembershipAuthority {
                 head_refs: membership.head_refs().to_vec(),
             },
-            commits: ordered,
-        })
+            installed,
+            publication,
+            commits,
+        )
+        .map_err(StorePullError::Database)
     }
 }

@@ -33,6 +33,8 @@ pub enum CovenError {
     Migration(MigrationError),
     #[error("Coven schema migration error: {0}")]
     CovenMigration(coven_database::CovenMigrationError),
+    #[error("snapshot preparation failed: {0}")]
+    SnapshotPreparation(#[source] Box<OpenError>),
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("file error: {0}")]
@@ -106,6 +108,9 @@ impl From<OpenError> for CovenError {
             OpenError::CovenMigration(e) => CovenError::CovenMigration(e),
             OpenError::Migration(e) => CovenError::Migration(e),
             OpenError::Db(e) => CovenError::from(e),
+            error @ OpenError::PreparationCleanup { .. } => {
+                CovenError::SnapshotPreparation(Box::new(error))
+            }
         }
     }
 }

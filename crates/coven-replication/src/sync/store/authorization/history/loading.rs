@@ -1,6 +1,21 @@
 use super::*;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
+    pub(crate) async fn candidate_grant_retirement(
+        &mut self,
+        candidate: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+    ) -> Result<
+        Option<(
+            MembershipChain,
+            coven_protocol::store_commit::StorePublicationRef,
+        )>,
+        pull::StorePullError,
+    > {
+        self.history_verifier
+            .candidate_grant_retirement(&self.database, candidate)
+            .await
+    }
+
     pub(crate) async fn stage_verified_blob_plaintext(
         &self,
         authority: &coven_protocol::blob::RowBlobAuthority,
@@ -36,7 +51,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .history_verifier
             .load_exact_anchored_membership_traversal(membership.head_refs(), Some(&owner))
             .await?;
-        Ok(traversed.into_rollup_parts())
+        self.history_verifier
+            .membership_rollup_parts(traversed)
+            .await
     }
 
     pub(crate) fn root(&self) -> &StoreRootRef {
@@ -59,18 +76,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     > {
         self.history_verifier
             .authenticate_bytes(reference, bytes)
-            .await
-    }
-
-    pub(crate) async fn authenticate_blocked_candidate(
-        &mut self,
-        candidate: &coven_database::BlockedMergeCandidate,
-    ) -> Result<
-        coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        crate::sync::store::StoreError,
-    > {
-        self.history_verifier
-            .authenticate_blocked_candidate(candidate)
             .await
     }
 
@@ -107,6 +112,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         }
         let commit_ref = verified_commit.reference();
         let commit = verified_commit.value();
+        // Another writer can install the predecessors after this history owner
+        // opens. Verify against the same retained authority used by preparation.
+        self.seed_retained_history().await?;
         self.history_verifier
             .verify_refs(pull::commit_predecessor_references(commit))
             .await?;
@@ -152,18 +160,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         state: ResolvedStoreDeviceState,
     ) -> Result<coven_protocol::store_commit::VerifiedStoreDeviceOperations, pull::StorePullError>
     {
-        let resolver =
-            crate::sync::store::commit_verification::commit::DeviceStateResolver::Database(
-                &self.database,
-            );
         self.history_verifier
-            .load_local_device_operations_with_resolver(
-                &resolver,
-                verified_commit,
-                membership,
-                state_ref,
-                state,
-            )
+            .load_local_device_operations(verified_commit, membership, state_ref, state)
             .await
     }
 
@@ -204,118 +202,48 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    /// Resolve the snapshot this device has already acknowledged, ready to
-    /// stand on.
+    /// Resolve the latest installed accepted snapshot, ready to stand on.
     ///
     /// `Err` is never the answer to "there is nothing to do" — every way of
     /// having nothing to do is a [`ReplayBaselineDecline`], so the cycle can
     /// say which one it hit instead of printing a silent nothing.
-    pub(crate) async fn resolve_acknowledged_snapshot(
+    pub(crate) async fn resolve_accepted_snapshot(
         &mut self,
-        registration: &StoreDeviceRegistrationRef,
-        members: &MembershipChain,
     ) -> Result<
         Result<
-            crate::sync::store::commit_verification::merge_history::SelectedReplayBaselineRetirement,
+            crate::sync::store::commit_verification::merge_history::SelectedStoreSnapshot,
             crate::sync::store::ReplayBaselineDecline,
         >,
         crate::sync::store::acknowledgements::StoreAckError,
-    >{
+    > {
         use crate::sync::store::ReplayBaselineDecline;
 
-        let Some(locator) = self
+        let Some(snapshot) = self
             .history_verifier
-            .newest_acknowledged_snapshot(registration)
-        else {
-            return Ok(Err(ReplayBaselineDecline::NoAcknowledgedSnapshot));
-        };
-        let generation = locator.snapshot.generation;
-        if self
-            .history_verifier
-            .replay_baseline_stands_on(&locator.snapshot)
-            && !self
-                .database
-                .replay_baseline_would_advance(
-                    self.history_verifier.replay_baseline_coverage().clone(),
-                )
-                .await?
-        {
-            return Ok(Err(ReplayBaselineDecline::BaselineAtCoverage {
-                generation,
-            }));
-        }
-        let author = self
-            .database
-            .activated_store_device_registration_records()
-            .await?
-            .into_iter()
-            .find(|record| record.reference() == &locator.author_registration);
-        let Some(author) = author else {
-            return Ok(Err(ReplayBaselineDecline::SnapshotAuthorInactive {
-                generation,
-            }));
-        };
-        let snapshot = self
-            .history_verifier
-            .load_acknowledged_snapshot(&locator, author.value())
+            .load_installed_current_accepted_snapshot(&self.database)
             .await
-            .map_err(crate::sync::store::acknowledgements::StoreAckError::from)?;
-        let Some(snapshot) = snapshot else {
-            return Ok(Err(ReplayBaselineDecline::SnapshotUnavailable {
-                generation,
-            }));
+            .map_err(crate::sync::store::snapshots::SnapshotError::from)?
+        else {
+            return Ok(Err(ReplayBaselineDecline::NoAcceptedSnapshot));
         };
         if !self
             .database
-            .replay_baseline_would_advance(snapshot.meta.coverage.clone())
+            .replay_baseline_would_advance(
+                snapshot.reference.clone(),
+                snapshot.meta.coverage.clone(),
+            )
             .await?
         {
             return Ok(Err(ReplayBaselineDecline::BaselineAtCoverage {
-                generation,
+                snapshot: snapshot.reference,
             }));
         }
         let verified = match self
             .history_verifier
-            .verify_replay_baseline_retirement(&snapshot, members)
+            .verify_installable_snapshot(&snapshot)
             .await
         {
             Ok(verified) => verified,
-            Err(crate::sync::store::pull::StorePullError::SnapshotNotStable {
-                member,
-                device_id,
-            }) => {
-                return Ok(Err(ReplayBaselineDecline::MissingWriterAcknowledgement {
-                    generation,
-                    member,
-                    device_id,
-                }));
-            }
-            Err(
-                crate::sync::store::pull::StorePullError::SnapshotAuthorInactive
-                | crate::sync::store::pull::StorePullError::SnapshotAuthorNotOwner
-                | crate::sync::store::pull::StorePullError::SnapshotBehindReplayBaseline,
-            ) => {
-                return Ok(Err(ReplayBaselineDecline::SnapshotRejected { generation }));
-            }
-            Err(
-                crate::sync::store::pull::StorePullError::ReplayRetirementMembershipUnwitnessed,
-            ) => {
-                return Ok(Err(ReplayBaselineDecline::MembershipNotAccepted {
-                    generation,
-                }));
-            }
-            Err(
-                crate::sync::store::pull::StorePullError::ReplayRetirementOwnerRecoveryPending {
-                    member,
-                    device_id,
-                },
-            ) => {
-                return Ok(Err(ReplayBaselineDecline::PendingOwnerRecovery {
-                    generation,
-                    member,
-                    device_id,
-                }));
-            }
             Err(error) => {
                 return Err(crate::sync::store::snapshots::SnapshotError::from(error).into());
             }
@@ -328,87 +256,35 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         ))
     }
 
-    /// The newest snapshot this device could acknowledge next, verified as
-    /// installable.
-    ///
-    /// What a device *may say next* — not what it has already said. A snapshot
-    /// whose device state the store has moved past fails these filters while
-    /// remaining exactly what this device acknowledged, which is why the
-    /// baseline advance is licensed elsewhere.
-    ///
-    /// A snapshot stream's coverage grows with its generation, which is what
-    /// makes the three filters below answers about a *descent* rather than
-    /// about each generation separately:
-    ///
-    /// - A snapshot this device's own frontier does not cover is ahead of what
-    ///   the device can say, and the generation below it is the one to ask
-    ///   about. This is the only one worth descending for, and how far it
-    ///   descends is how far behind the publisher this device is.
-    /// - A snapshot the replay baseline already stands past would need the
-    ///   history the baseline retired, and every generation below it stands
-    ///   further back still.
-    /// - A snapshot naming a device state this device is not at cannot be what
-    ///   this device acknowledges, and the states below it are older ones the
-    ///   store has moved even further past.
-    pub(crate) async fn select_acknowledgement_snapshot(
-        &mut self,
-        frontier: &CommitFrontier,
-        device_state: &StoreDeviceStateRef,
-    ) -> Result<
-        Option<
-            crate::sync::store::commit_verification::merge_history::SelectedInstallableStoreSnapshot,
-        >,
-        crate::sync::store::acknowledgements::StoreAckError,
-    >{
-        use crate::sync::store::commit_verification::merge_history::StoreSnapshotDescentStep;
-
-        let registrations = self
-            .database
-            .activated_store_device_registration_records()
-            .await?;
-        // Held by value so the descent below can ask about them while the
-        // verifier is borrowed to load candidates.
-        let baseline_coverage = self.history_verifier.replay_baseline_coverage().clone();
-        let mut weigh = |snapshot: &coven_database::PublishedStoreSnapshot| {
-            let coverage = &snapshot.meta.coverage;
-            if !frontier.covers(coverage) {
-                return StoreSnapshotDescentStep::Descend;
-            }
-            if !coverage.covers(&baseline_coverage)
-                || snapshot.meta.state.devices.state_hash() != device_state.state_hash()
-                || snapshot.meta.state.devices.recovery() != device_state.recovery()
-            {
-                return StoreSnapshotDescentStep::Abandon;
-            }
-            StoreSnapshotDescentStep::Weigh
-        };
-        Ok(self
-            .history_verifier
-            .select_listed_installable_store_snapshot(
-                registrations
-                    .iter()
-                    .map(|registration| (registration.reference(), registration.value())),
-                &mut weigh,
-            )
-            .await
-            .map_err(crate::sync::store::snapshots::SnapshotError::from)?)
-    }
-
     pub(crate) async fn load_current_membership(
         &mut self,
         owner_pubkey: &str,
     ) -> Result<MembershipChain, crate::sync::store::membership::MembershipOpsError> {
         let _membership_load = self.database.membership_load_permit().await;
+        let (publication, _) = self
+            .history_verifier
+            .load_store_publications_for_replay(&self.database)
+            .await
+            .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
         let cursors = self
             .database
             .membership_head_cursors()
             .await
             .map_err(crate::sync::store::membership::MembershipOpsError::Database)?;
-        let chain = Box::pin(
-            self.history_verifier
-                .load_exact_anchored_membership(&cursors.head_refs, Some(owner_pubkey)),
-        )
-        .await?;
+        let chain = self
+            .history_verifier
+            .membership_at_accepted_publication(&publication, &cursors.head_refs)
+            .await
+            .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
+        if !chain.is_founded_by(owner_pubkey) {
+            return Err(
+                crate::sync::store::membership::AnchoredChainError::FounderMismatch {
+                    founder: chain.founder_pubkey().map(str::to_string),
+                    owner: owner_pubkey.to_string(),
+                }
+                .into(),
+            );
+        }
         self.database
             .persist_membership_head_cursors(chain.head_refs().to_vec())
             .await
@@ -442,6 +318,23 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let chain = match carried.filter(|chain| chain.covers_heads(&cursors.head_refs)) {
             Some(chain) => chain,
             None => {
+                let installed_owner = self
+                    .database
+                    .get_protocol_state(coven_protocol::membership::OWNER_PUBKEY_STATE_KEY)
+                    .await
+                    .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
+                // Installing the owner anchor creates the initial replay baseline.
+                // Before that installation the rooted founder chain is the authority;
+                // a reopened Store must load its accepted history before walking
+                // cursors that can name Store-activated membership changes.
+                if installed_owner.is_some() {
+                    Box::pin(
+                        self.history_verifier
+                            .load_store_publications_for_replay(&self.database),
+                    )
+                    .await
+                    .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
+                }
                 Box::pin(
                     self.history_verifier
                         .load_exact_anchored_membership(&cursors.head_refs, Some(owner_pubkey)),
@@ -451,33 +344,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         };
         let root = self.history_verifier.verified_root().reference().clone();
         let root_object = self.history_verifier.verified_root().object().clone();
-        let founder = chain.founder_coord().ok_or_else(|| {
-            crate::sync::store::membership::AnchoredChainError::LoadFailed(
-                "owner-anchored membership chain is empty".to_string(),
-            )
-        })?;
-        let founder_head_ref = chain
-            .head_ref_for_stream(
-                &founder.author_pubkey,
-                &founder.author_owner_grant,
-                founder.stream_id,
-            )
-            .cloned()
-            .ok_or_else(|| {
-                crate::sync::store::membership::AnchoredChainError::LoadFailed(
-                    "owner-anchored membership chain has no exact founder head".to_string(),
-                )
-            })?;
-        let founder_head = self
-            .history_verifier
-            .load_exact_membership_head(&founder_head_ref)
-            .await?;
-        let founder_registration_ref = founder_head.body.author_registration.clone();
         let founder_registration = self
             .history_verifier
-            .load_registration(&founder_registration_ref)
+            .load_founder_registration()
             .await
             .map_err(crate::sync::store::membership::AnchoredChainError::from_store_object)?;
+        let founder_registration_ref = StoreDeviceRegistrationRef::from_registration(
+            &founder_registration.value,
+            founder_registration.object.clone(),
+        );
         if root_object.value.descriptor.founder_pubkey != owner_pubkey {
             return Err(
                 crate::sync::store::membership::AnchoredChainError::LoadFailed(

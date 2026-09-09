@@ -150,6 +150,13 @@ impl Database {
         .await
     }
 
+    pub async fn remove_store_publication_boundary_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| {
+            database.clear_table(DatabaseTestTable::named("store_publication_current"))
+        })
+        .await
+    }
+
     pub async fn table_row_count_for_test(&self, table: DatabaseTestTable) -> Result<i64, DbError> {
         self.test_sql(move |database| database.table_row_count(table))
             .await

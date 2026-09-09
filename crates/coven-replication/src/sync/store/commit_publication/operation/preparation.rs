@@ -1,14 +1,12 @@
 use super::close_prepared_packages;
-use crate::sync::store::commit_publication::operation::commit_plan::{
-    next_store_sequence, successor_store_sequence,
-};
+use crate::sync::store::commit_publication::operation::commit_plan::next_store_sequence;
 use crate::sync::store::StoreError;
 use coven_database::{PreparedProtocolObject, PreparedStoreWrite, StoreWritePreparation};
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
-    commit_semantic_prefix, head_slot_prefix, CirclePackageInput, StoreCommitCoord,
-    StoreCommitOperationsInput, StoreCommitOrder, StorePackageInput, SuccessorLink,
+    commit_semantic_prefix, store_publication_entry_semantic_prefix, CirclePackageInput,
+    StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder, StorePackageInput,
 };
 
 use super::AuthorizedWriterOperation;
@@ -27,7 +25,25 @@ impl AuthorizedWriterOperation<'_> {
         &mut self,
         timings: &mut coven_foundation::stage_timing::StageTimings,
     ) -> Result<bool, StoreError> {
+        let authorship = self.database.author_own_stream().await;
+        self.prepare_store_write_with_authorship(timings, &authorship)
+            .await
+    }
+
+    pub(super) async fn prepare_store_write_with_authorship(
+        &mut self,
+        timings: &mut coven_foundation::stage_timing::StageTimings,
+        authorship: &coven_database::OwnStreamAuthorship,
+    ) -> Result<bool, StoreError> {
         let database = self.database.clone();
+        self.prepare_publication_boundary().await?;
+        let reservation = database.active_store_publication().await?;
+        if reservation
+            .as_ref()
+            .is_some_and(|active| !active.is_awaiting_preparation())
+        {
+            return Ok(false);
+        }
         let Some(pending) = timings
             .stage("read pending write", database.prepare_store_write())
             .await?
@@ -35,7 +51,9 @@ impl AuthorizedWriterOperation<'_> {
             return Ok(false);
         };
         let stream_id = self.announcement_stream_id();
-        let membership = self.membership.clone();
+        let local = authorship.read_local_commit_state(stream_id).await?;
+        let (previous, _frontier, membership, publication) = local.into_parts();
+        let publication_previous = publication.require_observed()?.clone();
         let db = &database;
         let PreparedStoreWrite {
             write_id,
@@ -43,10 +61,23 @@ impl AuthorizedWriterOperation<'_> {
             blob_facts,
             partitions,
         } = pending;
+        if let Some(active) = &reservation {
+            if active.owner()
+                != &coven_database::ActiveStorePublicationOwner::StoreWrite(write_id.clone())
+            {
+                return Err(StoreError::InvalidOutbound(
+                    "awaiting reservation differs from oldest pending write".to_string(),
+                ));
+            }
+        }
         let preparation = async {
             let root = self.store_root().clone();
             let store_root_hash = root.store_root_hash;
-            let previous = database.latest_local_store_position(stream_id).await?;
+            if publication_previous.record().store_root_hash != store_root_hash {
+                return Err(StoreError::Database(coven_database::DbError::Message(
+                    "Store publication boundary belongs to another Store root".to_string(),
+                )));
+            }
             let mut observed =
                 coven_protocol::store_commit::CommitFrontier::from_refs(base.dependencies)
                     .map_err(StoreError::from)?;
@@ -70,6 +101,13 @@ impl AuthorizedWriterOperation<'_> {
                 stream_id,
                 sequence: seq,
             };
+            if let Some(active) = &reservation {
+                let (_, registration, reserved_coord) = active.commit_reservation().ok_or_else(||
+                    StoreError::InvalidOutbound("awaiting Store write has no reserved author coordinate".to_string()))?;
+                if reserved_coord != &coord || registration != self.writer.blob_write_authority().reference {
+                    return Err(StoreError::InvalidOutbound("replacement preparation would change the reserved author coordinate".to_string()));
+                }
+            }
             let order = StoreCommitOrder {
                 seq,
                 predecessor: previous.clone(),
@@ -78,14 +116,15 @@ impl AuthorizedWriterOperation<'_> {
             let authorization = timings
                 .stage(
                     "authorize outbound",
-                    self.authorize_retained_outbound(&order, membership.head_refs()),
+                    self.authorize_retained_preparation(&order, &membership.head_refs),
                 )
                 .await
                 .map_err(StoreError::from)?;
             let membership_authority = self.membership_authority(&authorization.membership)?;
+            self.membership = authorization.membership.clone();
             let membership_state = authorization.membership_state;
             let device_state = authorization.device_state_ref;
-            let active_store_members: std::collections::BTreeSet<String> = membership
+            let active_store_members: std::collections::BTreeSet<String> = authorization.membership
                 .current_members()
                 .into_iter()
                 .map(|(pubkey, _)| pubkey)
@@ -139,21 +178,6 @@ impl AuthorizedWriterOperation<'_> {
                 store_root_hash,
                 ProtocolObjectDomain::StoreCommit,
             );
-            let head_context = ProtocolObjectContext::signed_plaintext(
-                store_root_hash,
-                ProtocolObjectDomain::StoreHead,
-            );
-            let device_id = self.local_device_id().to_string();
-            let head_prefix = head_slot_prefix(&device_id, seq);
-            let next_head_prefix = head_slot_prefix(&device_id, successor_store_sequence(seq)?);
-            let next_head_slot = timings
-                .stage(
-                    "allocate slots",
-                    storage.allocate_protocol_slot(&head_context, &next_head_prefix, ".json"),
-                )
-                .await
-                .map_err(StoreObjectError::from)?;
-
             let store_package = prepared_packages
                 .iter()
                 .find(|package| package.audience == coven_protocol::circle::Audience::Store)
@@ -196,6 +220,7 @@ impl AuthorizedWriterOperation<'_> {
                     write_id.clone(),
                     coord.clone(),
                     order,
+                    publication_previous.record().publication_base(),
                     membership_state,
                     device_state,
                     membership_authority,
@@ -244,34 +269,51 @@ impl AuthorizedWriterOperation<'_> {
                         &commit,
                         &authorization.membership,
                         None,
-                        authorization.device_state.clone(),
+                        &authorization.device_state,
+                        &authorization.device_state,
                         crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence::none(),
                     ),
                 )
                 .await
                 .map_err(StoreError::from)?;
             let storage = self.storage.as_ref();
-            let activation = self
+            let publication_entry = self
                 .writer
-                .announcement_activation_id()
+                .sign_store_publication_entry(&publication_previous, &commit)
                 .map_err(StoreError::from)?;
-            let head = self.writer.sign_device_head(
+            let publication_prefix = store_publication_entry_semantic_prefix(&publication_entry);
+            let publication_context = ProtocolObjectContext::signed_plaintext(
                 store_root_hash,
-                commit_ref.clone(),
-                SuccessorLink {
-                    activation,
-                    predecessor: successor.predecessor_head.map(|reference| reference.object),
-                    next_slot: next_head_slot,
-                },
-            )?;
-            let head_prepared = storage
+                ProtocolObjectDomain::StorePublicationEntry,
+            );
+            let publication_slot = timings
+                .stage(
+                    "allocate slots",
+                    storage.allocate_protocol_slot(
+                        &publication_context,
+                        &publication_prefix,
+                        ".json",
+                    ),
+                )
+                .await
+                .map_err(StoreObjectError::from)?;
+            let publication_prepared = storage
                 .prepare_protocol_object(
-                    &head_context,
-                    successor.head_slot,
-                    &head_prefix,
-                    head.to_bytes(),
+                    &publication_context,
+                    publication_slot,
+                    &publication_prefix,
+                    publication_entry.to_bytes(),
                 )
                 .map_err(StoreObjectError::from)?;
+            let publication_replacement = self
+                .writer
+                .advance_store_publication(
+                    &publication_previous,
+                    &publication_entry,
+                    &publication_prepared,
+                    &commit,
+                )
+                .map_err(StoreError::from)?;
             let (remote_objects, audience_objects) =
                 close_prepared_packages(prepared_packages, commit.value(), &commit_ref)?;
             let local_cleanup_requests = published_local_cleanup_requests(
@@ -292,9 +334,12 @@ impl AuthorizedWriterOperation<'_> {
                     value: commit,
                     prepared: commit_prepared,
                 },
-                head: PreparedProtocolObject {
-                    value: head,
-                    prepared: head_prepared,
+                publication: coven_database::StorePublicationPreparation {
+                    previous: publication_previous.record().clone(),
+                    previous_version: publication_previous.version().clone(),
+                    entry: publication_entry,
+                    entry_object: publication_prepared.reference().clone(),
+                    replacement: publication_replacement,
                 },
                 history_evidence: successor.history_evidence,
                 local_cleanup,
@@ -305,12 +350,14 @@ impl AuthorizedWriterOperation<'_> {
         let preparation = match preparation {
             Ok(preparation) => preparation,
             Err(error) => {
-                if let Some(block) = error.write_block() {
-                    if let Err(status) = database.block_write_if_unresolved(&write_id, block).await
+                if let Some((blocked_write, block)) = error.write_block(&write_id) {
+                    if let Err(status) = database
+                        .block_write_if_unresolved(&blocked_write, block)
+                        .await
                     {
                         return Err(StoreError::WriteBlockNotRecorded {
-                            write_id: write_id.clone(),
-                            preparation: Box::new(error),
+                            write_id: blocked_write,
+                            operation: Box::new(error),
                             status,
                         });
                     }

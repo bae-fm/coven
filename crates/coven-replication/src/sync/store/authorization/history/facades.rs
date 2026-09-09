@@ -1,12 +1,15 @@
 use super::*;
+use crate::sync::store::authorization::HistoryConstructionAuthority;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
-    pub(crate) fn accepted_commit_membership_state(
-        &self,
-        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Option<&coven_protocol::circle_control::StoreMembershipStateRef> {
+    pub(crate) async fn history_has_only_acknowledgements(
+        &mut self,
+        previous: &coven_protocol::store_commit::StoreHistoryCut,
+        current: &coven_protocol::store_commit::StoreHistoryCut,
+    ) -> Result<bool, crate::sync::store::pull::StorePullError> {
         self.history_verifier
-            .accepted_commit_membership_state(reference)
+            .history_has_only_acknowledgements(previous, current)
+            .await
     }
 
     pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, coven_database::DbError> {
@@ -19,24 +22,33 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         identity: Option<&UserKeypair>,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<pull::StorePullExecution, pull::StorePullError> {
-        pull::AuthorizedPull::load(
-            self.pull_history(),
-            membership,
-            identity,
-            routing_encryption,
-        )
-        .await?
-        .execute()
-        .await
-    }
-
-    pub(crate) async fn current_merge_authority_cut(
-        &mut self,
-        membership: &coven_protocol::membership::MembershipChain,
-    ) -> Result<coven_protocol::store_commit::StoreHistoryCut, pull::StorePullError> {
-        self.history_verifier
-            .current_merge_authority_cut(membership)
-            .await
+        loop {
+            let result = pull::AuthorizedPull::load(
+                self.pull_history(),
+                membership,
+                identity,
+                routing_encryption,
+            )
+            .await?
+            .execute()
+            .await;
+            if !matches!(
+                result,
+                Err(pull::StorePullError::Database(
+                    coven_database::DbError::StorePublicationChanged
+                ))
+            ) {
+                return result;
+            }
+            // execute has rolled back the attempt and disposed its checkpoint.
+            // Rebuild all verification state before reading the installed prefix.
+            tracing::debug!("restarting Store pull after concurrent publication installation");
+            self.history_verifier = Box::pin(HistoryConstructionAuthority::store().bind_verified(
+                self.storage.as_ref(),
+                self.history_verifier.verified_root().clone(),
+            ))
+            .await?;
+        }
     }
 
     pub(crate) async fn verify_owner_recovery_node_authority(
@@ -80,6 +92,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         Ok(())
     }
 
+    pub(crate) fn admit_materialized_publication(
+        &mut self,
+        materialization: &coven_database::OwnedVerifiedMergeMaterialization,
+    ) -> Result<(), pull::StorePullError> {
+        self.history_verifier
+            .admit_retained_history(std::slice::from_ref(materialization))
+    }
+
     /// The provider-operation counter of the storage this reads through, so a
     /// run over it can report each stage's count beside its wall time.
     pub(crate) fn provider_requests(
@@ -117,16 +137,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         )
     }
 
-    pub(crate) fn merge_conflict(
-        &mut self,
-    ) -> crate::sync::store::merge_conflict::MergeConflictHistory<'_, 'storage> {
-        crate::sync::store::merge_conflict::MergeConflictHistory::new(
-            &self.database,
-            self.storage.as_ref(),
-            &mut self.history_verifier,
-        )
-    }
-
     pub(crate) fn device_exclusion(
         &mut self,
     ) -> crate::sync::store::device_exclusion::DeviceExclusionHistory<'_, 'storage> {
@@ -148,7 +158,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 
     pub(crate) fn owner_promotion(&mut self) -> OwnerPromotionHistory<'_, 'storage> {
-        OwnerPromotionHistory::new(&mut self.history_verifier)
+        OwnerPromotionHistory::new(self.database.clone(), &mut self.history_verifier)
     }
 
     pub(crate) fn bind_restore(

@@ -1,20 +1,16 @@
 use super::{
-    publication_state::{
-        MergeAbandonmentOutcome, MergeCandidateAbandonmentPreparation, PreparedStoreWriteState,
-        StoreWritePreparation,
-    },
+    publication_state::{PreparedStoreWriteState, StoreWritePreparation},
     StoreDatabase, StoreSession,
 };
+#[cfg(any(test, feature = "test-utils"))]
+use crate::StoreWriteBase;
 use crate::{
-    persist_exact_remote_object_on, DbError, DurablePreparedProtocolObject, StoreWriteBase,
-    LOCAL_DEVICE_ID_STATE_KEY,
+    persist_exact_remote_object_on, ActiveStorePublication, ActiveStorePublicationOwner, DbError,
+    DurablePreparedProtocolObject, LOCAL_DEVICE_ID_STATE_KEY,
 };
 use coven_protocol::remote_object::RemoteObjectRecord;
-use coven_protocol::store_commit::{
-    CommitFrontier, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
-};
+use coven_protocol::store_commit::{CommitFrontier, StoreCommitCoord, StoreDeviceRegistrationRef};
 use coven_protocol::write::WriteStatus;
-use rusqlite::OptionalExtension;
 
 impl StoreSession<'_> {
     fn table_schema_for_apply(&mut self) -> Result<crate::TableSchema, DbError> {
@@ -42,11 +38,9 @@ impl StoreSession<'_> {
             serde_json::from_str(&registration_object).map_err(|error| {
                 DbError::context("prepared write exact registration ref", error)
             })?;
-        if registration_ref != stage.commit.value.author_registration
-            || registration_ref != stage.head.value.author_registration
-        {
+        if registration_ref != stage.commit.value.author_registration {
             return Err(DbError::Message(
-                "prepared Store commit/head author registration differs from local activation"
+                "prepared Store commit author registration differs from local activation"
                     .to_string(),
             ));
         }
@@ -80,22 +74,35 @@ impl StoreSession<'_> {
             ));
         }
         let commit_ref = stage.commit.value.reference().clone();
-        if stage.head.value.commit != commit_ref {
-            return Err(DbError::Message(
-                "prepared Store head does not activate the exact prepared commit".to_string(),
-            ));
-        }
         stage
             .history_evidence
             .validate_for(&commit_ref, stage.commit.value.value())
             .map_err(|error| DbError::context("prepared Store history evidence", error))?;
-        StoreDeviceHead::parse_at(
-            &stage.head.value.to_bytes(),
-            stage.root.store_root_hash,
-            registration,
-            &commit_ref,
+        let installed_publication =
+            super::observed_store_publication::load_store_current_publication_on(&tx)?;
+        if installed_publication.record() != &stage.publication.previous
+            || installed_publication.observed_version() != Some(&stage.publication.previous_version)
+        {
+            return Err(DbError::Message(
+                "prepared Store write extends a stale publication boundary".to_string(),
+            ));
+        }
+        let publication_reference = coven_protocol::store_commit::StorePublicationRef::from_entry(
+            &stage.publication.entry,
+            stage.publication.entry_object.clone(),
         )
-        .map_err(|error| DbError::context("verify prepared Store head", error))?;
+        .map_err(|error| DbError::context("prepared Store publication entry", error))?;
+        stage
+            .publication
+            .replacement
+            .verify_commit_transition(
+                &stage.publication.previous,
+                &stage.publication.entry,
+                &publication_reference,
+                &stage.commit.value,
+                &registration.device_signing_pubkey,
+            )
+            .map_err(|error| DbError::context("prepared Store publication transition", error))?;
         let (stored_base, stored_status, stored_preparation): (
             Option<String>,
             String,
@@ -122,8 +129,15 @@ impl StoreSession<'_> {
         })?;
         let partitions = crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
             .store_write_partitions(stage.write_id.as_str())?;
-        let stored_base: StoreWriteBase = serde_json::from_str(&stored_base)
-            .map_err(|error| DbError::context(format!("write {} base", stage.write_id), error))?;
+        let records = super::StoreRecords::new(&tx, self.store_dir);
+        let stored_base = records.effective_store_write_base(&stage.write_id, &stored_base)?;
+        if let Some(rebased) = records.rebased_store_write(&stage.write_id)? {
+            if rebased.publication_base != stage.commit.value.publication_base {
+                return Err(DbError::Message(
+                    "rebased write requires the validated snapshot base".to_string(),
+                ));
+            }
+        }
         let mut stored_dependencies = CommitFrontier::from_refs(stored_base.dependencies)
             .map_err(|error| DbError::context("stored write dependencies", error))?;
         let observed_predecessor = stored_dependencies.0.remove(&stream_id);
@@ -131,21 +145,6 @@ impl StoreSession<'_> {
             return Err(DbError::Message(format!(
                 "prepared commit dependencies differ from write {}",
                 stage.write_id
-            )));
-        }
-        let another_prepared: Option<String> = tx
-            .query_row(
-                "SELECT write_id FROM store_writes
-                 WHERE prepared IS NOT NULL AND write_id != ?1
-                 ORDER BY ordinal LIMIT 1",
-                [stage.write_id.as_str()],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        if let Some(other_write_id) = another_prepared {
-            return Err(DbError::Message(format!(
-                "write {other_write_id} already owns Store publication"
             )));
         }
         let durable_predecessor =
@@ -173,6 +172,50 @@ impl StoreSession<'_> {
             return Err(DbError::Message(format!(
                 "outbound Store commit exact predecessor differs from durable {durable_predecessor:?}"
             )));
+        }
+
+        let active_publication = ActiveStorePublication::commit(
+            ActiveStorePublicationOwner::StoreWrite(stage.write_id.clone()),
+            stage.write_id.clone(),
+            registration_ref,
+            commit_ref.coord.clone(),
+            stage.publication.clone(),
+        )?;
+        let reserved = super::active_store_publication::load_active_store_publication_on(&tx)?;
+        if let Some(reserved) = reserved
+            .as_ref()
+            .filter(|active| active.is_awaiting_preparation())
+        {
+            if reserved.owner() != active_publication.owner()
+                || reserved.commit_reservation() != active_publication.commit_reservation()
+            {
+                return Err(DbError::Message(
+                    "candidate preparation differs from its retained reservation".to_string(),
+                ));
+            }
+            let replacement = reserved.replace_attempt(stage.publication.clone())?;
+            super::active_store_publication::update_active_store_publication_on(
+                &tx,
+                reserved,
+                &replacement,
+            )?;
+        } else {
+            match super::active_store_publication::claim_active_store_publication_on(
+                &tx,
+                &active_publication,
+            )? {
+                super::active_store_publication::ActiveStorePublicationClaim::Acquired => {}
+                super::active_store_publication::ActiveStorePublicationClaim::AlreadyOwned => {
+                    return Err(DbError::Message(
+                        "pending Store write already owns an active publication".to_string(),
+                    ));
+                }
+                super::active_store_publication::ActiveStorePublicationClaim::Occupied(source) => {
+                    return Err(DbError::Message(format!(
+                        "another local Store operation owns publication: {source:?}"
+                    )));
+                }
+            }
         }
 
         let mut object_ids = std::collections::BTreeSet::new();
@@ -284,27 +327,10 @@ impl StoreSession<'_> {
             &stage.audiences.packages,
             &stage.audiences.blobs,
         )?;
-        let head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
-            head_hash: stage.head.value.head_hash(),
-            object: stage.head.prepared.reference().clone(),
-        };
-        let head_remote = RemoteObjectRecord::candidate_activated_store_head(
-            head_ref,
-            &stage.head.value.to_bytes(),
-            stage.head.prepared.stored_bytes(),
-            commit_ref.clone(),
-        )
-        .map_err(|error| DbError::context("prepared Store head", error))?;
-        persist_exact_remote_object_on(&tx, self.store_dir, &head_remote, "Store head")?;
-
-        let prepared = PreparedStoreWriteState::Publication {
+        let prepared = PreparedStoreWriteState {
             commit: DurablePreparedProtocolObject::new(
                 stage.commit.value.to_bytes(),
                 stage.commit.prepared,
-            ),
-            head: DurablePreparedProtocolObject::new(
-                stage.head.value.to_bytes(),
-                stage.head.prepared,
             ),
             history_evidence: stage.history_evidence,
             local_cleanup: stage.local_cleanup,
@@ -327,177 +353,15 @@ impl StoreSession<'_> {
                 stage.write_id
             )));
         }
-        tx.commit().map_err(DbError::from)?;
-        Ok(())
-    }
-
-    fn prepare_merge_candidate_abandonment(
-        &mut self,
-        stage: MergeCandidateAbandonmentPreparation,
-    ) -> Result<(), DbError> {
-        let verified_authority = &mut *self.verified_store_authority;
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let (raw_status, raw_prepared): (String, String) = tx
-            .query_row(
-                "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
-                [stage.write_id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(DbError::from)?;
-        let status: WriteStatus = serde_json::from_str(&raw_status)
-            .map_err(|error| DbError::context("Merge abandonment status", error))?;
-        if !matches!(status, WriteStatus::Blocked(_)) {
-            return Err(DbError::Message(format!(
-                "write {} is not blocked",
-                stage.write_id
-            )));
-        }
-        let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-            .map_err(|error| DbError::context("prepared Merge candidate", error))?;
-        let PreparedStoreWriteState::Publication {
-            commit: candidate_commit,
-            head: candidate_head,
-            history_evidence: candidate_history_evidence,
-            local_cleanup,
-            completion,
-        } = prepared
-        else {
-            return Err(DbError::Message(
-                "Merge abandonment requires one prepared candidate".to_string(),
-            ));
-        };
-        let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
-        let candidate = store_transaction.prepared_merge_candidate_parts(
-            verified_authority,
-            candidate_commit.semantic_bytes(),
-            candidate_commit.prepared().reference(),
-            candidate_head.semantic_bytes(),
-            candidate_head.prepared().reference(),
-        )?;
-        if candidate.commit.write_id != stage.write_id {
-            return Err(DbError::Message(
-                "prepared Merge candidate differs from its write identity".to_string(),
-            ));
-        }
-        let root = store_transaction.required_root_authority(verified_authority)?;
-        let registration = store_transaction.activated_registration(
-            verified_authority,
-            &root,
-            &candidate.commit.author_registration,
-        )?;
-        if stage.commit.value.store_root_hash() != root.store_root_hash
-            || stage.commit.value.author() != &registration
-            || stage.commit.value.reference().coord != candidate.reference.coord
-            || stage.commit.value.reference().object != *stage.commit.prepared.reference()
-        {
-            return Err(DbError::Message(
-                "authenticated Merge abandonment commit differs from its current local authority"
-                    .to_string(),
-            ));
-        }
-        if stage.commit.value.write_id != stage.write_id
-            || stage.commit.value.abandoned_candidates()
-                != [coven_protocol::store_commit::CandidateCleanupManifest {
-                    candidate: coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
-                        coord: candidate.reference.coord.clone(),
-                        object: candidate.reference.object.clone(),
-                        canonical_signed_bytes: candidate.canonical_signed_bytes.clone(),
-                    },
-                }]
-        {
-            return Err(DbError::Message(
-                "Merge abandonment does not name its exact prepared candidate".to_string(),
-            ));
-        }
-        let authority_ref = stage.commit.value.reference().clone();
-        if stage.head.value.commit != authority_ref
-            || stage.head.prepared.reference().slot() != candidate.head_object.slot()
-            || stage.head.value.successor != candidate.head.successor
-            || stage.head.value.author_registration != candidate.commit.author_registration
-        {
-            return Err(DbError::Message(
-                "Merge abandonment head differs from the candidate competition point".to_string(),
-            ));
-        }
-        stage
-            .history_evidence
-            .validate_for(&authority_ref, stage.commit.value.value())
-            .map_err(|error| DbError::context("Merge abandonment history evidence", error))?;
-        StoreDeviceHead::parse_at(
-            &stage.head.value.to_bytes(),
-            root.store_root_hash,
-            &registration,
-            &authority_ref,
-        )
-        .map_err(|error| DbError::context("verify Merge abandonment head", error))?;
-        let authority_commit = RemoteObjectRecord::candidate_commit(
-            authority_ref.clone(),
-            &stage.commit.value.to_bytes(),
-            stage.commit.prepared.stored_bytes(),
-        )
-        .map_err(|error| DbError::context("Merge abandonment commit", error))?;
-        persist_exact_remote_object_on(
-            &tx,
-            self.store_dir,
-            &authority_commit,
-            "Merge abandonment commit",
-        )?;
-        let authority_head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
-            head_hash: stage.head.value.head_hash(),
-            object: stage.head.prepared.reference().clone(),
-        };
-        let authority_head = RemoteObjectRecord::candidate_activated_store_head(
-            authority_head_ref,
-            &stage.head.value.to_bytes(),
-            stage.head.prepared.stored_bytes(),
-            authority_ref,
-        )
-        .map_err(|error| DbError::context("Merge abandonment head", error))?;
-        persist_exact_remote_object_on(
-            &tx,
-            self.store_dir,
-            &authority_head,
-            "Merge abandonment head",
-        )?;
-        let replacement = PreparedStoreWriteState::MergeAbandonment {
-            candidate_commit,
-            candidate_head,
-            candidate_history_evidence,
-            authority_commit: DurablePreparedProtocolObject::new(
-                stage.commit.value.to_bytes(),
-                stage.commit.prepared,
-            ),
-            authority_head: DurablePreparedProtocolObject::new(
-                stage.head.value.to_bytes(),
-                stage.head.prepared,
-            ),
-            authority_history_evidence: stage.history_evidence,
-            outcome: MergeAbandonmentOutcome::Prepared,
-            local_cleanup,
-            completion,
-        };
-        let replacement = serde_json::to_string(&replacement)
-            .map_err(|error| DbError::context("serialize Merge abandonment", error))?;
-        let publishing = serde_json::to_string(&WriteStatus::Publishing)
-            .map_err(|error| DbError::context("serialize Merge abandonment status", error))?;
-        let updated = tx
-            .execute(
-                "UPDATE store_writes SET prepared = ?2, status = ?3
-                 WHERE write_id = ?1 AND prepared = ?4
-                   AND json_extract(status, '$.blocked') IS NOT NULL",
-                rusqlite::params![
-                    stage.write_id.as_str(),
-                    replacement,
-                    publishing,
-                    raw_prepared
-                ],
-            )
-            .map_err(DbError::from)?;
-        if updated != 1 {
-            return Err(DbError::Message(
-                "blocked Merge candidate changed during abandonment preparation".to_string(),
-            ));
+        if let Some(reserved) = reserved {
+            for retired in reserved.retired_candidates() {
+                super::candidate_records::begin_candidate_nonactivation_targets_on(
+                    &tx,
+                    &retired.candidate()?,
+                    &retired.objects()?,
+                    &retired.nonactivation,
+                )?;
+            }
         }
         tx.commit().map_err(DbError::from)?;
         Ok(())
@@ -547,17 +411,6 @@ impl StoreDatabase {
         self.call_store(move |session| session.prepare_store_write_commit(stage))
             .await?;
         self.notify_write_status(write_id, WriteStatus::Publishing);
-        Ok(())
-    }
-
-    pub async fn prepare_merge_candidate_abandonment(
-        &self,
-        stage: MergeCandidateAbandonmentPreparation,
-    ) -> Result<(), DbError> {
-        let notified_write_id = stage.write_id.clone();
-        self.call_store(move |session| session.prepare_merge_candidate_abandonment(stage))
-            .await?;
-        self.notify_write_status(notified_write_id, WriteStatus::Publishing);
         Ok(())
     }
 

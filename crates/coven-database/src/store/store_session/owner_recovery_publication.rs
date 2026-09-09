@@ -10,17 +10,16 @@ use rusqlite::OptionalExtension;
 #[serde(deny_unknown_fields)]
 struct DurableOwnerRecoveryPublication {
     commit: DurablePreparedProtocolObject,
-    head: DurablePreparedProtocolObject,
     history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
 }
 
 pub(super) fn complete_owner_recovery_publication_on(
-    transaction: &rusqlite::Transaction<'_>,
+    store: super::StoreTransaction<'_, '_>,
     commit: &VerifiedStoreBatchCommit,
-    head: &coven_protocol::store_commit::StoreDeviceHead,
-    head_object: &coven_protocol::objects::ExactObjectRef,
+    publication: &crate::AcceptedStoreCommitPublication,
 ) -> Result<(), DbError> {
-    if complete_matching_owner_recovery_publication_on(transaction, commit, head, head_object)? {
+    if complete_matching_owner_recovery_publication_on(store, commit, &publication.clone().into())?
+    {
         return Ok(());
     }
     Err(DbError::Message(
@@ -29,11 +28,11 @@ pub(super) fn complete_owner_recovery_publication_on(
 }
 
 pub(super) fn complete_matching_owner_recovery_publication_on(
-    transaction: &rusqlite::Transaction<'_>,
+    store: super::StoreTransaction<'_, '_>,
     commit: &VerifiedStoreBatchCommit,
-    head: &coven_protocol::store_commit::StoreDeviceHead,
-    head_object: &coven_protocol::objects::ExactObjectRef,
+    acceptance: &crate::AcceptedStoreCommitEvidence,
 ) -> Result<bool, DbError> {
+    let transaction = store.transaction;
     let stored: Option<(String, String)> = transaction
         .query_row(
             "SELECT registration_hash, publication
@@ -51,15 +50,30 @@ pub(super) fn complete_matching_owner_recovery_publication_on(
     }
     let durable: DurableOwnerRecoveryPublication = serde_json::from_str(&stored.1)
         .map_err(|error| DbError::context("parse completed Owner recovery publication", error))?;
+    let active = super::active_store_publication::load_active_store_publication_on(transaction)?
+        .ok_or_else(|| {
+            DbError::Message("completed Owner recovery has no active Store publication".into())
+        })?;
+    let attempt = active.attempt()?;
     if durable.commit.semantic_bytes() != commit.value().to_bytes()
         || durable.commit.prepared().reference() != &commit.reference().object
-        || durable.head.semantic_bytes() != head.to_bytes()
-        || durable.head.prepared().reference() != head_object
+        || acceptance.commit_ref() != commit.reference()
+        || active.owner() != &ActiveStorePublicationOwner::OwnerRecovery
+        || acceptance.exact_publication().is_some_and(|publication| {
+            attempt.entry != *publication.entry()
+                || attempt.entry_object != publication.reference().object
+        })
     {
         return Err(DbError::Message(
             "completed Owner recovery differs from its exact publication journal".into(),
         ));
     }
+    MergeMaterializationTransaction::from_store(store).activate_store_operation_remote_objects(
+        commit.reference(),
+        &[coven_protocol::remote_object::remote_object_id(
+            &commit.reference().object,
+        )],
+    )?;
     let deleted = transaction
         .execute(
             "DELETE FROM local_owner_recovery_publication
@@ -72,29 +86,39 @@ pub(super) fn complete_matching_owner_recovery_publication_on(
             "Owner recovery publication changed during completion".into(),
         ));
     }
+    super::active_store_publication::clear_active_store_commit_for_owner_on(
+        transaction,
+        &ActiveStorePublicationOwner::OwnerRecovery,
+        commit.reference(),
+    )?;
     Ok(true)
 }
 
 impl DurableOwnerRecoveryPublication {
-    fn from_publication(publication: OwnerRecoveryPublication) -> Result<Self, DbError> {
-        if publication.commit.bytes != publication.commit.value.value().to_bytes()
-            || publication.head.bytes != publication.head.value.to_bytes()
-        {
+    fn from_publication(
+        publication: OwnerRecoveryPublication,
+    ) -> Result<
+        (
+            Self,
+            coven_protocol::prepared_commit::PreparedStorePublication,
+        ),
+        DbError,
+    > {
+        if publication.commit.bytes != publication.commit.value.value().to_bytes() {
             return Err(DbError::Message(
                 "Owner recovery publication carries noncanonical semantic bytes".into(),
             ));
         }
-        Ok(Self {
-            commit: DurablePreparedProtocolObject::new(
-                publication.commit.bytes,
-                publication.commit.prepared,
-            ),
-            head: DurablePreparedProtocolObject::new(
-                publication.head.bytes,
-                publication.head.prepared,
-            ),
-            history_evidence: publication.history_evidence,
-        })
+        Ok((
+            Self {
+                commit: DurablePreparedProtocolObject::new(
+                    publication.commit.bytes,
+                    publication.commit.prepared,
+                ),
+                history_evidence: publication.history_evidence,
+            },
+            publication.publication,
+        ))
     }
 }
 
@@ -102,11 +126,15 @@ impl StoreSession<'_> {
     fn verify_owner_recovery_publication(
         &mut self,
         durable: DurableOwnerRecoveryPublication,
+        publication: coven_protocol::prepared_commit::PreparedStorePublication,
     ) -> Result<(OwnerRecoveryPublication, ObjectHash), DbError> {
         let local = self.local_store_device_registration()?.ok_or_else(|| {
             DbError::Message("Owner recovery registration journal is absent".into())
         })?;
-        if local.state != LocalDeviceRegistrationState::Created {
+        if !matches!(
+            local.state,
+            LocalDeviceRegistrationState::Created | LocalDeviceRegistrationState::Activated { .. }
+        ) {
             return Err(DbError::Message(
                 "Owner recovery publication requires created registration objects".into(),
             ));
@@ -190,46 +218,27 @@ impl StoreSession<'_> {
                 "Owner recovery commit differs from its local recovery authority".into(),
             ));
         }
+        let proof = durable
+            .history_evidence
+            .membership_proof
+            .as_ref()
+            .ok_or_else(|| {
+                DbError::Message("Owner recovery has no registration authority head".into())
+            })?;
+        if !matches!(&proof.entry_value.change, coven_protocol::membership::StoreAuthorityChange::DeviceRegistrationActivation { registration } if registration == activation)
+        {
+            return Err(DbError::Message(
+                "Owner recovery authority entry names another activation".into(),
+            ));
+        }
         durable
             .history_evidence
             .validate_for(commit.reference(), commit.value())
             .map_err(|error| DbError::context("Owner recovery history evidence", error))?;
 
-        durable
-            .head
-            .prepared()
-            .reference()
-            .verify(durable.head.prepared().stored_bytes())
-            .map_err(|error| DbError::context("Owner recovery exact head", error))?;
-        let head = coven_protocol::store_commit::StoreDeviceHead::parse_at(
-            durable.head.semantic_bytes(),
-            root.store_root_hash,
-            &registration,
-            commit.reference(),
-        )
-        .map_err(|error| DbError::context("verify Owner recovery head", error))?;
-        let coven_protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot } =
-            &registration.store_commits
-        else {
-            return Err(DbError::Message(
-                "Owner recovery registration has no announcement stream anchor".into(),
-            ));
-        };
-        let activation = registration
-            .store_announcement_activation(&registration_ref)
-            .map_err(|error| DbError::context("Owner recovery announcement activation", error))?
-            .activation_id();
-        if durable.head.prepared().reference().slot() != first_slot
-            || head.successor.predecessor.is_some()
-            || head.successor.activation != activation
-            || &head.successor.next_slot == first_slot
-            || head.to_bytes() != durable.head.semantic_bytes()
-        {
-            return Err(DbError::Message(
-                "Owner recovery head differs from its first announcement position".into(),
-            ));
-        }
-
+        publication
+            .verify_commit(&commit)
+            .map_err(|error| DbError::context("Owner recovery publication", error))?;
         Ok((
             OwnerRecoveryPublication {
                 commit: ExactProtocolObject {
@@ -237,11 +246,7 @@ impl StoreSession<'_> {
                     bytes: durable.commit.semantic_bytes,
                     prepared: durable.commit.prepared,
                 },
-                head: ExactProtocolObject {
-                    value: head,
-                    bytes: durable.head.semantic_bytes,
-                    prepared: durable.head.prepared,
-                },
+                publication,
                 history_evidence: durable.history_evidence,
             },
             local.registration_hash,
@@ -252,14 +257,53 @@ impl StoreSession<'_> {
         &mut self,
         publication: OwnerRecoveryPublication,
     ) -> Result<OwnerRecoveryPublication, DbError> {
-        let durable = DurableOwnerRecoveryPublication::from_publication(publication)?;
+        let (durable, publication) =
+            DurableOwnerRecoveryPublication::from_publication(publication)?;
         let (verified, registration_hash) =
-            self.verify_owner_recovery_publication(durable.clone())?;
+            self.verify_owner_recovery_publication(durable.clone(), publication)?;
         let registration_hash = registration_hash.to_string();
         let encoded = serde_json::to_string(&durable)
             .map_err(|error| DbError::context("serialize Owner recovery publication", error))?;
-        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+        let active = ActiveStorePublication::commit(
+            ActiveStorePublicationOwner::OwnerRecovery,
+            verified.commit.value.write_id.clone(),
+            verified.commit.value.author_registration.clone(),
+            verified.commit.value.reference().coord.clone(),
+            verified.publication.clone(),
+        )?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let current = super::observed_store_publication::load_store_current_publication_on(&tx)?;
+        if current.record() != &verified.publication.previous
+            || current.observed_version() != Some(&verified.publication.previous_version)
+        {
+            return Err(DbError::Message(
+                "Owner recovery publication extends another accepted boundary".into(),
+            ));
+        }
+        match super::active_store_publication::claim_active_store_publication_on(&tx, &active)? {
+            super::active_store_publication::ActiveStorePublicationClaim::Acquired => {}
+            super::active_store_publication::ActiveStorePublicationClaim::AlreadyOwned => {
+                return Err(DbError::Message(
+                    "Owner recovery owns publication before its journal".into(),
+                ));
+            }
+            super::active_store_publication::ActiveStorePublicationClaim::Occupied(owner) => {
+                return Err(DbError::Message(format!(
+                    "another local Store operation owns publication: {owner:?}"
+                )));
+            }
+        }
+        for remote in verified.remote_objects()? {
+            persist_exact_remote_object_on(
+                &tx,
+                self.store_dir,
+                &remote,
+                "Owner recovery candidate authority",
+            )?;
+        }
+        crate::store::store_session::StoreRecords::new(&tx, self.store_dir)
             .stage_owner_recovery_publication(&registration_hash, &encoded)?;
+        tx.commit().map_err(DbError::from)?;
         Ok(verified)
     }
 
@@ -270,8 +314,20 @@ impl StoreSession<'_> {
             .map(|(registration_hash, encoded)| {
                 let durable = serde_json::from_str(&encoded)
                     .map_err(|error| DbError::context("parse Owner recovery publication", error))?;
+                let active =
+                    super::active_store_publication::load_active_store_publication_on(self.conn)?
+                        .ok_or_else(|| {
+                        DbError::Message(
+                            "Owner recovery journal has no active Store publication".into(),
+                        )
+                    })?;
+                if active.owner() != &ActiveStorePublicationOwner::OwnerRecovery {
+                    return Err(DbError::Message(
+                        "Owner recovery journal differs from the active publication owner".into(),
+                    ));
+                }
                 let (publication, local_registration_hash) =
-                    self.verify_owner_recovery_publication(durable)?;
+                    self.verify_owner_recovery_publication(durable, active.attempt()?.clone())?;
                 if registration_hash != local_registration_hash.to_string() {
                     return Err(DbError::Message(
                         "Owner recovery publication belongs to another local registration".into(),

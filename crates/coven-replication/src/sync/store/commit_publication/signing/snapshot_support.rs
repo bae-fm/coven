@@ -24,6 +24,7 @@ impl LocalStoreWriter {
             old_commit.write_id.clone(),
             coord,
             old_commit.order.clone(),
+            old_commit.publication_base().clone(),
             old_commit.membership_state.clone(),
             old_commit.device_state.clone(),
             old_commit.operations_membership_authority()?,
@@ -69,8 +70,7 @@ impl LocalStoreWriter {
         coven_protocol::store_commit::SnapshotMeta::signed(
             meta.store_root_hash,
             self.registration.reference().clone(),
-            meta.generation,
-            meta.predecessor.clone(),
+            meta.publication_predecessor.clone(),
             meta.image.clone(),
             meta.membership_rollup.clone(),
             meta.coverage.clone(),
@@ -78,7 +78,6 @@ impl LocalStoreWriter {
             meta.history_summary.clone(),
             meta.schema_version,
             meta.created_at.clone(),
-            meta.successor.clone(),
             &self.device_signer,
         )
     }
@@ -98,25 +97,6 @@ impl LocalStoreWriter {
             store_root_hash,
             reference,
             self.registration.value(),
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn parse_snapshot_stream_entry(
-        &self,
-        bytes: &[u8],
-        root: &coven_protocol::store_commit::StoreRootRef,
-        reference: &coven_protocol::store_commit::StoreSnapshotRef,
-    ) -> Result<
-        coven_protocol::store_commit::SnapshotMeta,
-        coven_protocol::store_commit::StoreProtocolError,
-    > {
-        coven_protocol::store_commit::SnapshotMeta::parse_stream_entry_at(
-            bytes,
-            root,
-            self.registration.reference(),
-            self.registration.value(),
-            reference,
         )
     }
 

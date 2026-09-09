@@ -6,12 +6,27 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         metadata_stamp: &str,
         name: &str,
     ) -> Result<CircleId, CircleOperationError> {
-        let journal = self.preparer().prepare_create(metadata_stamp, name).await?;
+        let plan = self.writer.prepare_plan().await?;
+        let journal = self
+            .preparer()
+            .prepare_from_plan(
+                &plan,
+                CircleOperationRequest::Create {
+                    metadata_stamp: metadata_stamp.to_string(),
+                    name: name.to_string(),
+                },
+            )
+            .await?;
+        #[cfg(any(test, feature = "test-utils"))]
+        self.database
+            .reach_test_point(coven_database::DatabaseTestPoint::CircleCandidatePrepared)
+            .await;
         let circle_id = journal.journal.circle_id();
         let operation_id = journal.journal.operation_id.clone();
         self.database
             .insert_circle_operation(journal.journal, journal.prepared_objects)
             .await?;
+        drop(plan);
         self.publisher().publish(&operation_id, None).await?;
         Ok(circle_id)
     }
@@ -23,17 +38,19 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         name: &str,
     ) -> Result<(), CircleOperationError> {
         let (current, _, reference) = self.current_authoring_context(circle_id).await?;
+        let plan = self.writer.prepare_plan().await?;
         let journal = self
             .preparer()
-            .prepare_request(CircleOperationRequest::Rename(Box::new(
-                CircleRenameRequest {
+            .prepare_from_plan(
+                &plan,
+                CircleOperationRequest::Rename(Box::new(CircleRenameRequest {
                     circle_id,
                     name: name.to_string(),
                     metadata_stamp: metadata_stamp.to_string(),
                     current,
                     previous_control: reference,
-                },
-            )))
+                })),
+            )
             .await?;
         if journal.journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
@@ -44,6 +61,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         self.database
             .insert_circle_operation(journal.journal, journal.prepared_objects)
             .await?;
+        drop(plan);
         self.publisher().publish(&operation_id, None).await
     }
 
@@ -67,17 +85,19 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             .activations()
             .load_control_roster_chain(&activation_commit, &reference, &current.control, keyring)
             .await?;
+        let plan = self.writer.prepare_plan().await?;
         let journal = self
             .preparer()
-            .prepare_request(CircleOperationRequest::RemoveMember(Box::new(
-                CircleRemoveMemberRequest {
+            .prepare_from_plan(
+                &plan,
+                CircleOperationRequest::RemoveMember(Box::new(CircleRemoveMemberRequest {
                     circle_id,
                     member_pubkey,
                     current,
                     previous_control: reference,
                     roster_chain,
-                },
-            )))
+                })),
+            )
             .await?;
         if journal.journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
@@ -88,6 +108,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         self.database
             .insert_circle_operation(journal.journal, journal.prepared_objects)
             .await?;
+        drop(plan);
         self.publisher().publish(&operation_id, None).await?;
         Ok(operation_id)
     }
@@ -105,7 +126,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         let request = self
             .resolution_request(circle_id, &chosen, &branches, branches.clone())
             .await?;
-        let journal = self.preparer().prepare_request(request).await?;
+        let plan = self.writer.prepare_plan().await?;
+        let journal = self.preparer().prepare_from_plan(&plan, request).await?;
         if journal.journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
                 "prepared Circle control resolution changed Circle identity".to_string(),
@@ -115,6 +137,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         self.database
             .insert_circle_operation(journal.journal, journal.prepared_objects)
             .await?;
+        drop(plan);
         self.publisher().publish(&operation_id, None).await
     }
 
@@ -305,17 +328,19 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 journal.operation_id
             )));
         }
+        let plan = self.writer.prepare_plan().await?;
         let prepared = self
             .preparer()
-            .prepare_request(CircleOperationRequest::CancelEpochClose(Box::new(
-                CircleCancelEpochCloseRequest {
+            .prepare_from_plan(
+                &plan,
+                CircleOperationRequest::CancelEpochClose(Box::new(CircleCancelEpochCloseRequest {
                     operation_id: journal.operation_id.clone(),
                     circle_id,
                     member_pubkey,
                     current,
                     previous_control: reference,
-                },
-            )))
+                })),
+            )
             .await?;
         if prepared.journal.operation_id != journal.operation_id
             || prepared.journal.circle_id != circle_id
@@ -330,6 +355,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         self.database
             .begin_circle_operation_finalization(journal.clone(), prepared.prepared_objects)
             .await?;
+        drop(plan);
         Ok(journal.operation_id)
     }
 
@@ -485,15 +511,17 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             return Err(CircleOperationError::Deleted { circle_id });
         }
         let (current, reference) = self.current_delete_context(circle_id).await?;
+        let plan = self.writer.prepare_plan().await?;
         let journal = self
             .preparer()
-            .prepare_request(CircleOperationRequest::Delete(Box::new(
-                CircleDeleteRequest {
+            .prepare_from_plan(
+                &plan,
+                CircleOperationRequest::Delete(Box::new(CircleDeleteRequest {
                     circle_id,
                     current,
                     previous_control: reference,
-                },
-            )))
+                })),
+            )
             .await?;
         if journal.journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
@@ -524,6 +552,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     .await?
             }
         }
+        drop(plan);
         self.publisher().publish(&operation_id, None).await
     }
 
@@ -551,10 +580,12 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             .activations()
             .load_control_roster_chain(&activation_commit, &reference, &current.control, keyring)
             .await?;
+        let plan = self.writer.prepare_plan().await?;
         let journal = self
             .preparer()
-            .prepare_request(CircleOperationRequest::AddMember(Box::new(
-                CircleAddMemberRequest::new(
+            .prepare_from_plan(
+                &plan,
+                CircleOperationRequest::AddMember(Box::new(CircleAddMemberRequest::new(
                     circle_id,
                     member_pubkey,
                     role,
@@ -562,8 +593,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     current,
                     reference,
                     roster_chain,
-                ),
-            )))
+                ))),
+            )
             .await?;
         if journal.journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
@@ -574,6 +605,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         self.database
             .insert_circle_operation(journal.journal, journal.prepared_objects)
             .await?;
+        drop(plan);
         self.publisher()
             .publish(&operation_id, Some(routing_key))
             .await
@@ -584,14 +616,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<(), CircleOperationError> {
         let database = self.database.clone();
-        for operation_id in database.discarding_circle_operations().await? {
-            self.history()
-                .cleanup_operation_candidate(&operation_id)
-                .await?;
-            database
-                .finish_circle_operation_discard(&operation_id)
-                .await?;
-        }
         while let Some(journal) = database.oldest_pending_circle_operation().await? {
             if !journal.is_publishable() {
                 return Err(CircleOperationError::JournalState(format!(

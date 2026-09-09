@@ -4,7 +4,8 @@ use super::{StoreRecords, StoreTransaction};
 use crate::store::materialization_models::{
     RetainedCommitActivationInput, RetainedMergeMaterializationInput,
 };
-use crate::store::verified_store_authority::{VerifiedRegistrationLookup, VerifiedStoreLookup};
+use crate::store::retained_merge_replay::RetainedReplayObjectCoverage;
+use crate::store::verified_store_authority::VerifiedStoreLookup;
 use crate::{
     Database, DbError, ObjectHash, OwnedVerifiedMergeMaterialization, RetainedReplayOwner,
     StoreDatabase,
@@ -22,7 +23,7 @@ pub(crate) struct RetainedReplayBaselineRow {
 }
 
 pub(crate) struct SnapshotRetentionRows {
-    pub(crate) exclusion_activation_commits: Vec<String>,
+    pub(crate) exclusion_activations: Vec<(String, String)>,
     pub(crate) circle_bootstraps: Vec<(String, String, String)>,
     pub(crate) materialization_refs: Vec<String>,
 }
@@ -55,6 +56,17 @@ impl PreparedRetainedReplayBaseline {
         }
     }
 
+    pub(super) fn verify_authority(
+        self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+        blob_decls: &crate::BlobDecls,
+    ) -> Result<crate::store::VerifiedStoreAuthority, DbError> {
+        let prepared = self.validate_image(store_dir, blob_decls)?;
+        Ok(crate::store::VerifiedStoreAuthority::for_replay_baseline(
+            prepared.baseline,
+        ))
+    }
+
     /// Validate the image from the bytes in hand, before they are stored.
     ///
     /// The installed-baseline check reads its image back out of the payload
@@ -65,11 +77,46 @@ impl PreparedRetainedReplayBaseline {
         blob_decls: &crate::BlobDecls,
     ) -> Result<Self, DbError> {
         let mut image = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
-        crate::connection_io::deserialize_database_image_into(&mut image, &self.image_bytes)
-            .map_err(|error| DbError::context("open advanced replay database image", error))?;
-        self.baseline.validate_open_image(&image, store_dir)?;
-        self.local_blob_leases = retained_replay_blob_leases(&image, blob_decls)?;
+        self.local_blob_leases = self.validate_image_on(&mut image, store_dir, blob_decls)?;
         Ok(self)
+    }
+
+    /// Validate the reconstructed cut and retain its live Store blob ownership
+    /// in the same transaction that will install this baseline.
+    pub(super) fn validate_and_retain_snapshot_blobs(
+        mut self,
+        target: StoreTransaction<'_, '_>,
+        blob_decls: &crate::BlobDecls,
+        synced_tables: &[coven_protocol::synced_schema::SyncedTable],
+    ) -> Result<Self, DbError> {
+        let mut image = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
+        self.local_blob_leases =
+            self.validate_image_on(&mut image, target.store_dir, blob_decls)?;
+        let crate::RetainedReplayAuthority::InstalledSnapshot(authority) = &self.baseline.authority
+        else {
+            return Err(DbError::Message(
+                "reconstructed snapshot ownership requires an accepted snapshot".into(),
+            ));
+        };
+        crate::snapshot_objects::retain_reconstructed_snapshot_blobs_on(
+            target.transaction,
+            &image,
+            synced_tables,
+            &authority.snapshot,
+        )?;
+        Ok(self)
+    }
+
+    fn validate_image_on(
+        &self,
+        image: &mut rusqlite::Connection,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+        blob_decls: &crate::BlobDecls,
+    ) -> Result<BTreeSet<(String, String)>, DbError> {
+        crate::connection_io::deserialize_database_image_into(image, &self.image_bytes)
+            .map_err(|error| DbError::context("open advanced replay database image", error))?;
+        self.baseline.validate_open_image(image, store_dir)?;
+        retained_replay_blob_leases(image, blob_decls)
     }
 }
 
@@ -98,11 +145,11 @@ impl StoreRecords<'_> {
     pub(crate) fn snapshot_retention_rows(self) -> Result<SnapshotRetentionRows, DbError> {
         let exclusions = crate::query_mapped_rows(
             self.conn,
-            "SELECT DISTINCT activation_commit
+            "SELECT exclusion_ref, activation_commit
              FROM store_author_exclusion_activations
-             ORDER BY activation_commit",
+             ORDER BY exclusion_ref",
             [],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?;
         let bootstraps = crate::query_mapped_rows(
             self.conn,
@@ -124,7 +171,7 @@ impl StoreRecords<'_> {
             |row| row.get::<_, String>(0),
         )?;
         Ok(SnapshotRetentionRows {
-            exclusion_activation_commits: exclusions,
+            exclusion_activations: exclusions,
             circle_bootstraps: bootstraps,
             materialization_refs: materializations,
         })
@@ -151,19 +198,6 @@ impl StoreRecords<'_> {
         )?)
     }
 
-    pub(crate) fn snapshot_exclusion_activation_rows(
-        self,
-    ) -> Result<Vec<(String, String)>, DbError> {
-        Ok(crate::query_mapped_rows(
-            self.conn,
-            "SELECT exclusion_ref, activation_commit
-             FROM store_author_exclusion_activations
-             ORDER BY exclusion_ref",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?)
-    }
-
     pub(crate) fn retained_materialization_refs(self) -> Result<BTreeSet<String>, DbError> {
         Ok(crate::query_mapped_rows(
             self.conn,
@@ -173,13 +207,6 @@ impl StoreRecords<'_> {
         )?
         .into_iter()
         .collect())
-    }
-
-    pub(crate) fn remote_object(
-        self,
-        object_id: ObjectHash,
-    ) -> Result<coven_protocol::remote_object::RemoteObjectRecord, DbError> {
-        crate::load_remote_object_on(self.conn, object_id)
     }
 
     pub(crate) fn retained_materialization_row(
@@ -217,9 +244,10 @@ impl StoreRecords<'_> {
         self,
         input: &RetainedMergeMaterializationInput,
         owner: &RetainedReplayOwner,
+        coverage: &RetainedReplayObjectCoverage<'_>,
     ) -> Result<(), DbError> {
         crate::store::retained_merge_replay::validate_retained_merge_pin_closure_on(
-            self.conn, input, owner,
+            self.conn, input, owner, coverage,
         )
     }
 
@@ -273,6 +301,7 @@ impl StoreRecords<'_> {
             base: &'a Option<String>,
             blob_facts: &'a Option<String>,
             prepared: &'a Option<String>,
+            rebased: &'a Option<String>,
             partitions: &'a [(String, Option<String>, String)],
             packages: &'a [(String, String)],
             blobs: &'a [(String, String, String, Option<String>)],
@@ -282,7 +311,7 @@ impl StoreRecords<'_> {
         let writes = crate::query_mapped_rows(
             self.conn,
             "SELECT ordinal, write_id, status, affected_rows, changeset_hash,
-                    base, blob_facts, prepared
+                    base, blob_facts, prepared, rebased
              FROM store_writes
              ORDER BY ordinal",
             [],
@@ -296,6 +325,7 @@ impl StoreRecords<'_> {
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             },
         )?;
@@ -309,6 +339,7 @@ impl StoreRecords<'_> {
             base,
             blob_facts,
             prepared,
+            rebased,
         ) in writes
         {
             let partitions = crate::query_mapped_rows(
@@ -353,6 +384,7 @@ impl StoreRecords<'_> {
                 base: &base,
                 blob_facts: &blob_facts,
                 prepared: &prepared,
+                rebased: &rebased,
                 partitions: &partitions,
                 packages: &packages,
                 blobs: &blobs,
@@ -368,6 +400,7 @@ impl StoreRecords<'_> {
                         || base.is_some()
                         || blob_facts.is_some()
                         || prepared.is_some()
+                        || rebased.is_some()
                         || !partitions.is_empty()
                         || !packages.is_empty()
                         || !blobs.is_empty()
@@ -397,21 +430,6 @@ impl StoreRecords<'_> {
             }
         }
         Ok(manifests)
-    }
-
-    pub(crate) fn merge_retraction_cleanup_objects(
-        self,
-        candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<
-        (
-            crate::DurablePreparedProtocolObject,
-            crate::DurablePreparedProtocolObject,
-        ),
-        DbError,
-    > {
-        crate::store::retained_merge_replay::load_merge_retraction_cleanup_objects_on(
-            self.conn, candidate,
-        )
     }
 
     pub(crate) fn retained_materialization_rows(
@@ -671,9 +689,8 @@ impl StoreRecords<'_> {
             image_bytes,
             local_blob_leases,
         } = prepared;
-        // The baseline's authority is not checked here. Both callers validate
-        // the image they are about to install immediately before calling this,
-        // and `validate_open_image` ends by validating the authority against
+        // Callers validate the prepared image and its authority before
+        // installing it here. `validate_open_image` validates authority against
         // that image — so a check here would be the same check on the same
         // baseline a moment later. It is not free: for an installed snapshot
         // the authority carries the signed snapshot metadata and every active
@@ -754,51 +771,6 @@ impl StoreTransaction<'_, '_> {
             .map_err(DbError::from)
     }
 
-    pub(crate) fn retained_materialization_rows(
-        self,
-    ) -> Result<Vec<(String, i64, String, String)>, DbError> {
-        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
-            .retained_materialization_rows()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn load_retained_materialization(
-        self,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        registrations: &mut dyn VerifiedRegistrationLookup,
-        stream_id: &str,
-        sequence: u64,
-        commit_ref: &coven_protocol::store_commit::StoreBatchCommitRef,
-        expected_input_hash: &str,
-        verified: Option<&coven_protocol::store_commit::VerifiedStoreBatchCommit>,
-    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let records =
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir);
-        match verified {
-            Some(verified) => {
-                StoreDatabase::load_retained_merge_materialization_with_verified_commit_on(
-                    records,
-                    root,
-                    registrations,
-                    stream_id,
-                    sequence,
-                    commit_ref,
-                    expected_input_hash,
-                    verified,
-                )
-            }
-            None => StoreDatabase::load_retained_merge_materialization_on(
-                records,
-                root,
-                registrations,
-                stream_id,
-                sequence,
-                commit_ref,
-                expected_input_hash,
-            ),
-        }
-    }
-
     pub(crate) fn circle_replay_controls(self) -> Result<Vec<(String, String)>, DbError> {
         crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
             .circle_replay_controls()
@@ -825,7 +797,7 @@ impl StoreTransaction<'_, '_> {
 
     pub(crate) fn merge_replay_journal(
         self,
-        baseline_cut: &coven_protocol::store_commit::CommitFrontier,
+        baseline: &crate::RetainedReplayBaseline,
         active_accepted_writes: &std::collections::BTreeMap<
             coven_protocol::write::WriteId,
             coven_protocol::store_commit::StoreBatchCommitRef,
@@ -834,7 +806,7 @@ impl StoreTransaction<'_, '_> {
     ) -> Result<Vec<crate::MergeReplayWrite>, DbError> {
         StoreDatabase::load_merge_replay_journal_on(
             crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-            baseline_cut,
+            baseline,
             active_accepted_writes,
             retracted_writes,
         )
@@ -842,7 +814,7 @@ impl StoreTransaction<'_, '_> {
 
     pub(crate) fn merge_replay_associations(
         self,
-        baseline_cut: &coven_protocol::store_commit::CommitFrontier,
+        baseline: &crate::RetainedReplayBaseline,
         active_accepted_writes: &std::collections::BTreeMap<
             coven_protocol::write::WriteId,
             coven_protocol::store_commit::StoreBatchCommitRef,
@@ -851,53 +823,16 @@ impl StoreTransaction<'_, '_> {
     ) -> Result<Vec<crate::MergeReplayWrite>, DbError> {
         StoreDatabase::load_merge_replay_associations_on(
             crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-            baseline_cut,
+            baseline,
             active_accepted_writes,
             retracted_writes,
         )
     }
 
-    pub(crate) fn retained_membership_authority_bytes(
-        self,
-        object: &coven_protocol::objects::ExactObjectRef,
-        kind: &str,
-    ) -> Result<crate::MembershipAuthorityBytes, DbError> {
-        let object_id = coven_protocol::remote_object::remote_object_id(object);
-        let remote =
-            crate::load_remote_object_on(self.transaction, object_id).map_err(|error| {
-                DbError::context(
-                    format!("load retained Merge membership {kind} {object_id} for replay"),
-                    error,
-                )
-            })?;
-        if remote.object() != object {
-            return Err(DbError::Message(format!(
-                "retained Merge membership {kind} {object_id} has different exact object"
-            )));
-        }
-        let coven_protocol::remote_object::SemanticPayload::Spooled(semantic_hash) =
-            remote.semantic_payload()
-        else {
-            return Err(DbError::Message(format!(
-                "retained Merge membership {kind} {object_id} names no stored plaintext"
-            )));
-        };
-        let stored_hash = remote.stored_payload().ok_or_else(|| {
-            DbError::Message(format!(
-                "retained Merge membership {kind} {object_id} names no stored ciphertext"
-            ))
-        })?;
-        Ok(crate::MembershipAuthorityBytes::new(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
-                .payload(semantic_hash)?,
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
-                .payload(stored_hash)?,
-        ))
-    }
-
     pub(crate) fn open_replay_projection(
         self,
         baseline: &crate::RetainedReplayBaseline,
+        gates: &crate::Gates,
     ) -> Result<crate::store::ReplayProjection, DbError> {
         // Accepted history belongs to this transaction. Only positions under
         // the rewind cut may seed the projection; later states must be replayed.
@@ -905,12 +840,15 @@ impl StoreTransaction<'_, '_> {
             self.transaction,
             &baseline.exact_cut,
         )?;
-        crate::store::ReplayProjection::from_image(
+        let projection = crate::store::ReplayProjection::from_image(
             &baseline.image_bytes(self.transaction, self.store_dir)?,
             self.store_dir.clone(),
-            &baseline.exact_cut,
+            baseline,
+            gates,
             covered,
-        )
+        )?;
+        projection.replace_store_publication_state(self.transaction)?;
+        Ok(projection)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -951,7 +889,7 @@ impl StoreTransaction<'_, '_> {
 
     pub(crate) fn retain_merge_materialization(
         self,
-        registrations: &mut dyn VerifiedRegistrationLookup,
+        authority: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
         materialization: &crate::VerifiedMergeMaterialization<'_>,
     ) -> Result<
@@ -970,11 +908,6 @@ impl StoreTransaction<'_, '_> {
             commit: coven_protocol::objects::PreparedExactObject::new(
                 materialization.commit_ref().object.clone(),
                 materialization.commit().to_bytes(),
-            )
-            .map_err(DbError::from)?,
-            activation_head: coven_protocol::objects::PreparedExactObject::new(
-                materialization.activation_head_object().clone(),
-                materialization.activation_head().to_bytes(),
             )
             .map_err(DbError::from)?,
             history_evidence: materialization.history_evidence().clone(),
@@ -998,20 +931,49 @@ impl StoreTransaction<'_, '_> {
         let canonical_input = serde_json::to_vec(&input)
             .map_err(|error| DbError::context("serialize retained Merge materialization", error))?;
         let input_hash = ObjectHash::digest(&canonical_input);
-        let verified =
-            StoreDatabase::open_retained_merge_materialization_input_with_verified_commit_on(
+        let verified = authority
+            .open_retained_materialization_on(
                 crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
                 root,
-                registrations,
+                &input,
+                input_hash,
+                materialization,
+            )
+            .map_err(|error| DbError::context("open received retained input", error))?;
+        let coverage = authority.retained_replay_object_coverage_on(StoreRecords::new(
+            self.transaction,
+            self.store_dir,
+        ))?;
+        let key = self
+            .persist_retained_materialization(
                 materialization.commit_ref(),
                 &input,
                 input_hash,
-                materialization.verified_commit(),
-            )?;
-        let stream_id = materialization.commit_ref().coord.stream_id.to_string();
-        let sequence =
-            Database::sequence_to_sqlite(&stream_id, materialization.commit_ref().coord.sequence)?;
-        let commit_ref_json = serde_json::to_string(materialization.commit_ref())
+                canonical_input,
+                &coverage,
+            )
+            .map_err(|error| DbError::context("persist received retained input", error))?;
+        Ok((key, verified))
+    }
+
+    pub(super) fn persist_retained_materialization(
+        self,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
+        input: &RetainedMergeMaterializationInput,
+        input_hash: ObjectHash,
+        canonical_input: Vec<u8>,
+        coverage: &RetainedReplayObjectCoverage<'_>,
+    ) -> Result<crate::RetainedMergeMaterializationKey, DbError> {
+        if serde_json::to_vec(input)? != canonical_input
+            || ObjectHash::digest(&canonical_input) != input_hash
+        {
+            return Err(DbError::Message(
+                "retained materialization bytes differ from their verified input".into(),
+            ));
+        }
+        let stream_id = reference.coord.stream_id.to_string();
+        let sequence = Database::sequence_to_sqlite(&stream_id, reference.coord.sequence)?;
+        let commit_ref_json = serde_json::to_string(reference)
             .map_err(|error| DbError::context("serialize retained Merge commit ref", error))?;
         let inserted = self
             .transaction
@@ -1049,43 +1011,57 @@ impl StoreTransaction<'_, '_> {
             {
                 return Err(DbError::Message(format!(
                     "retained Merge coordinate {stream_id}/{} already contains different exact input",
-                    materialization.commit_ref().coord.sequence()
+                    reference.coord.sequence()
                 )));
             }
         }
         let replay_owner = RetainedReplayOwner::Commit {
-            commit: materialization.commit_ref().clone(),
+            commit: reference.clone(),
             input_hash,
         };
-        crate::store::retained_merge_replay::pin_retained_merge_objects_on(
+        crate::store::retained_merge_replay::replace_retained_merge_object_ownership_on(
             self.transaction,
-            &input,
+            input,
             &replay_owner,
+            coverage,
         )?;
         crate::store::retained_merge_replay::validate_retained_merge_pin_closure_on(
             self.transaction,
-            &input,
+            input,
             &replay_owner,
+            coverage,
         )?;
-        Ok((
-            crate::RetainedMergeMaterializationKey {
-                commit_ref: commit_ref_json,
-                input_hash,
-            },
-            verified,
-        ))
+        Ok(crate::RetainedMergeMaterializationKey {
+            commit_ref: commit_ref_json,
+            input_hash,
+        })
     }
 
     pub(crate) fn retain_snapshot_replay_inputs(
         self,
         authority: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
+        coverage: &coven_protocol::store_commit::CommitFrontier,
     ) -> Result<(), DbError> {
         let conn = self.transaction;
+        let pending_joins = authority
+            .pending_device_join_retention_on(
+                StoreRecords::new(conn, self.store_dir),
+                root,
+                coverage,
+            )?
+            .into_values()
+            .flatten()
+            .collect();
+        let object_coverage = RetainedReplayObjectCoverage::Snapshot {
+            coverage,
+            pending_joins,
+        };
         let required = StoreDatabase::snapshot_required_retained_refs(
             crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
             authority,
             root,
+            coverage,
         )?;
         let mut retained = Vec::with_capacity(required.len());
         for encoded in required {
@@ -1093,10 +1069,8 @@ impl StoreTransaction<'_, '_> {
                 serde_json::from_str(&encoded).map_err(|error| {
                     DbError::context("snapshot author exclusion activation commit", error)
                 })?;
-            StoreDatabase::load_retained_merge_materialization_by_ref_on(
+            authority.retained_materialization_by_ref_on(
                 crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-                root,
-                authority,
                 &reference,
             )?;
             let stream_id = reference.coord.stream_id.to_string();
@@ -1156,12 +1130,105 @@ impl StoreTransaction<'_, '_> {
                 commit: reference,
                 input_hash,
             };
-            crate::store::retained_merge_replay::pin_retained_merge_objects_on(
-                conn, &input, &owner,
+            crate::store::retained_merge_replay::replace_retained_merge_object_ownership_on(
+                conn,
+                &input,
+                &owner,
+                &object_coverage,
             )?;
             crate::store::retained_merge_replay::validate_retained_merge_pin_closure_on(
-                conn, &input, &owner,
+                conn,
+                &input,
+                &owner,
+                &object_coverage,
             )?;
+        }
+        Ok(())
+    }
+
+    /// Change the retained object claims with the installed replay baseline.
+    /// Inline authority bytes stay exact; covered Store packages and their
+    /// unreferenced blobs no longer inherit a Circle package's replay lifetime.
+    pub(super) fn replace_snapshot_replay_object_ownership(
+        self,
+        baseline: &crate::RetainedReplayBaseline,
+    ) -> Result<u64, DbError> {
+        let records = StoreRecords::new(self.transaction, self.store_dir);
+        let coverage = RetainedReplayObjectCoverage::from_baseline(Some(baseline))?;
+        let mut released = 0_u64;
+        for (stream, sequence, reference, expected_hash) in
+            records.retained_materialization_rows()?
+        {
+            let (stored_ref, stored_hash, canonical) =
+                records.retained_materialization_row(&stream, sequence)?;
+            let reference: coven_protocol::store_commit::StoreBatchCommitRef =
+                serde_json::from_str(&reference)?;
+            let input: RetainedMergeMaterializationInput = serde_json::from_slice(&canonical)?;
+            let input_hash = ObjectHash::digest(&canonical);
+            if stored_ref != serde_json::to_string(&reference)?
+                || stored_hash != expected_hash
+                || stored_hash != input_hash.to_string()
+                || serde_json::to_vec(&input)? != canonical
+                || input.commit.reference() != &reference.object
+            {
+                return Err(DbError::Message(
+                    "retained replay ownership input changed during baseline installation".into(),
+                ));
+            }
+            let owner = RetainedReplayOwner::Commit {
+                commit: reference,
+                input_hash,
+            };
+            released = released.checked_add(
+                crate::store::retained_merge_replay::replace_retained_merge_object_ownership_on(
+                    self.transaction, &input, &owner, &coverage,
+                )?,
+            ).ok_or_else(|| DbError::Message("released replay pin count exceeds u64".into()))?;
+            crate::store::retained_merge_replay::validate_retained_merge_pin_closure_on(
+                self.transaction,
+                &input,
+                &owner,
+                &coverage,
+            )?;
+        }
+        Ok(released)
+    }
+
+    /// Merge the exact predecessor-state closure carried by an authenticated
+    /// snapshot. Existing local history may retain additional positions.
+    pub(super) fn import_snapshot_device_state_records(
+        self,
+        source: StoreRecords<'_>,
+    ) -> Result<(), DbError> {
+        for encoded in crate::query_mapped_rows(
+            source.conn,
+            "SELECT commit_ref FROM store_device_state_snapshots ORDER BY commit_ref",
+            [],
+            |row| row.get::<_, String>(0),
+        )? {
+            let reference = serde_json::from_str(&encoded)
+                .map_err(|error| DbError::context("received device-state reference", error))?;
+            let state = source.store_device_snapshot(&reference)?;
+            let exists: bool = self.transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM store_device_state_snapshots WHERE commit_ref = ?1)",
+                [&encoded],
+                |row| row.get(0),
+            )?;
+            if exists {
+                let installed = StoreRecords::new(self.transaction, self.store_dir)
+                    .store_device_snapshot(&reference)?;
+                if installed != state {
+                    return Err(DbError::Message(
+                        "received snapshot conflicts with an installed exact device state".into(),
+                    ));
+                }
+            } else {
+                crate::store::store_device_state::record_store_device_snapshot_on(
+                    self.transaction,
+                    &reference,
+                    &state,
+                )?;
+            }
         }
         Ok(())
     }
@@ -1173,14 +1240,11 @@ impl StoreTransaction<'_, '_> {
         coverage: BTreeMap<String, coven_protocol::store_commit::StoreBatchCommitRef>,
     ) -> Result<(), DbError> {
         let conn = self.transaction;
-        let cut = coven_protocol::store_commit::CommitFrontier::from_refs(coverage.clone())
+        let cut = coven_protocol::store_commit::CommitFrontier::from_refs(coverage)
             .map_err(DbError::from)?;
-        // A peer can still publish against any accepted position below this
-        // cut. Its dependencies are not limited to the snapshot's current tips.
-        let covered =
-            crate::store::store_device_state::load_covered_store_device_snapshots_on(conn, &cut)?;
-        let mut required = covered.into_keys().collect::<BTreeSet<_>>();
-        required.extend(coverage.into_values());
+        // The checkpoint owns its exact tips. Other states survive only while
+        // an independently retained materialization consumes their exact refs.
+        let mut required = cut.commits().values().cloned().collect::<BTreeSet<_>>();
         let retained = crate::query_mapped_rows(
             conn,
             "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
@@ -1192,12 +1256,15 @@ impl StoreTransaction<'_, '_> {
                 serde_json::from_str(&encoded).map_err(|error| {
                     DbError::context("snapshot retained device-state authority", error)
                 })?;
-            let materialization = StoreDatabase::load_retained_merge_materialization_by_ref_on(
+            let materialization = authority.retained_materialization_by_ref_on(
                 crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-                root,
-                authority,
                 &reference,
             )?;
+            if materialization.root() != root {
+                return Err(DbError::Message(
+                    "snapshot retained device state belongs to another Store root".to_string(),
+                ));
+            }
             required.insert(reference);
             required.extend(materialization.commit().order.predecessor.iter().cloned());
             required.extend(

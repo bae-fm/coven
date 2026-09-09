@@ -1,16 +1,49 @@
 //! Store membership operations authorized by a retained local writer.
 
+mod admission;
 mod removal;
 
 use crate::sync::store::membership::MembershipMutationError;
 
 pub(super) use removal::AuthorizedMembershipRevocation;
 
+pub(super) enum MembershipRevocation {
+    Activated(coven_keys::encryption::EncryptionService),
+    AlreadyRemoved(coven_keys::encryption::EncryptionService),
+}
+
 use super::{
     decode_membership_mutation, exact_owned_remote, MembershipMutationPlan,
-    MembershipMutationProgress, ReplacementWrappedKey, RevokeMembershipPublication,
+    MembershipMutationProgress, PreparedMembershipActivation, ReplacementWrappedKey,
     RevokeMutationPlan,
 };
+
+pub(super) fn publication_predecessor_changed(
+    error: &MembershipMutationError,
+    expected: &coven_protocol::membership::MembershipCoord,
+) -> bool {
+    if let MembershipMutationError::Membership(
+        coven_protocol::membership::MembershipError::PublicationPredecessorChanged { coord },
+    ) = error
+    {
+        return coord.as_ref() == expected;
+    }
+    let MembershipMutationError::Store(error) = error else {
+        return false;
+    };
+    let crate::sync::store::StoreError::Pull(error) = error.as_ref() else {
+        return false;
+    };
+    let crate::sync::store::pull::StorePullError::MembershipChain(
+        crate::sync::store::membership::AnchoredChainError::Membership(
+            coven_protocol::membership::MembershipError::PublicationPredecessorChanged { coord },
+        ),
+    ) = error
+    else {
+        return false;
+    };
+    coord.as_ref() == expected
+}
 
 pub(super) fn validate_revoke_rotation_adoption(
     row: coven_database::DurableMembershipMutation,

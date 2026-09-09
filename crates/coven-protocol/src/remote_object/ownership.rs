@@ -162,10 +162,15 @@ impl RetainedReplayOwner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SnapshotObjectOwner {
-    pub activation: StreamActivationId,
-    pub generation: u64,
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SnapshotObjectOwner {
+    Store {
+        metadata_slot: crate::objects::ObjectSlot,
+    },
+    Circle {
+        activation: StreamActivationId,
+        generation: u64,
+    },
 }
 
 impl RemoteObjectRecord {
@@ -186,37 +191,6 @@ impl RemoteObjectRecord {
             return Err(RemoteObjectRecordError::StoredReferenceMismatch);
         }
         merge_store_commit_owner(&mut record.state, owner);
-        self.validate()
-    }
-
-    /// Add one more snapshot generation to a membership rollup's owners.
-    ///
-    /// A rollup is content-addressed over the membership frontier, so a
-    /// generation published while membership stood still names the object an
-    /// earlier one already owns. Both own it; reclaim deletes it when the last
-    /// owner goes.
-    pub fn merge_snapshot_ownership(
-        &mut self,
-        rollup: &crate::store_commit::MembershipRollupRef,
-        owner: SnapshotObjectOwner,
-    ) -> Result<(), RemoteObjectRecordError> {
-        let Self::SharedLiveSet(record) = self else {
-            return Err(RemoteObjectRecordError::DomainMismatch);
-        };
-        if !matches!(
-            &record.identity.domain,
-            SharedLiveSetObjectDomain::StoreMembershipRollup { reference } if reference == rollup
-        ) || record.identity.semantic_hash != rollup.rollup_hash
-            || record.identity.object != rollup.object
-        {
-            return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-        }
-        let OwnedObjectState::UploadedVerified { ownership } = &mut record.state else {
-            return Err(RemoteObjectRecordError::DomainMismatch);
-        };
-        ownership
-            .activated
-            .insert(SharedObjectOwner::Snapshot(owner));
         self.validate()
     }
 
@@ -348,111 +322,6 @@ impl RemoteObjectRecord {
         Ok(())
     }
 
-    pub fn retract_activated_candidate(
-        &mut self,
-        nonactivation: CandidateNonactivation,
-        head_nonactivation: Option<&VerifiedCandidateHeadNonactivation>,
-    ) -> Result<Option<ProtocolInertObject>, RemoteObjectRecordError> {
-        nonactivation.validate()?;
-        if !matches!(
-            nonactivation.proof,
-            CandidateNonactivationProof::AuthorExclusion { .. }
-                | CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
-        ) {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "activated candidate retraction requires terminal author exclusion".to_string(),
-            ));
-        }
-        let candidate = nonactivation.reference()?;
-        match self {
-            Self::RetainedAuthority(record) => {
-                let RetainedAuthorityObjectState::UploadedVerified { ownership } =
-                    &mut record.state
-                else {
-                    return Err(RemoteObjectRecordError::InvalidActivation);
-                };
-                if !ownership.activated.remove(&candidate) {
-                    ensure_candidate_nonactivation(&ownership.nonactivated, &candidate)?;
-                    return Ok(None);
-                }
-                ownership.nonactivated.push(nonactivation.clone());
-                let is_head = matches!(
-                    record.identity.domain,
-                    RetainedAuthorityObjectDomain::DeviceHead { .. }
-                );
-                match (is_head, head_nonactivation) {
-                    (true, Some(head_nonactivation))
-                        if head_nonactivation.candidate == candidate
-                            && matches!(
-                                &head_nonactivation.head,
-                                VerifiedCandidateHead::ExactLateCandidate { object }
-                                    if object == &record.identity.object
-                            ) => {}
-                    (true, _) => {
-                        return Err(RemoteObjectRecordError::InvalidProof(
-                            "uploaded retracted candidate head lacks exact presence evidence"
-                                .to_string(),
-                        ));
-                    }
-                    (false, None) => {}
-                    (false, Some(_)) => {
-                        return Err(RemoteObjectRecordError::InvalidProof(
-                            "candidate-head evidence reached a non-head activated object"
-                                .to_string(),
-                        ));
-                    }
-                }
-                if !ownership.pending.is_empty() || !ownership.activated.is_empty() {
-                    self.validate()?;
-                    return Ok(None);
-                }
-                if matches!(
-                    &record.identity.domain,
-                    RetainedAuthorityObjectDomain::Commit { reference }
-                        if reference == &candidate
-                ) {
-                    let payloads = record.payloads.clone();
-                    *self = Self::CandidateCommit(CandidateCommitRecord {
-                        identity: candidate,
-                        semantic_hash: record.identity.semantic_hash,
-                        payloads,
-                        state: CandidateCommitState::CleanupPending {
-                            proof: nonactivation.proof,
-                        },
-                    });
-                    self.validate()?;
-                    return Ok(None);
-                }
-                ProtocolInertObject::new(record.identity.clone(), ownership.nonactivated.clone())
-                    .map(Some)
-            }
-            Self::SharedLiveSet(record) => {
-                if head_nonactivation.is_some() {
-                    return Err(RemoteObjectRecordError::InvalidProof(
-                        "candidate-head evidence reached a shared activated object".to_string(),
-                    ));
-                }
-                let OwnedObjectState::UploadedVerified { ownership } = &mut record.state else {
-                    return Err(RemoteObjectRecordError::InvalidActivation);
-                };
-                if !ownership
-                    .activated
-                    .remove(&SharedObjectOwner::StoreCommit(candidate.clone()))
-                {
-                    ensure_candidate_nonactivation(&ownership.nonactivated, &candidate)?;
-                    return Ok(None);
-                }
-                ownership.nonactivated.push(nonactivation);
-                self.retire_unowned_shared_live_set()?;
-                self.validate()?;
-                Ok(None)
-            }
-            Self::CandidateCommit(_) | Self::CandidateExclusive(_) => {
-                Err(RemoteObjectRecordError::InvalidActivation)
-            }
-        }
-    }
-
     pub fn merge_snapshot_owner(
         &mut self,
         stored: &crate::blob::locator::StoredBlobRef,
@@ -470,6 +339,68 @@ impl RemoteObjectRecord {
             return Err(RemoteObjectRecordError::StoredReferenceMismatch);
         }
         merge_shared_owner(&mut record.state, SharedObjectOwner::Snapshot(owner))?;
+        self.validate()
+    }
+
+    /// Reassign inherited snapshot ownership in an exported database copy.
+    /// Live records keep their owners through the merge methods instead.
+    pub fn replace_snapshot_owners_for_image(
+        &mut self,
+        owner: Option<&SnapshotObjectOwner>,
+        pending_store_snapshots: &BTreeSet<crate::objects::ObjectSlot>,
+    ) -> Result<(), RemoteObjectRecordError> {
+        if let Self::SharedLiveSet(record) = self {
+            if let OwnedObjectState::UploadedVerified { ownership } = &mut record.state {
+                ownership.activated.retain(|owner| match owner {
+                    SharedObjectOwner::Snapshot(SnapshotObjectOwner::Store { metadata_slot }) => {
+                        pending_store_snapshots.contains(metadata_slot)
+                    }
+                    SharedObjectOwner::Snapshot(SnapshotObjectOwner::Circle { .. }) => false,
+                    _ => true,
+                });
+                if let Some(owner) = owner {
+                    ownership
+                        .activated
+                        .insert(SharedObjectOwner::Snapshot(owner.clone()));
+                }
+            }
+        }
+        self.validate()
+    }
+
+    /// Retire superseded Store snapshot leases at an accepted successor. A
+    /// reused object remains owned by that successor; a dropped blob retains
+    /// its exact original publication provenance until physical reclaim.
+    pub fn retire_superseded_store_snapshot_ownership(
+        &mut self,
+        metadata_slot: &crate::objects::ObjectSlot,
+        superseded: &BTreeSet<crate::objects::ObjectSlot>,
+    ) -> Result<(), RemoteObjectRecordError> {
+        let Self::SharedLiveSet(record) = self else {
+            return Err(RemoteObjectRecordError::DomainMismatch);
+        };
+        let OwnedObjectState::UploadedVerified { ownership } = &mut record.state else {
+            return Err(RemoteObjectRecordError::InvalidActivation);
+        };
+        let current = SharedObjectOwner::Snapshot(SnapshotObjectOwner::Store {
+            metadata_slot: metadata_slot.clone(),
+        });
+        let published_blob = record.identity.domain == SharedLiveSetObjectDomain::StoredBlob
+            && ownership
+                .activated
+                .iter()
+                .any(|owner| matches!(owner, SharedObjectOwner::StoreCommit(_)));
+        if (!ownership.activated.contains(&current) && !published_blob)
+            || superseded.contains(metadata_slot)
+        {
+            return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+        }
+        ownership.activated.retain(|owner| match owner {
+            SharedObjectOwner::Snapshot(SnapshotObjectOwner::Store { metadata_slot }) => {
+                !superseded.contains(metadata_slot)
+            }
+            _ => true,
+        });
         self.validate()
     }
 }

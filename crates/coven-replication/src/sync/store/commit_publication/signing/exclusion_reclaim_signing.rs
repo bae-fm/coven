@@ -35,7 +35,6 @@ impl LocalStoreWriter {
         proposal_id: coven_protocol::store_commit::StoreDeviceExclusionProposalId,
         target: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         target_registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-        device_state: coven_protocol::store_commit::StoreDeviceStateRef,
         outcome_slot: coven_protocol::objects::ObjectSlot,
         owner_grant: coven_protocol::membership::MembershipGrantId,
     ) -> Result<
@@ -47,7 +46,6 @@ impl LocalStoreWriter {
             proposal_id,
             target,
             target_registration,
-            device_state,
             outcome_slot,
             self.registration.reference().clone(),
             owner_grant,
@@ -118,7 +116,6 @@ impl LocalStoreWriter {
         proposal_value: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
         target: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         target_registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-        proof: coven_protocol::store_commit::StoreDeviceExclusionProof,
         owner_grant: coven_protocol::membership::MembershipGrantId,
     ) -> Result<coven_protocol::store_commit::StoreDeviceExclusion, crate::sync::store::StoreError>
     {
@@ -127,26 +124,9 @@ impl LocalStoreWriter {
             proposal_value,
             target,
             target_registration,
-            proof,
             self.registration.reference().clone(),
             owner_grant,
             self.registration.value(),
-            &self.device_signer,
-        )
-        .map_err(crate::sync::store::StoreError::from)
-    }
-
-    pub(crate) fn sign_device_head(
-        &self,
-        root_hash: coven_protocol::store_commit::ObjectHash,
-        commit: coven_protocol::store_commit::StoreBatchCommitRef,
-        successor: coven_protocol::store_commit::SuccessorLink,
-    ) -> Result<coven_protocol::store_commit::StoreDeviceHead, crate::sync::store::StoreError> {
-        coven_protocol::store_commit::StoreDeviceHead::signed(
-            root_hash,
-            self.registration.reference().clone(),
-            commit,
-            successor,
             &self.device_signer,
         )
         .map_err(crate::sync::store::StoreError::from)

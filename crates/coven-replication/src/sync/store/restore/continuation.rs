@@ -89,38 +89,12 @@ impl<'storage> RestoringStore<'storage> {
             .rev()
             .map(|(_, value)| value)
             .collect();
-        // The code's snapshot cursor is the stream as it stood when the code
-        // was exported; the device kept publishing after that, so the stream's
-        // head is whatever the provider holds now. Walk it from the
-        // registration's first slot -- every entry is authenticated as this
-        // device's and chained to its predecessor -- and resume from its head.
-        // The code's cursor is a floor: a stream that does not contain it is
-        // not the stream the code was cut from.
-        let published = history
-            .load_store_snapshot_stream(&continuation.registration, &registration)
-            .await
-            .map_err(|error| StoreRegistrationError::SnapshotStream(Box::new(error)))?;
-        if let Some(expected) = &continuation.latest_snapshot {
-            let pinned = published
-                .iter()
-                .find(|snapshot| snapshot.reference.generation == expected.generation);
-            if pinned.map(|snapshot| &snapshot.reference) != Some(expected) {
-                return Err(StoreRegistrationError::Invalid(
-                    "continued snapshot stream does not contain the code's snapshot".into(),
-                ));
-            }
-        }
-        let latest_snapshot = published
-            .into_iter()
-            .last()
-            .map(|snapshot| (snapshot.reference, snapshot.meta));
         self.database
             .install_activated_device_continuation(
                 continuation,
                 &self.identity,
                 &device_signer,
                 chain,
-                latest_snapshot,
             )
             .await
             .map_err(StoreRegistrationError::from)

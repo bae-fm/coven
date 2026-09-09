@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "replay_projection_relationship_tests.rs"]
+mod relationships;
+
 fn projection_connection(parent_id: &str) -> rusqlite::Connection {
     let connection = rusqlite::Connection::open_in_memory().expect("open projection database");
     connection
@@ -23,14 +26,11 @@ fn projection_connection(parent_id: &str) -> rusqlite::Connection {
 
 #[test]
 fn projection_install_restores_unchanged_child_removed_by_parent_cascade() {
-    let source = ReplayProjection {
-        connection: projection_connection("replacement-parent"),
-        store_dir: crate::synthetic_store::test_store_dir(),
-    };
+    let source = projection_connection("replacement-parent");
     let mut target = projection_connection("old-parent");
     let transaction = target.transaction().expect("begin projection install");
 
-    replace_tables_from_projection_on(
+    replace_tables_from_connection_on(
         &source,
         &transaction,
         &["parents".to_string(), "children".to_string()],
@@ -70,18 +70,13 @@ fn update_cascade_projection(parent_rows: &str, child_parent: &str) -> rusqlite:
 
 #[test]
 fn projection_install_is_exact_after_parent_update_cascades() {
-    let source = ReplayProjection {
-        connection: update_cascade_projection(
-            "INSERT INTO parents VALUES ('0', 'C'), ('1', 'B');",
-            "B",
-        ),
-        store_dir: crate::synthetic_store::test_store_dir(),
-    };
+    let source =
+        update_cascade_projection("INSERT INTO parents VALUES ('0', 'C'), ('1', 'B');", "B");
     let mut target =
         update_cascade_projection("INSERT INTO parents VALUES ('0', 'B'), ('1', 'A');", "A");
     let transaction = target.transaction().expect("begin projection install");
 
-    replace_tables_from_projection_on(
+    replace_tables_from_connection_on(
         &source,
         &transaction,
         &["children".to_string(), "parents".to_string()],
@@ -103,18 +98,13 @@ fn projection_install_is_exact_after_parent_update_cascades() {
 
 #[test]
 fn projection_install_does_not_depend_on_unique_value_update_order() {
-    let source = ReplayProjection {
-        connection: update_cascade_projection(
-            "INSERT INTO parents VALUES ('0', 'B'), ('1', 'C');",
-            "B",
-        ),
-        store_dir: crate::synthetic_store::test_store_dir(),
-    };
+    let source =
+        update_cascade_projection("INSERT INTO parents VALUES ('0', 'B'), ('1', 'C');", "B");
     let mut target =
         update_cascade_projection("INSERT INTO parents VALUES ('0', 'A'), ('1', 'B');", "B");
     let transaction = target.transaction().expect("begin projection install");
 
-    replace_tables_from_projection_on(
+    replace_tables_from_connection_on(
         &source,
         &transaction,
         &["children".to_string(), "parents".to_string()],
@@ -135,7 +125,7 @@ fn projection_install_does_not_depend_on_unique_value_update_order() {
 }
 
 #[test]
-fn cyclic_unique_projection_fails_without_exposing_intermediate_rows() {
+fn cyclic_unique_projection_installs_without_replaying_host_triggers() {
     fn connection(rows: &str) -> rusqlite::Connection {
         let connection = rusqlite::Connection::open_in_memory().expect("open projection database");
         connection
@@ -149,10 +139,7 @@ fn cyclic_unique_projection_fails_without_exposing_intermediate_rows() {
             .expect("create projection rows");
         connection
     }
-    let source = ReplayProjection {
-        connection: connection("INSERT INTO rows VALUES ('0', 'B'), ('1', 'A');"),
-        store_dir: crate::synthetic_store::test_store_dir(),
-    };
+    let source = connection("INSERT INTO rows VALUES ('0', 'B'), ('1', 'A');");
     let mut target = connection("INSERT INTO rows VALUES ('0', 'A'), ('1', 'B');");
     target
         .execute_batch(
@@ -170,15 +157,9 @@ fn cyclic_unique_projection_fails_without_exposing_intermediate_rows() {
         .expect("create local update audit");
     let transaction = target.transaction().expect("begin projection install");
 
-    let error = replace_tables_from_projection_on(&source, &transaction, &["rows".to_string()])
-        .expect_err("cyclic unique projection must fail atomically");
-    assert!(
-        error.to_string().contains("UNIQUE constraint failed"),
-        "error preserves the SQLite constraint: {error}"
-    );
-    transaction
-        .rollback()
-        .expect("roll back failed projection install");
+    replace_tables_from_connection_on(&source, &transaction, &["rows".to_string()])
+        .expect("install exact cyclic UNIQUE projection");
+    transaction.commit().expect("commit projection install");
 
     assert_eq!(
         target
@@ -187,21 +168,21 @@ fn cyclic_unique_projection_fails_without_exposing_intermediate_rows() {
                 [],
                 |row| row.get::<_, String>(0),
             )
-            .expect("read unchanged rows"),
-        "0:A,1:B",
+            .expect("read installed rows"),
+        "0:B,1:A",
     );
     assert_eq!(
         target
             .query_row("SELECT COUNT(*) FROM local_audit", [], |row| {
                 row.get::<_, i64>(0)
             })
-            .expect("count rolled-back trigger effects"),
+            .expect("count duplicate trigger effects"),
         0,
     );
 }
 
 #[test]
-fn deferred_unique_attempt_rolls_back_trigger_effects() {
+fn projection_install_does_not_repeat_captured_trigger_effects() {
     fn connection(rows: &str) -> rusqlite::Connection {
         let connection = rusqlite::Connection::open_in_memory().expect("open projection database");
         connection
@@ -215,10 +196,7 @@ fn deferred_unique_attempt_rolls_back_trigger_effects() {
             .expect("create projection rows");
         connection
     }
-    let source = ReplayProjection {
-        connection: connection("INSERT INTO parents VALUES ('0', 'B'), ('1', 'C');"),
-        store_dir: crate::synthetic_store::test_store_dir(),
-    };
+    let source = connection("INSERT INTO parents VALUES ('0', 'B'), ('1', 'C');");
     let mut target = connection("INSERT INTO parents VALUES ('0', 'A'), ('1', 'B');");
     target
         .execute_batch(
@@ -232,7 +210,7 @@ fn deferred_unique_attempt_rolls_back_trigger_effects() {
         .expect("create local update audit");
     let transaction = target.transaction().expect("begin projection install");
 
-    replace_tables_from_projection_on(&source, &transaction, &["parents".to_string()])
+    replace_tables_from_connection_on(&source, &transaction, &["parents".to_string()])
         .expect("replace projection tables");
     transaction.commit().expect("commit projection install");
 
@@ -241,8 +219,8 @@ fn deferred_unique_attempt_rolls_back_trigger_effects() {
             .query_row("SELECT COUNT(*) FROM local_audit", [], |row| {
                 row.get::<_, i64>(0)
             })
-            .expect("count successful update effects"),
-        2,
+            .expect("count duplicate update effects"),
+        0,
     );
 }
 
@@ -265,14 +243,11 @@ fn self_referencing_projection(parent_title: &str) -> rusqlite::Connection {
 
 #[test]
 fn projection_install_restores_unchanged_self_referencing_child() {
-    let source = ReplayProjection {
-        connection: self_referencing_projection("New parent"),
-        store_dir: crate::synthetic_store::test_store_dir(),
-    };
+    let source = self_referencing_projection("New parent");
     let mut target = self_referencing_projection("Old parent");
     let transaction = target.transaction().expect("begin projection install");
 
-    replace_tables_from_projection_on(&source, &transaction, &["nodes".to_string()])
+    replace_tables_from_connection_on(&source, &transaction, &["nodes".to_string()])
         .expect("replace projection table");
     transaction.commit().expect("commit projection install");
 
@@ -308,14 +283,11 @@ fn local_dependent_projection(parent_title: &str) -> rusqlite::Connection {
 
 #[test]
 fn projection_install_preserves_unprojected_dependents_of_changed_rows() {
-    let source = ReplayProjection {
-        connection: local_dependent_projection("New parent"),
-        store_dir: crate::synthetic_store::test_store_dir(),
-    };
+    let source = local_dependent_projection("New parent");
     let mut target = local_dependent_projection("Old parent");
     let transaction = target.transaction().expect("begin projection install");
 
-    replace_tables_from_projection_on(&source, &transaction, &["parents".to_string()])
+    replace_tables_from_connection_on(&source, &transaction, &["parents".to_string()])
         .expect("replace projection table");
     transaction.commit().expect("commit projection install");
 
@@ -327,4 +299,128 @@ fn projection_install_preserves_unprojected_dependents_of_changed_rows() {
             .expect("count local dependents"),
         1,
     );
+}
+
+#[test]
+fn projection_install_cascades_real_deletions_to_device_local_rows() {
+    let source = local_dependent_projection("Parent");
+    source
+        .execute("DELETE FROM parents", [])
+        .expect("remove projected parent");
+    let mut target = local_dependent_projection("Parent");
+    let transaction = target.transaction().expect("begin projection install");
+
+    replace_tables_from_connection_on(&source, &transaction, &["parents".to_string()])
+        .expect("install parent deletion");
+    assert_eq!(
+        transaction
+            .query_row("SELECT COUNT(*) FROM local_records", [], |row| row
+                .get::<_, i64>(0))
+            .expect("count device-local children"),
+        0,
+    );
+    assert!(!transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+            [],
+            |row| row.get::<_, bool>(0)
+        )
+        .expect("validate installed foreign keys"));
+    transaction.commit().expect("commit parent deletion");
+}
+
+#[test]
+fn projection_install_preserves_local_descendants_of_reparented_rows() {
+    fn connection(reparent: bool) -> rusqlite::Connection {
+        let connection = local_dependent_projection("Parent");
+        connection
+            .execute_batch(
+                "CREATE TABLE local_details (
+                id TEXT PRIMARY KEY,
+                record_id TEXT NOT NULL REFERENCES local_records(id) ON DELETE CASCADE
+             );
+             INSERT INTO local_details VALUES ('detail', 'local-record');
+             INSERT INTO parents VALUES ('replacement', 'Replacement');",
+            )
+            .expect("create local grandchild");
+        if reparent {
+            connection
+                .execute_batch(
+                    "UPDATE local_records SET parent_id = 'replacement';
+                 DELETE FROM parents WHERE id = 'parent';",
+                )
+                .expect("reparent the projected child before deleting its former parent");
+        }
+        connection
+    }
+    let source = connection(true);
+    let mut target = connection(false);
+    let transaction = target.transaction().expect("begin projection install");
+
+    replace_tables_from_connection_on(
+        &source,
+        &transaction,
+        &["parents".to_string(), "local_records".to_string()],
+    )
+    .expect("install reparented child and parent deletion");
+    assert_eq!(
+        transaction
+            .query_row(
+                "SELECT record_id FROM local_details WHERE id = 'detail'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("retain the surviving child's local data"),
+        "local-record",
+    );
+    transaction.commit().expect("commit reparented projection");
+}
+
+#[test]
+fn projection_install_keeps_local_references_with_their_surviving_parent() {
+    fn connection() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().expect("open projection database");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+             CREATE TABLE parents (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE);
+             CREATE TABLE local_records (
+                id TEXT PRIMARY KEY,
+                parent_code TEXT NOT NULL REFERENCES parents(code)
+                    ON UPDATE CASCADE ON DELETE CASCADE
+             );
+             INSERT INTO parents VALUES ('one', 'A'), ('two', 'B');
+             INSERT INTO local_records VALUES ('local-one', 'A'), ('local-two', 'B');",
+            )
+            .expect("create parents with local references");
+        connection
+    }
+    let source = connection();
+    source
+        .execute_batch(
+            "UPDATE parents SET code = 'temporary' WHERE id = 'one';
+         UPDATE parents SET code = 'A' WHERE id = 'two';
+         UPDATE parents SET code = 'B' WHERE id = 'one';",
+        )
+        .expect("swap parent keys");
+    let mut target = connection();
+    let transaction = target.transaction().expect("begin projection install");
+
+    replace_tables_from_connection_on(&source, &transaction, &["parents".to_string()])
+        .expect("install swapped parent keys");
+    let references = crate::query_mapped_rows(
+        &transaction,
+        "SELECT id, parent_code FROM local_records ORDER BY id",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )
+    .expect("read retained local references");
+    assert_eq!(
+        references,
+        [
+            ("local-one".into(), "B".into()),
+            ("local-two".into(), "A".into())
+        ]
+    );
+    transaction.commit().expect("commit parent key swap");
 }

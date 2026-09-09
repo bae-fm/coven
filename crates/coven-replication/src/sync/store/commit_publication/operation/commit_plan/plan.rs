@@ -1,6 +1,10 @@
 use super::*;
 
 pub(crate) enum StoreOperationBatch {
+    Circle {
+        reference: super::store_commit::CircleControlRef,
+        stream_activations: Vec<super::store_commit::StreamActivation>,
+    },
     Acknowledgement {
         reference: super::store_commit::StoreAckRef,
         value: super::store_commit::StoreAck,
@@ -12,13 +16,22 @@ pub(crate) enum StoreOperationBatch {
     SamePrincipalDeviceJoin {
         attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
         registration: Box<ActivatedStoreDeviceRegistration>,
+        transition: super::membership::MergeMembershipHeadTransition,
     },
     Abandonment(coven_protocol::store_commit::DeviceJoinAbandonmentRef),
+    AbandonCandidates(Vec<coven_protocol::store_commit::CandidateCleanupManifest>),
     JoinActivation {
         registration: Box<ActivatedStoreDeviceRegistration>,
+        transition: super::membership::MergeMembershipHeadTransition,
     },
-    DeviceExclusionProposal(super::store_commit::RetainedStoreDeviceExclusionProposal),
-    DeviceExclusionOutcome(super::store_commit::RetainedStoreDeviceExclusionOutcome),
+    DeviceExclusionProposal {
+        proposal: super::store_commit::RetainedStoreDeviceExclusionProposal,
+        transition: super::membership::MergeMembershipHeadTransition,
+    },
+    DeviceExclusionOutcome {
+        outcome: super::store_commit::RetainedStoreDeviceExclusionOutcome,
+        transition: super::membership::MergeMembershipHeadTransition,
+    },
     ReclaimAuthorization(Box<coven_protocol::reclaim::ReclaimAuthorizationRef>),
     ReclaimReceipt(Box<coven_protocol::reclaim::ReclaimReceiptRef>),
     OwnerPromotionRequest(super::store_commit::OwnerPromotionRequest),
@@ -31,13 +44,14 @@ pub(crate) enum StoreOperationBatch {
 pub struct StoreOperationPlanCommon {
     /// This device's turn to author its own next Store commit, taken when the
     /// position this plan's order extends was read. A plan is the live claim on
-    /// that position: hold it until the commit has published its head, or until
-    /// the candidate is durably persisted for a later publisher to activate.
+    /// that position: keep it through publication, or transfer it back to the
+    /// operation that will continue publishing the persisted candidate.
     _authorship: coven_database::OwnStreamAuthorship,
     writer: std::sync::Arc<LocalStoreWriter>,
     root: StoreRootRef,
     coord: StoreCommitCoord,
     order: StoreCommitOrder,
+    publication_previous: coven_database::ObservedStorePublication,
     membership_state: super::circle_control::StoreMembershipStateRef,
     device_state: super::store_commit::StoreDeviceStateRef,
     membership_authority: StoreOperationMembershipAuthority,
@@ -66,6 +80,7 @@ impl StoreOperationPlanCommon {
         root: StoreRootRef,
         coord: StoreCommitCoord,
         order: StoreCommitOrder,
+        publication_previous: coven_database::ObservedStorePublication,
         membership_state: super::circle_control::StoreMembershipStateRef,
         device_state: super::store_commit::StoreDeviceStateRef,
         membership_authority: StoreOperationMembershipAuthority,
@@ -77,6 +92,7 @@ impl StoreOperationPlanCommon {
             root,
             coord,
             order,
+            publication_previous,
             membership_state,
             device_state,
             membership_authority,
@@ -113,6 +129,7 @@ impl StoreOperationPlanCommon {
                 root: self.root.clone(),
                 coord: self.coord.clone(),
                 order: self.order.clone(),
+                publication_base: self.publication_previous.record().publication_base(),
                 membership_state: self.membership_state.clone(),
                 device_state: self.device_state.clone(),
                 membership_authority: self.membership_authority.clone(),
@@ -123,6 +140,10 @@ impl StoreOperationPlanCommon {
 }
 
 impl StoreOperationCommitPlan {
+    pub(crate) fn into_authorship(self) -> coven_database::OwnStreamAuthorship {
+        self.common._authorship
+    }
+
     pub(crate) fn new(
         common: StoreOperationPlanCommon,
         membership: MembershipChain,
@@ -166,6 +187,7 @@ impl StoreOperationCommitPlan {
         member_pubkey: String,
         member_grant: super::membership::MembershipGrantId,
         finalization: super::store_commit::OwnerPromotionFinalization,
+        publication_slot: coven_protocol::objects::ObjectSlot,
     ) -> Result<super::store_commit::OwnerPromotionRequest, StoreError> {
         let promoter_owner_grant = self.owner_grant.clone().ok_or_else(|| {
             StoreError::InvalidOutbound(
@@ -182,7 +204,16 @@ impl StoreOperationCommitPlan {
             self.membership_state.clone(),
             self.device_state.clone(),
             finalization,
+            publication_slot,
         )
+    }
+
+    pub(crate) fn candidate_family(
+        &self,
+        write_id: &coven_protocol::write::WriteId,
+    ) -> super::store_commit::CandidateFamilyId {
+        self.writer
+            .candidate_family_id(self.root.store_root_hash, write_id, &self.order)
     }
 
     pub(crate) fn predecessor_cut(&self) -> Result<StoreHistoryCut, StoreError> {
@@ -193,7 +224,6 @@ impl StoreOperationCommitPlan {
         &self.membership_state
     }
 
-    #[cfg(test)]
     pub(crate) fn membership_authority(&self) -> &StoreOperationMembershipAuthority {
         &self.membership_authority
     }
@@ -210,8 +240,8 @@ impl StoreOperationCommitPlan {
         &self.coord
     }
 
-    pub(crate) fn device_id(&self) -> &super::store_commit::StoreDeviceId {
-        self.writer.device_id()
+    pub(crate) fn publication_previous(&self) -> &coven_database::ObservedStorePublication {
+        &self.publication_previous
     }
 
     pub(crate) fn author_pubkey(&self) -> String {
@@ -244,14 +274,6 @@ impl StoreOperationCommitPlan {
     ) -> Result<super::store_commit::RetainedStoreDeviceExclusionOutcome, StoreError> {
         self.writer
             .retain_device_exclusion_outcome(reference, proposal, outcome)
-            .map_err(StoreError::from)
-    }
-
-    pub(crate) fn announcement_activation_id(
-        &self,
-    ) -> Result<super::store_commit::StreamActivationId, StoreError> {
-        self.writer
-            .announcement_activation_id()
             .map_err(StoreError::from)
     }
 
@@ -332,7 +354,6 @@ impl StoreOperationCommitPlan {
             proposal_id,
             target,
             target_registration,
-            self.device_state.clone(),
             outcome_slot,
             owner_grant,
         )
@@ -355,7 +376,6 @@ impl StoreOperationCommitPlan {
         proposal_value: &super::store_commit::StoreDeviceExclusionProposal,
         target: super::store_commit::StoreDeviceRegistrationRef,
         target_registration: &super::store_commit::StoreDeviceRegistration,
-        proof: super::store_commit::StoreDeviceExclusionProof,
         owner_grant: super::membership::MembershipGrantId,
     ) -> Result<super::store_commit::StoreDeviceExclusion, StoreError> {
         self.writer.sign_device_exclusion(
@@ -363,18 +383,8 @@ impl StoreOperationCommitPlan {
             proposal_value,
             target,
             target_registration,
-            proof,
             owner_grant,
         )
-    }
-
-    pub(crate) fn sign_device_head(
-        &self,
-        commit: super::store_commit::StoreBatchCommitRef,
-        successor: super::store_commit::SuccessorLink,
-    ) -> Result<super::store_commit::StoreDeviceHead, StoreError> {
-        self.writer
-            .sign_device_head(self.root.store_root_hash, commit, successor)
     }
 
     pub(crate) fn sign_reclaim_receipt(

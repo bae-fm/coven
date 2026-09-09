@@ -13,10 +13,8 @@ pub(crate) trait CircleBootstrapBlobVerification {
     ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, CircleOperationError> {
         let mut blobs = Vec::with_capacity(snapshot_blobs.len());
         for captured in snapshot_blobs {
-            let coven_database::SnapshotBlobAudience::Circle {
-                circle_id: captured_circle,
-                ..
-            } = captured.audience
+            let coven_protocol::blob::locator::RemoteAudience::Circle(captured_circle) =
+                captured.audience
             else {
                 return Err(CircleOperationError::InvalidState(
                     "Circle bootstrap contains a Store-audience blob".to_string(),

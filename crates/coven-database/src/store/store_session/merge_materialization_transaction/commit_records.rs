@@ -68,7 +68,7 @@ pub(crate) fn derive_materialized_store_device_state_on(
         ));
     }
     device_state = device_operations
-        .apply_to(device_state, &commit.device_state)
+        .apply_to(device_state)
         .map_err(DbError::from)?;
     for activation in commit.device_registrations() {
         if recovery_author
@@ -148,19 +148,12 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         root: &coven_protocol::store_commit::StoreRootRef,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
-        activation: &ReclaimCommitActivation,
     ) -> Result<(), DbError> {
-        activation.validate().map_err(store_reclaim_journal_error)?;
-        if activation.commit() != commit_ref {
-            return Err(DbError::Message(
-                "Store reclaim activation evidence names another commit".to_string(),
-            ));
-        }
         if let Some(authorization) = commit.reclaim_authorization() {
             let operation_id = authorization.authorization_hash;
             let next = DurableStoreReclaimOperation::Authorized {
                 authorization: authorization.clone(),
-                activation: activation.clone(),
+                activation: commit_ref.clone(),
             };
             next.validate().map_err(store_reclaim_journal_error)?;
             match load_store_reclaim_operation_on(self.store.transaction, operation_id)? {
@@ -168,11 +161,15 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     if matches!(
                         &expected,
                         DurableStoreReclaimOperation::AuthorizationCandidate { object, .. }
-                            | DurableStoreReclaimOperation::AuthorizationReplacing { object, .. }
                             if object.authorization_ref() == authorization
                     ) =>
                 {
                     update_store_reclaim_operation_on(self.store.transaction, &expected, &next)?;
+                    crate::store::clear_active_store_commit_for_owner_on(
+                        self.store.transaction,
+                        &crate::ActiveStorePublicationOwner::Reclaim(operation_id),
+                        commit_ref,
+                    )?;
                 }
                 Some(existing) if existing == next => {}
                 Some(_) => {
@@ -189,83 +186,67 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .ok_or_else(|| {
                 DbError::Message("reclaim receipt has no durable authorization".to_string())
             })?;
-            let (authorization, authorization_activation) = match &expected {
-                DurableStoreReclaimOperation::AuthorizationCandidate { .. } => {
-                    return Err(DbError::Message(
-                        "reclaim receipt precedes authorization activation".to_string(),
-                    ));
-                }
-                DurableStoreReclaimOperation::AuthorizationReplacing { .. } => {
-                    return Err(DbError::Message(
-                        "reclaim receipt precedes replacement authorization activation".to_string(),
-                    ));
-                }
-                DurableStoreReclaimOperation::Authorized {
-                    authorization,
-                    activation,
-                } => (authorization.clone(), activation.clone()),
-                DurableStoreReclaimOperation::AbsentVerified {
-                    authorization,
-                    authorization_activation,
-                    ..
-                } => (authorization.clone(), authorization_activation.clone()),
-                DurableStoreReclaimOperation::ReceiptCandidate {
-                    authorization,
-                    authorization_activation,
-                    object,
-                    ..
-                } if matches!(
-                    &**object,
-                    crate::DurableStoreReclaimObject::Receipt {
-                        receipt_ref,
+            let (authorization, authorization_activation, completes_local_candidate) =
+                match &expected {
+                    DurableStoreReclaimOperation::AuthorizationCandidate { .. } => {
+                        return Err(DbError::Message(
+                            "reclaim receipt precedes authorization activation".to_string(),
+                        ));
+                    }
+                    DurableStoreReclaimOperation::Authorized {
+                        authorization,
+                        activation,
+                    } => (authorization.clone(), activation.clone(), false),
+                    DurableStoreReclaimOperation::AbsentVerified {
+                        authorization,
+                        authorization_activation,
                         ..
-                    } if receipt_ref == receipt
-                ) =>
-                {
-                    (authorization.clone(), authorization_activation.clone())
-                }
-                DurableStoreReclaimOperation::ReceiptReplacing {
-                    authorization,
-                    authorization_activation,
-                    object,
-                    ..
-                } if matches!(
-                    &**object,
-                    crate::DurableStoreReclaimObject::Receipt {
-                        receipt_ref,
+                    } => (
+                        authorization.clone(),
+                        authorization_activation.clone(),
+                        false,
+                    ),
+                    DurableStoreReclaimOperation::ReceiptCandidate {
+                        authorization,
+                        authorization_activation,
+                        object,
                         ..
-                    } if receipt_ref == receipt
-                ) =>
-                {
-                    (authorization.clone(), authorization_activation.clone())
-                }
-                DurableStoreReclaimOperation::ReceiptCandidate { .. } => {
-                    return Err(DbError::Message(
-                        "reclaim receipt differs from its durable candidate".to_string(),
-                    ));
-                }
-                DurableStoreReclaimOperation::ReceiptReplacing { .. } => {
-                    return Err(DbError::Message(
-                        "reclaim receipt differs from its replacement candidate".to_string(),
-                    ));
-                }
-                DurableStoreReclaimOperation::Completed { .. } => {
-                    return Err(DbError::Message(
-                        "reclaim authorization already has a receipt".to_string(),
-                    ));
-                }
-            };
+                    } if matches!(
+                        &**object,
+                        crate::DurableStoreReclaimObject::Receipt {
+                            receipt_ref,
+                            ..
+                        } if receipt_ref == receipt
+                    ) =>
+                    {
+                        (
+                            authorization.clone(),
+                            authorization_activation.clone(),
+                            true,
+                        )
+                    }
+                    DurableStoreReclaimOperation::ReceiptCandidate { .. } => {
+                        return Err(DbError::Message(
+                            "reclaim receipt differs from its durable candidate".to_string(),
+                        ));
+                    }
+                    DurableStoreReclaimOperation::Completed { .. } => {
+                        return Err(DbError::Message(
+                            "reclaim authorization already has a receipt".to_string(),
+                        ));
+                    }
+                };
             let next = DurableStoreReclaimOperation::Completed {
                 authorization: authorization.clone(),
                 authorization_activation: authorization_activation.clone(),
                 receipt: receipt.clone(),
-                receipt_activation: activation.clone(),
+                receipt_activation: commit_ref.clone(),
             };
             let reclaimed = ReclaimedStorePackage::receipted(
                 authorization,
                 authorization_activation,
                 receipt.clone(),
-                activation.clone(),
+                commit_ref.clone(),
             )
             .map_err(store_reclaim_journal_error)?;
             record_reclaimed_store_package_on(
@@ -274,61 +255,59 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 &reclaimed,
             )?;
             update_store_reclaim_operation_on(self.store.transaction, &expected, &next)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn replace_store_device_exclusion_freezes_from_replay(
-        &self,
-        root: &coven_protocol::store_commit::StoreRootRef,
-    ) -> Result<(), DbError> {
-        let existing = load_store_device_exclusion_freezes_on(self.store.transaction, root)?;
-        let frontier = crate::store::materialized_commit_index::materialized_frontier_on(
-            self.store.transaction,
-            None,
-        )?
-        .into_values()
-        .map(|reference| (reference.coord.stream_id, reference))
-        .collect::<BTreeMap<_, _>>();
-        let (_, state) = store_device_state_for_history_cut_on(
-            self.store.transaction,
-            &StoreHistoryCut(frontier),
-        )?;
-        let mut retained = Vec::new();
-        for freeze in existing.into_values() {
-            let proposal_state = state
-                .devices
-                .get(&freeze.proposal.target.device_id)
-                .and_then(|record| record.proposals.get(&freeze.proposal.proposal_id));
-            match proposal_state {
-                Some(StoreDeviceProposalState::Pending { proposal })
-                    if proposal == &freeze.proposal =>
-                {
-                    retained.push(freeze);
-                }
-                Some(StoreDeviceProposalState::Cancelled { outcome })
-                    if outcome.proposal == freeze.proposal => {}
-                Some(StoreDeviceProposalState::Superseded { proposal, .. })
-                    if proposal == &freeze.proposal => {}
-                None => {}
-                Some(_) => {
-                    return Err(DbError::Message(
-                        "stored device exclusion freeze differs from replayed device state"
-                            .to_string(),
-                    ));
-                }
+            if completes_local_candidate {
+                crate::store::clear_active_store_commit_for_owner_on(
+                    self.store.transaction,
+                    &crate::ActiveStorePublicationOwner::Reclaim(operation_id),
+                    commit_ref,
+                )?;
             }
         }
-        retained.sort_by_key(|freeze| freeze.proposal.proposal_id);
-        replace_store_device_exclusion_freezes_on(self.store.transaction, &retained)
+        Ok(())
     }
 
     pub(crate) fn complete_membership_journal(
         &self,
         completion: coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
-        candidate: &StoreBatchCommitRef,
+        acceptance: &crate::AcceptedStoreCommitEvidence,
+        verified_commit: &VerifiedStoreBatchCommit,
     ) -> Result<(), DbError> {
+        // The publication transaction resolves this evidence against its live
+        // baseline and records any new materialization before completing journals.
+        let candidate = acceptance.commit_ref();
+        if candidate != verified_commit.reference() {
+            return Err(DbError::Message(
+                "membership completion differs from the accepted exact commit".into(),
+            ));
+        }
         match completion {
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion::MembershipCandidateAbandoned {
+                intent_hash, original, publication, remote_objects,
+            } => self.complete_membership_candidate_abandonment(
+                intent_hash, &original, *publication, &remote_objects, verified_commit,
+            ),
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion::DeviceJoin { remote_objects } => {
+                let object_ids = remote_objects.iter().map(|remote| remote.object_id()).collect::<Vec<_>>();
+                if object_ids.is_empty() || object_ids.iter().collect::<BTreeSet<_>>().len() != object_ids.len() {
+                    return Err(DbError::Message("device join activation graph is empty or repeats an exact object".into()));
+                }
+                self.activate_store_operation_remote_objects(candidate, &object_ids)
+            }
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion::DeviceExclusion {
+                operation,
+                remote_objects,
+            } => {
+                let object_ids = remote_objects.iter().map(|remote| remote.object_id()).collect::<Vec<_>>();
+                if object_ids.is_empty()
+                    || object_ids.iter().collect::<BTreeSet<_>>().len() != object_ids.len()
+                {
+                    return Err(DbError::Message("exclusion activation graph is empty or repeats an exact object".into()));
+                }
+                self.activate_store_operation_remote_objects(candidate, &object_ids)?;
+                crate::store::store_session::device_exclusion::complete_store_device_exclusion_activation_on(
+                    self.store.transaction, &operation, acceptance,
+                )
+            }
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
                 intent_hash,
                 progress_bytes,
@@ -391,6 +370,78 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         }
     }
 
+    fn complete_membership_candidate_abandonment(
+        &self,
+        intent_hash: ObjectHash,
+        original: &coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        publication: coven_protocol::membership_mutation::PreparedMembershipPublication,
+        remote_objects: &[coven_protocol::remote_object::RemoteObjectRecord],
+        accepted: &VerifiedStoreBatchCommit,
+    ) -> Result<(), DbError> {
+        use crate::store::store_session::{
+            active_store_publication, candidate_records, membership_mutations,
+        };
+        let tx = self.store.transaction;
+        membership_mutations::require_membership_mutation_on(tx, intent_hash)?;
+        original.validate_closed_shape()?;
+        if publication != original.prepared_membership_publication()? {
+            return Err(DbError::Message(
+                "membership abandonment carries another original authority graph".into(),
+            ));
+        }
+        let active =
+            active_store_publication::load_active_store_publication_on(tx)?.ok_or_else(|| {
+                DbError::Message("accepted membership abandonment has no owner".into())
+            })?;
+        let abandonment = active.membership_abandonment().ok_or_else(|| {
+            DbError::Message("membership continuation has no prepared abandonment".into())
+        })?;
+        if abandonment.reference != *accepted.reference()
+            || abandonment.commit != *accepted.value()
+            || active.commit_reservation()
+                != Some((
+                    &original.commit.write_id,
+                    &original.commit.author_registration,
+                    &original.reference.coord,
+                ))
+            || remote_objects.len() != 1
+            || remote_objects[0].object() != &accepted.reference().object
+        {
+            return Err(DbError::Message(
+                "accepted abandonment differs from its reserved membership mutation".into(),
+            ));
+        }
+        let nonactivation =
+            coven_protocol::remote_object::CandidateNonactivation::from_durable_parts(
+                &original.reference,
+                &original.commit,
+                coven_protocol::remote_object::CandidateNonactivationProof::AcceptedAbandonment {
+                    abandonment: coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
+                        coord: accepted.reference().coord.clone(),
+                        object: accepted.reference().object.clone(),
+                        canonical_signed_bytes: accepted.to_bytes(),
+                    },
+                },
+            )?;
+        let retired = crate::RetiredStoreCandidate {
+            nonactivation,
+            inputs: crate::RetiredStoreCandidateInputs::Membership(publication),
+            publications: vec![original.publication.reference()?],
+        };
+        let replacement = active.continue_membership_after_abandonment(retired.clone())?;
+        self.activate_store_operation_remote_objects(
+            accepted.reference(),
+            &[remote_objects[0].object_id()],
+        )?;
+        candidate_records::begin_candidate_nonactivation_targets_on(
+            tx,
+            &original.reference,
+            &retired.objects()?,
+            &retired.nonactivation,
+        )?;
+        active_store_publication::update_active_store_publication_on(tx, &active, &replacement)
+    }
+
     fn record_activated_membership_candidate_mutation(
         &self,
         intent_hash: ObjectHash,
@@ -432,6 +483,11 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         if let crate::MembershipMutationActivation::Rotation { generation } = activation {
             super::commit_rotation_candidate_on(self.store.transaction, intent_hash, generation)?;
         }
+        crate::store::clear_active_store_commit_for_owner_on(
+            self.store.transaction,
+            &crate::ActiveStorePublicationOwner::MembershipMutation,
+            candidate,
+        )?;
         Ok(())
     }
 
@@ -453,8 +509,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         root: &coven_protocol::store_commit::StoreRootRef,
         verified_commit: &VerifiedStoreBatchCommit,
         registrations: &[ActivatedStoreDeviceRegistration],
-        activation_head: &StoreDeviceHead,
-        activation_head_object: &ExactObjectRef,
+        acceptance: &crate::AcceptedStoreCommitEvidence,
         history_evidence: &coven_protocol::store_commit::RetainedMergeCommitEvidence,
         packages: &[AudiencePackage],
         package_application: Option<RetainedPackageApplication>,
@@ -471,8 +526,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             registrations,
             &device_operations,
             &circle_activations,
-            activation_head,
-            activation_head_object,
+            acceptance,
             history_evidence,
             None,
             packages,
@@ -488,31 +542,26 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         self.record_author_exclusion_activations(&materialization)?;
         let root = materialization.root();
-        self.store.derive_materialized_store_device_state(
-            registrations_lookup,
-            root,
-            materialization.commit(),
-            materialization.device_operations(),
-        )?;
-        let (retained_commit_ref, retained) = self.store.retain_merge_materialization(
-            registrations_lookup,
-            root,
-            &materialization,
-        )?;
-        self.store.record_circle_bootstrap_coverage(
-            registrations_lookup,
-            root,
-            materialization.commit_ref(),
-            materialization.circle_activations(),
-        )?;
-        let activation = ReclaimCommitActivation::new(
-            materialization.commit_ref().clone(),
-            coven_protocol::store_commit::StoreDeviceHeadRef {
-                head_hash: materialization.activation_head().head_hash(),
-                object: materialization.activation_head_object().clone(),
-            },
-        )
-        .map_err(store_reclaim_journal_error)?;
+        self.store
+            .derive_materialized_store_device_state(
+                registrations_lookup,
+                root,
+                materialization.commit(),
+                materialization.device_operations(),
+            )
+            .map_err(|error| DbError::context("received declared device state", error))?;
+        let (retained_commit_ref, retained) = self
+            .store
+            .retain_merge_materialization(registrations_lookup, root, &materialization)
+            .map_err(|error| DbError::context("received canonical retained input", error))?;
+        self.store
+            .record_circle_bootstrap_coverage(
+                registrations_lookup,
+                root,
+                materialization.commit_ref(),
+                materialization.circle_activations(),
+            )
+            .map_err(|error| DbError::context("received Circle coverage", error))?;
         self.record_materialized_commit_with_device_operations(
             registrations_lookup,
             root,
@@ -520,8 +569,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             materialization.device_operations(),
             materialization.circle_activations().stream_activations(),
             &retained_commit_ref,
-            &activation,
-        )?;
+        )
+        .map_err(|error| DbError::context("received materialized commit record", error))?;
         Ok(retained)
     }
 
@@ -533,7 +582,6 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         device_operations: &VerifiedStoreDeviceOperations,
         stream_activations: &VerifiedStreamActivations,
         retention: &RetainedMergeMaterializationKey,
-        activation: &ReclaimCommitActivation,
     ) -> Result<(), DbError> {
         let conn = self.store.transaction;
         let commit = verified_commit.value();
@@ -669,7 +717,6 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             stream_activations,
             &commit_ref_json,
         )?;
-        apply_store_device_exclusion_freezes_on(conn, root, &device_state, device_operations)?;
-        self.record_store_reclaim_activation(root, commit, commit_ref, activation)
+        self.record_store_reclaim_activation(root, commit, commit_ref)
     }
 }

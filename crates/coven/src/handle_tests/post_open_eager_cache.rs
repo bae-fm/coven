@@ -1,4 +1,5 @@
 use super::*;
+use crate::handle::tests::HostBlobTestOps;
 
 async fn join_eager_fixture(fixture: &FacadeFixture) -> coven_foundation::config::Config {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -334,7 +335,8 @@ async fn publish_one_more_eager_image(handle: &crate::CovenHandle, index: usize)
     let hash = coven_protocol::blob::content_hash(&bytes);
     let blob_id = id.clone();
     let blob_bytes = bytes.clone();
-    handle
+    let published_row = id.clone();
+    let write = handle
         .write_with_blobs(
             move |batch| {
                 batch.put_blob("photos", blob_id, blob_bytes);
@@ -353,8 +355,10 @@ async fn publish_one_more_eager_image(handle: &crate::CovenHandle, index: usize)
         )
         .await
         .expect("write one more eager image");
-    // The root is already Remote, so the new child row is published with it.
-    wait_for_initial_sync(handle).await;
+    // Wait for this child write, even if an earlier sync cycle already finished.
+    handle
+        .wait_for_host_blob_publication(&published_row, &write.write_id)
+        .await;
 }
 
 /// Artwork that arrives *after* a device is open still becomes local bytes.

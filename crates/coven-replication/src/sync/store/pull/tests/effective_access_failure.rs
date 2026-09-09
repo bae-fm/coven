@@ -16,19 +16,19 @@ impl PackageFailure {
 }
 
 #[tokio::test]
-async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() {
+async fn a_conflicting_admission_preserves_the_accepted_grant_and_pull_access() {
     let owner_database_store_dir = crate::sync::test_helpers::test_store_dir();
     let owner_database = open_scoped_replay_database(owner_database_store_dir.clone());
     let owner = coven_keys::keys::UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &owner_database,
         owner_database_store_dir.clone(),
-        "unresolved-effective-access",
+        "conflicting-effective-access",
         owner.clone(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await
-    .expect("create unresolved-membership Store");
+    .expect("create conflicting-assignment Store");
     let second_owner = coven_keys::keys::UserKeypair::generate();
     let second_owner_database_store_dir = crate::sync::test_helpers::test_store_dir();
     let second_owner_database =
@@ -43,7 +43,7 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
             None,
             coven_protocol::membership::MemberRole::Member,
             &encryption,
-            "Unresolved Membership Store",
+            "Conflicting Assignment Store",
         )
         .await
         .expect("admit the second owner");
@@ -99,34 +99,72 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
             None,
             coven_protocol::membership::MemberRole::Member,
             &encryption,
-            "unresolved-effective-access",
-            "Unresolved Membership Store",
+            "conflicting-effective-access",
+            "Conflicting Assignment Store",
         )
         .await
         .expect("publish the founder's assignment");
-    second_writer
+    let accepted = StoreDatabase::new(&owner_database)
+        .store_current_publication()
+        .await
+        .expect("accepted first assignment");
+    let original_grants = owner_store
+        .membership_for_test()
+        .await
+        .expect("accepted target membership")
+        .active_grant_ids(&target_pubkey);
+    assert_eq!(original_grants.len(), 1);
+    let error = second_writer
         .admit_member(
             &target_pubkey,
             None,
             coven_protocol::membership::MemberRole::Follower,
             &encryption,
-            "unresolved-effective-access",
-            "Unresolved Membership Store",
+            "conflicting-effective-access",
+            "Conflicting Assignment Store",
         )
         .await
-        .expect("publish the second owner's conflicting assignment");
+        .expect_err("an earlier writer handle cannot overwrite the accepted assignment");
+    assert!(matches!(
+        error,
+        crate::sync::store::membership::MembershipOpsError::ExistingMemberMismatch
+    ));
+    let second_database = StoreDatabase::new(&second_owner_database);
+    assert!(second_database
+        .outbound_membership_mutation()
+        .await
+        .expect("rejected assignment journal")
+        .is_none());
+    assert!(second_database
+        .active_store_publication()
+        .await
+        .expect("rejected assignment reservation")
+        .is_none());
     drop(founder_writer);
     drop(second_writer);
 
-    let mut founder_writer = owner_store
-        .authorize_writer()
+    let (_, pulled) = owner_store
+        .pull_store()
         .await
-        .expect("authorize the founder with the unresolved membership");
-    let error = founder_writer
-        .pull(Some(&encryption))
+        .expect("rejected conflicting assignment leaves accepted history readable");
+    assert!(pulled.held_positions.is_empty(), "{pulled:?}");
+    assert_eq!(
+        StoreDatabase::new(&owner_database)
+            .store_current_publication()
+            .await
+            .expect("boundary after rejected assignment"),
+        accepted
+    );
+    let membership = owner_store
+        .membership_for_test()
         .await
-        .expect_err("pull must reject unresolved Store membership");
-    assert!(error.to_string().contains("membership"), "{error}");
+        .expect("accepted membership");
+    assert!(membership.conflict().is_none());
+    assert_eq!(membership.active_grant_ids(&target_pubkey), original_grants);
+    assert!(membership.current_members().contains(&(
+        target_pubkey,
+        coven_protocol::membership::MemberRole::Member,
+    )));
 }
 
 #[tokio::test]

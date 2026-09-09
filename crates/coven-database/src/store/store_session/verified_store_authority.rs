@@ -1,4 +1,3 @@
-use super::candidate_records::PreparedMergeCandidate;
 use super::retained_merge_replay::CircleReplayEpochIndex;
 use super::ReplayProjection;
 use super::*;
@@ -45,9 +44,77 @@ pub(crate) trait VerifiedRegistrationLookup {
         root: &StoreRootRef,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceRegistration, DbError>;
+
+    fn local_registration_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+        root: &StoreRootRef,
+    ) -> Result<ReferencedStoreDeviceRegistration, DbError> {
+        let reference = records.local_activated_registration_ref()?.ok_or_else(|| {
+            DbError::Message("local Store device has no activated registration".to_string())
+        })?;
+        let registration = self.activated_registration_on(records, root, &reference)?;
+        ReferencedStoreDeviceRegistration::verified(reference, registration).map_err(DbError::from)
+    }
+}
+
+pub(super) fn verify_prepared_store_commit_on(
+    lookup: &mut dyn VerifiedRegistrationLookup,
+    records: crate::store::store_session::StoreRecords<'_>,
+    root: &StoreRootRef,
+    prepared: &super::publication_state::PreparedStoreWriteState,
+) -> Result<coven_protocol::store_commit::VerifiedStoreBatchCommit, DbError> {
+    let unverified: coven_protocol::store_commit::StoreBatchCommit =
+        serde_json::from_slice(prepared.commit.semantic_bytes())
+            .map_err(|error| DbError::context("prepared Store commit", error))?;
+    let registration =
+        lookup.activated_registration_on(records, root, &unverified.author_registration)?;
+    let coord = coven_protocol::store_commit::StoreCommitCoord {
+        stream_id: coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &unverified.author_registration,
+            coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        ),
+        sequence: unverified.seq(),
+    };
+    coven_protocol::store_commit::VerifiedStoreBatchCommit::parse_prepared(
+        prepared.commit.semantic_bytes(),
+        root.store_root_hash,
+        coord,
+        prepared.commit.prepared().reference().clone(),
+        &registration,
+    )
+    .map_err(|error| DbError::context("prepared Store commit", error))
 }
 
 pub(crate) trait VerifiedStoreLookup: VerifiedRegistrationLookup {
+    fn retained_replay_object_coverage_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+    ) -> Result<super::retained_merge_replay::RetainedReplayObjectCoverage<'_>, DbError>;
+
+    fn pending_device_join_retention_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+        root: &StoreRootRef,
+        coverage: &coven_protocol::store_commit::CommitFrontier,
+    ) -> Result<
+        BTreeMap<
+            coven_protocol::store_commit::AcceptedStoreSnapshotRef,
+            std::collections::BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>,
+        >,
+        DbError,
+    >;
+
+    fn open_retained_materialization_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+        root: &StoreRootRef,
+        input: &crate::store::materialization_models::RetainedMergeMaterializationInput,
+        input_hash: coven_protocol::store_commit::ObjectHash,
+        materialization: &crate::VerifiedMergeMaterialization<'_>,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError>;
+
     fn retained_materialization_by_ref_on(
         &mut self,
         records: crate::store::store_session::StoreRecords<'_>,
@@ -95,53 +162,26 @@ impl VerifiedStoreAuthorityTransaction {
         self.cache.insert_verified(materialization)
     }
 
-    pub(super) fn replay_inputs_on(
-        &mut self,
-        records: crate::store::store_session::StoreRecords<'_>,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
-        self.cache
-            .replay_inputs_on(records, &self.root, &mut registrations)
+    pub(super) fn forget_superseded_replay_baseline(&mut self) {
+        self.cache.forget_superseded_baseline();
     }
 
-    pub(super) fn prepared_merge_candidate_on(
+    pub(super) fn replace_installed_replay_baseline(
         &mut self,
-        records: crate::store::store_session::StoreRecords<'_>,
-        prepared: &super::publication_state::PreparedStoreWriteState,
-    ) -> Result<PreparedMergeCandidate, DbError> {
-        let (commit, head) = super::candidate_records::prepared_merge_candidate_objects(prepared);
-        self.prepared_merge_candidate_parts_on(
-            records,
-            commit.semantic_bytes(),
-            commit.prepared().reference(),
-            head.semantic_bytes(),
-            head.prepared().reference(),
-        )
-    }
-
-    pub(super) fn prepared_merge_candidate_parts_on(
-        &mut self,
-        records: crate::store::store_session::StoreRecords<'_>,
-        commit_bytes: &[u8],
-        commit_object: &coven_protocol::objects::ExactObjectRef,
-        head_bytes: &[u8],
-        head_object: &coven_protocol::objects::ExactObjectRef,
-    ) -> Result<PreparedMergeCandidate, DbError> {
-        let unverified: coven_protocol::store_commit::StoreBatchCommit =
-            serde_json::from_slice(commit_bytes)
-                .map_err(|error| DbError::context("signed Merge candidate", error))?;
-        let root = self.root.clone();
-        let registration =
-            self.activated_registration_on(records, &root, &unverified.author_registration)?;
-        super::candidate_records::verify_prepared_merge_candidate_parts(
-            &root,
-            unverified,
-            &registration,
-            commit_bytes,
-            commit_object,
-            head_bytes,
-            head_object,
-        )
+        baseline: RetainedReplayBaseline,
+    ) -> Result<(), DbError> {
+        let baseline_root = match &baseline.authority {
+            RetainedReplayAuthority::Genesis(authority) => &authority.store_root,
+            RetainedReplayAuthority::InstalledSnapshot(authority) => &authority.store_root,
+        };
+        if baseline_root != &self.root {
+            return Err(DbError::Message(
+                "received replay baseline belongs to another Store root".into(),
+            ));
+        }
+        self.cache.forget_superseded_baseline();
+        self.cache.commit_installed_baseline(baseline);
+        Ok(())
     }
 
     fn retained_materialization_by_ref_on(
@@ -149,18 +189,9 @@ impl VerifiedStoreAuthorityTransaction {
         records: crate::store::store_session::StoreRecords<'_>,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        if let Some(materialization) = self.cache.cached_by_ref(reference)? {
-            return Ok(materialization.clone());
-        }
         let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
-        let materialization = StoreDatabase::load_retained_merge_materialization_by_ref_on(
-            records,
-            &self.root,
-            &mut registrations,
-            reference,
-        )?;
-        self.cache.insert_verified(materialization.clone())?;
-        Ok(materialization)
+        self.cache
+            .materialization_by_ref_on(records, &self.root, &mut registrations, reference)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -201,6 +232,7 @@ impl VerifiedStoreAuthorityTransaction {
         gates: &crate::Gates,
         synced_tables: &[coven_protocol::synced_schema::SyncedTable],
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+        history_cut: Option<&coven_protocol::store_commit::CommitFrontier>,
         journal: crate::ReplayJournal<'_>,
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
     ) -> Result<super::ReplayProjectionResult, DbError> {
@@ -214,7 +246,7 @@ impl VerifiedStoreAuthorityTransaction {
             synced_tables,
             routing_key,
             &std::collections::BTreeSet::new(),
-            None,
+            history_cut,
             journal,
             local_store_membership,
             None,
@@ -223,6 +255,14 @@ impl VerifiedStoreAuthorityTransaction {
 }
 
 impl VerifiedStoreAuthority {
+    pub(super) fn for_replay_baseline(baseline: RetainedReplayBaseline) -> Self {
+        let mut authority = Self::default();
+        authority
+            .retained_replay
+            .commit_installed_baseline(baseline);
+        authority
+    }
+
     fn commit_installed_root(&mut self, reference: StoreRootRef, value: StoreProtocolRoot) {
         match &self.root_authority {
             Some(existing) => assert_eq!(
@@ -318,6 +358,15 @@ impl VerifiedStoreAuthority {
             .expect("committed Store owner anchor must match its connection authority");
     }
 
+    pub(super) fn verified_prepared_store_commit_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+        prepared: &super::publication_state::PreparedStoreWriteState,
+    ) -> Result<coven_protocol::store_commit::VerifiedStoreBatchCommit, DbError> {
+        let root = self.required_root_authority_on(records)?;
+        verify_prepared_store_commit_on(self, records, &root, prepared)
+    }
+
     pub(super) fn reuses_owner_anchor(
         &self,
         anchor: &crate::StoreOwnerAnchor,
@@ -345,46 +394,6 @@ impl VerifiedStoreAuthority {
             ));
         }
         Ok(true)
-    }
-
-    pub(super) fn prepared_merge_candidate_on(
-        &mut self,
-        records: crate::store::store_session::StoreRecords<'_>,
-        prepared: &super::publication_state::PreparedStoreWriteState,
-    ) -> Result<PreparedMergeCandidate, DbError> {
-        let (commit, head) = super::candidate_records::prepared_merge_candidate_objects(prepared);
-        self.prepared_merge_candidate_parts_on(
-            records,
-            commit.semantic_bytes(),
-            commit.prepared().reference(),
-            head.semantic_bytes(),
-            head.prepared().reference(),
-        )
-    }
-
-    pub(super) fn prepared_merge_candidate_parts_on(
-        &mut self,
-        records: crate::store::store_session::StoreRecords<'_>,
-        commit_bytes: &[u8],
-        commit_object: &coven_protocol::objects::ExactObjectRef,
-        head_bytes: &[u8],
-        head_object: &coven_protocol::objects::ExactObjectRef,
-    ) -> Result<PreparedMergeCandidate, DbError> {
-        let root = self.required_root_authority_on(records)?;
-        let unverified: coven_protocol::store_commit::StoreBatchCommit =
-            serde_json::from_slice(commit_bytes)
-                .map_err(|error| DbError::context("signed Merge candidate", error))?;
-        let registration =
-            self.activated_registration_on(records, &root, &unverified.author_registration)?;
-        super::candidate_records::verify_prepared_merge_candidate_parts(
-            &root,
-            unverified,
-            &registration,
-            commit_bytes,
-            commit_object,
-            head_bytes,
-            head_object,
-        )
     }
 
     pub(super) fn begin_transaction_on(
@@ -472,11 +481,7 @@ impl VerifiedStoreAuthority {
         records: crate::store::store_session::StoreRecords<'_>,
     ) -> Result<ReferencedStoreDeviceRegistration, DbError> {
         let root = self.required_root_authority_on(records)?;
-        let reference = records.local_activated_registration_ref()?.ok_or_else(|| {
-            DbError::Message("local Store device has no activated registration".to_string())
-        })?;
-        let registration = self.activated_registration_on(records, &root, &reference)?;
-        ReferencedStoreDeviceRegistration::verified(reference, registration).map_err(DbError::from)
+        self.local_registration_on(records, &root)
     }
 
     /// Drop replay state derived from a baseline this session just advanced.
@@ -537,20 +542,14 @@ impl VerifiedStoreAuthority {
         records: crate::store::store_session::StoreRecords<'_>,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        if let Some(materialization) = self.retained_replay.cached_by_ref(reference)? {
-            return Ok(materialization.clone());
-        }
         let root = self.required_root_authority_on(records)?;
         let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
-        let materialization = StoreDatabase::load_retained_merge_materialization_by_ref_on(
+        self.retained_replay.materialization_by_ref_on(
             records,
             &root,
             &mut registrations,
             reference,
-        )?;
-        self.retained_replay
-            .insert_verified(materialization.clone())?;
-        Ok(materialization)
+        )
     }
 
     pub(super) fn validate_retained_materialization_by_ref_on(
@@ -614,34 +613,6 @@ impl VerifiedStoreAuthority {
             local_store_membership,
         )
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn replay_projection_result_for_root_on(
-        &mut self,
-        records: crate::store::store_session::StoreTransaction<'_, '_>,
-        root: &StoreRootRef,
-        blob_decls: &BlobDecls,
-        gates: &crate::Gates,
-        synced_tables: &[coven_protocol::synced_schema::SyncedTable],
-        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
-        history_cut: &coven_protocol::store_commit::CommitFrontier,
-    ) -> Result<crate::store::store_session::ReplayProjectionResult, DbError> {
-        let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
-        self.retained_replay.replay_projection_watching_on(
-            records,
-            root,
-            &mut registrations,
-            blob_decls,
-            gates,
-            synced_tables,
-            routing_key,
-            &std::collections::BTreeSet::new(),
-            Some(history_cut),
-            crate::ReplayJournal::Omit,
-            coven_protocol::membership::LocalStoreMembership::Current,
-            None,
-        )
-    }
 }
 
 impl VerifiedRegistrationLookup for VerifiedStoreAuthority {
@@ -656,6 +627,56 @@ impl VerifiedRegistrationLookup for VerifiedStoreAuthority {
 }
 
 impl VerifiedStoreLookup for VerifiedStoreAuthority {
+    fn retained_replay_object_coverage_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+    ) -> Result<super::retained_merge_replay::RetainedReplayObjectCoverage<'_>, DbError> {
+        super::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(Some(
+            self.retained_replay_baseline_on(records)?,
+        ))
+    }
+
+    fn pending_device_join_retention_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+        root: &StoreRootRef,
+        coverage: &coven_protocol::store_commit::CommitFrontier,
+    ) -> Result<
+        BTreeMap<
+            coven_protocol::store_commit::AcceptedStoreSnapshotRef,
+            std::collections::BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>,
+        >,
+        DbError,
+    > {
+        let baseline = self.retained_replay_baseline_on(records)?.clone();
+        StoreDatabase::pending_device_join_retention_on(records, self, root, coverage, &baseline)
+    }
+
+    fn open_retained_materialization_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+        root: &StoreRootRef,
+        input: &crate::store::materialization_models::RetainedMergeMaterializationInput,
+        input_hash: coven_protocol::store_commit::ObjectHash,
+        materialization: &crate::VerifiedMergeMaterialization<'_>,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        if self.required_root_authority_on(records)? != *root {
+            return Err(DbError::Message(
+                "retained materialization belongs to another Store root".to_string(),
+            ));
+        }
+        let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
+        StoreDatabase::open_retained_merge_materialization_input_with_verified_materialization_on(
+            records,
+            root,
+            &mut registrations,
+            materialization.commit_ref(),
+            input,
+            input_hash,
+            materialization,
+        )
+    }
+
     fn retained_materialization_by_ref_on(
         &mut self,
         records: crate::store::store_session::StoreRecords<'_>,
@@ -718,27 +739,6 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
             self.store_dir,
         ))
     }
-
-    pub(super) fn retained_replay_inputs(
-        self,
-        authority: &mut VerifiedStoreAuthorityTransaction,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        authority.replay_inputs_on(crate::store::store_session::StoreRecords::new(
-            self.transaction,
-            self.store_dir,
-        ))
-    }
-
-    pub(super) fn retained_materialization_by_ref(
-        self,
-        authority: &mut VerifiedStoreAuthorityTransaction,
-        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        authority.retained_materialization_by_ref_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-            reference,
-        )
-    }
 }
 
 impl VerifiedRegistrationLookup for VerifiedStoreAuthorityTransaction {
@@ -763,6 +763,56 @@ impl VerifiedRegistrationLookup for VerifiedStoreAuthorityTransaction {
 }
 
 impl VerifiedStoreLookup for VerifiedStoreAuthorityTransaction {
+    fn retained_replay_object_coverage_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+    ) -> Result<super::retained_merge_replay::RetainedReplayObjectCoverage<'_>, DbError> {
+        super::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(Some(
+            self.cache.baseline_on(records)?,
+        ))
+    }
+
+    fn pending_device_join_retention_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+        root: &StoreRootRef,
+        coverage: &coven_protocol::store_commit::CommitFrontier,
+    ) -> Result<
+        BTreeMap<
+            coven_protocol::store_commit::AcceptedStoreSnapshotRef,
+            std::collections::BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>,
+        >,
+        DbError,
+    > {
+        let baseline = self.cache.baseline_on(records)?.clone();
+        StoreDatabase::pending_device_join_retention_on(records, self, root, coverage, &baseline)
+    }
+
+    fn open_retained_materialization_on(
+        &mut self,
+        records: crate::store::store_session::StoreRecords<'_>,
+        root: &StoreRootRef,
+        input: &crate::store::materialization_models::RetainedMergeMaterializationInput,
+        input_hash: coven_protocol::store_commit::ObjectHash,
+        materialization: &crate::VerifiedMergeMaterialization<'_>,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        if &self.root != root {
+            return Err(DbError::Message(
+                "retained materialization belongs to another Store root".to_string(),
+            ));
+        }
+        let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
+        StoreDatabase::open_retained_merge_materialization_input_with_verified_materialization_on(
+            records,
+            root,
+            &mut registrations,
+            materialization.commit_ref(),
+            input,
+            input_hash,
+            materialization,
+        )
+    }
+
     fn retained_materialization_by_ref_on(
         &mut self,
         records: crate::store::store_session::StoreRecords<'_>,

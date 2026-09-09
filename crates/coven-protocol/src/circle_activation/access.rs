@@ -246,6 +246,24 @@ impl VerifiedCircleReference {
         .map(|keyring| keyring.key_entry(fingerprint))
     }
 
+    /// Snapshot streams can contain images from earlier epochs retained in the
+    /// recipient's signed keyring. Package access still selects its exact key.
+    pub fn snapshot_keyring(&self) -> Result<Option<EncryptionService>, CircleStateError> {
+        let Some(access) = self.local_access.as_ref() else {
+            return Ok(None);
+        };
+        let Some(active) = access.active.as_ref() else {
+            return Ok(None);
+        };
+        verified_keyring_from(
+            self.circle_id,
+            &self.control.value,
+            &access.leaf.value.disposition,
+            &active.roster,
+        )
+        .map(|verified| Some(verified.keyring))
+    }
+
     pub fn epoch_access(&self) -> Result<Option<CircleEpochAccess>, CircleStateError> {
         let Some(access) = self.local_access.as_ref() else {
             return Ok(None);

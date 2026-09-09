@@ -3,22 +3,17 @@ use crate::sync::store::StoreError;
 #[cfg(test)]
 use coven_database::StoreDatabase;
 use coven_protocol::membership::MembershipChain;
-use coven_protocol::objects::ExactObjectRef;
-#[cfg(test)]
-use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreCommitOrder, StoreHistoryCut, StoreOperationMembershipAuthority, StoreRootRef,
 };
-use coven_protocol::{circle_control, membership, provider, remote_object, store_commit};
-mod candidate;
+use coven_protocol::{circle_control, membership, provider, store_commit};
 mod plan;
 mod publication;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use candidate::*;
 pub(crate) use coven_protocol::prepared_commit::*;
 pub use plan::StoreOperationCommitPlan;
 pub(crate) use plan::*;

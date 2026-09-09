@@ -104,17 +104,37 @@ async fn publication_respects_a_transfer_limit_of_one() {
 /// candidate lost — is a blob nothing will ever upload, and publication has to
 /// refuse the write loudly rather than skip it.
 ///
-/// This state is reachable on a write still being drained. Publication reads
-/// each record live through `reopen_remote_object_on`, not from a snapshot
-/// taken when the write was prepared, and the nonactivation machinery retires
-/// ownership the moment a candidate loses a merge race, is abandoned, or has
-/// its author excluded — here driven through the same
-/// `begin_remote_candidate_nonactivation_on` those paths call. Skipping the
-/// blob would publish a commit naming bytes nobody put at the provider; going
-/// to the provider to check would be the round trip this path exists to avoid.
+/// The peer publishes a snapshot that retires the candidate's old publication
+/// base. The original device has not adopted that snapshot, so its prepared
+/// write still names the blob when the real ownership transition retires it.
+/// Publication must consult the current durable object record before uploading
+/// packages or the commit, without probing the blob at the provider.
 #[tokio::test]
 async fn publication_refuses_a_blob_whose_candidate_ownership_was_retired() {
     let fixture = UploadFixture::new(4).await;
+    let peer_dir = crate::sync::test_helpers::test_store_dir();
+    let peer_db = Database::open_synthetic_for_test(
+        std::path::Path::new(":memory:"),
+        peer_dir.clone(),
+        FixtureSchema::RowBlobs.tables(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
+        "snapshot-peer".into(),
+        Arc::new(coven_foundation::clock::SystemClock),
+        &FixtureSchema::RowBlobs.migrations(),
+    )
+    .expect("open snapshot peer database");
+    let peer_database = StoreDatabase::new(&peer_db);
+    let peer = crate::sync::test_helpers::TestDevice::activate_joined(
+        fixture.device.clone(),
+        peer_database.clone(),
+        peer_dir,
+        &fixture.owner,
+        "2026-07-16T00:00:00Z",
+        fixture.storage.clone(),
+    )
+    .await
+    .expect("join independent snapshot publisher");
     fixture.seed_uploads(1).await;
     fixture.drain(&fixed_clock(T0), None).await.unwrap();
     assert!(
@@ -134,7 +154,6 @@ async fn publication_refuses_a_blob_whose_candidate_ownership_was_retired() {
         .expect("the prepared write exists");
     let write_id = prepared.commit.value.value().write_id.clone();
     let candidate = prepared.commit.value.reference().clone();
-    let candidate_bytes = prepared.commit.bytes.clone();
     let blob = fixture
         .database
         .prepared_remote_objects(&write_id)
@@ -155,11 +174,34 @@ async fn publication_refuses_a_blob_whose_candidate_ownership_was_retired() {
     let blob_object = blob.closed.object().clone();
     let blob_key = blob_object.slot().logical_key().to_string();
 
+    let published = peer
+        .publish_snapshot_generation_for_test()
+        .await
+        .expect("publish the accepted snapshot beyond the candidate base");
+    let boundary = peer_database
+        .store_current_publication()
+        .await
+        .expect("read the installed accepted publication");
+    let accepted = boundary
+        .record()
+        .latest_snapshot()
+        .expect("the accepted publication names its snapshot")
+        .clone();
+    assert_eq!(accepted.snapshot, published.reference);
+    let nonactivation = coven_protocol::remote_object::CandidateNonactivation::from_durable_parts(
+        &candidate,
+        prepared.commit.value.value(),
+        coven_protocol::remote_object::CandidateNonactivationProof::SnapshotRetirement {
+            snapshot: accepted,
+            coverage: published.meta.coverage.clone(),
+        },
+    )
+    .expect("the real accepted snapshot retires this unaccepted candidate base");
     fixture
         .database
         .begin_remote_candidate_nonactivation_for_test(
             coven_protocol::remote_object::remote_object_id(&blob_object),
-            losing_candidate_nonactivation(&candidate, candidate_bytes),
+            nonactivation,
         )
         .await
         .expect("the losing candidate retires the blob's ownership");
@@ -198,36 +240,6 @@ async fn publication_refuses_a_blob_whose_candidate_ownership_was_retired() {
         !created.iter().any(|key| key.contains("/commits/")),
         "publication created the commit naming the retired blob: {created:?}",
     );
-}
-
-/// The receipt a candidate's loss carries: another head won the position this
-/// candidate wanted.
-fn losing_candidate_nonactivation(
-    candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
-    candidate_bytes: Vec<u8>,
-) -> coven_protocol::remote_object::CandidateNonactivation {
-    let winner_bytes = b"the head that won this position";
-    let winner_object = coven_protocol::objects::ExactObjectRef::new(
-        coven_protocol::objects::ObjectSlot::logical(
-            "store-v1/heads/retired-blob-winner.json".to_string(),
-        )
-        .expect("construct the winning head slot"),
-        winner_bytes.len() as u64,
-        coven_protocol::store_commit::ObjectHash::digest(winner_bytes),
-    );
-    coven_protocol::remote_object::CandidateNonactivation::unverified_for_test(
-        coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
-            coord: candidate.coord.clone(),
-            object: candidate.object.clone(),
-            canonical_signed_bytes: candidate_bytes,
-        },
-        coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
-            winner_head: coven_protocol::store_commit::StoreDeviceHeadRef {
-                head_hash: coven_protocol::store_commit::ObjectHash::digest(winner_bytes),
-                object: winner_object,
-            },
-        },
-    )
 }
 
 /// A write publishes its package before the commit that names it, and never

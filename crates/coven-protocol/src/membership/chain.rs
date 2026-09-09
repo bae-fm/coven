@@ -107,12 +107,12 @@ impl MembershipChain {
         self.entries
             .iter()
             .find_map(|entry| match &entry.change {
-                MembershipChange::Founder {
+                StoreAuthorityChange::Founder {
                     owner_grant_id,
                     membership,
                     ..
                 } if owner_grant_id == grant => Some(membership),
-                MembershipChange::SetMember {
+                StoreAuthorityChange::SetMember {
                     grant_id,
                     membership: Some(membership),
                     ..
@@ -129,6 +129,12 @@ impl MembershipChain {
 
     pub fn membership_stream_id(&self, grant: &MembershipGrantId) -> Option<AuthorStreamId> {
         let record = self.state.grants.get(grant)?.record();
+        let founder = self.founder_coord()?;
+        if founder.author_owner_grant == *grant {
+            // Creation owns the founder's first slot before grant-based paths
+            // exist; the verified founder entry owns its stream identity.
+            return Some(founder.stream_id);
+        }
         store_membership_anchor_stream(&record.member_pubkey, grant, self.membership_anchor(grant)?)
     }
 
@@ -168,18 +174,28 @@ impl MembershipChain {
             if !included.contains(coord) {
                 continue;
             }
-            let (owner_pubkey, grant, anchor) = match &entry.change {
-                MembershipChange::SetMember {
+            let (owner_pubkey, grant, anchor, stream_id) = match &entry.change {
+                StoreAuthorityChange::Founder {
+                    owner_pubkey,
+                    owner_grant_id,
+                    membership,
+                    ..
+                } => (owner_pubkey, owner_grant_id, membership, entry.stream_id),
+                StoreAuthorityChange::SetMember {
                     user_pubkey,
                     role: StoreMembershipRoleGrant::Owner { .. },
                     grant_id,
                     membership: Some(membership),
                     ..
-                } => (user_pubkey, grant_id, membership),
+                } => (
+                    user_pubkey,
+                    grant_id,
+                    membership,
+                    store_membership_anchor_stream(user_pubkey, grant_id, membership)
+                        .expect("validated Owner grant has a Store membership stream anchor"),
+                ),
                 _ => continue,
             };
-            let stream_id = store_membership_anchor_stream(owner_pubkey, grant, anchor)
-                .expect("validated Owner grant has a Store membership stream anchor");
             streams.insert(
                 MembershipStreamKey {
                     author_pubkey: owner_pubkey.clone(),
@@ -239,23 +255,26 @@ impl MembershipChain {
 
     pub fn founder_coord(&self) -> Option<&MembershipCoord> {
         self.entries_with_coords().find_map(|(coord, entry)| {
-            matches!(entry.change, MembershipChange::Founder { .. }).then_some(coord)
+            matches!(entry.change, StoreAuthorityChange::Founder { .. }).then_some(coord)
         })
     }
 
     pub(crate) fn founder_entry(&self) -> Option<&MembershipEntry> {
         self.entries
             .iter()
-            .find(|entry| matches!(entry.change, MembershipChange::Founder { .. }))
+            .find(|entry| matches!(entry.change, StoreAuthorityChange::Founder { .. }))
     }
 
     pub fn founder_pubkey(&self) -> Option<&str> {
         self.founder_entry().and_then(|entry| match &entry.change {
-            MembershipChange::Founder { owner_pubkey, .. } => Some(owner_pubkey.as_str()),
-            MembershipChange::SetMember { .. }
-            | MembershipChange::RemoveMember { .. }
-            | MembershipChange::ProviderAdmin
-            | MembershipChange::ResolutionActivation { .. } => None,
+            StoreAuthorityChange::Founder { owner_pubkey, .. } => Some(owner_pubkey.as_str()),
+            StoreAuthorityChange::SetMember { .. }
+            | StoreAuthorityChange::RemoveMember { .. }
+            | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+            | StoreAuthorityChange::DeviceExclusionProposal { .. }
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::ProviderAdmin
+            | StoreAuthorityChange::ResolutionActivation { .. } => None,
         })
     }
 
@@ -308,6 +327,25 @@ impl MembershipChain {
 
     pub fn effectively_contains_coord(&self, expected: &MembershipCoord) -> bool {
         self.included.contains(expected)
+    }
+
+    pub fn device_registration_activations(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &MembershipCoord,
+            &crate::store_commit::ActivatedStoreDeviceRegistrationRef,
+        ),
+    > {
+        self.entries_with_coords().filter_map(|(coord, entry)| {
+            let StoreAuthorityChange::DeviceRegistrationActivation { registration } = &entry.change
+            else {
+                return None;
+            };
+            self.included
+                .contains(coord)
+                .then_some((coord, registration))
+        })
     }
 
     pub(crate) fn contains_member_history(&self, pubkey: &str) -> bool {
@@ -471,7 +509,7 @@ impl MembershipChain {
                 return Err(MembershipError::NonCanonicalDependencyFrontier { index });
             }
             let (barriers, retirement_device_state) = match &entry.change {
-                MembershipChange::SetMember {
+                StoreAuthorityChange::SetMember {
                     user_pubkey,
                     role,
                     grant_id,
@@ -515,12 +553,12 @@ impl MembershipChain {
                     }
                     (retirement_barriers, retirement_device_state)
                 }
-                MembershipChange::RemoveMember {
+                StoreAuthorityChange::RemoveMember {
                     retirement_barriers,
                     retirement_device_state,
                     ..
                 } => (retirement_barriers, retirement_device_state),
-                MembershipChange::ResolutionActivation { resolution } => {
+                StoreAuthorityChange::ResolutionActivation { resolution } => {
                     if resolution.resolver_pubkey != entry.author_pubkey
                         || entry.seq != 1
                         || entry.previous_hash.is_some()
@@ -553,7 +591,7 @@ impl MembershipChain {
                     }
                     continue;
                 }
-                MembershipChange::ProviderAdmin => {
+                StoreAuthorityChange::ProviderAdmin => {
                     let Some(crate::provider::ProviderAdminMembershipChange {
                         owner_barriers, ..
                     }) = &entry.provider_admin
@@ -572,7 +610,15 @@ impl MembershipChain {
                     }
                     continue;
                 }
-                MembershipChange::Founder { .. } => continue,
+                StoreAuthorityChange::DeviceRegistrationActivation { .. }
+                | StoreAuthorityChange::DeviceExclusionProposal { .. }
+                | StoreAuthorityChange::DeviceExclusionOutcome { .. } => {
+                    if entry.provider_admin.is_some() {
+                        return Err(MembershipError::InvalidProviderAdminChange(index));
+                    }
+                    continue;
+                }
+                StoreAuthorityChange::Founder { .. } => continue,
             };
             if entry.provider_admin.is_some() {
                 return Err(MembershipError::InvalidProviderAdminChange(index));
@@ -613,7 +659,7 @@ impl MembershipChain {
             .entries
             .iter()
             .filter_map(|entry| {
-                let MembershipChange::Founder {
+                let StoreAuthorityChange::Founder {
                     owner_pubkey,
                     owner_grant_id,
                     ..
@@ -832,14 +878,14 @@ impl MembershipChain {
             .map_or_else(BTreeMap::new, |checkpoint| checkpoint.grant_anchors.clone());
         for entry in &self.entries {
             match &entry.change {
-                MembershipChange::Founder {
+                StoreAuthorityChange::Founder {
                     owner_grant_id,
                     membership,
                     ..
                 } => {
                     grant_anchors.insert(owner_grant_id.clone(), membership.clone());
                 }
-                MembershipChange::SetMember {
+                StoreAuthorityChange::SetMember {
                     grant_id,
                     membership: Some(membership),
                     ..

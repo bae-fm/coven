@@ -1,10 +1,15 @@
+use super::replay_sql::ReplaySql;
 use super::*;
+
+mod rebase;
+mod relationships;
 
 /// A replay-owned SQLite image. Callers can apply or inspect the projection,
 /// but cannot obtain the connection that implements it.
 pub(crate) struct ReplayProjection {
     connection: rusqlite::Connection,
     store_dir: coven_foundation::store_dir::StoreDir,
+    baseline: RetainedReplayBaseline,
 }
 
 pub(crate) struct ReplayProjectionResult {
@@ -12,13 +17,12 @@ pub(crate) struct ReplayProjectionResult {
     watched: Option<WatchedReplayOutcome>,
     applied_order: Vec<coven_protocol::store_commit::StoreBatchCommitRef>,
     max_updated_at: Option<coven_protocol::hlc::Timestamp>,
+    unaccepted_journal: Vec<crate::MergeReplayWrite>,
 }
 
 #[derive(Clone)]
 pub(crate) enum WatchedReplayOutcome {
-    Applied {
-        max_updated_at: Option<coven_protocol::hlc::Timestamp>,
-    },
+    Applied,
     Held(crate::MaterializationHold),
 }
 
@@ -34,7 +38,57 @@ impl ReplayProjectionResult {
             watched,
             applied_order,
             max_updated_at,
+            unaccepted_journal: Vec::new(),
         }
+    }
+
+    pub(super) fn with_unaccepted_journal(mut self, journal: Vec<crate::MergeReplayWrite>) -> Self {
+        self.unaccepted_journal = journal;
+        self
+    }
+
+    pub(super) fn take_unaccepted_journal(&mut self) -> Vec<crate::MergeReplayWrite> {
+        std::mem::take(&mut self.unaccepted_journal)
+    }
+
+    pub(super) fn restore_unaccepted_write(
+        &self,
+        live: &mut VerifiedStoreTransaction<'_, '_, '_, '_>,
+        effect: crate::MergeReplayWriteEffect,
+    ) -> Result<(), DbError> {
+        let projection = &self.projection;
+        let schema = projection.table_schema(live.synced_tables, live.gates)?;
+        let mut private_rows = projection.private_rows(live.gates, &schema)?;
+        let mut authority =
+            VerifiedStoreAuthority::for_replay_baseline(projection.baseline.clone());
+        let write_id = effect.write_id.clone();
+        let outcome = ReplaySql::begin(&projection.connection)?.run(|| {
+            projection.apply_write_effect(
+                &mut authority,
+                live.authority.root(),
+                effect,
+                schema,
+                live.gates,
+                &mut private_rows,
+            )
+        })?;
+        if let Some(hold) = outcome {
+            return Err(DbError::Message(format!(
+                "prepared write {write_id} cannot replay at its current snapshot base: {hold:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(super) fn rebase_write(
+        &self,
+        transaction: &mut VerifiedStoreTransaction<'_, '_, '_, '_>,
+        effect: crate::MergeReplayWriteEffect,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+        base: &coven_protocol::store_commit::StorePublicationBase,
+    ) -> Result<(), DbError> {
+        self.projection
+            .rebase_write(transaction, effect, routing_key, base)
     }
 
     pub(super) fn watched_outcome(&self) -> Option<WatchedReplayOutcome> {
@@ -59,10 +113,9 @@ impl ReplayProjectionResult {
 
     pub(super) fn install_on(
         &self,
-        transaction: &VerifiedStoreTransaction<'_, '_, '_>,
-        root: &coven_protocol::store_commit::StoreRootRef,
+        transaction: &VerifiedStoreTransaction<'_, '_, '_, '_>,
     ) -> Result<Vec<coven_foundation::changeset::RowChange>, DbError> {
-        transaction.install_replay_projection(root, &self.projection)
+        transaction.install_replay_projection(&self.projection)
     }
 
     pub(super) fn capture_replay_baseline(
@@ -99,6 +152,25 @@ impl ReplayProjectionResult {
 }
 
 impl ReplayProjection {
+    pub(super) fn replace_store_publication_state(
+        &self,
+        source: &rusqlite::Connection,
+    ) -> Result<(), DbError> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        replace_tables_from_connection_on(
+            source,
+            &transaction,
+            &[
+                "store_publication_current".to_string(),
+                "store_publication_entries".to_string(),
+            ],
+        )?;
+        transaction.commit().map_err(DbError::from)
+    }
+
     pub(super) fn publication_blobs(
         &self,
         blob_decls: &crate::BlobDecls,
@@ -111,7 +183,8 @@ impl ReplayProjection {
     pub(super) fn from_image(
         image: &[u8],
         store_dir: coven_foundation::store_dir::StoreDir,
-        cut: &coven_protocol::store_commit::CommitFrontier,
+        baseline: &RetainedReplayBaseline,
+        gates: &crate::Gates,
         accepted: std::collections::BTreeMap<
             coven_protocol::store_commit::StoreBatchCommitRef,
             std::sync::Arc<coven_protocol::store_commit::ResolvedStoreDeviceState>,
@@ -126,7 +199,7 @@ impl ReplayProjection {
         let image_states =
             crate::store::store_device_state::load_covered_store_device_snapshots_on(
                 &connection,
-                cut,
+                &baseline.exact_cut,
             )?;
         let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
         for (reference, state) in accepted {
@@ -147,9 +220,15 @@ impl ReplayProjection {
             }
         }
         transaction.commit().map_err(DbError::from)?;
+        // Rebase partitions captured writes inside a transaction. Its empty
+        // comparison schema must already exist: SQLite cannot detach a schema
+        // created by that transaction until the transaction ends.
+        crate::gate::attach_empty_clone(&connection, gates)
+            .map_err(|error| DbError::context("install replay transaction gate", error))?;
         Ok(Self {
             connection,
             store_dir,
+            baseline: baseline.clone(),
         })
     }
 
@@ -357,8 +436,9 @@ impl ReplayProjection {
             .execute("DELETE FROM materialized_commits", [])
             .map_err(DbError::from)?;
         let records = super::StoreTransaction::new(&transaction, &self.store_dir);
-        let mut authority = super::VerifiedStoreAuthority::default();
-        records.retain_snapshot_replay_inputs(&mut authority, root)?;
+        let mut authority =
+            super::VerifiedStoreAuthority::for_replay_baseline(self.baseline.clone());
+        records.retain_snapshot_replay_inputs(&mut authority, root, cut)?;
         let records = super::StoreTransaction::new(&transaction, &self.store_dir);
         records.retain_snapshot_device_states(&mut authority, root, cut.clone().into_refs())?;
         transaction
@@ -398,6 +478,7 @@ impl ReplayProjection {
         image.capture_on(
             &self.connection,
             &self.store_dir,
+            VerifiedStoreAuthority::for_replay_baseline(self.baseline.clone()),
             root,
             tables,
             routing_encryption,
@@ -433,80 +514,32 @@ pub(super) fn replace_tables_from_projection_on(
     target: &rusqlite::Transaction<'_>,
     tables: &[String],
 ) -> Result<(), DbError> {
-    target
-        .pragma_update(None, "defer_foreign_keys", "ON")
-        .map_err(DbError::from)?;
-    let tables = tables
-        .iter()
-        .map(|table| ProjectionTableRows::load(&source.connection, target, table))
-        .collect::<Result<Vec<_>, _>>()?;
-    let order = projection_parent_first_order(&source.connection, &tables)?;
-    for index in order.iter().rev() {
-        let table = &tables[*index];
-        table.delete_absent(target)?;
-    }
-    for index in &order {
-        let table = &tables[*index];
-        table.install_changed(target)?;
-    }
-    for table in &tables {
-        table.validate_exact(target)?;
-    }
-    Ok(())
+    replace_tables_from_connection_on(&source.connection, target, tables)
 }
 
-fn projection_parent_first_order(
+fn replace_tables_from_connection_on(
     source: &rusqlite::Connection,
-    tables: &[ProjectionTableRows],
-) -> Result<Vec<usize>, DbError> {
-    let indices = tables
+    target: &rusqlite::Transaction<'_>,
+    tables: &[String],
+) -> Result<(), DbError> {
+    let mut tables = tables
         .iter()
-        .enumerate()
-        .map(|(index, table)| (table.table.as_str(), index))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut parents = tables
-        .iter()
-        .map(|table| {
-            crate::foreign_key_edges(source, &table.table)
-                .map(|edges| {
-                    edges
-                        .into_iter()
-                        .filter_map(|edge| indices.get(edge.parent_table.as_str()).copied())
-                        .collect::<std::collections::BTreeSet<_>>()
-                })
-                .map_err(|error| {
-                    DbError::Message(format!(
-                        "read projection foreign keys for {}: {error}",
-                        table.table
-                    ))
-                })
-        })
+        .map(|table| ProjectionTableRows::load(source, target, table))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut remaining = (0..tables.len()).collect::<std::collections::BTreeSet<_>>();
-    let mut order = Vec::with_capacity(tables.len());
-    while !remaining.is_empty() {
-        let ready = remaining
-            .iter()
-            .copied()
-            .filter(|index| {
-                parents[*index]
-                    .iter()
-                    .all(|parent| parent == index || !remaining.contains(parent))
-            })
-            .collect::<Vec<_>>();
-        if ready.is_empty() {
-            order.extend(remaining.iter().copied());
-            break;
-        }
-        for index in ready {
-            remaining.remove(&index);
-            order.push(index);
-            for dependencies in &mut parents {
-                dependencies.remove(&index);
+    relationships::with_local_relationships(target, &mut tables, |tables| {
+        super::replay_sql::ReplaySql::begin(target)?.run(|| {
+            for table in tables {
+                table.delete_changed(target)?;
             }
-        }
-    }
-    Ok(order)
+            for table in tables {
+                table.insert_changed(target)?;
+            }
+            for table in tables {
+                table.validate_exact(target)?;
+            }
+            Ok(())
+        })
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -534,6 +567,7 @@ struct ProjectionTableRows {
     table: String,
     columns: Vec<String>,
     primary_key: Vec<usize>,
+    writable_columns: Vec<usize>,
     source: std::collections::BTreeMap<Vec<ProjectionKeyValue>, Vec<rusqlite::types::Value>>,
     target: std::collections::BTreeMap<Vec<ProjectionKeyValue>, Vec<rusqlite::types::Value>>,
 }
@@ -544,9 +578,13 @@ impl ProjectionTableRows {
         target: &rusqlite::Connection,
         table: &str,
     ) -> Result<Self, DbError> {
-        let (columns, primary_key) = projection_table_columns(source, table)?;
-        let (target_columns, target_primary_key) = projection_table_columns(target, table)?;
-        if columns != target_columns || primary_key != target_primary_key {
+        let (columns, primary_key, writable_columns) = projection_table_columns(source, table)?;
+        let (target_columns, target_primary_key, target_writable_columns) =
+            projection_table_columns(target, table)?;
+        if columns != target_columns
+            || primary_key != target_primary_key
+            || writable_columns != target_writable_columns
+        {
             return Err(DbError::Message(format!(
                 "retained replay projection table {table:?} differs from the live schema"
             )));
@@ -562,10 +600,11 @@ impl ProjectionTableRows {
             target: projection_table_rows(target, table, &columns, &primary_key)?,
             columns,
             primary_key,
+            writable_columns,
         })
     }
 
-    fn delete_absent(&self, target: &rusqlite::Connection) -> Result<(), DbError> {
+    fn delete_changed(&self, target: &rusqlite::Connection) -> Result<(), DbError> {
         let predicate = self
             .primary_key
             .iter()
@@ -585,7 +624,7 @@ impl ProjectionTableRows {
         );
         let mut statement = target.prepare(&sql).map_err(DbError::from)?;
         for (key, row) in &self.target {
-            if self.source.contains_key(key) {
+            if self.source.get(key) == Some(row) {
                 continue;
             }
             let values = self.primary_key.iter().map(|index| &row[*index]);
@@ -596,114 +635,27 @@ impl ProjectionTableRows {
         Ok(())
     }
 
-    fn install_changed(&self, target: &rusqlite::Connection) -> Result<(), DbError> {
-        let target_rows =
-            projection_table_rows(target, &self.table, &self.columns, &self.primary_key)?;
+    fn insert_changed(&self, target: &rusqlite::Connection) -> Result<(), DbError> {
         let quoted_columns = self
-            .columns
+            .writable_columns
             .iter()
-            .map(|column| crate::quote_ident(column))
+            .map(|index| crate::quote_ident(&self.columns[*index]))
             .collect::<Vec<_>>();
-        let placeholders = (1..=self.columns.len())
+        let placeholders = (1..=self.writable_columns.len())
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let insert_sql = format!(
+        let sql = format!(
             "INSERT INTO {} ({}) VALUES ({placeholders})",
             crate::quote_ident(&self.table),
             quoted_columns.join(", ")
         );
-        let mut insert = target.prepare(&insert_sql).map_err(DbError::from)?;
-        let non_key = (0..self.columns.len())
-            .filter(|index| !self.primary_key.contains(index))
-            .collect::<Vec<_>>();
-        let assignments = non_key
-            .iter()
-            .enumerate()
-            .map(|(parameter, index)| format!("{} = ?{}", quoted_columns[*index], parameter + 1))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let predicate = self
-            .primary_key
-            .iter()
-            .enumerate()
-            .map(|(parameter, index)| {
-                format!(
-                    "{} IS ?{}",
-                    quoted_columns[*index],
-                    non_key.len() + parameter + 1
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        let update_sql = (!non_key.is_empty()).then(|| {
-            format!(
-                "UPDATE {} SET {assignments} WHERE {predicate}",
-                crate::quote_ident(&self.table)
-            )
-        });
-        let mut update = update_sql
-            .as_deref()
-            .map(|sql| target.prepare(sql).map_err(DbError::from))
-            .transpose()?;
-        let mut pending = self
-            .source
-            .iter()
-            .filter(|(key, source_row)| {
-                target_rows
-                    .get(*key)
-                    .is_some_and(|target_row| target_row != *source_row)
-            })
-            .collect::<Vec<_>>();
-        while !pending.is_empty() {
-            let mut deferred = Vec::new();
-            let mut first_conflict = None;
-            let mut progressed = false;
-            for (key, source_row) in pending {
-                let values = non_key
-                    .iter()
-                    .chain(self.primary_key.iter())
-                    .map(|index| &source_row[*index])
-                    .collect::<Vec<_>>();
-                match execute_projection_update(
-                    target,
-                    update
-                        .as_mut()
-                        .expect("a changed row has non-primary-key columns"),
-                    &values,
-                )? {
-                    Ok(1) => progressed = true,
-                    Ok(updated) => {
-                        return Err(DbError::Message(format!(
-                            "retained replay projection updated {updated} rows for {:?} key {key:?}",
-                            self.table
-                        )));
-                    }
-                    Err(error) if is_unique_constraint(&error) => {
-                        if first_conflict.is_none() {
-                            first_conflict = Some(error);
-                        }
-                        deferred.push((key, source_row));
-                    }
-                    Err(error) => return Err(DbError::from(error)),
-                }
-            }
-            if !progressed {
-                return Err(clone_sqlite_error(
-                    first_conflict
-                        .as_ref()
-                        .expect("deferred update carries its constraint error"),
-                ));
-            }
-            pending = deferred;
-        }
-        let installed =
-            projection_table_rows(target, &self.table, &self.columns, &self.primary_key)?;
-        for (key, source_row) in &self.source {
-            if !installed.contains_key(key) {
-                insert
-                    .execute(rusqlite::params_from_iter(source_row))
-                    .map_err(DbError::from)?;
+        let mut statement = target.prepare(&sql)?;
+        for (key, row) in &self.source {
+            if self.target.get(key) != Some(row) {
+                statement.execute(rusqlite::params_from_iter(
+                    self.writable_columns.iter().map(|index| &row[*index]),
+                ))?;
             }
         }
         Ok(())
@@ -722,60 +674,20 @@ impl ProjectionTableRows {
     }
 }
 
-fn execute_projection_update(
-    connection: &rusqlite::Connection,
-    statement: &mut rusqlite::Statement<'_>,
-    values: &[&rusqlite::types::Value],
-) -> Result<Result<usize, rusqlite::Error>, DbError> {
-    const SAVEPOINT: &str = "coven_replay_projection_update";
-    connection
-        .execute_batch(&format!("SAVEPOINT {SAVEPOINT}"))
-        .map_err(DbError::from)?;
-    match statement.execute(rusqlite::params_from_iter(values.iter().copied())) {
-        Ok(updated) => {
-            connection
-                .execute_batch(&format!("RELEASE {SAVEPOINT}"))
-                .map_err(DbError::from)?;
-            Ok(Ok(updated))
-        }
-        Err(error) => {
-            connection
-                .execute_batch(&format!("ROLLBACK TO {SAVEPOINT}; RELEASE {SAVEPOINT}"))
-                .map_err(|rollback| {
-                    DbError::context(
-                        format!("roll back failed projection update after {error}"),
-                        rollback,
-                    )
-                })?;
-            Ok(Err(error))
-        }
-    }
-}
-
-fn is_unique_constraint(error: &rusqlite::Error) -> bool {
-    matches!(
-        error,
-        rusqlite::Error::SqliteFailure(code, _)
-            if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-    )
-}
-
-fn clone_sqlite_error(error: &rusqlite::Error) -> DbError {
-    match error {
-        rusqlite::Error::SqliteFailure(code, message) => {
-            DbError::from(rusqlite::Error::SqliteFailure(*code, message.clone()))
-        }
-        _ => DbError::Message(error.to_string()),
-    }
-}
+// Column names, primary-key positions in key order, and writable positions.
+type ProjectionColumns = (Vec<String>, Vec<usize>, Vec<usize>);
 
 fn projection_table_columns(
     connection: &rusqlite::Connection,
     table: &str,
-) -> Result<(Vec<String>, Vec<usize>), DbError> {
-    let pragma = format!("PRAGMA table_info({})", crate::quote_ident(table));
+) -> Result<ProjectionColumns, DbError> {
+    let pragma = format!("PRAGMA table_xinfo({})", crate::quote_ident(table));
     let columns = crate::query_mapped_rows(connection, &pragma, [], |row| {
-        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+        Ok((
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?,
+        ))
     })?;
     if columns.is_empty() {
         return Err(DbError::Message(format!(
@@ -784,16 +696,21 @@ fn projection_table_columns(
     }
     let names = columns
         .iter()
-        .map(|(name, _)| name.clone())
+        .map(|(name, _, _)| name.clone())
         .collect::<Vec<_>>();
+    let writable_columns = columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, _, hidden))| (*hidden == 0).then_some(index))
+        .collect();
     let mut primary_key_columns = columns
         .into_iter()
-        .filter(|(_, order)| *order > 0)
+        .filter(|(_, order, _)| *order > 0)
         .collect::<Vec<_>>();
-    primary_key_columns.sort_by_key(|(_, order)| *order);
+    primary_key_columns.sort_by_key(|(_, order, _)| *order);
     let primary_key = primary_key_columns
         .into_iter()
-        .map(|(name, _)| {
+        .map(|(name, _, _)| {
             names
                 .iter()
                 .position(|column| column == &name)
@@ -804,7 +721,7 @@ fn projection_table_columns(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((names, primary_key))
+    Ok((names, primary_key, writable_columns))
 }
 
 fn projection_table_rows(

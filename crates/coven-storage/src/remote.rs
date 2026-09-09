@@ -1,12 +1,11 @@
 //! `CloudSyncObjectStorage` implementation backed by any `CloudHome`.
 //!
-//! Handles the cloud home path layout (where keys, heads, images, etc. live)
-//! and how objects are protected at rest. The underlying `CloudHome` only deals
-//! in raw bytes and flat keys; this layer applies the [`CloudCipher`] — sealing
-//! every object under the store key for an encrypted home, or storing it
-//! verbatim for a plaintext one — and drives the object-key suffix off the same
-//! choice (`.enc` for encrypted data-plane objects, no suffix for signed
-//! control-plane and recipient-sealed objects).
+//! Resolves protocol slots and blob locators to exact provider objects. Each
+//! protocol domain declares its protection: Store data uses the home's
+//! [`CloudCipher`], Circle data uses the supplied Circle cipher, and signed
+//! readable or recipient-sealed records pass through unchanged. Blob locators
+//! declare their audience, scope, and readable or opaque path. Exact object
+//! references retain the resulting provider address and stored-byte identity.
 
 use async_trait::async_trait;
 use std::path::Path;
@@ -45,9 +44,9 @@ pub use cipher::{
 };
 pub use rotation::{CloudSyncRotationStateAccess, PendingRotation, RotationStateError};
 
-/// How a cloud home protects its objects at rest. An `Encrypted` home seals
-/// every object under the store key (the default); a `Plaintext` home stores
-/// objects in the clear so the bucket is browsable, and drops the `.enc` suffix.
+/// Protection for payloads assigned to this cipher. `Encrypted` seals under
+/// its keyring; `Plaintext` preserves the bytes. Protocol domains and blob
+/// locators determine which cipher applies.
 #[derive(Clone)]
 pub enum CloudCipher {
     Encrypted(EncryptionService),
@@ -72,10 +71,8 @@ pub struct CloudSyncConnection {
     /// How this installation chunks blobs and how wide its range requests are.
     blob_chunking: BlobChunking,
     store_id: String,
-    /// The device's signing identity. The control objects this storage writes
-    /// (its head, the min_schema floor) are signed with it so a reader can
-    /// attribute and verify them; the at-rest cipher proves confidentiality, not
-    /// authorship.
+    /// The Store identity used to verify that blob append authority names this
+    /// connection's author in its device registration.
     keypair: UserKeypair,
 }
 
@@ -345,61 +342,6 @@ impl CloudSyncConnection {
         .await
     }
 
-    /// The cloud object key for a blob under the home's [`BlobPathScheme`].
-    ///
-    /// **A cloud object is never rewritten with different bytes, so no two blobs ever
-    /// share a key.** `Hashed` gets that from the key itself; `Plain` gets it from the
-    /// blob's declared [`BlobReplacement`](coven_protocol::blob::BlobReplacement), which coven
-    /// enforces where a blob is derived from its row, in the database layer's blob
-    /// declarations — a replaceable blob's readable path must name it, and a write-once
-    /// blob's row can never be repointed. Either way, an object's *presence* at a blob's
-    /// key is proof of
-    /// its *content*, which is what lets the push skip an upload without asking a sealed
-    /// object what it holds.
-    ///
-    /// `Hashed` ignores `cloud_path` and shards by the id under the uploading
-    /// device: `{namespace}/{uploader}/{ab}/{cd}/{id}` — the id is right there, and the
-    /// `{uploader}` segment aligns the keyspace to the storage-access rule (a member
-    /// writes only under its own public key), so `uploader` is required and a missing one
-    /// is an error.
-    ///
-    /// `Plain` uses the consumer's `cloud_path` verbatim: `{namespace}/{cloud_path}`,
-    /// keeping the bucket browsable. Plain blob naming carries no uploader segment
-    /// and ignores `uploader`; the store still has membership authorization. A
-    /// `Plain` home with no `cloud_path` is an error — coven never silently falls
-    /// back to the hashed layout, which would scatter readable-path blobs under
-    /// unfindable shard keys.
-    pub fn blob_key(
-        scheme: BlobPathScheme,
-        namespace: &str,
-        uploader: Option<&str>,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<String, StorageError> {
-        match scheme {
-            BlobPathScheme::Hashed => {
-                let uploader = uploader.ok_or_else(|| {
-                    StorageError::Parse(format!(
-                        "an opaque-home blob requires an uploader for {namespace}/{id}"
-                    ))
-                })?;
-                Ok(coven_foundation::store_dir::StoreDir::uploader_hashed_key(
-                    namespace, uploader, id,
-                )?)
-            }
-            BlobPathScheme::Plain => {
-                let path = cloud_path.ok_or_else(|| {
-                    StorageError::Parse(format!(
-                        "unobfuscated blob-path home requires a cloud_path for blob {namespace}/{id}"
-                    ))
-                })?;
-                coven_foundation::store_dir::validate_path_token(namespace)?;
-                coven_foundation::store_dir::validate_cloud_path(path)?;
-                Ok(format!("{namespace}/{path}"))
-            }
-        }
-    }
-
     #[cfg(test)]
     async fn blob_write_registration(
         &self,
@@ -436,14 +378,8 @@ impl CloudSyncConnection {
                 creation_id: StoreCreationId::from_nonce(label),
             },
             provider,
-            DeviceStreamAnchor::StoreAnnouncements {
-                first_slot: anchor_slot("announcements"),
-            },
             DeviceStreamAnchor::StoreAcknowledgements {
                 first_slot: anchor_slot("acknowledgements"),
-            },
-            DeviceStreamAnchor::StoreSnapshots {
-                first_slot: anchor_slot("snapshots"),
             },
             &self.keypair,
         )
@@ -584,16 +520,6 @@ impl CloudSyncRotationStateAccess for CloudSyncConnection {
         mutation: ObjectHash,
     ) -> Result<(), RotationStateError> {
         self.pending_rotation.remove_candidate(generation, mutation)
-    }
-
-    fn replace_candidate_mutation(
-        &self,
-        generation: u64,
-        previous: ObjectHash,
-        replacement: ObjectHash,
-    ) -> Result<(), RotationStateError> {
-        self.pending_rotation
-            .replace_candidate_mutation(generation, previous, replacement)
     }
 
     fn gate(&self) -> Option<RotationGate> {

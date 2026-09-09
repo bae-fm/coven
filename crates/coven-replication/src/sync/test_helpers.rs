@@ -14,6 +14,9 @@ use coven_keys::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use coven_protocol::store_commit::ObjectHash;
 use coven_storage::CloudSyncObjectStorage;
 
+#[cfg(test)]
+mod uploaded_changeset;
+
 /// The synthetic store's schema and `Database` constructors, which the database
 /// layer owns and its own tests open directly.
 pub use coven_database::synthetic_store::*;
@@ -469,24 +472,6 @@ mod test_device {
             )
         }
 
-        pub fn sign_device_head_for_test(
-            &self,
-            store_root_hash: coven_protocol::store_commit::ObjectHash,
-            commit: coven_protocol::store_commit::StoreBatchCommitRef,
-            successor: coven_protocol::store_commit::SuccessorLink,
-        ) -> Result<
-            coven_protocol::store_commit::StoreDeviceHead,
-            coven_protocol::store_commit::StoreProtocolError,
-        > {
-            coven_protocol::store_commit::StoreDeviceHead::signed(
-                store_root_hash,
-                self.registration.reference().clone(),
-                commit,
-                successor,
-                &self.device_signer,
-            )
-        }
-
         pub fn sign_reclaim_receipt_for_test(
             &self,
             store_root_hash: coven_protocol::store_commit::ObjectHash,
@@ -606,6 +591,9 @@ mod test_device {
                 store_dir.clone(),
                 founder_timestamp,
                 &identity,
+                Some(coven_keys::encryption::EncryptionService::from_key(
+                    [42; 32],
+                )),
             )
             .await?;
             let (store, device_id) = initialized.into_parts();
@@ -634,6 +622,9 @@ mod test_device {
                 store_dir.clone(),
                 root,
                 identity,
+                Some(coven_keys::encryption::EncryptionService::from_key(
+                    [42; 32],
+                )),
             )
             .await?;
             let (store, device_id) = initialized.into_parts();
@@ -656,66 +647,132 @@ mod test_device {
             published_at: &str,
             storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
         ) -> Result<Self, TestError> {
-            let activated_database = joining_database.clone();
-            observer.ensure_device_join_snapshot_for_test().await?;
-            let pending_dir = tempfile::tempdir()?;
-            let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
-                pending_dir.path().join("pending-device-join.sqlite"),
-            )?;
-            let offer = observer
-                .begin_device_join(&pubkey_hex(joining_identity))
-                .await?;
-            let mut pending_join = observer
-                .open_pending_device_join_for_test(&pending, joining_identity, offer)
-                .await?;
-            let access_request = pending_join.prepare_provider_access_request().await?;
-            let approval = observer
-                .authorize_device_provider_access(access_request, None)
-                .await?;
-            let registration_request = pending_join.prepare_registration_request(approval).await?;
-            let join = observer
-                .activate_same_principal_join_for_test(registration_request)
-                .await?;
-            let mut joining = pending_join
-                .begin_joining_store(joining_database, &joining_store_dir)
-                .await?;
-            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
-            let bootstrap_pull = joining
-                .pull_store_history(Some(&routing_encryption))
-                .await?;
-            if !bootstrap_pull.held_positions.is_empty() {
-                return Err(TestError::invariant(format!(
-                    "device join bootstrap pull held signed positions: {:?}",
-                    bootstrap_pull.held_positions
-                )));
-            }
-            joining
-                .bootstrap(
-                    join.bootstrap.clone(),
-                    published_at,
-                    Some(&routing_encryption),
-                )
-                .await?;
-            joining.complete(join.activation).await?;
-            Self::load_with_database(
-                activated_database,
-                storage,
-                joining_identity.clone(),
+            Self::activate_joined_with_clock(
+                observer,
+                joining_database,
                 joining_store_dir,
+                joining_identity,
+                published_at,
+                storage,
+                Arc::new(coven_foundation::clock::SystemClock),
             )
             .await
-            .map_err(TestError::from)
         }
 
-        /// Join a device the way production does: install the owner's newest
-        /// snapshot, then carry only the history published after it.
-        ///
-        /// [`activate_joined`](Self::activate_joined) pulls the whole history
-        /// into an empty database instead, which leaves the joining device on a
-        /// genesis replay baseline holding — and pinning for replay — every
-        /// commit back to the beginning of the store. A store that reclaims has
-        /// deleted the packages its snapshot restates, so a device joined that
-        /// way cannot pull past the first reclaim it meets.
+        pub fn activate_joined_with_clock<'a>(
+            observer: Self,
+            joining_database: coven_database::StoreDatabase,
+            joining_store_dir: StoreDir,
+            joining_identity: &'a UserKeypair,
+            published_at: &'a str,
+            storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
+            clock: coven_foundation::clock::ClockRef,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self, TestError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let activated_database = joining_database.clone();
+                let snapshot = observer.ensure_device_join_snapshot_for_test();
+                snapshot.await?;
+                let pending_dir = tempfile::tempdir()?;
+                let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+                    pending_dir.path().join("pending-device-join.sqlite"),
+                )?;
+                let joining_pubkey = pubkey_hex(joining_identity);
+                let begin = observer.begin_device_join(&joining_pubkey);
+                let offer = begin.await?;
+                let mut pending_join = observer
+                    .open_pending_device_join_for_test(&pending, joining_identity, offer)
+                    .await?;
+                let access_request = pending_join.prepare_provider_access_request().await?;
+                let authorize = observer.authorize_device_provider_access(access_request, None);
+                let approval = Box::pin(authorize).await?;
+                let registration_request =
+                    pending_join.prepare_registration_request(approval).await?;
+                let activate = observer.activate_same_principal_join_for_test(registration_request);
+                let join = activate.await?;
+                let routing_encryption =
+                    coven_keys::encryption::EncryptionService::from_key([42; 32]);
+                let object_storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
+                    storage.clone();
+                let progress: crate::sync::JoiningDeviceJoinProgressObserver =
+                    std::sync::Arc::new(|_| {});
+                let cancel = tokio::sync::watch::channel(false).1;
+                let device_id = join
+                    .bootstrap
+                    .bootstrap
+                    .request
+                    .expected_registration()
+                    .device_id
+                    .to_string();
+                let history = crate::sync::store::HistoryConstructionAuthority::admission()
+                    .open_pinned(
+                        object_storage.as_ref(),
+                        &join.installation.authority.store_root,
+                    )
+                    .await
+                    .map_err(crate::sync::store::SnapshotError::from)?;
+                let accepted_membership = history
+                    .load_accepted_membership_authority(
+                        &join.installation.bootstrap.membership.0,
+                        None,
+                    )
+                    .await
+                    .map_err(crate::sync::store::SnapshotError::from)?;
+                let prepared = crate::sync::store::PreparedDeviceJoinSnapshot::prepare(
+                    &object_storage,
+                    (*join.installation).clone(),
+                    &accepted_membership,
+                    joining_database.schema_version(),
+                    &joining_store_dir.db_path(),
+                    &progress,
+                    &cancel,
+                )
+                .await?;
+                let installed = prepared.install(
+                    joining_database.synced_tables_for_test(),
+                    joining_database.blob_tombstone_grace(),
+                    joining_database.transfer_limits(),
+                    device_id,
+                    clock,
+                    &coven_database::synthetic_store::test_migrations(),
+                    coven_database::CovenMigrationPolicy::ApplyPending,
+                    &routing_encryption,
+                )?;
+                drop(pending_join);
+                let completion =
+                crate::sync::store::PendingDeviceJoinAuthority::prepare_same_principal_completion(
+                    &pending,
+                    &object_storage,
+                    &joining_store_dir,
+                    joining_identity,
+                    join,
+                    installed,
+                    published_at,
+                    Some(&routing_encryption),
+                    Some(accepted_membership.chain().clone()),
+                );
+                let completion = Box::pin(completion).await?;
+                completion.complete().await?;
+                let database_image =
+                    coven_database::DatabaseImageTest::open(&joining_store_dir.db_path())?
+                        .into_bytes()?;
+                joining_database
+                    .replace_with_database_image_for_test(database_image)
+                    .await?;
+                Self::load_with_database(
+                    activated_database,
+                    storage,
+                    joining_identity.clone(),
+                    joining_store_dir,
+                )
+                .await
+                .map_err(TestError::from)
+            })
+        }
+
+        /// Select the current accepted snapshot from provider history and use
+        /// its image to create the joining database. This keeps an independent
+        /// snapshot-selection path available to restore and join tests.
         #[cfg(test)]
         #[allow(clippy::too_many_arguments)]
         pub async fn activate_joined_from_snapshot(
@@ -816,74 +873,39 @@ mod test_device {
 
         /// Publish one more generation over the current frontier and acknowledge
         /// it, the way the cadence would.
-        pub async fn publish_snapshot_generation_for_test(
+        pub fn publish_snapshot_generation_for_test(
             &self,
-        ) -> Result<coven_database::PublishedStoreSnapshot, TestError> {
-            let image_dir = tempfile::tempdir()?;
-            let root = self.store.root_ref_for_test().clone();
-            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
-            let image = self
-                .db
-                .capture_snapshot_image_for_test(
-                    root,
-                    image_dir.path().to_path_buf(),
-                    Some(routing_encryption),
-                )
-                .await?;
-            let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-                self.db.materialized_frontier().await?,
-            )?;
-            self.publish_snapshot(image, coverage.clone()).await?;
-            self.publish_acknowledgement(coverage).await?;
-            self.db.latest_local_store_snapshot().await?.ok_or_else(|| {
-                TestError::invariant("the published generation is absent".to_string())
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<coven_database::PublishedStoreSnapshot, TestError>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                let routing_encryption =
+                    coven_keys::encryption::EncryptionService::from_key([42; 32]);
+                let mut writer = self.authorize_writer().await?;
+                writer.seed_retained_history().await?;
+                let mut snapshots = writer.snapshots();
+                let capture = snapshots.capture_snapshot_cut(Some(&routing_encryption));
+                let cut = capture.await?;
+                let publish = snapshots.push_snapshot_cut(cut, "2026-07-16T00:00:00Z".into());
+                let metadata = publish.await?;
+                self.publish_acknowledgement(metadata.coverage.clone())
+                    .await?;
+                self.db.latest_local_store_snapshot().await?.ok_or_else(|| {
+                    TestError::invariant("the published generation is absent".to_string())
+                })
             })
         }
 
         pub async fn ensure_device_join_snapshot_for_test(&self) -> Result<(), TestError> {
-            if let Some(snapshot) = self.db.latest_local_store_snapshot().await? {
-                let acknowledged = if let Some(published) = self.db.latest_local_store_ack().await?
-                {
-                    let authority = self.device_authority_for_test().await?;
-                    let acknowledgement = self
-                        .load_store_ack_for_test(
-                            &published.reference,
-                            authority.registration.value(),
-                        )
-                        .await?;
-                    acknowledgement.snapshot.as_ref().is_some_and(|locator| {
-                        locator.author_registration == snapshot.meta.author_registration
-                            && locator.snapshot == snapshot.reference
-                            && acknowledgement
-                                .store_cut
-                                .frontier()
-                                .covers(&snapshot.meta.coverage)
-                    })
-                } else {
-                    false
-                };
-                if !acknowledged {
-                    self.publish_acknowledgement(snapshot.meta.coverage.clone())
-                        .await?;
-                }
+            if self.db.latest_local_store_snapshot().await?.is_some() {
                 return Ok(());
             }
-            let image_dir = tempfile::tempdir()?;
-            let root = self.store.root_ref_for_test().clone();
-            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
-            let image = self
-                .db
-                .capture_snapshot_image_for_test(
-                    root,
-                    image_dir.path().to_path_buf(),
-                    Some(routing_encryption),
-                )
-                .await?;
-            let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-                self.db.materialized_frontier().await?,
-            )?;
-            self.publish_snapshot(image, coverage.clone()).await?;
-            self.publish_acknowledgement(coverage).await?;
+            self.publish_snapshot_generation_for_test().await?;
             Ok(())
         }
 
@@ -914,6 +936,9 @@ mod test_device {
                 storage.clone(),
                 store_dir.clone(),
                 identity.clone(),
+                Some(coven_keys::encryption::EncryptionService::from_key(
+                    [42; 32],
+                )),
             )
             .await?;
             let device_id = database
@@ -1129,17 +1154,6 @@ mod test_device {
             self.store.announcement_stream_id_for_test().await
         }
 
-        pub async fn sign_device_head_for_test(
-            &self,
-            commit: coven_protocol::store_commit::StoreBatchCommitRef,
-            successor: coven_protocol::store_commit::SuccessorLink,
-        ) -> Result<coven_protocol::store_commit::StoreDeviceHead, crate::sync::store::StoreError>
-        {
-            self.store
-                .sign_device_head_for_test(commit, successor)
-                .await
-        }
-
         pub async fn owner_promotion_target_for_test(
             &self,
         ) -> Result<
@@ -1147,31 +1161,6 @@ mod test_device {
             crate::sync::store::StoreError,
         > {
             self.store.owner_promotion_target_for_test().await
-        }
-
-        pub async fn observe_excluded_candidate_head_for_test(
-            &self,
-            candidate: &coven_protocol::store_commit::StoreDeviceHead,
-            candidate_commit: &coven_protocol::store_commit::StoreBatchCommit,
-            candidate_object: &coven_protocol::objects::ExactObjectRef,
-        ) -> Result<
-            crate::sync::store::ExcludedCandidateHeadObservation,
-            crate::sync::store::StoreError,
-        > {
-            self.store
-                .observe_excluded_candidate_head_for_test(
-                    candidate,
-                    candidate_commit,
-                    candidate_object,
-                )
-                .await
-        }
-
-        pub async fn cleanup_merge_candidate_for_test(
-            &self,
-            write_id: coven_protocol::write::WriteId,
-        ) -> Result<(), crate::sync::store::StoreError> {
-            self.store.cleanup_merge_candidate_for_test(write_id).await
         }
 
         pub async fn resign_snapshot_meta_for_test(
@@ -1287,23 +1276,6 @@ mod test_device {
                 .await
         }
 
-        pub async fn exact_next_announcement_slot_for_test(
-            &self,
-            registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-            registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-            previous: Option<&coven_protocol::store_commit::StoreBatchCommitRef>,
-        ) -> Result<
-            (
-                coven_protocol::objects::ObjectSlot,
-                Option<coven_protocol::store_commit::StoreDeviceHeadRef>,
-            ),
-            crate::sync::store::StoreError,
-        > {
-            self.store
-                .exact_next_announcement_slot_for_test(registration_ref, registration, previous)
-                .await
-        }
-
         pub async fn load_registration_for_test(
             &self,
             reference: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
@@ -1342,20 +1314,11 @@ mod test_device {
                 String,
                 coven_protocol::store_commit::StoreBatchCommitRef,
             >,
-            device_state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
-            exclusion_freezes: &[coven_protocol::store_commit::StoreDeviceProposalAck],
             commit_ref: &coven_protocol::store_commit::StoreBatchCommitRef,
             commit: &coven_protocol::store_commit::StoreBatchCommit,
         ) -> Result<crate::sync::store::Readiness, crate::sync::store::StorePullError> {
             self.store
-                .pull_readiness_for_test(
-                    coverage,
-                    frontier,
-                    device_state,
-                    exclusion_freezes,
-                    commit_ref,
-                    commit,
-                )
+                .pull_readiness_for_test(coverage, frontier, commit_ref, commit)
                 .await
         }
 
@@ -1430,7 +1393,7 @@ mod test_device {
         pub async fn load_applicable_circle_packages_for_test(
             &self,
             verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-            activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+            activations: &[&coven_protocol::circle_activation::VerifiedCircleActivations],
             author: &coven_protocol::store_commit::StoreDeviceRegistration,
             local_store_membership: coven_protocol::membership::LocalStoreMembership,
         ) -> Result<
@@ -1454,10 +1417,13 @@ mod test_device {
         pub async fn prepare_acknowledgement_activation_for_test(
             &self,
             acknowledgement: coven_protocol::store_commit::StoreAckRef,
+            object: coven_protocol::objects::ExactProtocolObject<
+                coven_protocol::store_commit::StoreAck,
+            >,
             candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
         ) -> Result<(), coven_database::DbError> {
             self.store
-                .prepare_acknowledgement_activation_for_test(acknowledgement, candidate)
+                .prepare_acknowledgement_activation_for_test(acknowledgement, object, candidate)
                 .await
         }
 
@@ -1513,18 +1479,6 @@ mod test_device {
         {
             self.store
                 .load_store_ack_for_test(reference, registration)
-                .await
-        }
-
-        pub async fn load_head_for_test(
-            &self,
-            reference: &coven_protocol::store_commit::StoreDeviceHeadRef,
-            registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-            commit: &coven_protocol::store_commit::StoreBatchCommitRef,
-        ) -> Result<coven_protocol::store_commit::StoreDeviceHead, crate::sync::store::StoreError>
-        {
-            self.store
-                .load_head_for_test(reference, registration, commit)
                 .await
         }
 
@@ -1888,6 +1842,58 @@ mod test_device {
             })
         }
 
+        #[cfg(test)]
+        pub async fn prepare_uploaded_changeset_for_test(
+            &self,
+            sequence: u64,
+            changeset: Vec<u8>,
+        ) -> Result<coven_database::PreparedStoreWriteCommit, TestError> {
+            let before = self.latest_local_store_position().await?;
+            let expected = before
+                .as_ref()
+                .map_or(1, |reference| reference.coord.sequence() + 1);
+            if sequence != expected {
+                return Err(TestError::invariant(format!(
+                    "test producer expected sequence {expected}, got {sequence}"
+                )));
+            }
+            self.db.enqueue_store_changeset_for_test(changeset).await?;
+            self.prepare_uploaded_pending_write_for_test().await
+        }
+
+        #[cfg(test)]
+        pub async fn prepare_uploaded_pending_write_for_test(
+            &self,
+        ) -> Result<coven_database::PreparedStoreWriteCommit, TestError> {
+            let mut writer = self.authorize_writer().await?;
+            if !writer.prepare_pending_store_write().await? {
+                return Err(TestError::invariant(
+                    "test changeset did not prepare a Store commit",
+                ));
+            }
+            let pending = self
+                .db
+                .oldest_prepared_store_write()
+                .await?
+                .ok_or_else(|| TestError::invariant("prepared test changeset is absent"))?;
+            let (uploaded, _resume) = self.db.arm_test_pause(
+                coven_database::DatabaseTestPoint::StoreWriteCommitUploaded {
+                    write_id: pending.commit.value.write_id.clone(),
+                },
+            );
+            {
+                let publication = writer.drain_store_writes();
+                tokio::pin!(publication);
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    tokio::select! {
+                        _ = uploaded.notified() => {},
+                        result = &mut publication => panic!("publication returned before commit upload: {result:?}"),
+                    }
+                }).await.expect("upload the package and commit before interrupting publication");
+            }
+            Ok(pending)
+        }
+
         pub async fn publish_changeset_for_test(
             &self,
             sequence: u64,
@@ -2148,7 +2154,13 @@ mod test_device {
                 master_keys.unwrap_or_else(|| std::sync::Arc::new(super::TestCustody::default())),
                 self.settled.clone(),
             );
-            components.run_cycle(clock, observer).await
+            components
+                .run_cycle(
+                    clock,
+                    observer,
+                    coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+                )
+                .await
         }
 
         pub fn current_keyring_for_test(&self) -> Option<coven_storage::CloudKeyringFacts> {
@@ -2355,29 +2367,6 @@ mod test_device {
                 .await
         }
 
-        pub async fn abandon_merge_candidate(
-            &self,
-            write_id: coven_protocol::write::WriteId,
-        ) -> Result<crate::sync::store::MergeCandidateAbandonment, crate::sync::store::StoreError>
-        {
-            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
-            self.store
-                .abandon_merge_candidate(write_id, Some(&routing_encryption))
-                .await
-        }
-
-        pub async fn prepare_merge_candidate_abandonment(
-            &self,
-            write_id: coven_protocol::write::WriteId,
-        ) -> Result<bool, crate::sync::store::StoreError> {
-            self.store
-                .authorize_writer()
-                .await
-                .map_err(crate::sync::store::StoreError::from)?
-                .prepare_merge_candidate_abandonment(write_id)
-                .await
-        }
-
         pub async fn prepare_peer_exclusion(
             &self,
             target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
@@ -2393,35 +2382,27 @@ mod test_device {
                 } => proposal,
                 result => panic!("unexpected exclusion proposal result: {result:?}"),
             };
-            let freezes = self
-                .db
-                .store_device_exclusion_freezes()
-                .await
-                .expect("read owner exclusion freeze");
-            assert_eq!(freezes.len(), 1);
-            assert_eq!(freezes[0].proposal, proposal);
-            assert_eq!(&freezes[0].proposal.target, target);
             let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
                 self.db
                     .materialized_frontier()
                     .await
-                    .expect("read owner exclusion frontier"),
+                    .expect("read proposal frontier"),
             )
-            .expect("shape owner exclusion frontier");
-            let acknowledgement = self
-                .stage_acknowledgement(frontier, "2026-07-18T00:01:00Z".to_string())
+            .expect("exact proposal frontier");
+            let (_, state) = self
+                .db
+                .store_device_state_for_history_cut(&coven_protocol::store_commit::StoreHistoryCut(
+                    frontier.0,
+                ))
                 .await
-                .expect("stage owner exclusion acknowledgement")
-                .expect("the exclusion freeze is new, so it is acknowledged");
-            let coven_protocol::store_commit::StoreAckExclusionState { proposal_freezes } =
-                acknowledgement.exclusions.clone();
-            assert_eq!(proposal_freezes, freezes);
-            assert_eq!(
-                self.drain_acknowledgements()
-                    .await
-                    .expect("publish owner exclusion acknowledgement"),
-                1
-            );
+                .expect("read accepted proposal state");
+            let record = &state.devices[&target.device_id];
+            assert!(matches!(
+                record.status,
+                coven_protocol::store_commit::StoreDeviceStatus::Active
+            ));
+            assert!(matches!(record.proposals.get(&proposal.proposal_id),
+                Some(coven_protocol::store_commit::StoreDeviceProposalState::Pending { proposal: actual }) if actual == &proposal));
             proposal
         }
 
@@ -2441,12 +2422,22 @@ mod test_device {
             else {
                 panic!("unexpected exclusion result: {result:?}")
             };
-            assert!(self
+            let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
+                self.db
+                    .materialized_frontier()
+                    .await
+                    .expect("read exclusion frontier"),
+            )
+            .expect("exact exclusion frontier");
+            let (_, state) = self
                 .db
-                .store_device_exclusion_freezes()
+                .store_device_state_for_history_cut(&coven_protocol::store_commit::StoreHistoryCut(
+                    frontier.0,
+                ))
                 .await
-                .expect("read released owner exclusion freeze")
-                .is_empty());
+                .expect("read accepted exclusion state");
+            assert!(matches!(&state.devices[&proposal.target.device_id].status,
+                coven_protocol::store_commit::StoreDeviceStatus::Inactive { terminals } if terminals.contains(&exclusion)));
             exclusion
         }
 
@@ -2675,25 +2666,38 @@ mod test_device {
                 .await
         }
 
-        /// Publish an acknowledgement, then run the independent replay
-        /// baseline stage and report what it retired.
-        pub async fn publish_acknowledgement(
+        /// Publish a changed acknowledgement assertion, then run the independent
+        /// replay baseline stage even when the assertion was already current.
+        pub fn publish_acknowledgement(
             &self,
             frontier: coven_protocol::store_commit::CommitFrontier,
-        ) -> Result<Option<coven_database::AdvancedReplayBaseline>, TestError> {
-            self.store
-                .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:01Z".to_string())
-                .await?;
-            let published = self.store.drain_acknowledgements_for_test().await?;
-            if published != 1 {
-                return Err(TestError::invariant(format!(
-                "snapshot acknowledgement fixture published {published} acknowledgements instead of one"
-            )));
-            }
-            match self.stand_on_acknowledged_snapshot().await? {
-                crate::sync::store::ReplayBaselineAdvance::Advanced(advanced) => Ok(Some(advanced)),
-                crate::sync::store::ReplayBaselineAdvance::Declined(_) => Ok(None),
-            }
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<Option<coven_database::AdvancedReplayBaseline>, TestError>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                let staged = self
+                    .store
+                    .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:01Z".to_string())
+                    .await?;
+                let expected = u64::from(staged.acknowledgement.is_some());
+                let published = self.store.drain_acknowledgements_for_test().await?;
+                if published != expected {
+                    return Err(TestError::invariant(format!(
+                        "acknowledgement fixture published {published} statements for {expected} changed assertions"
+                    )));
+                }
+                match self.stand_on_accepted_snapshot().await? {
+                    crate::sync::store::ReplayBaselineAdvance::Advanced(advanced) => {
+                        Ok(Some(advanced))
+                    }
+                    crate::sync::store::ReplayBaselineAdvance::Declined(_) => Ok(None),
+                }
+            })
         }
 
         pub async fn stage_acknowledgement(
@@ -2732,13 +2736,12 @@ mod test_device {
             Ok(())
         }
 
-        /// Stand on the snapshot this device has acknowledged, the way the
-        /// cycle does, and report what it did or why it did nothing.
-        pub async fn stand_on_acknowledged_snapshot(
+        /// Stand on the accepted snapshot and report what the baseline stage did.
+        pub async fn stand_on_accepted_snapshot(
             &self,
         ) -> Result<crate::sync::store::ReplayBaselineAdvance, TestError> {
             self.store
-                .stand_on_acknowledged_snapshot_for_test()
+                .stand_on_accepted_snapshot_for_test()
                 .await
                 .map_err(TestError::from)
         }
@@ -2753,7 +2756,7 @@ mod test_device {
                 .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:02Z".to_string())
                 .await?;
             self.store.drain_acknowledgements_for_test().await?;
-            match self.stand_on_acknowledged_snapshot().await? {
+            match self.stand_on_accepted_snapshot().await? {
                 crate::sync::store::ReplayBaselineAdvance::Advanced(advanced) => Ok(Some(advanced)),
                 crate::sync::store::ReplayBaselineAdvance::Declined(_) => Ok(None),
             }
@@ -2854,17 +2857,18 @@ mod test_device {
                 .expect("acknowledgement matches activation predecessor");
             let candidate = writer
                 .prepare_candidate(
-                    plan,
+                    &plan,
                     crate::sync::store::StoreOperationBatch::Acknowledgement {
                         reference: outbound.reference.clone(),
                         value: outbound.ack.value.clone(),
-                        circle_acknowledgements: Vec::new(),
+                        circle_acknowledgements: outbound.circle_acknowledgements.clone(),
                     },
                 )
                 .await
                 .expect("prepare acknowledgement candidate");
             self.prepare_acknowledgement_activation_for_test(
                 outbound.reference.clone(),
+                outbound.ack.clone(),
                 candidate.clone(),
             )
             .await
@@ -3104,9 +3108,18 @@ impl TestStore {
         store_dir: StoreDir,
         identity: &UserKeypair,
     ) -> Result<crate::sync::store::Store, crate::sync::store::StoreInitializationError> {
-        crate::sync::store::Store::open(database, storage, store_dir, &self.root, identity)
-            .await
-            .map(|initialized| initialized.into_parts().0)
+        crate::sync::store::Store::open(
+            database,
+            storage,
+            store_dir,
+            &self.root,
+            identity,
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
+        )
+        .await
+        .map(|initialized| initialized.into_parts().0)
     }
 
     pub async fn open_founder_store_with_storage(
@@ -3229,6 +3242,7 @@ impl TestStore {
             storage,
             store_dir.clone(),
             self.signer.clone(),
+            routing_encryption.cloned(),
         )
         .await
         .map_err(|error| crate::sync::cycle::SyncCycleFailure::operation("load Store", error))?;
@@ -3834,326 +3848,6 @@ impl TestStore {
         }
     }
 
-    pub async fn publish_competing_store_head(
-        &self,
-        journal: &coven_protocol::circle_journal::CircleOperationJournal,
-    ) -> (
-        coven_protocol::objects::ExactObjectRef,
-        coven_protocol::objects::ExactObjectRef,
-    ) {
-        let candidate = journal.commit().expect("parse candidate Store commit");
-        let coord = journal.operation().commit_ref.coord.clone();
-        let head = &journal.operation().policy.head;
-        let registration = self
-            .founder
-            .activated_store_device_registration_for_test(candidate.author_registration.clone())
-            .await
-            .expect("load candidate author registration");
-        let device_signer = registration
-            .value()
-            .device_signer(&self.signer)
-            .expect("derive candidate device signer");
-        let schema_version = self.founder.schema_version();
-        let package = coven_protocol::audience_package::AudiencePackage::store(
-            self.root.store_root_hash,
-            candidate.candidate_family(),
-            candidate.write_id.clone(),
-            coord.clone(),
-            schema_version,
-            b"competing valid package".to_vec(),
-            Vec::new(),
-        )
-        .expect("construct competing package");
-        let package_bytes = package.to_bytes();
-        let package_prefix = coven_protocol::store_commit::package_semantic_prefix(
-            candidate.candidate_family(),
-            &coord.stream_id.to_string(),
-            candidate.seq(),
-            coven_protocol::store_commit::ObjectHash::digest(&package_bytes),
-        );
-        let package_context = coven_protocol::objects::ProtocolObjectContext::store_encrypted(
-            self.root.store_root_hash,
-            coven_protocol::objects::ProtocolObjectDomain::StorePackage,
-        );
-        let package_slot = self
-            .storage
-            .allocate_protocol_slot(&package_context, &package_prefix, ".pkg")
-            .await
-            .expect("reserve competing package slot");
-        let package_prepared = self
-            .storage
-            .prepare_protocol_object(
-                &package_context,
-                package_slot,
-                &package_prefix,
-                package_bytes.clone(),
-            )
-            .expect("prepare competing package");
-        self.storage
-            .create_protocol_object(&package_prepared)
-            .await
-            .expect("publish competing package");
-        let membership = self
-            .founder
-            .membership()
-            .await
-            .expect("load competing commit membership");
-        let predecessor = membership
-            .write_grant_authority(&registration.value().author_pubkey)
-            .expect("competing author has an active write grant");
-        let winner = coven_protocol::store_commit::StoreBatchCommit::signed_operations(
-            self.root.store_root_hash,
-            candidate.write_id.clone(),
-            coord.clone(),
-            candidate.author_registration.clone(),
-            registration.value(),
-            candidate.order.clone(),
-            coven_protocol::store_commit::StorePublicationBase::Genesis,
-            candidate.membership_state.clone(),
-            candidate.device_state.clone(),
-            coven_protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
-            coven_protocol::store_commit::StoreCommitOperationsInput {
-                store_package: Some(coven_protocol::store_commit::StorePackageInput {
-                    candidate_family: candidate.candidate_family(),
-                    schema_version,
-                    bytes: &package_bytes,
-                    object: package_prepared.reference().clone(),
-                }),
-                ..coven_protocol::store_commit::StoreCommitOperationsInput::empty()
-            },
-            &device_signer,
-        )
-        .expect("sign competing commit");
-        let commit_prefix = coven_protocol::store_commit::commit_semantic_prefix(
-            winner.candidate_family(),
-            &coord.stream_id.to_string(),
-            winner.seq(),
-            winner.commit_hash(),
-        );
-        let commit_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
-            coven_protocol::objects::ProtocolObjectDomain::StoreCommit,
-        );
-        let commit_slot = self
-            .storage
-            .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
-            .await
-            .expect("reserve competing commit slot");
-        let commit_prepared = self
-            .storage
-            .prepare_protocol_object(
-                &commit_context,
-                commit_slot,
-                &commit_prefix,
-                winner.to_bytes(),
-            )
-            .expect("prepare competing commit");
-        self.storage
-            .create_protocol_object(&commit_prepared)
-            .await
-            .expect("publish competing commit");
-        let winner_ref = coven_protocol::store_commit::StoreBatchCommitRef::from_commit(
-            &winner,
-            coord,
-            commit_prepared.reference().clone(),
-        )
-        .expect("reference competing commit");
-        assert_ne!(winner_ref, journal.operation().commit_ref);
-        let winner_head = coven_protocol::store_commit::StoreDeviceHead::signed(
-            self.root.store_root_hash,
-            candidate.author_registration.clone(),
-            winner_ref,
-            head.successor.clone(),
-            &device_signer,
-        )
-        .expect("sign competing head");
-        let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
-            coven_protocol::objects::ProtocolObjectDomain::StoreHead,
-        );
-        let head_slot = journal
-            .operation()
-            .prepared_objects
-            .get("store-head")
-            .expect("candidate carries a prepared Store head")
-            .slot()
-            .clone();
-        let head_prefix = coven_protocol::store_commit::head_slot_prefix(
-            &candidate.author_registration.device_id.to_string(),
-            candidate.seq(),
-        );
-        let head_prepared = self
-            .storage
-            .prepare_protocol_object(
-                &head_context,
-                head_slot,
-                &head_prefix,
-                winner_head.to_bytes(),
-            )
-            .expect("prepare competing head");
-        self.storage
-            .create_protocol_object(&head_prepared)
-            .await
-            .expect("publish competing head");
-        (
-            commit_prepared.reference().clone(),
-            head_prepared.reference().clone(),
-        )
-    }
-
-    pub async fn publish_third_candidate_winner(
-        &self,
-        peer_db: &Database,
-        candidate: &coven_database::BlockedMergeCandidate,
-    ) {
-        let registration = coven_database::StoreDatabase::new(peer_db)
-            .activated_store_device_registration(
-                candidate.commit.value().author_registration.clone(),
-            )
-            .await
-            .expect("load third-winner device registration");
-        let device_signer = registration
-            .value()
-            .device_signer(&self.signer)
-            .expect("derive third-winner device signer");
-        let coord = candidate.head.commit.coord.clone();
-        let candidate_family = candidate.commit.value().candidate_family();
-        let package = coven_protocol::audience_package::AudiencePackage::store(
-            self.root.store_root_hash,
-            candidate_family,
-            candidate.commit.value().write_id.clone(),
-            coord.clone(),
-            peer_db.schema_version(),
-            b"third winner package".to_vec(),
-            Vec::new(),
-        )
-        .expect("construct third winner package");
-        let coven_protocol::store_commit::StoreCommitCoord {
-            stream_id,
-            sequence,
-        } = coord.clone();
-        let package_bytes = package.to_bytes();
-        let package_context = coven_protocol::objects::ProtocolObjectContext::store_encrypted(
-            self.root.store_root_hash,
-            coven_protocol::objects::ProtocolObjectDomain::StorePackage,
-        );
-        let package_prefix = coven_protocol::store_commit::package_semantic_prefix(
-            candidate_family,
-            &stream_id.to_string(),
-            sequence,
-            coven_protocol::store_commit::ObjectHash::digest(&package_bytes),
-        );
-        let package_slot = self
-            .storage
-            .allocate_protocol_slot(&package_context, &package_prefix, ".pkg")
-            .await
-            .expect("allocate third winner package slot");
-        let package_prepared = self
-            .storage
-            .prepare_protocol_object(
-                &package_context,
-                package_slot,
-                &package_prefix,
-                package_bytes.clone(),
-            )
-            .expect("prepare third winner package");
-        let third = coven_protocol::store_commit::StoreBatchCommit::signed_operations(
-            self.root.store_root_hash,
-            candidate.commit.value().write_id.clone(),
-            coord.clone(),
-            candidate.commit.value().author_registration.clone(),
-            registration.value(),
-            candidate.commit.value().order.clone(),
-            coven_protocol::store_commit::StorePublicationBase::Genesis,
-            candidate.commit.value().membership_state.clone(),
-            candidate.commit.value().device_state.clone(),
-            candidate
-                .commit
-                .value()
-                .operations_membership_authority()
-                .expect("load third winner membership authority"),
-            coven_protocol::store_commit::StoreCommitOperationsInput {
-                store_package: Some(coven_protocol::store_commit::StorePackageInput {
-                    candidate_family,
-                    schema_version: peer_db.schema_version(),
-                    bytes: &package_bytes,
-                    object: package_prepared.reference().clone(),
-                }),
-                ..coven_protocol::store_commit::StoreCommitOperationsInput::empty()
-            },
-            &device_signer,
-        )
-        .expect("sign third ordinary winner");
-        let commit_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
-            coven_protocol::objects::ProtocolObjectDomain::StoreCommit,
-        );
-        let commit_prefix = coven_protocol::store_commit::commit_semantic_prefix(
-            third.candidate_family(),
-            &stream_id.to_string(),
-            sequence,
-            third.commit_hash(),
-        );
-        let commit_slot = self
-            .storage
-            .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
-            .await
-            .expect("allocate third winner commit slot");
-        let third_prepared = self
-            .storage
-            .prepare_protocol_object(
-                &commit_context,
-                commit_slot,
-                &commit_prefix,
-                third.to_bytes(),
-            )
-            .expect("prepare third winner commit");
-        self.storage
-            .create_protocol_object(&third_prepared)
-            .await
-            .expect("publish third winner commit");
-        let third_ref = coven_protocol::store_commit::StoreBatchCommitRef::from_commit(
-            &third,
-            coord,
-            third_prepared.reference().clone(),
-        )
-        .expect("reference third winner commit");
-        let third_head = coven_protocol::store_commit::StoreDeviceHead::signed(
-            self.root.store_root_hash,
-            candidate.commit.value().author_registration.clone(),
-            third_ref,
-            candidate.head.successor.clone(),
-            &device_signer,
-        )
-        .expect("sign third winner head");
-        let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
-            coven_protocol::objects::ProtocolObjectDomain::StoreHead,
-        );
-        let head_prefix = coven_protocol::store_commit::head_slot_prefix(
-            &candidate
-                .commit
-                .value()
-                .author_registration
-                .device_id
-                .to_string(),
-            sequence,
-        );
-        let head_prepared = self
-            .storage
-            .prepare_protocol_object(
-                &head_context,
-                candidate.head_object.slot().clone(),
-                &head_prefix,
-                third_head.to_bytes(),
-            )
-            .expect("prepare third winner head");
-        self.storage
-            .create_protocol_object(&head_prepared)
-            .await
-            .expect("publish third winner head");
-    }
-
     pub async fn overwrite_membership_head(
         &self,
         reference: &coven_protocol::membership::MembershipHeadRef,
@@ -4283,21 +3977,48 @@ impl TestStore {
         joining_identity: &UserKeypair,
         published_at: &str,
     ) -> Result<TestDevice, TestError> {
-        let observer = self
-            .bind_device_in(observer_db, observer_store_dir, &self.signer)
-            .await?;
-        TestDevice::activate_joined(
-            observer,
-            coven_database::StoreDatabase::new(joining_db),
+        self.activate_joined_device_with_clock(
+            observer_db,
+            observer_store_dir,
+            joining_db,
             joining_store_dir,
             joining_identity,
             published_at,
-            std::sync::Arc::new(
-                self.storage
-                    .connection_for_test_identity(joining_identity.clone()),
-            ),
+            Arc::new(coven_foundation::clock::SystemClock),
         )
         .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn activate_joined_device_with_clock<'a>(
+        &'a self,
+        observer_db: &'a Database,
+        observer_store_dir: StoreDir,
+        joining_db: &'a Database,
+        joining_store_dir: StoreDir,
+        joining_identity: &'a UserKeypair,
+        published_at: &'a str,
+        clock: coven_foundation::clock::ClockRef,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<TestDevice, TestError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let binding = self.bind_device_in(observer_db, observer_store_dir, &self.signer);
+            let observer = binding.await?;
+            TestDevice::activate_joined_with_clock(
+                observer,
+                coven_database::StoreDatabase::new(joining_db),
+                joining_store_dir,
+                joining_identity,
+                published_at,
+                std::sync::Arc::new(
+                    self.storage
+                        .connection_for_test_identity(joining_identity.clone()),
+                ),
+                clock,
+            )
+            .await
+        })
     }
 
     /// Join a device through the production shape: snapshot install first,
@@ -4690,7 +4411,7 @@ impl TestStore {
     /// carries only the history published after it, which is the shape
     /// production has: a joiner that carried the closure back to genesis would
     /// need every package ever written, including the ones reclamation deletes
-    /// once every device has acknowledged the snapshot restating them.
+    /// once an accepted snapshot restates them.
     #[cfg(test)]
     pub fn install_cross_principal_device<'a>(
         &'a self,
@@ -5041,6 +4762,13 @@ pub trait StorageInterceptor: Send + Sync {
         Ok(())
     }
 
+    fn filter_protocol_slots(
+        &self,
+        _listing_prefix: &str,
+        _slots: &mut Vec<coven_protocol::objects::ObjectSlot>,
+    ) {
+    }
+
     async fn before_blob_allocate(&self) -> Result<(), coven_protocol::objects::StorageError> {
         Ok(())
     }
@@ -5108,6 +4836,14 @@ where
         semantic_prefix: &str,
     ) -> Result<(), coven_protocol::objects::StorageError> {
         (**self).before_protocol_read(read, semantic_prefix).await
+    }
+
+    fn filter_protocol_slots(
+        &self,
+        listing_prefix: &str,
+        slots: &mut Vec<coven_protocol::objects::ObjectSlot>,
+    ) {
+        (**self).filter_protocol_slots(listing_prefix, slots);
     }
 
     async fn before_blob_allocate(&self) -> Result<(), coven_protocol::objects::StorageError> {
@@ -5260,16 +4996,6 @@ where
         mutation: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), coven_storage::RotationStateError> {
         self.inner.remove_candidate(generation, mutation)
-    }
-
-    fn replace_candidate_mutation(
-        &self,
-        generation: u64,
-        previous: coven_protocol::store_commit::ObjectHash,
-        replacement: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<(), coven_storage::RotationStateError> {
-        self.inner
-            .replace_candidate_mutation(generation, previous, replacement)
     }
 
     fn gate(&self) -> Option<coven_protocol::objects::RotationGate> {
@@ -5771,9 +5497,13 @@ where
         self.interceptor
             .before_protocol_read(ProtocolRead::Listing, listing_prefix)
             .await?;
-        self.inner
+        let mut slots = self
+            .inner
             .list_protocol_slots(context, listing_prefix)
-            .await
+            .await?;
+        self.interceptor
+            .filter_protocol_slots(listing_prefix, &mut slots);
+        Ok(slots)
     }
 
     async fn read_protocol_slot(

@@ -1,6 +1,43 @@
 use super::*;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
+    #[cfg(test)]
+    pub(crate) fn verified_circle_predecessors_for_test(
+        &self,
+        candidate: &coven_protocol::store_commit::StoreBatchCommit,
+        circle_id: coven_protocol::circle::CircleId,
+        prepared: &[&coven_protocol::circle_activation::VerifiedCircleActivations],
+    ) -> Result<Vec<coven_protocol::circle_activation::VerifiedCircleReference>, pull::StorePullError>
+    {
+        self.history_verifier
+            .verified_circle_predecessors(candidate, circle_id, prepared)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verify_prepared_circle_predecessor_for_test(
+        &self,
+        candidate: &coven_protocol::store_commit::StoreBatchCommit,
+        activating_commit: &coven_protocol::store_commit::StoreBatchCommitRef,
+        activation: &coven_protocol::circle_activation::VerifiedCircleReference,
+    ) -> Result<(), pull::StorePullError> {
+        self.history_verifier.verify_prepared_circle_predecessor(
+            candidate,
+            activating_commit,
+            activation,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn prepare_store_publication_history_for_test(
+        &mut self,
+    ) -> Result<(), pull::StorePullError> {
+        // These direct readers exercise preparation before the interval's
+        // atomic install, using the same accepted history as a real pull.
+        let mut pull = self.pull_history();
+        pull.load_store_publications_for_replay().await?;
+        Ok(())
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn blob_key_fingerprint_for_test(
         &self,
@@ -69,32 +106,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn exact_next_announcement_slot_for_test(
-        &mut self,
-        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-        previous: Option<&coven_protocol::store_commit::StoreBatchCommitRef>,
-    ) -> Result<
-        (
-            coven_protocol::objects::ObjectSlot,
-            Option<coven_protocol::store_commit::StoreDeviceHeadRef>,
-        ),
-        StoreError,
-    > {
-        let previous = match previous {
-            Some(reference) => Some(
-                self.load_commit(reference)
-                    .await
-                    .map_err(StoreError::from)?,
-            ),
-            None => None,
-        };
-        self.history_verifier
-            .exact_next_announcement_slot(registration_ref, registration, previous.as_ref())
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn load_commit_ancestry_until_for_test(
         &mut self,
         start: coven_protocol::store_commit::StoreBatchCommitRef,
@@ -149,20 +160,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             String,
             coven_protocol::store_commit::StoreBatchCommitRef,
         >,
-        device_state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
-        exclusion_freezes: &[coven_protocol::store_commit::StoreDeviceProposalAck],
         commit_ref: &coven_protocol::store_commit::StoreBatchCommitRef,
         commit: &coven_protocol::store_commit::StoreBatchCommit,
     ) -> Result<pull::Readiness, pull::StorePullError> {
         self.pull_history()
-            .readiness(
-                coverage,
-                frontier,
-                device_state,
-                exclusion_freezes,
-                commit_ref,
-                commit,
-            )
+            .readiness(coverage, frontier, commit_ref, commit)
             .await
     }
 
@@ -219,7 +221,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
         evidence: MergeHistorySuccessorEvidence,
     ) -> Result<PreparedMergeHistorySuccessor, StoreError> {
-        let (_, state_after) = self
+        let (_, predecessor_state) = self
             .database
             .store_device_state_for_order(&verified_commit.value().order)
             .await?;
@@ -227,7 +229,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             verified_commit,
             membership,
             recovery_author,
-            state_after,
+            &predecessor_state,
+            &predecessor_state,
             evidence,
         )
         .await
@@ -242,12 +245,30 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         membership_state: &coven_protocol::circle_control::StoreMembershipStateRef,
         installed: &coven_protocol::store_commit::CommitFrontier,
     ) -> Result<coven_database::DeviceJoinBootstrapPlan, StoreError> {
+        let snapshot = self
+            .database
+            .latest_local_store_snapshot()
+            .await?
+            .ok_or_else(|| {
+                StoreError::InvalidOutbound(
+                    "device join bootstrap test has no installed Store snapshot".to_string(),
+                )
+            })?;
+        let publication = self
+            .history_verifier
+            .retained_store_publication_interval(
+                &self.database,
+                snapshot.meta.publication_predecessor.clone(),
+            )
+            .await
+            .map_err(StoreError::from)?;
         self.history_verifier
             .prepare_device_join_bootstrap(
                 bootstrap_cut,
                 attempt_activation,
                 membership_state,
                 installed,
+                publication,
             )
             .await
             .map_err(StoreError::from)
@@ -271,19 +292,5 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .history_verifier
             .load_store_ack(reference, registration)
             .await?)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn load_head_for_test(
-        &mut self,
-        reference: &coven_protocol::store_commit::StoreDeviceHeadRef,
-        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-        commit: &coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<coven_protocol::store_commit::StoreDeviceHead, StoreError> {
-        Ok(self
-            .history_verifier
-            .load_head(reference, registration, commit)
-            .await?
-            .value)
     }
 }

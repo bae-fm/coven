@@ -1,6 +1,4 @@
-use crate::sync::test_helpers::{
-    pubkey_hex, InterceptedStorage, ProtocolRead, StorageInterceptor, TestDevice, TestStore,
-};
+use crate::sync::test_helpers::{pubkey_hex, TestStore};
 use coven_keys::keys::UserKeypair;
 use coven_protocol::membership::MemberRole;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
@@ -9,147 +7,191 @@ use coven_protocol::store_commit::{
     StoreDeviceRegistrationOrigin,
 };
 use coven_storage::CloudSyncObjectStorage;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-struct PublishBetweenAuthorityPasses {
-    probe_prefix: String,
-    writer: Arc<TestDevice>,
-    matching_reads: Arc<AtomicUsize>,
-}
-
-#[async_trait::async_trait]
-impl StorageInterceptor for PublishBetweenAuthorityPasses {
-    async fn before_protocol_read(
-        &self,
-        read: ProtocolRead,
-        semantic_prefix: &str,
-    ) -> Result<(), coven_protocol::objects::StorageError> {
-        if read != ProtocolRead::Slot || semantic_prefix != self.probe_prefix {
-            return Ok(());
-        }
-        let read = self.matching_reads.fetch_add(1, Ordering::SeqCst) + 1;
-        if read <= 3 {
-            self.writer
-                .publish_fixture_position(&format!("authority-read-{read}"))
-                .await;
-        }
-        Ok(())
-    }
+#[tokio::test]
+async fn installed_ordinary_commit_cannot_complete_owner_recovery() {
+    let owner = UserKeypair::generate();
+    let store_dir = crate::sync::test_helpers::test_store_dir();
+    let database = crate::sync::test_helpers::open_test_db(store_dir.clone());
+    let store = TestStore::create(
+        &database,
+        store_dir.clone(),
+        "unrelated-recovery-completion",
+        owner.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let admission = store
+        .admit_member(
+            &database,
+            store_dir.clone(),
+            &owner,
+            &pubkey_hex(&UserKeypair::generate()),
+            None,
+            MemberRole::Member,
+            &coven_keys::encryption::EncryptionService::from_key([42; 32]),
+            "Test Store",
+        )
+        .await
+        .expect("publish an unrelated membership activation");
+    let [admission_head] = admission.membership_floor.0.as_slice() else {
+        panic!("the admission extends the founder's sole authority stream");
+    };
+    let unrelated_result = finalized_membership_result(&database, admission_head).await;
+    let device = store
+        .bind_device(&database, store_dir, &owner)
+        .await
+        .expect("bind founder");
+    device
+        .publish_fixture_position("ordinary-accepted-write")
+        .await;
+    let reference = device
+        .latest_local_store_position()
+        .await
+        .expect("read installed position")
+        .expect("ordinary write is installed");
+    let database = coven_database::StoreDatabase::new(&database);
+    let retained = database
+        .retained_merge_materialization(store.root(), reference)
+        .await
+        .expect("load installed ordinary write");
+    let commit = retained.verified_commit().clone();
+    let evidence = database
+        .installed_store_commit_evidence(commit.clone())
+        .await
+        .expect("read exact installed evidence")
+        .expect("write has installed evidence");
+    let registration = database
+        .activated_store_device_registration_with_authority(
+            &store.root(),
+            commit.author_registration.clone(),
+        )
+        .await
+        .expect("load activated author");
+    database
+        .complete_owner_recovery(
+            commit,
+            coven_database::StoreCommitPublicationOutcome::Installed(evidence),
+            retained.history_evidence().clone(),
+            registration,
+            unrelated_result,
+        )
+        .await
+        .expect_err("an installed ordinary commit cannot prove Owner recovery completion");
 }
 
 #[tokio::test]
-async fn current_authority_finishes_while_data_only_frontiers_keep_advancing() {
-    let founder = UserKeypair::generate();
-    let founder_store_dir = crate::sync::test_helpers::test_store_dir();
-    let founder_db = crate::sync::test_helpers::open_test_db(founder_store_dir.clone());
+async fn pulling_a_peer_commit_preserves_the_pending_recovery_attempt() {
+    assert_pending_recovery_after_peer_publication(false).await;
+}
+
+#[tokio::test]
+async fn reopening_recovery_rejects_a_corrupted_publication_signature() {
+    assert_pending_recovery_after_peer_publication(true).await;
+}
+
+async fn assert_pending_recovery_after_peer_publication(corrupt_signature: bool) {
+    let owner = UserKeypair::generate();
+    let source_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(source_dir.clone());
     let home = crate::sync::test_helpers::test_cloud_home();
-    let (store, cloud_storage) = TestStore::create_with_connection(
-        &founder_db,
-        founder_store_dir.clone(),
-        "advancing-authority-frontier",
-        founder.clone(),
-        home,
+    let store = TestStore::create(
+        &source,
+        source_dir.clone(),
+        "pending-recovery-observation",
+        owner.clone(),
+        home.clone(),
     )
     .await
-    .expect("create advancing authority Store");
-    let peer = UserKeypair::generate();
-    let peer_store_dir = crate::sync::test_helpers::test_store_dir();
-    let peer_db = crate::sync::test_helpers::open_test_db(peer_store_dir.clone());
-    let peer_device = store
+    .expect("create Store");
+    let peer_dir = crate::sync::test_helpers::test_store_dir();
+    let peer_database = crate::sync::test_helpers::open_test_db(peer_dir.clone());
+    let peer = store
         .admit_and_activate_peer(
-            &founder_db,
-            founder_store_dir.clone(),
-            &peer_db,
-            peer_store_dir.clone(),
-            &peer,
+            &source,
+            source_dir.clone(),
+            &peer_database,
+            peer_dir,
+            &UserKeypair::generate(),
         )
         .await
-        .expect("activate peer writer");
-    let founder_device = store
-        .bind_device(&founder_db, founder_store_dir.clone(), &founder)
+        .expect("activate peer");
+    let device = store
+        .bind_device(&source, source_dir, &owner)
         .await
-        .expect("bind founder writer");
-    let membership = founder_device
-        .membership_for_test()
+        .expect("bind recovery source");
+    let authority = store.founder_recovery_authority().await;
+    let mut recovery = device
+        .owner_recovery_for_test()
         .await
-        .expect("load current membership");
-    let founder_id = founder_device.typed_device_id();
-    let peer_id = peer_device.typed_device_id();
-    let (probe_database, probe_store_dir, probe_identity, probe_id, probe_tip, writer) =
-        if founder_id < peer_id {
-            let tip = founder_device
-                .latest_local_store_position()
-                .await
-                .expect("read founder tip");
-            (
-                &founder_db,
-                founder_store_dir,
-                &founder,
-                founder_id,
-                tip,
-                Arc::new(peer_device),
-            )
-        } else {
-            let tip = peer_device
-                .latest_local_store_position()
-                .await
-                .expect("read peer tip");
-            (
-                &peer_db,
-                peer_store_dir,
-                &peer,
-                peer_id,
-                tip,
-                Arc::new(founder_device),
-            )
-        };
-    let next_sequence = probe_tip
-        .as_ref()
-        .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
-    let matching_reads = Arc::new(AtomicUsize::new(0));
-    let intercepted: Arc<dyn CloudSyncObjectStorage> = Arc::new(InterceptedStorage::new(
-        Arc::new(cloud_storage.connection_for_test_identity(probe_identity.clone())),
-        PublishBetweenAuthorityPasses {
-            probe_prefix: coven_protocol::store_commit::head_slot_prefix(
-                &probe_id.to_string(),
-                next_sequence,
-            ),
-            writer: writer.clone(),
-            matching_reads: matching_reads.clone(),
-        },
-    ));
-    let loaded = super::Store::load(
-        coven_database::StoreDatabase::new(probe_database),
-        intercepted,
-        probe_store_dir,
-        probe_identity.clone(),
-    )
-    .await
-    .expect("load authority verifier with intercepted storage");
-    let mut history = loaded
-        .authorize_history()
+        .expect("authorize recovery");
+    home.fail_exact_create_before_call(4);
+    recovery
+        .recover_owner_device(&authority, None)
         .await
-        .expect("authorize current history");
-
-    let target = history
-        .current_merge_authority_cut(&membership)
+        .expect_err("interrupt before uploading the staged activation");
+    let database = coven_database::StoreDatabase::new(&source);
+    let staged = database
+        .owner_recovery_publication()
         .await
-        .expect("capture one self-consistent authority cut");
-    let last_published = writer
-        .latest_local_store_position()
+        .expect("read staged recovery")
+        .expect("recovery is durable");
+    let reservation = database
+        .active_store_publication()
         .await
-        .expect("read advancing writer tip")
-        .expect("the interceptor published a writer position");
-
-    assert_eq!(
-        target.0.get(&last_published.coord.stream_id),
-        Some(&last_published),
-        "the returned authority includes the data tip observed during its pass",
+        .expect("read reservation");
+    peer.publish_fixture_position("peer-during-recovery").await;
+    let pulled = recovery
+        .pull(None)
+        .await
+        .expect("observe accepted peer history");
+    assert!(pulled.held_positions.is_empty(), "{pulled:?}");
+    assert_ne!(
+        database
+            .store_current_publication()
+            .await
+            .expect("read observed boundary")
+            .record(),
+        &staged.publication.previous
     );
-    assert!(
-        matching_reads.load(Ordering::SeqCst) <= 2,
-        "authority discovery repeated a self-consistent unchanged device state",
+    if corrupt_signature {
+        let mut corrupted = staged.publication.clone();
+        corrupted.replacement.corrupt_signature_for_test();
+        let active = reservation.as_ref().expect("recovery has a reservation");
+        let corrupted = active
+            .replace_attempt(corrupted)
+            .expect("retain attempt identity");
+        let encoded = serde_json::to_string(&corrupted).expect("encode damaged journal");
+        source
+            .execute_test_sql(&format!(
+                "UPDATE active_store_publication SET state = '{}' WHERE singleton = 1",
+                encoded.replace('\'', "''"),
+            ))
+            .await;
+        let result = database.owner_recovery_publication().await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("recovery reopened with a corrupted current-record signature"),
+        };
+        assert!(error.to_string().contains("signature"), "{error}");
+        return;
+    }
+    let reopened = database
+        .owner_recovery_publication()
+        .await
+        .expect("an unresolved recovery attempt remains readable after pulling a peer")
+        .expect("recovery is still pending");
+    assert_eq!(reopened.commit.bytes, staged.commit.bytes);
+    assert_eq!(reopened.commit.prepared, staged.commit.prepared);
+    assert_eq!(reopened.publication, staged.publication);
+    assert_eq!(
+        database
+            .active_store_publication()
+            .await
+            .expect("read retained reservation"),
+        reservation
     );
 }
 
@@ -276,7 +318,7 @@ async fn recovery_node_keeps_its_historical_membership_when_activation_membershi
         "the immutable recovery node keeps the authority it was created under while the activation names the later membership",
     );
 
-    let recovered = recovery
+    let _recovered = recovery
         .recover_owner_device(&authority, Some(&encryption))
         .await
         .expect("retry accepts the node's historical membership");
@@ -307,27 +349,41 @@ async fn recovery_node_keeps_its_historical_membership_when_activation_membershi
         .expect("read retried recovery commit");
     assert_eq!(commit_bytes, staged.commit.bytes);
     assert_eq!(commit_prepared, staged.commit.prepared);
-    let head_prefix = coven_protocol::store_commit::head_slot_prefix(
-        &recovered.device_id.to_string(),
-        staged.head.value.slot_sequence(),
+    let publication_prefix = coven_protocol::store_commit::store_publication_entry_semantic_prefix(
+        &staged.publication.entry,
     );
-    let (head_bytes, head_prepared) = cloud_storage
+    let (publication_bytes, publication_prepared) = cloud_storage
         .read_prepared_protocol_slot(
             &ProtocolObjectContext::signed_plaintext(
                 store.root().store_root_hash,
-                ProtocolObjectDomain::StoreHead,
+                ProtocolObjectDomain::StorePublicationEntry,
             ),
-            staged.head.prepared.reference().slot(),
-            &head_prefix,
+            staged.publication.entry_object.slot(),
+            &publication_prefix,
         )
         .await
-        .expect("read retried recovery head");
-    assert_eq!(head_bytes, staged.head.bytes);
-    assert_eq!(head_prepared, staged.head.prepared);
+        .expect("read retried recovery publication entry");
+    assert_eq!(publication_bytes, staged.publication.entry.to_bytes());
+    assert_eq!(
+        publication_prepared,
+        staged
+            .publication
+            .prepared_entry()
+            .expect("prepare staged publication entry")
+    );
 }
 
 #[tokio::test]
-async fn recovery_adopts_a_first_head_discovered_at_its_predecessor_barrier() {
+async fn recovery_adopts_an_accepted_publication_after_local_completion_fails() {
+    assert_recovery_completion_retry(true).await;
+}
+
+#[tokio::test]
+async fn recovery_retries_atomic_local_publication_completion() {
+    assert_recovery_completion_retry(false).await;
+}
+
+async fn assert_recovery_completion_retry(pull_accepted: bool) {
     let owner = UserKeypair::generate();
     let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = crate::sync::test_helpers::open_test_db(source_store_dir.clone());
@@ -359,25 +415,104 @@ async fn recovery_adopts_a_first_head_discovered_at_its_predecessor_barrier() {
     let first_error = first_recovery
         .recover_owner_device(&authority, None)
         .await
-        .expect_err("fail local completion after publishing the first head");
-    assert!(first_error.to_string().contains("injected failure"));
-    let pulled = first_recovery
-        .pull(None)
-        .await
-        .expect("pull the published recovery activation into its original database");
-    assert!(pulled.held_positions.is_empty());
+        .expect_err("fail local completion after accepting recovery publication");
     assert!(
-        coven_database::StoreDatabase::new(&first_database)
-            .owner_recovery_publication()
-            .await
-            .expect("read publication journal after pulled activation")
-            .is_none(),
-        "accepted recovery activation consumes its exact publication journal",
+        first_error.to_string().contains("injected failure"),
+        "{first_error}"
     );
+    let database = coven_database::StoreDatabase::new(&first_database);
+    let staged = database
+        .owner_recovery_publication()
+        .await
+        .expect("read rolled back recovery journal")
+        .expect("failed local completion retains the recovery journal");
+    let observed = database
+        .store_current_publication()
+        .await
+        .expect("read rolled back publication boundary");
+    assert_eq!(observed.record(), &staged.publication.previous);
+    assert_eq!(
+        observed
+            .require_observed()
+            .expect("recovery provider observation")
+            .version(),
+        &staged.publication.previous_version
+    );
+    assert_eq!(
+        database
+            .active_store_publication()
+            .await
+            .expect("read retained publication reservation")
+            .expect("failed completion retains its reservation")
+            .attempt()
+            .expect("prepared publication"),
+        &staged.publication
+    );
+    assert_recovery_uploads(&first_database, &staged, false).await;
+    if pull_accepted {
+        let pulled = first_recovery
+            .pull(None)
+            .await
+            .expect("pull the accepted recovery activation");
+        assert!(pulled.held_positions.is_empty());
+    }
     first_recovery
         .recover_owner_device(&authority, None)
         .await
-        .expect("retry adopts the activation pulled into the original database");
+        .expect("retry completes the same accepted recovery activation");
+    assert!(database
+        .owner_recovery_publication()
+        .await
+        .expect("read completed recovery journal")
+        .is_none());
+    assert!(database
+        .active_store_publication()
+        .await
+        .expect("read completed publication reservation")
+        .is_none());
+    assert_eq!(
+        database
+            .store_current_publication()
+            .await
+            .expect("read accepted recovery boundary")
+            .record(),
+        &staged.publication.replacement
+    );
+
+    assert_recovery_uploads(&first_database, &staged, true).await;
+    let registration = database
+        .activated_store_device_registration_with_authority(
+            &store.root(),
+            staged.commit.value.author_registration.clone(),
+        )
+        .await
+        .expect("read completed recovery authority");
+    let evidence = database
+        .installed_store_commit_evidence(staged.commit.value.clone())
+        .await
+        .expect("read completed recovery acceptance")
+        .expect("completed recovery is installed");
+    let acceptance_result = finalized_membership_result(
+        &first_database,
+        &staged
+            .history_evidence
+            .membership_proof
+            .as_ref()
+            .expect("recovery retains its exact authority proof")
+            .head,
+    )
+    .await;
+    database
+        .complete_owner_recovery(
+            staged.commit.value.clone(),
+            coven_database::StoreCommitPublicationOutcome::Installed(evidence),
+            staged.history_evidence.clone(),
+            registration,
+            acceptance_result,
+        )
+        .await
+        .expect("exact installed recovery completion is idempotent after journal removal");
+    assert_recovery_uploads(&first_database, &staged, true).await;
 
     let retry_store_dir = crate::sync::test_helpers::test_store_dir();
     let retry_database = crate::sync::test_helpers::open_test_db(retry_store_dir.clone());
@@ -392,6 +527,99 @@ async fn recovery_adopts_a_first_head_discovered_at_its_predecessor_barrier() {
         .recover_owner_device(&authority, None)
         .await
         .expect("adopt the accepted first head pulled by the predecessor barrier");
+}
+
+async fn finalized_membership_result(
+    database: &coven_database::Database,
+    expected_head: &coven_protocol::membership::MembershipHeadRef,
+) -> coven_protocol::remote_object::RemoteObjectRecord {
+    use coven_protocol::remote_object::{RemoteObjectRecord, RetainedAuthorityObjectDomain};
+
+    let objects = database
+        .remote_objects_for_test()
+        .await
+        .expect("read actual remote object ownership");
+    let mut results = objects.into_iter().filter(|object| {
+        matches!(object, RemoteObjectRecord::RetainedAuthority(record)
+            if matches!(&record.identity.domain,
+                RetainedAuthorityObjectDomain::MembershipHeadAcceptance { head, .. }
+                    if head == expected_head))
+    });
+    let result = results
+        .next()
+        .expect("the exact head has a finalized result");
+    assert!(results.next().is_none(), "one result owns the exact head");
+    assert!(result.records_verified_upload());
+    result
+}
+
+async fn assert_recovery_uploads(
+    database: &coven_database::Database,
+    staged: &coven_database::OwnerRecoveryPublication,
+    activated: bool,
+) {
+    assert!(!database
+        .remote_object_exists_for_test(staged.publication.entry_object.clone())
+        .await
+        .expect("publication entries are not generic candidate objects"));
+    let store = coven_database::StoreDatabase::new(database);
+    if activated {
+        let accepted = store
+            .store_publication_entries()
+            .await
+            .expect("read accepted recovery entry")
+            .into_iter()
+            .find(|entry| {
+                entry.value.payload
+                    == coven_protocol::store_commit::StorePublicationPayload::Commit(
+                        staged.commit.value.reference().clone(),
+                    )
+            })
+            .expect("completed recovery retains its accepted entry");
+        assert_eq!(accepted.value, staged.publication.entry);
+        assert_eq!(
+            accepted.prepared.reference(),
+            &staged.publication.entry_object
+        );
+    } else {
+        let active = store
+            .active_store_publication()
+            .await
+            .expect("read retained recovery attempt")
+            .expect("incomplete recovery owns its publication");
+        assert_eq!(
+            active.attempt().expect("prepared publication"),
+            &staged.publication
+        );
+    }
+    let object = &staged.commit.value.reference().object;
+    let id = coven_protocol::remote_object::remote_object_id(object);
+    let state = database
+        .query_test_text(&format!(
+            "SELECT state FROM remote_objects WHERE object_id = '{id}'"
+        ))
+        .await;
+    let remote: coven_protocol::remote_object::RemoteObjectRecord =
+        serde_json::from_str(&state).expect("read retained recovery upload");
+    assert_eq!(remote.object(), object);
+    assert!(remote.records_verified_upload());
+    if activated {
+        let coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record) = remote
+        else {
+            panic!("completed recovery retains an unactivated candidate: {remote:?}");
+        };
+        let coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
+            ownership,
+        } = record.state
+        else {
+            panic!("completed recovery object is not retained as uploaded");
+        };
+        assert!(ownership.pending.is_empty());
+        assert_eq!(
+            ownership.activated,
+            std::collections::BTreeSet::from([staged.commit.value.reference().clone()])
+        );
+    }
 }
 
 #[tokio::test]
@@ -504,6 +732,7 @@ async fn cold_snapshot_recovery_keeps_covered_and_new_concurrent_tips() {
         cloud_storage,
         restore_dir,
         founder.clone(),
+        Some(encryption.clone()),
     )
     .await
     .expect("load cold snapshot Store");
@@ -572,4 +801,136 @@ async fn cold_snapshot_recovery_keeps_covered_and_new_concurrent_tips() {
         Some(&peer_tip),
         "the activation also orders itself after the concurrent peer tip",
     );
+}
+
+#[tokio::test]
+async fn adopted_recovery_keeps_its_current_ack_when_preparation_fails() {
+    let owner = UserKeypair::generate();
+    let store_dir = crate::sync::test_helpers::test_store_dir();
+    let database = crate::sync::test_helpers::open_test_db(store_dir.clone());
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let (store, storage) = TestStore::create_with_connection(
+        &database,
+        store_dir.clone(),
+        "atomic-recovery-continuation",
+        owner.clone(),
+        home.clone(),
+    )
+    .await
+    .expect("create recovery Store");
+    let founder = store
+        .bind_device(&database, store_dir.clone(), &owner)
+        .await
+        .expect("bind founder");
+    let authority = store.founder_recovery_authority().await;
+    let registration = founder
+        .owner_recovery_for_test()
+        .await
+        .expect("authorize first recovery")
+        .recover_owner_device(&authority, None)
+        .await
+        .expect("activate recovery registration");
+    let recovered = store
+        .bind_device(&database, store_dir, &owner)
+        .await
+        .expect("bind recovered device");
+    // Keep this verifier at the previous accepted history. The new ACK must
+    // be loaded during adoption rather than already residing in its cache.
+    let mut recovery = recovered
+        .owner_recovery_for_test()
+        .await
+        .expect("authorize repeated recovery");
+    recovered.publish_fixture_position("after-recovery").await;
+    let frontier = recovered
+        .acknowledgement_frontier()
+        .await
+        .expect("read acknowledgement frontier");
+    recovered
+        .publish_acknowledgement_without_advancing(frontier)
+        .await
+        .expect("publish recovered acknowledgement");
+    let records = coven_database::StoreDatabase::new(&database);
+    let before = records
+        .latest_local_store_ack()
+        .await
+        .expect("read current local acknowledgement")
+        .expect("recovered acknowledgement is installed");
+    assert!(before.reference.sequence > 1);
+    assert_eq!(before.reference.registration, registration);
+    let journal = records
+        .latest_local_store_device_registration()
+        .await
+        .expect("read local registration")
+        .expect("recovered registration is installed");
+    let boundary = records
+        .store_current_publication()
+        .await
+        .expect("read accepted boundary");
+    let context = ProtocolObjectContext::signed_plaintext(
+        store.root().store_root_hash,
+        ProtocolObjectDomain::StoreAck,
+    );
+    let prefix = coven_protocol::store_commit::ack_slot_prefix(
+        &registration.device_id.to_string(),
+        before.reference.sequence,
+    );
+    let (bytes, prepared) = storage
+        .read_prepared_protocol_slot(&context, before.reference.object.slot(), &prefix)
+        .await
+        .expect("retain exact acknowledgement for retry");
+    storage
+        .delete_protocol_object(&before.reference.object)
+        .await
+        .expect("make the current acknowledgement unavailable");
+    home.clear_exact_reads();
+    recovery
+        .recover_owner_device(&authority, None)
+        .await
+        .expect_err("adoption cannot prepare the unavailable current acknowledgement");
+    assert!(
+        home.exact_reads().contains(before.reference.object.slot()),
+        "recovery must reach the unavailable current acknowledgement",
+    );
+    let after = records
+        .latest_local_store_ack()
+        .await
+        .expect("read acknowledgement after failed adoption")
+        .expect("the current acknowledgement remains installed");
+    assert_eq!(after.reference, before.reference);
+    assert_eq!(after.successor_slot, before.successor_slot);
+    assert_eq!(after.standing, before.standing);
+    let after_journal = records
+        .latest_local_store_device_registration()
+        .await
+        .expect("read registration after failed adoption")
+        .expect("the registration remains installed");
+    assert_eq!(after_journal.registration_bytes, journal.registration_bytes);
+    assert_eq!(after_journal.prepared, journal.prepared);
+    assert_eq!(after_journal.initial_ack_ref, journal.initial_ack_ref);
+    assert_eq!(after_journal.state, journal.state);
+    assert_eq!(
+        records
+            .store_current_publication()
+            .await
+            .expect("read preserved accepted boundary"),
+        boundary,
+    );
+    storage
+        .create_verified_protocol_object(&context, &prepared, &prefix, &bytes)
+        .await
+        .expect("restore the exact acknowledgement");
+    assert_eq!(
+        recovery
+            .recover_owner_device(&authority, None)
+            .await
+            .expect("retry the adopted recovery"),
+        registration,
+    );
+    let resumed = records
+        .latest_local_store_ack()
+        .await
+        .expect("read resumed acknowledgement")
+        .expect("resumed acknowledgement exists");
+    assert_eq!(resumed.reference, before.reference);
+    assert_eq!(resumed.successor_slot, before.successor_slot);
 }

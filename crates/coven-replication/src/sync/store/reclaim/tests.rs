@@ -1,3 +1,8 @@
+#[path = "baseline_tests.rs"]
+mod baseline_tests;
+#[path = "offline_peer_tests.rs"]
+mod offline_peer_tests;
+
 use super::*;
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::objects::ExactObjectRef;
@@ -15,6 +20,23 @@ fn proof_object(path: &str) -> ExactObjectRef {
         u64::try_from(bytes.len()).expect("proof length fits u64"),
         ObjectHash::digest(bytes),
     )
+}
+
+pub(super) async fn publish_current_snapshot(device: &crate::sync::test_helpers::TestDevice) {
+    let mut writer = device
+        .authorize_writer()
+        .await
+        .expect("authorize reclaim snapshot writer");
+    let mut snapshots = writer.snapshots();
+    let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+    let cut = snapshots
+        .capture_snapshot_cut(Some(&encryption))
+        .await
+        .expect("capture the accepted reclaim snapshot");
+    snapshots
+        .push_snapshot_cut(cut, "2026-07-16T00:00:00Z".to_string())
+        .await
+        .expect("publish reclaim snapshot");
 }
 
 /// An owner Store whose founder stream carries two acknowledged, snapshot-covered
@@ -185,7 +207,7 @@ impl ReclaimJourneyFixture {
 }
 
 #[tokio::test]
-async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_snapshot() {
+async fn reclaim_selects_the_latest_accepted_snapshot_without_acknowledgements() {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let signer = UserKeypair::generate();
@@ -216,10 +238,7 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         .expect("publish first Store position");
     let StoreCommitCoord { stream_id, .. } = first_commit.coord;
     let first_coverage = CommitFrontier(BTreeMap::from([(stream_id, first_commit.clone())]));
-    device
-        .publish_snapshot(b"stable reclaim snapshot".to_vec(), first_coverage.clone())
-        .await
-        .expect("publish stable snapshot");
+    publish_current_snapshot(&device).await;
     device
         .publish_acknowledgement(first_coverage)
         .await
@@ -238,33 +257,33 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
                  '0000000002000-0000-unstable-snapshot', '2026-01-01')",
             ])
             .await;
-    let second_commit = store
+    store
         .publish_changeset("founder", 3, &second_changeset, db.schema_version())
         .await
         .expect("publish second Store position");
-    device
-        .publish_snapshot(
-            b"unacknowledged reclaim snapshot".to_vec(),
-            CommitFrontier(BTreeMap::from([(stream_id, second_commit)])),
-        )
-        .await
-        .expect("publish unacknowledged snapshot");
-    let registrations = coven_database::StoreDatabase::new(&db)
-        .activated_store_device_registration_records()
-        .await
-        .expect("load active registrations");
-
+    publish_current_snapshot(&device).await;
     let mut writer = device
         .authorize_writer()
         .await
         .expect("authorize reclaim writer");
     let selected = writer
         .reclaim()
-        .choose_snapshot(&registrations)
+        .choose_snapshot()
         .await
         .expect("select the stable reclaim snapshot");
 
-    assert_eq!(selected.snapshot.reference, stable.reference);
+    assert_ne!(selected.snapshot().reference, stable.reference);
+    assert_eq!(
+        selected.reference(),
+        coven_database::StoreDatabase::new(&db)
+            .store_current_publication()
+            .await
+            .expect("read current publication")
+            .record()
+            .latest_snapshot()
+            .expect("accepted snapshot exists")
+            .clone(),
+    );
 }
 
 #[tokio::test]
@@ -317,20 +336,6 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
                 package: package.clone(),
                 activation: activation.clone(),
             },
-            covering_snapshot: StoreSnapshotLocator {
-                author_registration: founder_authority.registration_ref().clone(),
-                snapshot: coven_protocol::store_commit::StoreSnapshotRef {
-                    generation: 0,
-                    snapshot_hash: ObjectHash::digest(b"covering snapshot"),
-                    object: proof_object("store-v1/snapshots/founder/covering"),
-                },
-            },
-            acknowledgements: vec![StoreAckRef {
-                registration: founder_authority.registration_ref().clone(),
-                sequence: 1,
-                ack_hash: ObjectHash::digest(b"acknowledgement"),
-                object: proof_object("store-v1/acks/founder/1.json"),
-            }],
         }),
         &signer,
     )
@@ -451,14 +456,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
     authorization_activation.object = proof_object("store-v1/commits/reclaim-authorization.json");
     let operation = DurableStoreReclaimOperation::Authorized {
         authorization: receipt.authorization.clone(),
-        activation: ReclaimCommitActivation::new(
-            authorization_activation,
-            coven_protocol::store_commit::StoreDeviceHeadRef {
-                head_hash: ObjectHash::digest(b"reclaim authorization head"),
-                object: proof_object("store-v1/heads/reclaim-authorization.json"),
-            },
-        )
-        .expect("valid reclaim activation"),
+        activation: authorization_activation,
     };
     let mut writer = loaded
         .authorize_writer()
@@ -533,25 +531,11 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .clone();
     let StoreCommitCoord { stream_id, .. } = target_activation.coord;
     let coverage = CommitFrontier(BTreeMap::from([(stream_id, target_activation.clone())]));
-    loaded
-        .publish_snapshot(b"reclaim activation snapshot".to_vec(), coverage.clone())
-        .await
-        .expect("publish covering snapshot");
+    publish_current_snapshot(&loaded).await;
     loaded
         .publish_acknowledgement(coverage)
         .await
         .expect("publish covering acknowledgement");
-    let snapshot = coven_database::StoreDatabase::new(&db)
-        .latest_local_store_snapshot()
-        .await
-        .expect("load covering snapshot")
-        .expect("covering snapshot exists");
-    let acknowledgement = coven_database::StoreDatabase::new(&db)
-        .latest_local_store_ack()
-        .await
-        .expect("load covering acknowledgement")
-        .expect("covering acknowledgement exists")
-        .reference;
     db.release_retained_replay_ownership_for_test()
         .await
         .expect("release target retained replay ownership");
@@ -566,11 +550,6 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
                 package: target_package.clone(),
                 activation: target_activation.clone(),
             },
-            covering_snapshot: StoreSnapshotLocator {
-                author_registration: snapshot.meta.author_registration.clone(),
-                snapshot: snapshot.reference.clone(),
-            },
-            acknowledgements: vec![acknowledgement],
         }))
         .await
         .expect("prepare reclaim authorization");
@@ -584,18 +563,22 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     let prepared_candidate = candidate
         .candidate()
         .expect("reclaim operation has a candidate");
-    let activation_head = prepared_candidate.head_ref();
-    let activation_head_prepared = prepared_candidate
-        .prepared_head()
-        .expect("prepare reclaim activation head");
+    let activation_publication = prepared_candidate
+        .publication
+        .reference()
+        .expect("reference reclaim activation publication");
+    let activation_publication_prepared = prepared_candidate
+        .publication
+        .prepared_entry()
+        .expect("prepare reclaim activation publication");
     reclaim
         .drive_candidate(candidate)
         .await
         .expect("activate reclaim authorization");
     cloud_storage
-        .delete_protocol_object(&activation_head.object)
+        .delete_protocol_object(&activation_publication.object)
         .await
-        .expect("remove reclaim activation head");
+        .expect("remove reclaim activation publication");
     let authorized = coven_database::StoreDatabase::new(&db)
         .store_reclaim_operations()
         .await
@@ -608,7 +591,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
 
     assert!(
         deletion.is_err(),
-        "a reclaim authorization without its exact Merge activation head must not delete"
+        "a reclaim authorization without its exact Store publication must not delete"
     );
     cloud_storage
         .read_protocol_object(
@@ -628,11 +611,11 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .expect("missing activation authority leaves target readable");
 
     cloud_storage
-        .create_protocol_object(&activation_head_prepared)
+        .create_protocol_object(&activation_publication_prepared)
         .await
-        .expect("restore exact reclaim activation head");
+        .expect("restore exact reclaim activation publication");
     let activation_commit = match &authorized {
-        DurableStoreReclaimOperation::Authorized { activation, .. } => activation.commit().clone(),
+        DurableStoreReclaimOperation::Authorized { activation, .. } => activation.clone(),
         _ => unreachable!("fixture has an activated reclaim"),
     };
     db.delete_exact_materialized_commit_for_test(activation_commit)
@@ -838,11 +821,30 @@ async fn a_refused_reclaim_delete_leaves_one_operation_stuck_and_finishes_the_re
 #[tokio::test]
 async fn reclaim_journal_deletes_every_covered_package_in_one_pass() {
     let fixture = ReclaimJourneyFixture::build("reclaim-journal-full-pass").await;
+    let snapshot = fixture
+        .device
+        .latest_local_store_snapshot_for_test()
+        .await
+        .expect("read accepted coverage")
+        .expect("fixture published a snapshot");
+    let publications = &snapshot.meta.history_summary.reclaim.publications;
+    assert_eq!(
+        publications.len(),
+        2,
+        "coverage retires both package publications"
+    );
+    for publication in publications.values() {
+        assert!(fixture.home.contains_exact_object(&publication.object));
+    }
     let result = fixture.reclaim().await.expect("reclaim covered packages");
     assert_eq!(
         (result.packages_deleted, result.physical_copies_deleted),
-        (2, 2),
+        (2, 4),
+        "reclaim deletes two packages and their two retired publication entries",
     );
+    for publication in publications.values() {
+        assert!(!fixture.home.contains_exact_object(&publication.object));
+    }
     for target in &fixture.packages {
         assert!(
             !fixture.package_is_present(target).await,
@@ -895,9 +897,17 @@ async fn a_reclaim_that_deletes_nothing_reports_the_step_that_declined() {
 
     assert_eq!(
         result.store_packages.coverage,
-        super::StorePackageReclaimCoverage::Snapshot { generation: 0 },
-        "a run that found coverage names the generation it deleted behind \
-         (the fixture's covering snapshot is its first, so generation zero)",
+        super::StorePackageReclaimCoverage::Snapshot {
+            snapshot: coven_database::StoreDatabase::new(&fixture.db)
+                .store_current_publication()
+                .await
+                .expect("read accepted publication")
+                .record()
+                .latest_snapshot()
+                .expect("accepted snapshot exists")
+                .clone(),
+        },
+        "reclaim reports the exact accepted snapshot that licenses retirement",
     );
     assert_eq!(
         result.store_packages.targets_considered, 2,
@@ -917,600 +927,6 @@ async fn a_reclaim_that_deletes_nothing_reports_the_step_that_declined() {
             + result.store_packages.already_authorized
             + result.store_packages.authorized,
         "every considered target is accounted for by exactly one outcome",
-    );
-}
-
-/// A standing device advances its own replay baseline over the snapshot it
-/// acknowledges, and that is what releases the packages behind it.
-///
-/// This is the shape that cost a live store 87MB and every package it ever
-/// wrote. A device that joins gets a baseline at the snapshot it installs, but
-/// one that has been in the store since the beginning never moved its own: its
-/// baseline stayed at genesis, so its retained-replay closure spanned all of
-/// history and pinned every package forever. Reclaim selected the right
-/// snapshot, found the targets behind it, and declined every one of them as
-/// retained for replay — for as long as the store existed.
-///
-/// The fixture acknowledges its snapshot while it builds, so the advance has
-/// already happened by the time reclaim runs; what reclaim shows is the
-/// consequence — nothing left pinned, every target authorized.
-#[tokio::test]
-async fn a_standing_device_advances_its_baseline_and_releases_what_it_pinned() {
-    let fixture = ReclaimJourneyFixture::build("reclaim-baseline-advance").await;
-
-    let result = fixture.reclaim().await.expect("reclaim covered packages");
-
-    assert_eq!(
-        result.store_packages.retained_for_replay, 0,
-        "the acknowledgement's advance left no target pinned for replay",
-    );
-    assert_eq!(
-        result.store_packages.authorized, result.store_packages.targets_considered,
-        "and every considered target is authorized instead of declined",
-    );
-    assert!(
-        result.store_packages.targets_considered > 0,
-        "the run had targets to consider in the first place",
-    );
-}
-
-/// Acknowledging a snapshot is what moves the baseline, and it moves once.
-///
-/// Rebuilding the baseline image replays the whole retained history, so a
-/// device whose baseline already stands at the snapshot it is acknowledging
-/// must decline before paying for it.
-#[tokio::test]
-async fn a_baseline_already_at_the_coverage_does_not_advance_again() {
-    let fixture = ReclaimJourneyFixture::build("reclaim-baseline-settled").await;
-    let frontier = fixture.materialized_frontier().await;
-
-    let again = fixture
-        .device
-        .advance_baseline_by_acknowledging(frontier)
-        .await
-        .expect("acknowledge the snapshot a second time");
-
-    assert!(
-        again.is_none(),
-        "the baseline already stands at the acknowledged snapshot, so nothing is rebuilt",
-    );
-}
-
-/// Replay still reconstructs the store after the baseline moves.
-///
-/// The advance retires the retained rows the new cut covers, which is only safe
-/// because the baseline image restates what they replayed. If it did not, this
-/// count would come back short by the retired commits' rows.
-#[tokio::test]
-async fn replay_reconstructs_the_store_after_the_baseline_advances() {
-    let fixture = ReclaimJourneyFixture::build("reclaim-baseline-replay").await;
-
-    let after = fixture
-        .replay_note_count()
-        .await
-        .expect("replay after advancing");
-    assert_eq!(
-        after, 2,
-        "replay from the advanced baseline reproduces both published notes",
-    );
-}
-
-/// The acknowledgement a device has already published is the licence, and it
-/// goes on licensing without being restated.
-///
-/// A quiet device says nothing new: its standing acknowledgement still asserts
-/// everything true, so the cycle stages no acknowledgement at all. If moving
-/// the baseline rode on staging one, a device that acknowledged a snapshot on a
-/// build without the advance would stay on its old baseline for as long as it
-/// had nothing to say — pinning every package behind that snapshot, which is
-/// exactly the state this whole change exists to end.
-#[tokio::test]
-async fn a_standing_acknowledgement_advances_a_baseline_that_never_moved() {
-    let fixture = StandingAcknowledgementFixture::build("standing-ack-advance").await;
-
-    let advanced = fixture.stand_on_acknowledged_snapshot().await;
-
-    assert!(
-        advanced.retired_commits > 0,
-        "advancing retires the retained materializations the acknowledged cut covers, retired {}",
-        advanced.retired_commits,
-    );
-    assert!(
-        advanced.released_pins > 0,
-        "and releases the replay pins those materializations held, released {}",
-        advanced.released_pins,
-    );
-}
-
-/// A writer activated after a snapshot must cross its cut before another device
-/// can retire local replay inputs behind it.
-///
-/// The founder's earlier acknowledgement remains enough for cloud reclaim, but
-/// it cannot establish where the new writer's future commits belong relative to
-/// local private work. A later founder acknowledgement that names no snapshot
-/// does not supply the missing writer acknowledgement either.
-#[tokio::test]
-async fn a_new_writer_without_a_crossing_acknowledgement_blocks_baseline_retirement() {
-    let fixture = StandingAcknowledgementFixture::build("standing-ack-overtaken").await;
-    fixture.overtake_the_acknowledged_device_state().await;
-    fixture.acknowledge_naming_no_snapshot().await;
-
-    assert!(
-        fixture.standing_acknowledgement_names_no_snapshot().await,
-        "the fixture reproduces the live shape: the latest word names no snapshot",
-    );
-
-    let outcome = fixture
-        .device
-        .stand_on_acknowledged_snapshot()
-        .await
-        .expect("evaluate the acknowledged snapshot");
-
-    assert!(
-        matches!(
-            outcome,
-            crate::sync::store::ReplayBaselineAdvance::Declined(
-                crate::sync::store::ReplayBaselineDecline::MissingWriterAcknowledgement { .. }
-            )
-        ),
-        "a writer activated after the snapshot has not crossed its cut: {outcome:?}",
-    );
-}
-
-/// Once a device has caught up, the stage says so and reads nothing.
-#[tokio::test]
-async fn a_baseline_at_the_acknowledged_coverage_declines_and_says_why() {
-    let fixture = StandingAcknowledgementFixture::build("standing-ack-settled").await;
-    fixture.stand_on_acknowledged_snapshot().await;
-
-    let outcome = fixture
-        .device
-        .stand_on_acknowledged_snapshot()
-        .await
-        .expect("stand on the acknowledged snapshot again");
-
-    assert_eq!(
-        outcome,
-        crate::sync::store::ReplayBaselineAdvance::Declined(
-            crate::sync::store::ReplayBaselineDecline::BaselineAtCoverage { generation: 0 },
-        ),
-        "the second pass reports the steady state rather than a silent nothing",
-    );
-}
-
-/// A device that has acknowledged no snapshot says that, rather than nothing.
-#[tokio::test]
-async fn a_device_that_acknowledged_no_snapshot_declines_and_says_why() {
-    let db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-    let signer = UserKeypair::generate();
-    let (store, _storage) = crate::sync::test_helpers::TestStore::create_with_connection(
-        &db,
-        db_store_dir.clone(),
-        "no-acknowledged-snapshot",
-        signer.clone(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await
-    .expect("create Store");
-    let device = store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
-        .await
-        .expect("bind Store");
-
-    let outcome = device
-        .stand_on_acknowledged_snapshot()
-        .await
-        .expect("stand on nothing");
-
-    assert_eq!(
-        outcome,
-        crate::sync::store::ReplayBaselineAdvance::Declined(
-            crate::sync::store::ReplayBaselineDecline::NoAcknowledgedSnapshot,
-        ),
-    );
-}
-
-/// Two changesets, a published snapshot, and an acknowledgement of it made the
-/// way a build without the advance made one: the statement is published and the
-/// baseline never moved.
-struct StandingAcknowledgementFixture {
-    db: coven_database::Database,
-    db_store_dir: coven_foundation::store_dir::StoreDir,
-    store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
-    device: crate::sync::test_helpers::TestDevice,
-    signer: UserKeypair,
-}
-
-impl StandingAcknowledgementFixture {
-    async fn build(store_id: &str) -> Self {
-        let db_store_dir = crate::sync::test_helpers::test_store_dir();
-        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-        let signer = UserKeypair::generate();
-        let home = crate::sync::test_helpers::test_cloud_home();
-        let (store, _storage) = crate::sync::test_helpers::TestStore::create_with_connection(
-            &db,
-            db_store_dir.clone(),
-            store_id,
-            signer.clone(),
-            home,
-        )
-        .await
-        .expect("create Store");
-        let device = store
-            .bind_device_in(&db, db_store_dir.clone(), &signer)
-            .await
-            .expect("bind Store");
-        for (sequence, row) in [
-            (
-                1,
-                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-                 VALUES ('standing-1', 'first', NULL, \
-                 '0000000001000-0000-standing', '2026-01-01')",
-            ),
-            (
-                2,
-                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-                 VALUES ('standing-2', 'second', NULL, \
-                 '0000000002000-0000-standing', '2026-01-01')",
-            ),
-        ] {
-            let changeset = crate::sync::test_helpers::open_test_db(
-                crate::sync::test_helpers::test_store_dir(),
-            )
-            .capture_test_changeset(&[row])
-            .await;
-            store
-                .publish_changeset("founder", sequence, &changeset, db.schema_version())
-                .await
-                .expect("publish package activation");
-        }
-        let image_dir = tempfile::tempdir().expect("snapshot image dir");
-        let image = coven_database::StoreDatabase::new(&db)
-            .capture_snapshot_image_for_test(
-                store.root().clone(),
-                image_dir.path().to_path_buf(),
-                None,
-            )
-            .await
-            .expect("capture a real snapshot image");
-        let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-            coven_database::StoreDatabase::new(&db)
-                .materialized_frontier()
-                .await
-                .expect("materialized frontier"),
-        )
-        .expect("frontier");
-        device
-            .publish_snapshot(image, coverage.clone())
-            .await
-            .expect("publish the snapshot");
-        device
-            .publish_acknowledgement_without_advancing(coverage)
-            .await
-            .expect("acknowledge it the way a build without the advance did");
-        Self {
-            db,
-            db_store_dir,
-            store,
-            device,
-            signer,
-        }
-    }
-
-    async fn frontier(&self) -> coven_protocol::store_commit::CommitFrontier {
-        coven_protocol::store_commit::CommitFrontier::from_refs(
-            coven_database::StoreDatabase::new(&self.db)
-                .materialized_frontier()
-                .await
-                .expect("read materialized frontier"),
-        )
-        .expect("shape materialized frontier")
-    }
-
-    async fn stand_on_acknowledged_snapshot(&self) -> coven_database::AdvancedReplayBaseline {
-        match self
-            .device
-            .stand_on_acknowledged_snapshot()
-            .await
-            .expect("stand on the acknowledged snapshot")
-        {
-            crate::sync::store::ReplayBaselineAdvance::Advanced(advanced) => advanced,
-            crate::sync::store::ReplayBaselineAdvance::Declined(decline) => {
-                panic!("declined to advance: {}", decline.as_str())
-            }
-        }
-    }
-
-    /// Publish an acknowledgement now that nothing is acknowledgeable, so the
-    /// latest word names no snapshot.
-    async fn acknowledge_naming_no_snapshot(&self) {
-        self.device
-            .publish_acknowledgement_without_advancing(self.frontier().await)
-            .await
-            .expect("publish an acknowledgement that names no snapshot");
-    }
-
-    async fn standing_acknowledgement_names_no_snapshot(&self) -> bool {
-        coven_database::StoreDatabase::new(&self.db)
-            .latest_local_store_ack()
-            .await
-            .expect("read the standing acknowledgement")
-            .and_then(|published| published.standing)
-            .expect("the device has published an acknowledgement")
-            .assertion
-            .snapshot
-            .is_none()
-    }
-
-    /// Register a second device, so no published snapshot describes this
-    /// Store's devices any more and nothing is acknowledgeable.
-    async fn overtake_the_acknowledged_device_state(&self) {
-        let joining_store_dir = crate::sync::test_helpers::test_store_dir();
-        self.store
-            .activate_joined_device_from_snapshot(
-                &self.db,
-                self.db_store_dir.clone(),
-                joining_store_dir,
-                &self.signer,
-                "2026-07-16T00:00:04Z",
-                crate::sync::test_helpers::test_synced_tables(),
-                crate::sync::test_helpers::test_migrations(),
-                self.db.schema_version(),
-            )
-            .await
-            .expect("activate a second device");
-    }
-}
-
-/// Publishing a snapshot does not move the publisher's baseline; acknowledging
-/// it does.
-///
-/// The baseline is what replay rewinds to, and advancing it retires the rows
-/// that served that rewind. What licenses that is this device's own
-/// acknowledgement: the signed statement that it holds everything the snapshot
-/// covers. Until it says so, it keeps replaying from where it was — and reclaim,
-/// which needs every device to have said it, has no coverage to work from
-/// either.
-#[tokio::test]
-async fn an_unacknowledged_snapshot_does_not_advance_the_baseline() {
-    let db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-    let signer = UserKeypair::generate();
-    let home = crate::sync::test_helpers::test_cloud_home();
-    let (store, _storage) = crate::sync::test_helpers::TestStore::create_with_connection(
-        &db,
-        db_store_dir.clone(),
-        "reclaim-baseline-unacknowledged",
-        signer.clone(),
-        home.clone(),
-    )
-    .await
-    .expect("create Store");
-    let device = store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
-        .await
-        .expect("bind reclaim Store");
-
-    let changeset =
-        crate::sync::test_helpers::open_test_db(crate::sync::test_helpers::test_store_dir())
-            .capture_test_changeset(&[
-                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('unacknowledged-1', 'first', NULL, \
-             '0000000001000-0000-unacknowledged', '2026-01-01')",
-            ])
-            .await;
-    store
-        .publish_changeset("founder", 1, &changeset, db.schema_version())
-        .await
-        .expect("publish package activation");
-
-    // Published the way production publishes it, and deliberately never
-    // acknowledged: the image is real, so nothing about its shape is what
-    // stops the advance.
-    let image_dir = tempfile::tempdir().expect("snapshot image dir");
-    let image = coven_database::StoreDatabase::new(&db)
-        .capture_snapshot_image_for_test(store.root().clone(), image_dir.path().to_path_buf(), None)
-        .await
-        .expect("capture a real snapshot image");
-    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-        coven_database::StoreDatabase::new(&db)
-            .materialized_frontier()
-            .await
-            .expect("materialized frontier"),
-    )
-    .expect("frontier");
-    device
-        .publish_snapshot(image, coverage)
-        .await
-        .expect("publish the unacknowledged snapshot");
-
-    let result = device
-        .reclaim_packages()
-        .await
-        .expect("reclaim runs even with nothing it may delete behind");
-    assert_ne!(
-        result.store_packages.coverage,
-        super::StorePackageReclaimCoverage::Snapshot { generation: 0 },
-        "the leg reports that it had no acknowledged coverage to work from",
-    );
-
-    let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
-        coven_database::StoreDatabase::new(&db)
-            .materialized_frontier()
-            .await
-            .expect("materialized frontier"),
-    )
-    .expect("frontier");
-    let advanced = device
-        .advance_baseline_by_acknowledging(frontier)
-        .await
-        .expect("acknowledge the published snapshot")
-        .expect("acknowledging it is what licenses the advance");
-    assert!(
-        advanced.retired_commits > 0,
-        "advancing retires the retained materializations the new cut covers, retired {}",
-        advanced.retired_commits,
-    );
-    assert!(
-        advanced.released_pins > 0,
-        "and releases the replay pins those materializations held, released {}",
-        advanced.released_pins,
-    );
-}
-
-/// Advancing the baseline folds the settled write journal into the image and
-/// deletes it, so a device's journal is bounded by what it has not yet settled
-/// rather than by everything it has ever written.
-///
-/// A local partition is stated nowhere else: no commit carries one, and a
-/// snapshot image projected for an audience may not. So before this, the journal
-/// was the durable home of every local row the device had ever written — replayed
-/// in full on every canonical rebuild, and never any shorter. The baseline image
-/// is this device's own rewind point, which is the one image that may hold them,
-/// and holding them is what lets the advance drop the rows.
-#[tokio::test]
-async fn advancing_the_baseline_folds_the_settled_write_journal_into_it() {
-    let db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-    let signer = UserKeypair::generate();
-    let home = crate::sync::test_helpers::test_cloud_home();
-    let (store, _storage) = crate::sync::test_helpers::TestStore::create_with_connection(
-        &db,
-        db_store_dir.clone(),
-        "baseline-folds-writes",
-        signer.clone(),
-        home,
-    )
-    .await
-    .expect("create Store");
-    let device = store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
-        .await
-        .expect("bind Store");
-    let changeset =
-        crate::sync::test_helpers::open_test_db(crate::sync::test_helpers::test_store_dir())
-            .capture_test_changeset(&[
-                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-                 VALUES ('shared-note', 'shared', NULL, 1, \
-                 '0000000001000-0000-folding', '2026-01-01')",
-            ])
-            .await;
-    store
-        .publish_changeset("founder", 1, &changeset, db.schema_version())
-        .await
-        .expect("publish package activation");
-
-    let store_database = coven_database::StoreDatabase::new(&db);
-    // Creating the Store journalled its own writes; the local ones are counted
-    // on top of whatever those left.
-    let (settled_before, claims_before) = store_database
-        .store_write_journal_counts_for_test()
-        .await
-        .expect("read the journal the Store creation left");
-    assert_eq!(
-        (settled_before, claims_before),
-        (1, 1),
-        "creating the Store published one write of its own",
-    );
-    const LOCAL_WRITES: i64 = 12;
-    for tick in 0..LOCAL_WRITES {
-        store_database
-            .run_host_store_write_for_test(None, None, move |tx| {
-                tx.execute(
-                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-                     VALUES (?1, 'local', NULL, 0, ?2, '2026-01-01')",
-                    rusqlite::params![
-                        format!("local-note-{tick}"),
-                        format!("000000000{}000-0000-folding", 2 + tick),
-                    ],
-                )?;
-                Ok::<_, coven_database::DbError>(())
-            })
-            .await
-            .expect("capture a local-only write");
-    }
-    assert_eq!(
-        store_database
-            .store_write_journal_counts_for_test()
-            .await
-            .expect("read the journal before the advance"),
-        (settled_before + LOCAL_WRITES, claims_before + LOCAL_WRITES),
-        "each local-only write is journalled while the baseline still stands behind it",
-    );
-
-    let image_dir = tempfile::tempdir().expect("snapshot image dir");
-    let image = coven_database::StoreDatabase::new(&db)
-        .capture_snapshot_image_for_test(store.root().clone(), image_dir.path().to_path_buf(), None)
-        .await
-        .expect("capture a real snapshot image");
-    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-        coven_database::StoreDatabase::new(&db)
-            .materialized_frontier()
-            .await
-            .expect("materialized frontier"),
-    )
-    .expect("frontier");
-    device
-        .publish_snapshot(image, coverage.clone())
-        .await
-        .expect("publish the snapshot");
-    let advanced = device
-        .advance_baseline_by_acknowledging(coverage)
-        .await
-        .expect("acknowledge the published snapshot")
-        .expect("acknowledging it is what licenses the advance");
-
-    assert_eq!(
-        advanced.folded_writes,
-        u64::try_from(settled_before + LOCAL_WRITES).expect("count fits"),
-        "every settled write is folded into the image the advance adopts",
-    );
-    assert_eq!(
-        store_database
-            .store_write_journal_counts_for_test()
-            .await
-            .expect("read the journal after the advance"),
-        (settled_before, 0),
-        "the local-only writes are gone outright and every payload claim with \
-         them; what is left is one receipt per write that reached the cloud, \
-         which is this device's record of where its own writes landed",
-    );
-    assert_eq!(
-        device
-            .replay_row_count_for_test("notes")
-            .await
-            .expect("replay the notes from the new baseline alone"),
-        LOCAL_WRITES + 1,
-        "the local rows are in the baseline image now, not owed by a journal",
-    );
-
-    // The bound moves with the baseline rather than with the device's lifetime:
-    // what a settled device journals from here is what it has written since the
-    // snapshot it stands on, and nothing before it.
-    for tick in LOCAL_WRITES..LOCAL_WRITES + 5 {
-        store_database
-            .run_host_store_write_for_test(None, None, move |tx| {
-                tx.execute(
-                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-                     VALUES (?1, 'local', NULL, 0, ?2, '2026-01-01')",
-                    rusqlite::params![
-                        format!("local-note-{tick}"),
-                        format!("00000000{}000-0000-folding", 20 + tick),
-                    ],
-                )?;
-                Ok::<_, coven_database::DbError>(())
-            })
-            .await
-            .expect("capture a local-only write after the advance");
-    }
-    assert_eq!(
-        store_database
-            .store_write_journal_counts_for_test()
-            .await
-            .expect("read the journal after writing past the advance"),
-        (settled_before + 5, 5),
-        "only the writes the standing baseline does not state are journalled",
     );
 }
 
@@ -1555,577 +971,6 @@ fn snapshot_supersedes_seed_requires_strict_domination() {
     );
 }
 
-/// A two-device owner Store with a snapshot whose coverage the peer's join is
-/// under, and only the owner's acknowledgement of it.
-///
-/// # What a fixture here has to get right
-///
-/// Four things about the harness decide whether a test like this measures the
-/// eligible set or something else entirely. Each of them produced a test that
-/// passed for the wrong reason before it was understood, so they are written
-/// down rather than rediscovered.
-///
-/// **Reclaim always has the generation-zero snapshot to fall back on.** Its
-/// coverage is empty, so the founder is the only device at it and the owner's
-/// own acknowledgement settles it. "Blocked" therefore never surfaces as an
-/// error — `choose_snapshot` still returns `Ok`, just with an older snapshot.
-/// Asserting on an error, or on whether any packages were deleted, measures the
-/// fallback rather than the rule. These tests assert *which* snapshot is chosen,
-/// which is also what decides how much history a reclaim may delete.
-///
-/// **A join publishes commits but no snapshot of its own, and acknowledges the
-/// one that already exists.** So a freshly joined device is not idle with
-/// respect to that snapshot, and a snapshot published before the join cannot
-/// have the peer in its coverage-time state. The snapshot under test has to be
-/// taken *after* the join.
-///
-/// **Its coverage has to be the owner's position after the join, not the join
-/// snapshot's own coverage.** The latter is generation zero's, which sits below
-/// the join's commits: reusing it yields a snapshot the peer is absent from and
-/// which does not strictly dominate the seed, so reclaim rejects it for a reason
-/// that has nothing to do with acknowledgements.
-///
-/// **The test producer shares the founder's stream**, so anything published
-/// before the packages shifts their expected sequence numbers, and a
-/// freshly activated peer has no local Store position of its own to read.
-///
-/// **Who the peer belongs to decides which questions the fixture can ask.** A
-/// second device of the owner's own identity settles everything about device
-/// status, but its author is the owner, so it cannot be removed as a member
-/// while the store still has an owner. Asking what a *member* removal does to
-/// the set needs a peer with a keypair of its own — see [`PeerPrincipal`].
-struct UnanimityFixture {
-    store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
-    owner_db: coven_database::Database,
-    owner_dir: coven_foundation::store_dir::StoreDir,
-    owner: UserKeypair,
-    /// The peer's own identity, for a [`PeerPrincipal::SeparateMember`] peer.
-    /// A same-principal peer has none: it writes under the owner's key.
-    member: Option<UserKeypair>,
-    owner_device: crate::sync::test_helpers::TestDevice,
-    /// Read once while the fixture's database is open. Reclaim uses these only
-    /// to enumerate snapshot streams; which devices must acknowledge comes from
-    /// the verified device states, not from this list.
-    registrations: Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>,
-    /// The snapshot whose eligible set is under test.
-    covering: coven_protocol::store_commit::StoreSnapshotRef,
-    peer: Option<StoreDeviceRegistrationRef>,
-}
-
-/// When the second device joins, relative to the snapshot's coverage.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PeerJoin {
-    BeforeCoverage,
-    AfterCoverage,
-}
-
-/// Whose identity the second device registers under.
-///
-/// The two are not interchangeable, because ending a device and ending a member
-/// are different acts with different reach. Excluding a device marks that device
-/// Inactive and leaves its owner a member. Removing a member ends that member's
-/// grants and rotates the store key, and touches no device status at all — so
-/// only a peer with an identity of its own can pose that second question.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PeerPrincipal {
-    /// A second device of the owner's own identity.
-    SamePrincipal,
-    /// A distinct member, admitted to the Store, with its own keypair.
-    SeparateMember,
-}
-
-impl UnanimityFixture {
-    async fn build(store_id: &str, join: PeerJoin, principal: PeerPrincipal) -> Self {
-        let signer = UserKeypair::generate();
-        let member = match principal {
-            PeerPrincipal::SamePrincipal => None,
-            PeerPrincipal::SeparateMember => Some(UserKeypair::generate()),
-        };
-        let owner_dir = crate::sync::test_helpers::test_store_dir();
-        let owner_db = crate::sync::test_helpers::open_test_db(owner_dir.clone());
-        let store = Box::pin(crate::sync::test_helpers::TestStore::create(
-            &owner_db,
-            owner_dir.clone(),
-            store_id,
-            signer.clone(),
-            crate::sync::test_helpers::test_cloud_home(),
-        ))
-        .await
-        .expect("create two-device reclaim Store");
-        let owner_device = Box::pin(store.open_into(&owner_db, owner_dir.clone()))
-            .await
-            .expect("open owner Store device");
-
-        let changeset =
-            crate::sync::test_helpers::open_test_db(crate::sync::test_helpers::test_store_dir())
-                .capture_test_changeset(&[
-                    "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-                     VALUES ('unanimity-row', 'unanimity', NULL, \
-                     '0000000001000-0000-unanimity', '2026-01-01')",
-                ])
-                .await;
-        let commit = store
-            .publish_changeset("founder", 1, &changeset, owner_db.schema_version())
-            .await
-            .expect("publish Store history to snapshot");
-
-        // A join publishes its own snapshot, and its coverage spans what the
-        // activation touched — so that snapshot's device state is the one the
-        // peer is in. Joining before the coverage means letting it be the
-        // snapshot under test; joining after means the owner takes one first,
-        // from a state the peer is absent from.
-        let latest_snapshot = || async {
-            coven_database::StoreDatabase::new(&owner_db)
-                .latest_local_store_snapshot()
-                .await
-                .expect("load the latest snapshot")
-                .expect("a snapshot exists")
-        };
-        let mut covering = None;
-        if join == PeerJoin::AfterCoverage {
-            let StoreCommitCoord { stream_id, .. } = commit.coord;
-            owner_device
-                .publish_snapshot(
-                    b"unanimity snapshot".to_vec(),
-                    CommitFrontier(BTreeMap::from([(stream_id, commit)])),
-                )
-                .await
-                .expect("publish covering snapshot");
-            covering = Some(latest_snapshot().await.reference);
-        }
-        let peer_dir = crate::sync::test_helpers::test_store_dir();
-        let peer_db = crate::sync::test_helpers::open_test_db(peer_dir.clone());
-        match &member {
-            None => {
-                Box::pin(store.activate_joined_device(
-                    &owner_db,
-                    owner_dir.clone(),
-                    &peer_db,
-                    peer_dir,
-                    &signer,
-                    "2026-07-18T00:00:00Z",
-                ))
-                .await
-                .expect("activate peer Store device");
-            }
-            Some(member) => {
-                // Admitting first is what makes this peer a member in its own
-                // right; the activation that follows is the same join the
-                // same-principal peer does, so the choreography above still
-                // holds and only the author of the registration differs.
-                Box::pin(store.admit_and_activate_peer(
-                    &owner_db,
-                    owner_dir.clone(),
-                    &peer_db,
-                    peer_dir,
-                    member,
-                ))
-                .await
-                .expect("admit and activate a second member's device");
-            }
-        }
-        let covering = match covering {
-            Some(reference) => reference,
-            None => {
-                // A join publishes a snapshot and acknowledges it, so the peer
-                // is not idle with respect to that one. The snapshot under test
-                // is a fresh one the owner takes afterwards, over the join
-                // snapshot's own coverage — the frontier that spans the streams
-                // the activation touched, and so the one whose device state has
-                // the peer in it. Acknowledgements match a snapshot by exact
-                // reference, so the peer's earlier one does not carry over.
-                // A join publishes commits but no snapshot of its own, and
-                // it acknowledges the one that already exists — so the peer is
-                // not idle with respect to that one. The snapshot under test is
-                // one the owner takes now, over its position *after* the join:
-                // that frontier is above the join's commits, so the device state
-                // resolved at it has the peer in it, and it strictly dominates
-                // the seed. Acknowledgements match a snapshot by exact
-                // reference, so the peer's earlier one does not carry over.
-                let after_join = owner_device
-                    .latest_local_store_position()
-                    .await
-                    .expect("read the owner's Store position after the join")
-                    .expect("the join published Store history");
-                let StoreCommitCoord { stream_id, .. } = after_join.coord;
-                owner_device
-                    .publish_snapshot(
-                        b"unanimity snapshot".to_vec(),
-                        CommitFrontier(BTreeMap::from([(stream_id, after_join)])),
-                    )
-                    .await
-                    .expect("publish covering snapshot above the join");
-                latest_snapshot().await.reference
-            }
-        };
-
-        let acknowledged_at = owner_device
-            .latest_local_store_position()
-            .await
-            .expect("read the owner's Store position")
-            .expect("the Store has published history");
-        let StoreCommitCoord { stream_id, .. } = acknowledged_at.coord;
-        owner_device
-            .publish_acknowledgement(CommitFrontier(BTreeMap::from([(
-                stream_id,
-                acknowledged_at,
-            )])))
-            .await
-            .expect("owner acknowledges the covering snapshot");
-
-        let local_device_id = owner_device.device_id().clone();
-        let registrations = coven_database::StoreDatabase::new(&owner_db)
-            .activated_store_device_registration_records()
-            .await
-            .expect("list active Store registrations");
-        let peer = registrations
-            .iter()
-            .map(|registration| registration.reference().clone())
-            .find(|reference| reference.device_id.to_string() != local_device_id);
-
-        Self {
-            store,
-            owner_db,
-            owner_dir,
-            owner: signer,
-            member,
-            owner_device,
-            registrations,
-            covering,
-            peer,
-        }
-    }
-
-    /// Removes the peer's member from the Store: its grants end and the store
-    /// key rotates. The devices that member registered keep the status they
-    /// had, which is the whole point of the case this serves.
-    async fn remove_peer_member(&self) {
-        let member = self
-            .member
-            .as_ref()
-            .expect("only a separate member can be removed as one");
-        self.store
-            .remove_member(
-                &self.owner_db,
-                self.owner_dir.clone(),
-                &self.owner,
-                &crate::sync::test_helpers::pubkey_hex(member),
-                &coven_keys::encryption::EncryptionService::from_key([42; 32]),
-                &crate::sync::test_helpers::TestCustody::default(),
-            )
-            .await
-            .expect("remove the peer's member");
-    }
-
-    async fn chosen_snapshot(&self) -> coven_protocol::store_commit::StoreSnapshotRef {
-        let mut writer = self
-            .owner_device
-            .authorize_writer()
-            .await
-            .expect("authorize reclaim writer");
-        writer
-            .reclaim()
-            .choose_snapshot(&self.registrations)
-            .await
-            .expect("reclaim selects some snapshot")
-            .snapshot
-            .reference
-    }
-}
-
-/// A device active at the coverage and still active gets no relaxation, whether
-/// or not it has done anything since. It is a current member, so history behind
-/// that snapshot is history it could still ask for, and reclaim declines the
-/// snapshot rather than delete it.
-#[tokio::test]
-async fn an_idle_device_active_at_the_coverage_still_blocks_reclaim() {
-    Box::pin(async {
-        let fixture = UnanimityFixture::build(
-            "reclaim-unanimity-idle",
-            PeerJoin::BeforeCoverage,
-            PeerPrincipal::SamePrincipal,
-        )
-        .await;
-        assert!(
-            fixture.peer.is_some(),
-            "the peer joined before the coverage"
-        );
-
-        let chosen = fixture.chosen_snapshot().await;
-        assert!(
-            chosen.generation < fixture.covering.generation,
-            "a current member that has not acknowledged the snapshot blocks it, so reclaim \
-             falls back below it: chose generation {} against {}",
-            chosen.generation,
-            fixture.covering.generation,
-        );
-    })
-    .await;
-}
-
-/// A device excluded after the coverage was active there, so the coverage-time
-/// state alone would demand a signature it can never publish — and one snapshot
-/// stuck that way takes every earlier one with it. It is not a member, cannot
-/// pull, and re-enters only through a join that bootstraps at or past the
-/// snapshot, so there is nothing behind it left to need.
-#[tokio::test]
-async fn a_device_excluded_after_the_coverage_does_not_block_reclaim() {
-    Box::pin(async {
-        let fixture = UnanimityFixture::build(
-            "reclaim-unanimity-excluded",
-            PeerJoin::BeforeCoverage,
-            PeerPrincipal::SamePrincipal,
-        )
-        .await;
-        let peer = fixture.peer.clone().expect("the peer joined");
-        fixture.owner_device.finalize_peer_exclusion(&peer).await;
-
-        // At or past, not equal: excluding a device publishes history of its own,
-        // which can produce a newer snapshot that is also selectable. What
-        // matters is that reclaim is no longer held below the one the excluded
-        // device was blocking.
-        let chosen = fixture.chosen_snapshot().await;
-        assert!(
-            chosen.generation >= fixture.covering.generation,
-            "an excluded device is excused, so reclaim reaches its snapshot: chose \
-             generation {} against {}",
-            chosen.generation,
-            fixture.covering.generation,
-        );
-    })
-    .await;
-}
-
-/// A device that joined after the coverage is absent from the coverage-time
-/// state, so it never enters the set. Stated as its own case because the reason
-/// is not that it is new: a join installs a snapshot image and materializes only
-/// what is past it, so the device already stands where an acknowledgement would
-/// have put it.
-#[tokio::test]
-async fn a_device_that_joined_after_the_coverage_does_not_block_reclaim() {
-    Box::pin(async {
-        let fixture = UnanimityFixture::build(
-            "reclaim-unanimity-joined-after",
-            PeerJoin::AfterCoverage,
-            PeerPrincipal::SamePrincipal,
-        )
-        .await;
-        assert!(fixture.peer.is_some(), "the peer joined after the coverage");
-
-        let chosen = fixture.chosen_snapshot().await;
-        assert!(
-            chosen.generation >= fixture.covering.generation,
-            "a device that joined after the coverage is excused, so reclaim reaches its \
-             snapshot: chose generation {} against {}",
-            chosen.generation,
-            fixture.covering.generation,
-        );
-    })
-    .await;
-}
-
-/// A removed member's device stops blocking reclaim — the case device status
-/// alone can never notice.
-///
-/// This is the shape the live store was stuck on. Removing a member ends its
-/// grants and rotates the store key; it does not mark the devices that member
-/// registered Inactive, because device status tracks a device's own lifecycle,
-/// not its owner's standing. A rule that asked only "is this device still
-/// Active" therefore kept demanding an acknowledgement from every removed
-/// member's device — devices that cannot pull, will never publish again, and
-/// had every snapshot behind them pinned unreclaimable for good.
-///
-/// Asserted as a before and an after over one fixture, so what moves reclaim is
-/// the removal and not the generation-zero fallback every one of these tests
-/// can otherwise land on.
-#[tokio::test]
-async fn a_removed_members_device_does_not_block_reclaim() {
-    Box::pin(async {
-        let fixture = UnanimityFixture::build(
-            "reclaim-unanimity-removed-member",
-            PeerJoin::BeforeCoverage,
-            PeerPrincipal::SeparateMember,
-        )
-        .await;
-        assert!(
-            fixture.peer.is_some(),
-            "the second member's device joined before the coverage"
-        );
-
-        let before = fixture.chosen_snapshot().await;
-        assert!(
-            before.generation < fixture.covering.generation,
-            "while it is still a member, its device blocks the snapshot: chose generation {} \
-             against {}",
-            before.generation,
-            fixture.covering.generation,
-        );
-
-        fixture.remove_peer_member().await;
-
-        // At or past, not equal: removing a member publishes history of its own,
-        // which can produce a newer snapshot that is also selectable. What
-        // matters is that reclaim is no longer held below the one the removed
-        // member's device was blocking.
-        let after = fixture.chosen_snapshot().await;
-        assert!(
-            after.generation >= fixture.covering.generation,
-            "a removed member's device is excused, so reclaim reaches its snapshot: chose \
-             generation {} against {}",
-            after.generation,
-            fixture.covering.generation,
-        );
-    })
-    .await;
-}
-
-/// A membership change does not alter the writer set used for local retirement
-/// until accepted Store history names that exact membership state. Otherwise a
-/// direct member removal could excuse a writer from the acknowledgement rule
-/// while the retirement cut still precedes the removal.
-#[tokio::test]
-async fn replay_retirement_rejects_membership_beyond_the_current_store_cut() {
-    Box::pin(async {
-        let fixture = UnanimityFixture::build(
-            "retirement-membership-cut",
-            PeerJoin::BeforeCoverage,
-            PeerPrincipal::SeparateMember,
-        )
-        .await;
-        let database = coven_database::StoreDatabase::new(&fixture.owner_db);
-        let frontier_before_removal = coven_protocol::store_commit::CommitFrontier::from_refs(
-            database
-                .materialized_frontier()
-                .await
-                .expect("read the Store frontier before member removal"),
-        )
-        .expect("shape the Store frontier before member removal");
-        let baseline_before_decline = database
-            .installed_replay_baseline()
-            .await
-            .expect("read the replay baseline before member removal");
-
-        fixture.remove_peer_member().await;
-
-        let frontier_after_removal = coven_protocol::store_commit::CommitFrontier::from_refs(
-            database
-                .materialized_frontier()
-                .await
-                .expect("read the Store frontier after member removal"),
-        )
-        .expect("shape the Store frontier after member removal");
-        assert_eq!(
-            frontier_after_removal, frontier_before_removal,
-            "member removal changes Circle history, not accepted Store history",
-        );
-        let membership = fixture
-            .owner_device
-            .membership_for_test()
-            .await
-            .expect("read membership after member removal");
-        assert!(
-            !membership.is_member_now(&crate::sync::test_helpers::pubkey_hex(
-                fixture.member.as_ref().expect("the peer is a member"),
-            )),
-            "the peer must already be absent from current membership",
-        );
-
-        let declined = fixture
-            .owner_device
-            .stand_on_acknowledged_snapshot()
-            .await
-            .expect("evaluate retirement before Store history names the removal");
-
-        assert_eq!(
-            declined,
-            crate::sync::store::ReplayBaselineAdvance::Declined(
-                crate::sync::store::ReplayBaselineDecline::MembershipNotAccepted {
-                    generation: fixture.covering.generation,
-                },
-            ),
-            "membership beyond the accepted Store cut must decline retirement",
-        );
-        let baseline_after_decline = database
-            .installed_replay_baseline()
-            .await
-            .expect("read the replay baseline after retirement declines");
-        assert_eq!(
-            baseline_after_decline.coverage(),
-            baseline_before_decline.coverage(),
-            "declining retirement must preserve the installed baseline",
-        );
-
-        fixture
-            .owner_device
-            .publish_acknowledgement_without_advancing(frontier_after_removal.clone())
-            .await
-            .expect("publish the current membership into Store history");
-        let witness = fixture
-            .owner_device
-            .latest_local_store_position()
-            .await
-            .expect("read the membership witness position")
-            .expect("the acknowledgement published a Store commit");
-        let witness_commit = fixture
-            .owner_device
-            .load_commit_for_test(&witness)
-            .await
-            .expect("load the membership witness commit");
-        let expected_membership =
-            coven_protocol::circle_control::StoreMembershipStateRef::from_membership(
-                &membership,
-                witness_commit.value().membership_state.recovery().to_vec(),
-            )
-            .expect("shape current membership");
-        assert_eq!(
-            witness_commit.value().membership_state,
-            expected_membership,
-            "the acknowledgement commit must name the member removal",
-        );
-
-        let advanced = fixture
-            .owner_device
-            .stand_on_acknowledged_snapshot()
-            .await
-            .expect("retire after accepted Store history names current membership");
-        assert!(
-            matches!(
-                advanced,
-                crate::sync::store::ReplayBaselineAdvance::Advanced(_)
-            ),
-            "the membership witness must license retirement: {advanced:?}",
-        );
-
-        let current_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
-            database
-                .materialized_frontier()
-                .await
-                .expect("read the Store frontier after retirement"),
-        )
-        .expect("shape the Store frontier after retirement");
-        let mut writer = fixture
-            .owner_device
-            .authorize_writer()
-            .await
-            .expect("authorize the acknowledgement check");
-        writer
-            .seed_retained_history()
-            .await
-            .expect("seed accepted Store history as the sync pull does");
-        let redundant = writer
-            .acknowledgements()
-            .stage_acknowledgement(current_frontier, "2026-07-18T00:00:01Z".to_string())
-            .await
-            .expect("stage a redundant acknowledgement")
-            .acknowledgement;
-        assert!(
-            redundant.is_none(),
-            "the standing acknowledgement already covers current history and membership",
-        );
-    })
-    .await;
-}
-
 /// A superseded snapshot generation's membership rollup is reclaimed; the
 /// newest generation's stays.
 ///
@@ -2165,11 +1010,13 @@ async fn superseded_membership_rollups_are_reclaimed_and_the_newest_stays() {
         .publish_changeset("founder", 4, &changeset, fixture.device.schema_version())
         .await
         .expect("publish a third package activation");
+    publish_current_snapshot(&fixture.device).await;
     let second = fixture
         .device
-        .publish_snapshot_generation_for_test()
+        .latest_local_store_snapshot_for_test()
         .await
-        .expect("publish and acknowledge a second generation");
+        .expect("read successor snapshot")
+        .expect("successor snapshot exists");
     assert_ne!(
         first.meta.membership_rollup.object, second.meta.membership_rollup.object,
         "the two generations must name different rollups for this to test anything",

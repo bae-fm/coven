@@ -8,6 +8,15 @@ use coven_protocol::store_commit::ObjectHash;
 use super::journal::target_key;
 use super::journal::OwnerPromotionJournalState;
 
+mod admission;
+mod excluded_authority;
+mod finalization;
+mod issuer_retirement;
+mod preparation;
+mod request_retirement;
+mod rotation_staging;
+mod snapshot_authority;
+
 /// A Merge Store with one activated Member device and the promotion target that
 /// device's registration names — the starting point of every promotion case that
 /// works on a single candidate.
@@ -26,11 +35,17 @@ struct PromotionCandidate {
 
 impl PromotionCandidate {
     async fn build(store_name: &str) -> Self {
+        Self::build_with_connection(store_name).await.0
+    }
+
+    async fn build_with_connection(
+        store_name: &str,
+    ) -> (Self, std::sync::Arc<coven_storage::CloudSyncConnection>) {
         let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
         let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
         let owner = UserKeypair::generate();
         let home = crate::sync::test_helpers::test_cloud_home();
-        let store = crate::sync::test_helpers::TestStore::create(
+        let (store, storage) = crate::sync::test_helpers::TestStore::create_with_connection(
             &owner_db,
             owner_db_store_dir.clone(),
             store_name,
@@ -74,19 +89,124 @@ impl PromotionCandidate {
             .owner_promotion_target_for_test()
             .await
             .expect("load Member promotion target");
-        Self {
-            owner_db,
-            owner_db_store_dir,
-            owner,
-            home,
-            store,
-            member,
-            member_db,
-            member_db_store_dir,
-            member_registration,
-            encryption,
-        }
+        (
+            Self {
+                owner_db,
+                owner_db_store_dir,
+                owner,
+                home,
+                store,
+                member,
+                member_db,
+                member_db_store_dir,
+                member_registration,
+                encryption,
+            },
+            storage,
+        )
     }
+}
+
+#[tokio::test]
+async fn interrupted_promotion_request_retains_its_candidate_objects() {
+    let fixture = PromotionCandidate::build("retained-promotion-request").await;
+    fixture.home.fail_exact_create_before_call(1);
+    fixture
+        .store
+        .bind_device_in(
+            &fixture.owner_db,
+            fixture.owner_db_store_dir.clone(),
+            &fixture.owner,
+        )
+        .await
+        .expect("bind Owner Store")
+        .begin_owner_promotion(fixture.member_registration.clone())
+        .await
+        .expect_err("interrupt before candidate upload");
+    let journal = StoreDatabase::new(&fixture.owner_db)
+        .load_owner_promotion_target(target_key(&fixture.member_registration).unwrap())
+        .await
+        .expect("load promotion journal")
+        .expect("promotion remains durable");
+    let OwnerPromotionJournalState::RequestPrepared { candidate, .. } = journal.state else {
+        panic!("interrupted promotion must retain its prepared request");
+    };
+    let object = &candidate.reference.object;
+    let retained = fixture
+        .owner_db
+        .remote_object_for_test(object.clone())
+        .await
+        .expect("candidate object ownership precedes upload");
+    assert_eq!(retained.object(), object);
+    assert!(!retained.records_verified_upload());
+
+    let database = StoreDatabase::new(&fixture.owner_db);
+    let active = database
+        .active_store_publication()
+        .await
+        .expect("read interrupted publication")
+        .expect("request owns an active attempt");
+    assert_eq!(
+        active.attempt().expect("prepared publication"),
+        &candidate.publication
+    );
+    assert!(!fixture
+        .owner_db
+        .remote_object_exists_for_test(
+            active
+                .attempt()
+                .expect("prepared publication")
+                .entry_object
+                .clone()
+        )
+        .await
+        .expect("inspect publication ownership"));
+    fixture
+        .store
+        .bind_device_in(
+            &fixture.owner_db,
+            fixture.owner_db_store_dir.clone(),
+            &fixture.owner,
+        )
+        .await
+        .expect("reopen Owner Store after interrupted publication")
+        .begin_owner_promotion(fixture.member_registration.clone())
+        .await
+        .expect("resume the retained promotion request");
+    let object = &candidate.reference.object;
+    let retained = fixture
+        .owner_db
+        .remote_object_for_test(object.clone())
+        .await
+        .expect("accepted candidate retains exact ownership");
+    assert!(retained.records_verified_upload());
+    assert_eq!(retained.object(), object);
+
+    assert!(database
+        .active_store_publication()
+        .await
+        .expect("read completed attempt")
+        .is_none());
+    let accepted = database
+        .store_publication_entries()
+        .await
+        .expect("read accepted publication entries")
+        .into_iter()
+        .find(|entry| {
+            entry.value.payload
+                == coven_protocol::store_commit::StorePublicationPayload::Commit(
+                    candidate.reference.clone(),
+                )
+        })
+        .expect("request is accepted under its exact commit reference");
+    assert_eq!(
+        accepted.value,
+        active.attempt().expect("prepared publication").entry
+    );
+    assert_eq!(
+        accepted.prepared.reference(),
+        &active.attempt().expect("prepared publication").entry_object
+    );
 }
 
 #[tokio::test]
@@ -388,29 +508,20 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .is_err());
 }
 
-/// A promotion finalization composes its Store candidate against this device's
-/// next stream position, journals it as `MergeHeadPrepared`, and publishes after
-/// — the turn that claimed the position is released in between. A queued host
-/// write that drains in that window takes the position, and the journaled
-/// candidate is bound to that create-once head slot, so it can never activate
-/// there. Publication reads the occupant, verifies it is a real winner, and ends
-/// the attempt on that evidence: the journal advances to `Stale` instead of
-/// re-publishing a candidate that can never land, and the promoter's next attempt
-/// for the same target replaces the failed one and activates.
 #[tokio::test]
-async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() {
+async fn promotion_waits_for_the_reserved_host_write_and_resumes_its_same_attempt() {
     let PromotionCandidate {
         owner_db,
         owner_db_store_dir,
         owner,
-        home,
+        home: _home,
         store,
         member,
         member_db,
         member_db_store_dir,
         member_registration,
         encryption,
-    } = PromotionCandidate::build("owner-promotion-loses-its-position").await;
+    } = PromotionCandidate::build("owner-promotion-reserved-position").await;
 
     let request = store
         .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
@@ -427,8 +538,6 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
         .await
         .expect("accept the promotion");
 
-    // A queued host write composes against the same next position the
-    // finalization will, and takes it the moment it drains.
     owner_db
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -448,9 +557,11 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
         .await
         .expect("queue a host write at the contended position"));
 
-    // Stop the finalization after it journals its composed candidate and before
-    // it publishes the head that would take the position.
-    home.fail_exact_create_before_call(5);
+    let reserved = StoreDatabase::new(&owner_db)
+        .active_store_publication()
+        .await
+        .expect("read reserved host publication")
+        .expect("prepared host write reserves its publication");
     Box::pin(
         store
             .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
@@ -459,7 +570,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
             .finalize_owner_promotion(&encryption, acceptance.clone()),
     )
     .await
-    .expect_err("the interrupted finalization cannot publish its head");
+    .expect_err("promotion cannot take a reserved host publication");
     let interrupted = StoreDatabase::new(&owner_db)
         .load_owner_promotion_target(target_key(&member_registration).unwrap())
         .await
@@ -468,11 +579,27 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
     assert!(
         matches!(
             interrupted.state,
-            OwnerPromotionJournalState::MergeHeadPrepared { .. }
+            OwnerPromotionJournalState::AcceptanceReady { .. }
         ),
-        "the interruption leaves a composed candidate bound to its position: {:?}",
+        "promotion retains its accepted request before reserving a candidate: {:?}",
         interrupted.state,
     );
+
+    assert_eq!(
+        StoreDatabase::new(&owner_db)
+            .active_store_publication()
+            .await
+            .expect("read reservation after rejected promotion"),
+        Some(reserved),
+    );
+    assert!(!store
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
+        .await
+        .expect("reopen owner before publication")
+        .membership_for_test()
+        .await
+        .expect("read membership before publication")
+        .is_owner_now(&keys::public_key_hex(&member)));
 
     assert_eq!(
         Box::pin(writer.drain_store_writes())
@@ -481,54 +608,31 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
         1,
     );
 
-    let lost = Box::pin(
+    Box::pin(
         store
             .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
             .await
-            .expect("load Owner Store")
+            .expect("reopen promoter after host publication")
             .finalize_owner_promotion(&encryption, acceptance),
     )
     .await
-    .expect_err("a candidate whose position was taken can never activate");
-    assert!(
-        matches!(
-            &lost,
-            crate::sync::store::owner_role_promotion::OwnerPromotionError::Stale(reason)
-                if matches!(
-                    reason.as_ref(),
-                    coven_protocol::store_commit::OwnerPromotionStaleReason::MergeActivationRejected
-                )
-        ),
-        "the finalization ends on the verified winner: {lost}",
-    );
-    let ended = StoreDatabase::new(&owner_db)
+    .expect("resume the same promotion after its predecessor publishes");
+    let finalized = StoreDatabase::new(&owner_db)
         .load_owner_promotion_target(target_key(&member_registration).unwrap())
         .await
-        .expect("load the ended promotion journal")
-        .expect("the ended promotion journal exists");
-    assert!(
-        matches!(ended.state, OwnerPromotionJournalState::Stale { .. }),
-        "the lost attempt is recorded stale rather than re-published: {:?}",
-        ended.state,
-    );
-
-    Box::pin(store.promote_active_member_fixture(
-        &owner_db,
-        owner_db_store_dir.clone(),
-        &member_db,
-        member_db_store_dir.clone(),
-        &owner,
-        &member,
-        &encryption,
-    ))
-    .await
-    .expect("a fresh attempt replaces the stale one and activates");
+        .expect("load finalized promotion")
+        .expect("promotion journal remains durable");
+    assert_eq!(finalized.promotion_id, interrupted.promotion_id);
+    assert!(matches!(
+        finalized.state,
+        OwnerPromotionJournalState::Finalized { .. }
+    ));
     assert!(store
         .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
         .await
-        .expect("bind re-issued promotion Store")
+        .expect("reopen promoted Store")
         .membership_for_test()
         .await
-        .expect("load membership after the re-issued promotion")
+        .expect("read accepted promotion")
         .is_owner_now(&keys::public_key_hex(&member)));
 }

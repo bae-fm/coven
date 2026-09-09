@@ -161,17 +161,11 @@ impl StoreDeviceRegistrationOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceStreamAnchor {
-    StoreAnnouncements {
-        first_slot: ObjectSlot,
-    },
     StoreAcknowledgements {
         first_slot: ObjectSlot,
     },
-    StoreSnapshots {
-        first_slot: ObjectSlot,
-    },
-    /// Per-(device, Circle) acknowledgement stream. Unlike the three permanent
-    /// anchors above, this is never a registration field: it is derived on
+    /// Per-(device, Circle) acknowledgement stream. Unlike the permanent
+    /// Store anchor above, this is never a registration field: it is derived on
     /// demand to bind one device's Circle-acknowledgement stream to its Circle.
     CircleAcknowledgements {
         circle_id: CircleId,
@@ -189,9 +183,7 @@ pub enum DeviceStreamAnchor {
 impl DeviceStreamAnchor {
     pub fn first_slot(&self) -> &ObjectSlot {
         match self {
-            Self::StoreAnnouncements { first_slot }
-            | Self::StoreAcknowledgements { first_slot }
-            | Self::StoreSnapshots { first_slot }
+            Self::StoreAcknowledgements { first_slot }
             | Self::CircleAcknowledgements { first_slot, .. }
             | Self::CircleSnapshots { first_slot, .. } => first_slot,
         }
@@ -242,9 +234,7 @@ pub struct StoreDeviceRegistrationBody {
     pub device_signing_pubkey: String,
     pub origin: StoreDeviceRegistrationOrigin,
     pub provider: ProviderDeviceBinding,
-    pub store_commits: DeviceStreamAnchor,
     pub acknowledgements: DeviceStreamAnchor,
-    pub snapshots: DeviceStreamAnchor,
 }
 
 impl SignedBody for StoreDeviceRegistrationBody {
@@ -465,50 +455,26 @@ impl<'de> Deserialize<'de> for ActivatedStoreDeviceRegistration {
 }
 
 impl StoreDeviceRegistration {
-    fn device_stream_activation(
+    pub fn store_acknowledgement_activation(
         &self,
         reference: &StoreDeviceRegistrationRef,
-        anchor: &DeviceStreamAnchor,
     ) -> Result<StreamActivation, StoreProtocolError> {
         reference.verify_registration(self)?;
         Ok(StreamActivation::device_authorized(
             self.store_root.store_root_hash,
             reference.clone(),
-            anchor.clone(),
+            self.acknowledgements.clone(),
         ))
-    }
-
-    pub fn store_announcement_activation(
-        &self,
-        reference: &StoreDeviceRegistrationRef,
-    ) -> Result<StreamActivation, StoreProtocolError> {
-        self.device_stream_activation(reference, &self.store_commits)
-    }
-
-    pub fn store_acknowledgement_activation(
-        &self,
-        reference: &StoreDeviceRegistrationRef,
-    ) -> Result<StreamActivation, StoreProtocolError> {
-        self.device_stream_activation(reference, &self.acknowledgements)
-    }
-
-    pub fn store_snapshot_activation(
-        &self,
-        reference: &StoreDeviceRegistrationRef,
-    ) -> Result<StreamActivation, StoreProtocolError> {
-        self.device_stream_activation(reference, &self.snapshots)
     }
 
     pub fn signed(
         store_root: StoreRootRef,
         origin: StoreDeviceRegistrationOrigin,
         provider: ProviderDeviceBinding,
-        store_commits: DeviceStreamAnchor,
         acknowledgements: DeviceStreamAnchor,
-        snapshots: DeviceStreamAnchor,
         identity_signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        validate_registration_anchors(&store_commits, &acknowledgements, &snapshots)?;
+        validate_acknowledgement_anchor(&acknowledgements)?;
         let author_pubkey = keys::public_key_hex(identity_signer);
         let device_signer = derive_device_signer(identity_signer, &store_root, &origin);
         let device_signing_pubkey = keys::public_key_hex(&device_signer);
@@ -521,9 +487,7 @@ impl StoreDeviceRegistration {
                 device_signing_pubkey,
                 origin,
                 provider,
-                store_commits,
                 acknowledgements,
-                snapshots,
             },
             identity_signer,
         ))
@@ -573,11 +537,7 @@ impl StoreDeviceRegistration {
                 "Store device id differs from its root and origin".to_string(),
             ));
         }
-        validate_registration_anchors(
-            &registration.store_commits,
-            &registration.acknowledgements,
-            &registration.snapshots,
-        )?;
+        validate_acknowledgement_anchor(&registration.acknowledgements)?;
         let author_pubkey = registration.author_pubkey.clone();
         registration.verify_by(&author_pubkey)?;
         Ok(registration)
@@ -595,19 +555,15 @@ fn derive_device_signer(
     identity_signer.derive_signing_key(DOMAIN, &context)
 }
 
-fn validate_registration_anchors(
-    commits: &DeviceStreamAnchor,
+fn validate_acknowledgement_anchor(
     acknowledgements: &DeviceStreamAnchor,
-    snapshots: &DeviceStreamAnchor,
 ) -> Result<(), StoreProtocolError> {
     if !matches!(
         acknowledgements,
         DeviceStreamAnchor::StoreAcknowledgements { .. }
-    ) || !matches!(snapshots, DeviceStreamAnchor::StoreSnapshots { .. })
-        || !matches!(commits, DeviceStreamAnchor::StoreAnnouncements { .. })
-    {
+    ) {
         return Err(StoreProtocolError::Malformed(
-            "Store device registration contains mismatched permanent stream anchors".to_string(),
+            "Store device registration contains a mismatched acknowledgement anchor".to_string(),
         ));
     }
     Ok(())

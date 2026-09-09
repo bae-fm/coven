@@ -3,6 +3,10 @@ use crate::database_session::DatabaseSession;
 use std::collections::HashMap;
 use tracing::error;
 
+mod snapshot_preparation;
+pub use crate::store::PreparedStoreSnapshot;
+use crate::store::SnapshotPreparationDirectory;
+
 /// Database state used both by connection-thread SQL and caller-task
 /// coordination. One instance is created at open and shared by the connection
 /// handle and worker; neither side derives a second aggregate from it.
@@ -10,6 +14,8 @@ struct DatabaseContext {
     store_dir: coven_foundation::store_dir::StoreDir,
     hlc: Arc<Hlc>,
     synced_tables: Arc<Vec<SyncedTable>>,
+    migrations: Arc<[Migration]>,
+    coven_migration_policy: CovenMigrationPolicy,
     schema_version: u32,
     sync_routing_hash: ObjectHash,
     gates: Arc<Gates>,
@@ -36,6 +42,7 @@ pub(crate) struct DatabaseCore {
     conn: Connection,
     verified_store_authority: crate::store::VerifiedStoreAuthority,
     context: Arc<DatabaseContext>,
+    snapshot_preparation: Option<SnapshotPreparationDirectory>,
 }
 
 impl DatabaseCore {
@@ -44,6 +51,8 @@ impl DatabaseCore {
         conn: Connection,
         hlc: Arc<Hlc>,
         synced_tables: Arc<Vec<SyncedTable>>,
+        migrations: Arc<[Migration]>,
+        coven_migration_policy: CovenMigrationPolicy,
         schema_version: u32,
         sync_routing_hash: ObjectHash,
         gates: Arc<Gates>,
@@ -57,10 +66,13 @@ impl DatabaseCore {
         Self {
             conn,
             verified_store_authority: Default::default(),
+            snapshot_preparation: None,
             context: Arc::new(DatabaseContext {
                 store_dir,
                 hlc,
                 synced_tables,
+                migrations,
+                coven_migration_policy,
                 schema_version,
                 sync_routing_hash,
                 gates,
@@ -88,6 +100,29 @@ impl DatabaseCore {
         // returned capture, and processes no other job until it is consumed.
         let database = unsafe { self.conn.handle() };
         crate::live_query::ChangeCapture::begin(database, schema_version)
+    }
+
+    pub(super) fn seed_clock(&self) -> Result<(), DbError> {
+        let mut timings =
+            coven_foundation::stage_timing::StageTimings::start("seed database clock");
+        timings.mark("read and seed the clock floor", || {
+            let persisted = get_protocol_state_on(&self.conn, HIGHWATER_STATE_KEY)?;
+            seed_from(
+                &self.context.hlc,
+                persisted,
+                "HLC high-water mark in protocol_state",
+            )?;
+            let seed_bound_ms = self
+                .context
+                .hlc
+                .wall_now_ms()
+                .saturating_add(MAX_FUTURE_SKEW_MS);
+            let on_disk =
+                scan_max_updated_at(&self.conn, &self.context.synced_tables, seed_bound_ms)?;
+            seed_from(&self.context.hlc, on_disk, "`_updated_at` in synced tables")
+        })?;
+        timings.report();
+        Ok(())
     }
 
     fn finish_change_capture(
@@ -181,7 +216,10 @@ impl DatabaseConnection {
         })
     }
 
-    pub(crate) async fn call_database<F, R>(&self, operation: F) -> Result<R, DbError>
+    pub(crate) fn call_database<F, R>(
+        &self,
+        operation: F,
+    ) -> impl std::future::Future<Output = Result<R, DbError>> + Send + '_
     where
         F: for<'session> FnOnce(&mut DatabaseSession<'session>) -> Result<R, DbError>
             + Send
@@ -198,13 +236,15 @@ impl DatabaseConnection {
                 operation(&mut session)
             })
         })
-        .await
     }
 
     /// Run one Store operation against the connection-owned row, payload, and
     /// verified-authority state, then discharge every payload deletion the
     /// operation committed before another Store operation can run.
-    pub(crate) async fn call_store<F, R>(&self, operation: F) -> Result<R, DbError>
+    pub(crate) fn call_store<F, R>(
+        &self,
+        operation: F,
+    ) -> impl std::future::Future<Output = Result<R, DbError>> + Send + '_
     where
         F: for<'session> FnOnce(&mut crate::store::StoreSession<'session>) -> Result<R, DbError>
             + Send
@@ -232,10 +272,12 @@ impl DatabaseConnection {
                 }
             })
         })
-        .await
     }
 
-    pub(crate) async fn read_store<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
+    pub(crate) fn read_store<F, R, E>(
+        &self,
+        read: F,
+    ) -> impl std::future::Future<Output = Result<Result<R, E>, DbError>> + Send + '_
     where
         F: for<'connection> FnOnce(crate::store::SqlReadContext<'connection>) -> Result<R, E>
             + Send
@@ -244,11 +286,133 @@ impl DatabaseConnection {
         E: Send + 'static,
     {
         self.on_connection_thread(move |core| store_session(core).read(read))
-            .await
     }
 
     pub(crate) fn store_schema_version(&self) -> u32 {
         self.context.schema_version
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn store_synced_tables(&self) -> Vec<SyncedTable> {
+        self.context.synced_tables.as_ref().clone()
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn replace_with_database_image_for_test(
+        &self,
+        image: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.on_connection_thread(move |core| {
+            let mut replacement = Connection::open_in_memory().map_err(DbError::from)?;
+            crate::connection_io::deserialize_database_image_into(&mut replacement, &image)?;
+            crate::connection_io::configure_connection_durability(
+                &replacement,
+                crate::connection_io::ConnectionDurability::Disabled,
+            )?;
+            replacement
+                .pragma_update(None, "foreign_keys", "ON")
+                .map_err(DbError::from)?;
+            let routing = crate::database_open::load_coven_metadata(&replacement)?;
+            if routing.hash() != core.context.sync_routing_hash {
+                return Err(DbError::Message(format!(
+                    "replaced test database has sync-routing hash {}, expected {}",
+                    routing.hash(),
+                    core.context.sync_routing_hash,
+                )));
+            }
+            crate::validate_coven_schema_for_reader(
+                &replacement,
+                core.context.gates.has_scoped_graph(),
+            )
+            .map_err(|error| {
+                DbError::Message(format!("validate replaced test database: {error}"))
+            })?;
+            let schema_version: u32 = replacement
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .map_err(DbError::from)?;
+            if schema_version != core.context.schema_version {
+                return Err(DbError::Message(
+                    "replaced test database has a different host schema version".to_string(),
+                ));
+            }
+            // This importer preserves existing Database handles and their
+            // resolved column indexes and attached gate schema. Schema changes
+            // must go through database opening, which rebuilds those owners.
+            for table in core.context.synced_tables.iter() {
+                let current =
+                    crate::schema_introspection::create_table_sql(&core.conn, table.name())
+                        .map_err(|error| {
+                            DbError::context(
+                                "read current host table",
+                                crate::GateError::from(error),
+                            )
+                        })?;
+                let incoming =
+                    crate::schema_introspection::create_table_sql(&replacement, table.name())
+                        .map_err(|error| {
+                            DbError::context(
+                                "read replacement host table",
+                                crate::GateError::from(error),
+                            )
+                        })?;
+                if crate::schema_introspection::normalize_schema_sql(&current)
+                    .map_err(DbError::from)?
+                    != crate::schema_introspection::normalize_schema_sql(&incoming)
+                        .map_err(DbError::from)?
+                {
+                    return Err(DbError::Message(format!(
+                        "replaced test database changes host table {}",
+                        table.name(),
+                    )));
+                }
+            }
+
+            let persisted = crate::get_protocol_state_on(&replacement, HIGHWATER_STATE_KEY)?;
+            let seed_bound_ms = core
+                .context
+                .hlc
+                .wall_now_ms()
+                .saturating_add(MAX_FUTURE_SKEW_MS);
+            let on_disk = crate::connection_io::scan_max_updated_at(
+                &replacement,
+                &core.context.synced_tables,
+                seed_bound_ms,
+            )?;
+            let persisted = crate::connection_io::parse_seed(
+                persisted,
+                "HLC high-water mark in replaced test database",
+            )?;
+            let on_disk = crate::connection_io::parse_seed(
+                on_disk,
+                "`_updated_at` in replaced test database",
+            )?;
+
+            // Copy into the owned connection: swapping in the memory image
+            // would detach a file-backed fixture from its persistent database.
+            // SQLite rolls back an unfinished backup when this handle drops.
+            {
+                let backup = rusqlite::backup::Backup::new(&replacement, &mut core.conn)
+                    .map_err(DbError::from)?;
+                let outcome = backup.step(-1).map_err(DbError::from)?;
+                if !matches!(outcome, rusqlite::backup::StepResult::Done) {
+                    return Err(DbError::Message(format!(
+                        "replace test database image did not finish: {outcome:?}",
+                    )));
+                }
+            }
+            for seed in [persisted, on_disk].into_iter().flatten() {
+                core.context.hlc.seed(&seed);
+            }
+            core.verified_store_authority = crate::store::VerifiedStoreAuthority::default();
+            Ok(())
+        })
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn database_image_for_test(&self) -> Result<Vec<u8>, DbError> {
+        self.on_connection_thread(|core| crate::connection_io::serialize_database_image(&core.conn))
+            .await
     }
 
     pub(crate) fn store_sync_routing_hash(&self) -> ObjectHash {
@@ -415,7 +579,7 @@ impl DatabaseConnection {
         self.context.store_runtime.device_exclusion_permit().await
     }
 
-    pub(crate) async fn author_own_store_stream(&self) -> crate::store::OwnStreamAuthorship {
+    pub(crate) async fn author_own_store_stream(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.context.store_runtime.author_own_stream().await
     }
 
@@ -504,7 +668,11 @@ impl DatabaseConnection {
     /// a cancelled call as possibly-committed. Follow-ups that matter beyond that
     /// durable state — observer notifications, publish triggers — are not driven
     /// off this return value; the sync cycle re-derives them from durable state.
-    async fn on_connection_thread<F, R>(&self, f: F) -> R
+    // Put the operation in the existing job allocation before constructing the
+    // returned future. Keeping this frame separate prevents large captures from
+    // occupying every forwarding future and its caller's polling stack.
+    #[inline(never)]
+    fn on_connection_thread<F, R>(&self, f: F) -> impl std::future::Future<Output = R> + Send + '_
     where
         F: FnOnce(&mut DatabaseCore) -> R + Send + 'static,
         R: Send + 'static,
@@ -516,14 +684,17 @@ impl DatabaseConnection {
             // send is that normal outcome, not an error.
             let _ = reply_tx.send(outcome);
         }));
-        if self.thread.jobs.send(job).is_err() {
-            panic!("database connection thread stopped before a call completed");
-        }
-        match reply_rx.await {
-            Ok(Ok(value)) => value,
-            Ok(Err(panic)) => std::panic::resume_unwind(panic),
-            Err(_) => {
-                panic!("database connection thread dropped a call's reply without responding")
+        async move {
+            // Creating or dropping an unpolled call must not submit work.
+            if self.thread.jobs.send(job).is_err() {
+                panic!("database connection thread stopped before a call completed");
+            }
+            match reply_rx.await {
+                Ok(Ok(value)) => value,
+                Ok(Err(panic)) => std::panic::resume_unwind(panic),
+                Err(_) => {
+                    panic!("database connection thread dropped a call's reply without responding")
+                }
             }
         }
     }
@@ -550,6 +721,8 @@ fn store_session(core: &mut DatabaseCore) -> crate::store::StoreSession<'_> {
 /// as it drops to stop the thread.
 enum DbJob {
     Run(Box<dyn FnOnce(&mut DatabaseCore) + Send>),
+    SealSnapshot(tokio::sync::oneshot::Sender<Result<PreparedStoreSnapshot, DbError>>),
+    DiscardSnapshot(tokio::sync::oneshot::Sender<Result<(), DbError>>),
     Stop,
 }
 
@@ -566,11 +739,11 @@ impl Drop for ConnectionThread {
         // clone can still be sending. Queue `Stop` behind whatever jobs are
         // already in flight so the worker drains them and closes the connection
         // on its owning thread.
-        let _ = self.jobs.send(DbJob::Stop);
         let handle = match self.join.take() {
             Some(handle) => handle,
             None => return,
         };
+        let _ = self.jobs.send(DbJob::Stop);
         if tokio::runtime::Handle::try_current().is_ok() {
             // Joining inside a runtime task would stall that executor worker
             // while queued database work finishes. Detaching preserves the
@@ -596,6 +769,17 @@ impl ConnectionWorker {
         while let Some(job) = self.receiver.blocking_recv() {
             match job {
                 DbJob::Run(f) => f(&mut self.core),
+                DbJob::SealSnapshot(reply) => {
+                    let sealed = PreparedStoreSnapshot::seal(self.core);
+                    // Cancellation drops the closed image and its payload directory.
+                    let _ = reply.send(sealed);
+                    return;
+                }
+                DbJob::DiscardSnapshot(reply) => {
+                    let discarded = self.core.discard_snapshot();
+                    let _ = reply.send(discarded);
+                    return;
+                }
                 DbJob::Stop => break,
             }
         }
@@ -603,105 +787,5 @@ impl ConnectionWorker {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use coven_protocol::blob::BLOB_TOMBSTONE_GRACE;
-
-    /// A SQL closure that blocks for a while must not stall other tasks on the
-    /// same runtime, because jobs run on the dedicated connection thread rather
-    /// than the async executor.
-    #[tokio::test]
-    async fn slow_db_call_does_not_block_the_executor() {
-        use std::time::{Duration, Instant};
-
-        let db = Database::open(
-            Path::new(":memory:"),
-            Vec::new(),
-            BLOB_TOMBSTONE_GRACE,
-            coven_protocol::blob::TransferLimits::one_at_a_time(),
-            "liveness".to_string(),
-            std::sync::Arc::new(coven_foundation::clock::SystemClock),
-            CovenMigrationPolicy::ApplyPending,
-            &[],
-        )
-        .expect("open database");
-
-        let slow_db = db.clone();
-        let slow = tokio::spawn(async move {
-            slow_db
-                .call_database(|session| session.select_one_after_delay(Duration::from_millis(500)))
-                .await
-        });
-
-        let start = Instant::now();
-        tokio::task::yield_now().await;
-        let stalled = start.elapsed();
-
-        assert!(
-            stalled < Duration::from_millis(250),
-            "unrelated task stalled {stalled:?} behind the slow DB call — the executor was blocked",
-        );
-
-        let value = slow
-            .await
-            .expect("slow DB task joins")
-            .expect("slow DB call succeeds");
-        assert_eq!(value, 1, "the slow DB call still returns its result");
-    }
-
-    /// Dropping the last handle from inside a runtime task must not block that
-    /// task on the connection thread's queue, and a job already dispatched must
-    /// still run to completion.
-    #[tokio::test]
-    async fn dropping_last_handle_in_async_context_does_not_stall_but_job_still_lands() {
-        use std::time::{Duration, Instant};
-
-        let dir = tempfile::tempdir().expect("temp dir");
-        let db_path = dir.path().join("db.sqlite");
-        let marker = dir.path().join("marker");
-
-        let db = Database::open(
-            &db_path,
-            Vec::new(),
-            BLOB_TOMBSTONE_GRACE,
-            coven_protocol::blob::TransferLimits::one_at_a_time(),
-            "drop-async".to_string(),
-            std::sync::Arc::new(coven_foundation::clock::SystemClock),
-            CovenMigrationPolicy::ApplyPending,
-            &[],
-        )
-        .expect("open");
-
-        let job_db = db.clone();
-        let job_marker = marker.clone();
-        let task = tokio::spawn(async move {
-            let _ = job_db
-                .call_database(move |_session| {
-                    std::thread::sleep(Duration::from_millis(300));
-                    std::fs::write(&job_marker, b"landed").map_err(DbError::from)
-                })
-                .await;
-        });
-        tokio::task::yield_now().await;
-        task.abort();
-        let _ = task.await;
-
-        let drop_start = Instant::now();
-        drop(db);
-        let drop_elapsed = drop_start.elapsed();
-        assert!(
-            drop_elapsed < Duration::from_millis(200),
-            "dropping the last handle stalled {drop_elapsed:?} — it joined the connection thread \
-             instead of detaching",
-        );
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !marker.exists() {
-            assert!(
-                Instant::now() < deadline,
-                "the dispatched job's effect never landed after the last handle dropped",
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-}
+#[path = "database_connection_tests.rs"]
+mod tests;

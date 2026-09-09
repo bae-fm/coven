@@ -91,7 +91,7 @@ async fn local_parent_cannot_supply_a_concurrent_shared_child() {
     let (tables, migrations) = inherited_parent_child_schema();
     let author_db = open_test_db_schema(author_dir.clone(), tables.clone(), migrations);
     let signer = user_keypair_from_seed([45; 32]);
-    let (store, _) = TestStore::create_with_connection(
+    let (store, storage) = TestStore::create_with_connection(
         &author_db,
         author_dir.clone(),
         "shared-child-private-parent",
@@ -217,8 +217,107 @@ async fn local_parent_cannot_supply_a_concurrent_shared_child() {
         })
         .await
         .expect("capture concurrent shared child");
+    let pending = {
+        let mut writer = withdrawer
+            .authorize_writer()
+            .await
+            .expect("authorize captured withdrawal");
+        assert!(writer
+            .prepare_pending_store_write()
+            .await
+            .expect("prepare captured withdrawal"));
+        let pending = withdrawer_database
+            .oldest_prepared_store_write()
+            .await
+            .expect("read prepared withdrawal")
+            .expect("withdrawal candidate");
+        let (uploaded, _resume) = withdrawer_database.arm_test_pause(
+            coven_database::DatabaseTestPoint::StoreWriteCommitUploaded {
+                write_id: pending.commit.value.write_id.clone(),
+            },
+        );
+        {
+            let publication = writer.drain_store_writes();
+            tokio::pin!(publication);
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    _ = uploaded.notified() => {},
+                    result = &mut publication => panic!("withdrawal returned before upload: {result:?}"),
+                }
+            })
+            .await
+            .expect("upload withdrawal before either concurrent publication");
+        }
+        pending
+    };
     drain(child_writer).await;
-    drain(withdrawer).await;
+    // Acceptance can precede successful local materialization. Publish the
+    // captured candidate through the provider so the receiver owns the hold.
+    {
+        use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+        use coven_protocol::store_commit::{
+            store_current_publication_semantic_prefix, store_publication_entry_semantic_prefix,
+            StoreCurrentPublicationRecord, StorePublicationEntry, StorePublicationRef,
+        };
+        use coven_storage::CloudSyncObjectStorage;
+        let root = withdrawer.protocol_root_for_test();
+        let current_context = ProtocolObjectContext::signed_plaintext(
+            store.root().store_root_hash,
+            ProtocolObjectDomain::StoreCurrentPublication,
+        );
+        let (bytes, version) = storage
+            .read_versioned_protocol_record(
+                &current_context,
+                &root.descriptor.current_publication_slot,
+                store_current_publication_semantic_prefix(),
+            )
+            .await
+            .expect("read accepted child boundary");
+        let previous: StoreCurrentPublicationRecord =
+            serde_json::from_slice(&bytes).expect("decode accepted child boundary");
+        let device_signer = pending
+            .commit
+            .value
+            .author()
+            .device_signer(&signer)
+            .expect("derive withdrawing device signer");
+        let entry =
+            StorePublicationEntry::signed_commit(&previous, &pending.commit.value, &device_signer)
+                .expect("envelope preserves the captured withdrawal commit");
+        let context = ProtocolObjectContext::signed_plaintext(
+            store.root().store_root_hash,
+            ProtocolObjectDomain::StorePublicationEntry,
+        );
+        let prefix = store_publication_entry_semantic_prefix(&entry);
+        let object = store
+            .create_exact_protocol_object(&context, &prefix, ".json", &entry.to_bytes())
+            .await
+            .expect("upload withdrawal publication");
+        let reference =
+            StorePublicationRef::from_entry(&entry, object).expect("exact withdrawal publication");
+        let replacement = StoreCurrentPublicationRecord::advance_commit(
+            &previous,
+            &entry,
+            reference,
+            &pending.commit.value,
+            &device_signer,
+        )
+        .expect("advance from the accepted child");
+        let accepted = storage
+            .replace_protocol_record_if_version(
+                &current_context,
+                &root.descriptor.current_publication_slot,
+                store_current_publication_semantic_prefix(),
+                &version,
+                replacement.to_bytes(),
+            )
+            .await
+            .expect("accept concurrent withdrawal");
+        assert!(matches!(
+            accepted,
+            coven_storage::cloud::ConditionalWriteOutcome::Replaced(_)
+        ));
+    }
     let frontier_before = withdrawer
         .materialized_frontier()
         .await
@@ -663,7 +762,7 @@ async fn pending_circle_write_conflicts_with_a_later_circle_deletion() {
         .expect("create Circle");
     peer.pull_store().await.expect("peer pulls Circle");
     let encoded_circle = circle_id.to_string();
-    store_database(&author_db)
+    let captured = store_database(&author_db)
         .run_host_store_write_for_test(
             Some(coven_keys::encryption::EncryptionService::from_key(
                 [42; 32],
@@ -689,13 +788,23 @@ async fn pending_circle_write_conflicts_with_a_later_circle_deletion() {
     peer.delete_circle(circle_id)
         .await
         .expect("delete Circle on peer");
-    let (_, pull) = author.pull_store().await.expect("pull Circle deletion");
-
-    assert!(pull.held_positions.iter().any(|held| matches!(
-        held.reason,
-        HeldStorePositionReason::InvalidLocalCircleContext { circle_id: held }
-            if held == circle_id
-    )));
+    let error = author
+        .pull_store()
+        .await
+        .expect_err("Circle deletion conflicts with the pending write");
+    let conflict = write_conflict(&error);
+    assert_eq!(conflict.write_id, captured.write_id);
+    assert_eq!(
+        conflict.reason,
+        coven_protocol::write::WriteRebaseConflictReason::InvalidCircleContext { circle_id }
+    );
+    assert_eq!(
+        conflict.affected_rows,
+        vec![coven_protocol::write::AffectedRow {
+            table: "accounts".to_string(),
+            primary_key: "pending".to_string(),
+        }]
+    );
     assert_eq!(
         author
             .materialized_frontier()
@@ -952,7 +1061,7 @@ async fn later_local_edit_cannot_modify_a_row_adopted_by_accepted_history() {
         })
         .await
         .expect("capture pending shared write");
-    author_database
+    let captured = author_database
         .run_host_store_write_for_test(None, None, |tx| {
             tx.execute_batch(
                 "UPDATE notes SET body = 'Private body',
@@ -976,16 +1085,12 @@ async fn later_local_edit_cannot_modify_a_row_adopted_by_accepted_history() {
         .expect("capture equivalent shared row");
     drain(&peer).await;
 
-    let (_, pull) = author
+    let error = author
         .pull_store()
         .await
-        .expect("pull equivalent shared row");
+        .expect_err("equivalent shared row conflicts with the later private edit");
 
-    assert!(pull.held_positions.iter().any(|held| matches!(
-        &held.reason,
-        HeldStorePositionReason::PrivateSharedConflict { table, row_id, .. }
-            if table == "notes" && row_id == "same-row"
-    )));
+    assert_private_shared_write_conflict(&error, &captured.write_id, "notes", "same-row");
     assert_eq!(
         author
             .query_test_text(
@@ -1041,7 +1146,7 @@ async fn delayed_local_insert_cannot_replace_a_concurrent_shared_insert() {
         })
         .await
         .expect("capture pending shared write");
-    author_database
+    let captured = author_database
         .run_host_store_write_for_test(None, None, |tx| {
             tx.execute_batch(
                 "INSERT INTO notes VALUES
@@ -1066,16 +1171,12 @@ async fn delayed_local_insert_cannot_replace_a_concurrent_shared_insert() {
         .expect("capture concurrent shared insert");
     drain(&peer).await;
 
-    let (_, pull) = author
+    let error = author
         .pull_store()
         .await
-        .expect("pull concurrent shared insert");
+        .expect_err("concurrent shared insert conflicts with the delayed private insert");
 
-    assert!(pull.held_positions.iter().any(|held| matches!(
-        &held.reason,
-        HeldStorePositionReason::PrivateSharedConflict { table, row_id, .. }
-            if table == "notes" && row_id == "same-row"
-    )));
+    assert_private_shared_write_conflict(&error, &captured.write_id, "notes", "same-row");
     assert_eq!(
         author
             .query_test_text(
@@ -1084,4 +1185,41 @@ async fn delayed_local_insert_cannot_replace_a_concurrent_shared_insert() {
             .await,
         "Private title:shared=0",
     );
+}
+
+fn assert_private_shared_write_conflict(
+    error: &(dyn std::error::Error + 'static),
+    write_id: &coven_protocol::write::WriteId,
+    table: &str,
+    primary_key: &str,
+) {
+    let conflict = write_conflict(error);
+    assert_eq!(&conflict.write_id, write_id);
+    assert_eq!(
+        conflict.affected_rows,
+        vec![coven_protocol::write::AffectedRow {
+            table: table.into(),
+            primary_key: primary_key.into(),
+        }]
+    );
+    assert!(matches!(
+        conflict.reason,
+        coven_protocol::write::WriteRebaseConflictReason::PrivateShared
+    ));
+}
+
+fn write_conflict<'error>(
+    error: &'error (dyn std::error::Error + 'static),
+) -> &'error coven_protocol::write::WriteRebaseConflict {
+    let mut source = error;
+    loop {
+        if let Some(database) = source.downcast_ref::<DbError>() {
+            return database
+                .write_rebase_conflict()
+                .unwrap_or_else(|| panic!("expected attributed write conflict: {error:?}"));
+        }
+        source = source
+            .source()
+            .unwrap_or_else(|| panic!("pull preserves typed write conflict: {error:?}"));
+    }
 }

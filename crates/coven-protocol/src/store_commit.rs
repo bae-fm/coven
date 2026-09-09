@@ -8,9 +8,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use super::membership::{
-    verify_membership_entry, AuthorHead, AuthorStreamId, MembershipChange, MembershipCoord,
-    MembershipEntry, MembershipEntryRef, MembershipGrantCreationAuthority, MembershipGrantId,
-    MembershipHeadRef, StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
+    verify_membership_entry, AuthorHead, AuthorStreamId, MembershipCoord, MembershipEntry,
+    MembershipEntryRef, MembershipGrantCreationAuthority, MembershipGrantId, MembershipHeadRef,
+    StoreAuthorityChange, StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
 };
 use crate::circle::{
     AccessLeafId, CircleBootstrapCoverageRef, CircleBootstrapRef, CircleControlCoord,
@@ -32,14 +32,19 @@ mod device_join;
 pub mod device_join_exchange;
 pub mod device_join_journal;
 mod device_state;
-mod heads;
 mod identifiers;
 mod membership_rollup;
 mod operation_refs;
+mod owner_promotion_publication;
 mod packages;
 mod protocol_root;
 mod publication;
+mod reclaim_state;
 mod registration;
+pub use reclaim_state::{
+    RetainedPackageActivation, RetainedReclaimAuthorization, RetainedReclaimState,
+    RetainedStoreSnapshotOwnership,
+};
 mod retained_history;
 mod signed;
 mod validation;
@@ -50,9 +55,9 @@ pub use circle_ack::*;
 pub use circle_snapshot::*;
 pub use device_join::*;
 pub use device_state::*;
-pub use heads::*;
 pub use identifiers::*;
 pub use membership_rollup::*;
+pub use owner_promotion_publication::*;
 pub use packages::*;
 pub use protocol_root::*;
 pub use publication::*;
@@ -99,7 +104,6 @@ pub(crate) const STORE_PROTOCOL_ROOT_SEMANTIC_PATH: &str = "store-v1/store-proto
 #[cfg(any(test, feature = "test-utils"))]
 pub const STORE_PROTOCOL_ROOT_LOGICAL_KEY: &str = "store-v1/store-protocol-root.json";
 pub(crate) const STORE_CANDIDATE_PREFIX: &str = "store-v1/candidates/";
-pub(crate) const STORE_HEAD_PREFIX: &str = "store-v1/heads/";
 pub(crate) const STORE_ACK_PREFIX: &str = "store-v1/acks/";
 pub(crate) const STORE_DEVICE_REGISTRATION_PREFIX: &str = "store-v1/devices/";
 pub(crate) const STORE_DEVICE_JOIN_ABANDONMENT_PREFIX: &str = "store-v1/device-join-abandonments/";
@@ -119,7 +123,6 @@ pub(crate) const STORE_MEMBERSHIP_ROLLUP_PREFIX: &str = "store-v1/membership-rol
 
 const STORE_PROTOCOL_ROOT_DOMAIN: &[u8] = b"coven.store-protocol-root.v1\0";
 const COMMIT_DOMAIN: &[u8] = b"coven.store-batch-commit.v1\0";
-const HEAD_DOMAIN: &[u8] = b"coven.store-device-head.v1\0";
 const REGISTRATION_DOMAIN: &[u8] = b"coven.store-device-registration.v1\0";
 const DEVICE_READINESS_DOMAIN: &[u8] = b"coven.device-readiness.v1\0";
 const DEVICE_EXCLUSION_PROPOSAL_DOMAIN: &[u8] = b"coven.store-device-exclusion-proposal.v1\0";

@@ -624,10 +624,6 @@ impl Gates {
         }
     }
 
-    pub(crate) fn row_can_be_private(&self, table: &str) -> bool {
-        self.tables.contains_key(table)
-    }
-
     pub(crate) fn private_rows(
         &self,
         conn: &Connection,
@@ -1224,7 +1220,9 @@ pub(crate) fn rows_referencing(
         let Some(id) = id else {
             // `id` is a NOT NULL primary key, so a NULL here is a genuine schema
             // anomaly, not a row we may quietly drop from the kept component.
-            warn!("gate: row in {table} referencing {fk}={value} has a NULL id; skipping it from the kept component");
+            warn!(
+                "gate: row in {table} referencing {fk}={value} has a NULL id; skipping it from the kept component"
+            );
             continue;
         };
         ids.push(id);

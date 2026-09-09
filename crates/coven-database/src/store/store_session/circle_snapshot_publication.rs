@@ -11,6 +11,22 @@ use rusqlite::OptionalExtension;
 use super::*;
 
 impl StoreSession<'_> {
+    fn pending_circle_snapshot_ids(&self) -> Result<Vec<CircleId>, DbError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT circle_id FROM outbound_circle_snapshot ORDER BY circle_id")
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?;
+        rows.map(|row| {
+            row.map_err(DbError::from)?
+                .parse()
+                .map_err(|error| DbError::context("pending Circle snapshot identity", error))
+        })
+        .collect()
+    }
+
     fn outbound_circle_snapshot_publication(
         &mut self,
         circle_id: CircleId,
@@ -33,7 +49,6 @@ impl StoreSession<'_> {
         meta_prepared: PreparedExactObject,
         image: SnapshotDatabaseImage,
         image_prepared: PreparedExactObject,
-        blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<CircleSnapshotRef, DbError> {
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
@@ -139,21 +154,10 @@ impl StoreSession<'_> {
                 "Circle snapshot successor is outside its activated exact stream".to_string(),
             ));
         }
-        let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner {
-            activation: meta.successor.activation,
-            generation: meta.generation,
-        };
-        validate_snapshot_blob_plans_on(
-            self.conn,
-            self.gates,
-            self.synced_tables,
-            &snapshot_owner,
-            &blobs,
-        )?;
         tx.execute(
             "INSERT INTO outbound_circle_snapshot \
-             (circle_id, snapshot_ref, meta_prepared, image_ref, meta_bytes, blobs) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (circle_id, snapshot_ref, meta_prepared, image_ref, meta_bytes) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 meta.circle_id.to_string(),
                 serde_json::to_string(&reference).map_err(|error| {
@@ -166,9 +170,6 @@ impl StoreSession<'_> {
                     DbError::context("serialize exact Circle snapshot image ref", error)
                 })?,
                 meta.to_bytes(),
-                serde_json::to_string(&blobs).map_err(|error| {
-                    DbError::context("serialize prepared Circle snapshot blobs", error)
-                })?,
             ],
         )
         .map_err(DbError::from)?;
@@ -216,8 +217,7 @@ impl StoreSession<'_> {
                 "accepted Circle snapshot differs from the prepared exact object".to_string(),
             ));
         }
-        install_snapshot_blob_plans_on(&tx, &outbound.blobs)?;
-        let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner {
+        let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner::Circle {
             activation: outbound.meta.value.successor.activation,
             generation: outbound.meta.value.generation,
         };
@@ -269,17 +269,17 @@ impl StoreSession<'_> {
 }
 
 impl StoreDatabase {
+    pub async fn pending_circle_snapshot_ids(&self) -> Result<Vec<CircleId>, DbError> {
+        self.call_store(move |session| session.pending_circle_snapshot_ids())
+            .await
+    }
+
     pub async fn outbound_circle_snapshot_publication(
         &self,
         circle_id: CircleId,
     ) -> Result<Option<DurableCircleSnapshotPublication>, DbError> {
-        let pending = self
-            .call_store(move |session| session.outbound_circle_snapshot_publication(circle_id))
-            .await?;
-        if let Some(pending) = &pending {
-            verify_snapshot_blob_spools(&pending.blobs, "prepared Circle").await?;
-        }
-        Ok(pending)
+        self.call_store(move |session| session.outbound_circle_snapshot_publication(circle_id))
+            .await
     }
 
     pub async fn latest_local_circle_snapshot(
@@ -296,16 +296,9 @@ impl StoreDatabase {
         meta_prepared: PreparedExactObject,
         image: SnapshotDatabaseImage,
         image_prepared: PreparedExactObject,
-        blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<CircleSnapshotRef, DbError> {
         self.call_store(move |session| {
-            session.stage_circle_snapshot_publication(
-                meta,
-                meta_prepared,
-                image,
-                image_prepared,
-                blobs,
-            )
+            session.stage_circle_snapshot_publication(meta, meta_prepared, image, image_prepared)
         })
         .await
     }

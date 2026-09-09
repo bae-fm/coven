@@ -2,6 +2,60 @@ use super::ownership::*;
 use super::*;
 
 impl RemoteObjectRecord {
+    pub fn prepared_owner_promotion_request_publication(
+        publication: &crate::store_commit::RetainedOwnerPromotionRequestPublication,
+        commit: &crate::store_commit::StoreBatchCommit,
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
+        publication.validate_for(commit)?;
+        let request = commit
+            .owner_promotion_request()
+            .ok_or(RemoteObjectRecordError::DomainMismatch)?;
+        let bytes = publication.value.to_bytes();
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::OwnerPromotionRequestPublication {
+                promotion_id: request.promotion_id,
+                activation: publication.value.body().clone(),
+            },
+            ObjectHash::digest(&bytes),
+            publication.object.clone(),
+            &bytes,
+            &bytes,
+            publication.value.commit.clone(),
+        )
+    }
+
+    pub fn prepared_membership_head_acceptance(
+        value: &crate::membership::MembershipHeadAcceptance,
+        head: &crate::membership::AuthorHead,
+        prepared: &crate::objects::PreparedExactObject,
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
+        let crate::membership::MembershipHeadActivation::StoreCommit {
+            commit,
+            acceptance_slot,
+        } = &head.activation
+        else {
+            return Err(RemoteObjectRecordError::DomainMismatch);
+        };
+        if value.head.head_hash != head.head_hash()
+            || value.head.coord != head.entry_coord()
+            || prepared.reference().slot() != acceptance_slot
+        {
+            return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+        }
+        let bytes = value.to_bytes();
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::MembershipHeadAcceptance {
+                head: value.head.clone(),
+                publication: value.publication()?.clone(),
+            },
+            ObjectHash::digest(&bytes),
+            prepared.reference().clone(),
+            &bytes,
+            prepared.stored_bytes(),
+            commit.clone(),
+        )
+    }
+
     fn candidate_exclusive_retained_authority(
         family: CandidateFamilyId,
         domain: CandidateExclusiveObjectDomain,
@@ -70,30 +124,6 @@ impl RemoteObjectRecord {
         ClosedRemoteObject::with_spooled_payloads(record, canonical_signed_bytes, stored_bytes)
     }
 
-    pub fn candidate_activated_store_head(
-        reference: crate::store_commit::StoreDeviceHeadRef,
-        canonical_signed_bytes: &[u8],
-        stored_bytes: &[u8],
-        owner: StoreBatchCommitRef,
-    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
-        let object = reference.object.clone();
-        // The head names the commit it publishes; reading it out here is the
-        // one parse, and the record carries the answer from then on.
-        let head: crate::store_commit::StoreDeviceHead =
-            serde_json::from_slice(canonical_signed_bytes)?;
-        Self::candidate_activated_retained_authority(
-            RetainedAuthorityObjectDomain::DeviceHead {
-                reference,
-                head_commit: head.commit.clone(),
-            },
-            ObjectHash::digest(canonical_signed_bytes),
-            object,
-            canonical_signed_bytes,
-            stored_bytes,
-            owner,
-        )
-    }
-
     pub(crate) fn candidate_activated_store_acknowledgement(
         reference: crate::store_commit::StoreAckRef,
         canonical_signed_bytes: &[u8],
@@ -143,6 +173,57 @@ impl RemoteObjectRecord {
             canonical_semantic_bytes,
             stored_bytes,
             candidate,
+        )
+    }
+
+    pub fn candidate_activated_provider_access_grant(
+        reference: crate::provider::StoreMemberProviderAccessGrantRef,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
+        owner: StoreBatchCommitRef,
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
+        let object = reference.object.clone();
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::ProviderAccessGrant { reference },
+            ObjectHash::digest(canonical_signed_bytes),
+            object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
+    pub fn candidate_activated_device_join_abandonment(
+        reference: crate::store_commit::DeviceJoinAbandonmentRef,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
+        owner: StoreBatchCommitRef,
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
+        let object = reference.object.clone();
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::DeviceJoinAbandonment { reference },
+            ObjectHash::digest(canonical_signed_bytes),
+            object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
+    pub fn candidate_activated_device_registration(
+        reference: crate::store_commit::StoreDeviceRegistrationRef,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
+        owner: StoreBatchCommitRef,
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
+        let object = reference.object.clone();
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::DeviceRegistration { reference },
+            ObjectHash::digest(canonical_signed_bytes),
+            object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
         )
     }
 
@@ -328,14 +409,9 @@ impl RemoteObjectRecord {
         ClosedRemoteObject::carried(record)
     }
 
-    /// The membership rollup one snapshot generation published, owned by that
-    /// generation.
-    ///
-    /// The same owner shape the image gets, and for a reason the image does not
-    /// have: a rollup is content-addressed over the membership frontier, so two
-    /// generations published over an unchanged membership name the *same*
-    /// object. Ownership is what keeps the older generation's reclaim from
-    /// deleting the rollup the newer one still points at.
+    /// The membership rollup bound to one exact snapshot metadata candidate.
+    /// Its metadata slot determines the artifact slot; another snapshot uses
+    /// another object even when its rollup bytes are identical.
     pub fn snapshot_activated_membership_rollup(
         rollup: &crate::store_commit::MembershipRollupRef,
         owner: SnapshotObjectOwner,

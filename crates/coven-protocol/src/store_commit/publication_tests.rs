@@ -25,7 +25,7 @@ fn publication_ref(entry: &StorePublicationEntry) -> StorePublicationRef {
 
 fn verified_fixture_commit() -> (
     UserKeypair,
-    StoreDeviceRegistrationRef,
+    ReferencedStoreDeviceRegistration,
     VerifiedStoreBatchCommit,
     UserKeypair,
 ) {
@@ -133,7 +133,12 @@ fn verified_fixture_commit() -> (
         .registration()
         .device_signer(&identity)
         .expect("derive fixture device signer");
-    (identity, author.reference().clone(), commit, device_signer)
+    let author = ReferencedStoreDeviceRegistration::verified(
+        author.reference().clone(),
+        author.registration().clone(),
+    )
+    .expect("reference fixture author");
+    (identity, author, commit, device_signer)
 }
 
 #[test]
@@ -215,11 +220,11 @@ fn publication_wire_has_one_source_for_each_boundary_fact() {
     let current_json: serde_json::Value =
         serde_json::from_slice(&accepted.to_bytes()).expect("decode current publication JSON");
 
-    assert!(entry_json["body"].get("previous_record_hash").is_some());
+    assert!(entry_json["body"].get("previous_state_hash").is_some());
     assert!(current_json["body"].get("publisher").is_none());
-    assert!(current_json["body"].get("previous_record_hash").is_none());
+    assert!(current_json["body"].get("previous_state_hash").is_none());
     assert!(current_json["body"]["state"]["accepted"]
-        .get("previous_record_hash")
+        .get("previous_state_hash")
         .is_none());
 }
 
@@ -257,7 +262,6 @@ fn commit_signed_at_genesis_cannot_cross_an_accepted_snapshot() {
     .expect("accept commit publication");
     let snapshot_bytes = b"snapshot metadata";
     let snapshot = StoreSnapshotRef {
-        generation: 1,
         snapshot_hash: ObjectHash::digest(snapshot_bytes),
         object: ExactObjectRef::new(
             ObjectSlot::logical("store-v1/test/snapshot.json".to_string())
@@ -268,7 +272,7 @@ fn commit_signed_at_genesis_cannot_cross_an_accepted_snapshot() {
     };
     let snapshot_entry = StorePublicationEntry::signed_snapshot(
         &accepted_commit,
-        registration,
+        registration.reference().clone(),
         snapshot,
         &device_signer,
     )
@@ -285,4 +289,227 @@ fn commit_signed_at_genesis_cannot_cross_an_accepted_snapshot() {
     assert!(
         StorePublicationEntry::signed_commit(&accepted_snapshot, &commit, &device_signer).is_err()
     );
+}
+
+#[test]
+fn a_received_publication_cannot_accept_a_commit_from_before_its_snapshot_base() {
+    assert_received_commit_cannot_cross_snapshot(false);
+}
+
+#[test]
+fn an_earlier_receipt_cannot_validate_a_repeated_commit_after_a_snapshot() {
+    assert_received_commit_cannot_cross_snapshot(true);
+}
+
+fn assert_received_commit_cannot_cross_snapshot(publish_before_snapshot: bool) {
+    let (identity, author, commit, device_signer) = verified_fixture_commit();
+    let genesis = StoreCurrentPublicationRecord::genesis(commit.store_root_hash(), &identity);
+    let mut entries = Vec::new();
+    let mut current = genesis.clone();
+    if publish_before_snapshot {
+        let entry = StorePublicationEntry::signed_commit(&current, &commit, &device_signer)
+            .expect("sign commit before snapshot");
+        let reference = publication_ref(&entry);
+        current = StoreCurrentPublicationRecord::advance_commit(
+            &current,
+            &entry,
+            reference.clone(),
+            &commit,
+            &device_signer,
+        )
+        .expect("accept commit before snapshot");
+        entries.push(StorePublicationIntervalEntry::new(
+            entry,
+            reference,
+            author.clone(),
+        ));
+    }
+    let snapshot_bytes = b"snapshot preceding a delayed commit";
+    let snapshot = StoreSnapshotRef {
+        snapshot_hash: ObjectHash::digest(snapshot_bytes),
+        object: exact_logical_object(
+            "store-v1/test/publication/delayed-commit-snapshot.json".to_string(),
+            snapshot_bytes,
+        ),
+    };
+    let snapshot_entry = StorePublicationEntry::signed_snapshot(
+        &current,
+        author.reference().clone(),
+        snapshot,
+        &device_signer,
+    )
+    .expect("sign snapshot publication");
+    let snapshot_ref = publication_ref(&snapshot_entry);
+    let accepted_snapshot = StoreCurrentPublicationRecord::advance_snapshot(
+        &current,
+        &snapshot_entry,
+        snapshot_ref.clone(),
+        &device_signer,
+    )
+    .expect("accept snapshot");
+    // Bypass the outgoing constructor to exercise validation of received bytes.
+    let stale_entry = Signed::sign(
+        StorePublicationEntryBody {
+            store_root_hash: commit.store_root_hash(),
+            position: accepted_snapshot.next_position().expect("next publication"),
+            predecessor: accepted_snapshot.accepted().cloned(),
+            previous_state_hash: accepted_snapshot.state_hash(),
+            author_registration: author.reference().clone(),
+            payload: StorePublicationPayload::Commit(commit.reference().clone()),
+        },
+        &device_signer,
+    );
+    let stale_ref = publication_ref(&stale_entry);
+    let received_current = Signed::sign(
+        StoreCurrentPublicationRecordBody {
+            store_root_hash: commit.store_root_hash(),
+            state: StorePublicationState::Accepted {
+                entry: stale_ref.clone(),
+                latest_snapshot: accepted_snapshot.latest_snapshot().cloned(),
+            },
+        },
+        &device_signer,
+    );
+    entries.extend([
+        StorePublicationIntervalEntry::new(snapshot_entry, snapshot_ref, author.clone()),
+        StorePublicationIntervalEntry::new(stale_entry, stale_ref, author),
+    ]);
+    let receipt = VerifiedStorePublicationInterval::verified(genesis, received_current, entries)
+        .and_then(|interval| interval.accepted_commit(&commit));
+    assert!(
+        receipt.is_err(),
+        "the old commit must be rejected against the snapshot preceding its accepted entry"
+    );
+}
+
+#[test]
+fn publication_interval_verifies_every_entry_author_and_the_final_boundary() {
+    let (identity, author, commit, device_signer) = verified_fixture_commit();
+    let genesis = StoreCurrentPublicationRecord::genesis(commit.store_root_hash(), &identity);
+    let commit_entry = StorePublicationEntry::signed_commit(&genesis, &commit, &device_signer)
+        .expect("sign commit publication");
+    let commit_ref = publication_ref(&commit_entry);
+    let accepted_commit = StoreCurrentPublicationRecord::advance_commit(
+        &genesis,
+        &commit_entry,
+        commit_ref.clone(),
+        &commit,
+        &device_signer,
+    )
+    .expect("accept commit publication");
+    let snapshot_bytes = b"publication interval snapshot";
+    let snapshot = StoreSnapshotRef {
+        snapshot_hash: ObjectHash::digest(snapshot_bytes),
+        object: exact_logical_object(
+            "store-v1/test/publication/interval-snapshot.json".to_string(),
+            snapshot_bytes,
+        ),
+    };
+    let snapshot_entry = StorePublicationEntry::signed_snapshot(
+        &accepted_commit,
+        author.reference().clone(),
+        snapshot,
+        &device_signer,
+    )
+    .expect("sign snapshot publication");
+    let snapshot_ref = publication_ref(&snapshot_entry);
+    let current = StoreCurrentPublicationRecord::advance_snapshot(
+        &accepted_commit,
+        &snapshot_entry,
+        snapshot_ref.clone(),
+        &device_signer,
+    )
+    .expect("accept snapshot publication");
+
+    let interval = VerifiedStorePublicationInterval::verified(
+        genesis,
+        current,
+        vec![
+            StorePublicationIntervalEntry::new(commit_entry, commit_ref, author.clone()),
+            StorePublicationIntervalEntry::new(snapshot_entry, snapshot_ref, author),
+        ],
+    )
+    .expect("verify publication interval");
+
+    assert_eq!(interval.entries().len(), 2);
+    assert_eq!(
+        interval
+            .accepted_commit(&commit)
+            .unwrap()
+            .reference()
+            .position
+            .get(),
+        1
+    );
+}
+
+#[test]
+fn initial_publication_observation_authenticates_the_actual_genesis_record() {
+    let founder = UserKeypair::generate();
+    let founder_pubkey = keys::public_key_hex(&founder);
+    let root_hash = ObjectHash::digest(b"initial publication root");
+    let current = StoreCurrentPublicationRecord::genesis(root_hash, &founder);
+    let interval = VerifiedStorePublicationInterval::from_genesis(
+        root_hash,
+        &founder_pubkey,
+        current.clone(),
+        Vec::new(),
+    )
+    .expect("observe genesis using only the founder public key");
+    assert_eq!(interval.current(), &current);
+    assert_eq!(interval.previous(), current.body());
+    assert!(interval.entries().is_empty());
+
+    let impostor = UserKeypair::generate();
+    let forged = StoreCurrentPublicationRecord::genesis(root_hash, &impostor);
+    assert!(VerifiedStorePublicationInterval::from_genesis(
+        root_hash,
+        &founder_pubkey,
+        forged,
+        Vec::new(),
+    )
+    .is_err());
+    assert!(VerifiedStorePublicationInterval::from_genesis(
+        ObjectHash::digest(b"another root"),
+        &founder_pubkey,
+        current,
+        Vec::new(),
+    )
+    .is_err());
+}
+
+#[test]
+fn initial_publication_observation_verifies_the_accepted_path_without_a_genesis_signature() {
+    let (founder, author, commit, device_signer) = verified_fixture_commit();
+    let root_hash = commit.store_root_hash();
+    let genesis = StoreCurrentPublicationRecord::genesis(root_hash, &founder);
+    let entry = StorePublicationEntry::signed_commit(&genesis, &commit, &device_signer)
+        .expect("prepare accepted publication");
+    let reference = publication_ref(&entry);
+    let current = StoreCurrentPublicationRecord::advance_commit(
+        &genesis,
+        &entry,
+        reference.clone(),
+        &commit,
+        &device_signer,
+    )
+    .expect("accept publication");
+    let interval = VerifiedStorePublicationInterval::from_genesis(
+        root_hash,
+        &keys::public_key_hex(&founder),
+        current.clone(),
+        vec![StorePublicationIntervalEntry::new(entry, reference, author)],
+    )
+    .expect("read accepted history without holding the founder's signing key");
+    assert_eq!(interval.current(), &current);
+    interval
+        .accepted_commit(&commit)
+        .expect("authenticate accepted commit");
+    assert!(VerifiedStorePublicationInterval::from_genesis(
+        root_hash,
+        &keys::public_key_hex(&founder),
+        current,
+        Vec::new(),
+    )
+    .is_err());
 }

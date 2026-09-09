@@ -10,7 +10,7 @@ use coven_protocol::remote_object::{remote_object_id, SharedLiveSetObjectDomain}
 use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CirclePackageRef, ObjectHash, RetainedStoreDeviceOperations,
     RetainedStoreDeviceRegistrationActivations, StoreBatchCommit, StoreBatchCommitRef,
-    StoreDeviceHead, StorePackageRef, VerifiedStoreDeviceOperations,
+    StorePackageRef, VerifiedStoreDeviceOperations,
 };
 use coven_protocol::store_commit::{
     RetainedMergeCommitEvidence, RetainedReplaySnapshotAuthority, StoreRootRef,
@@ -21,7 +21,6 @@ use coven_protocol::store_commit::{
 #[serde(deny_unknown_fields)]
 pub struct RetainedMergeMaterializationInput {
     pub commit: PreparedExactObject,
-    pub activation_head: PreparedExactObject,
     pub history_evidence: RetainedMergeCommitEvidence,
     pub membership_objects: Option<VerifiedMergeMembershipObjects>,
     pub packages: Vec<RetainedAudiencePackage>,
@@ -66,7 +65,7 @@ impl VerifiedMergeMembershipObjects {
             || !transition.matches_head(head_value, &head)
             || !matches!(
                 &head_value.activation,
-                coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit }
+                coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit, .. }
                     if commit == commit_ref
             )
         {
@@ -76,9 +75,9 @@ impl VerifiedMergeMembershipObjects {
             ));
         }
         let resolution = match &entry.change {
-            coven_protocol::membership::MembershipChange::ResolutionActivation { resolution } => {
-                Some(resolution.clone())
-            }
+            coven_protocol::membership::StoreAuthorityChange::ResolutionActivation {
+                resolution,
+            } => Some(resolution.clone()),
             _ => None,
         };
         Ok(Self {
@@ -99,13 +98,6 @@ impl VerifiedMergeMembershipObjects {
         .into_iter()
         .flatten()
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MergeRetractionCleanupInput {
-    pub commit: PreparedExactObject,
-    pub activation_head: PreparedExactObject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -245,8 +237,7 @@ pub struct VerifiedMergeMaterialization<'a> {
     verified_commit: &'a coven_protocol::store_commit::VerifiedStoreBatchCommit,
     device_operations: &'a VerifiedStoreDeviceOperations,
     circle_activations: &'a VerifiedCircleActivations,
-    activation_head: &'a StoreDeviceHead,
-    activation_head_object: &'a ExactObjectRef,
+    acceptance: &'a AcceptedStoreCommitEvidence,
     history_evidence: &'a RetainedMergeCommitEvidence,
     membership_objects: Option<&'a VerifiedMergeMembershipObjects>,
     packages: &'a [AudiencePackage],
@@ -261,8 +252,7 @@ pub struct OwnedVerifiedMergeMaterialization {
     registrations: Vec<ActivatedStoreDeviceRegistration>,
     device_operations: VerifiedStoreDeviceOperations,
     circle_activations: VerifiedCircleActivations,
-    activation_head: StoreDeviceHead,
-    activation_head_object: ExactObjectRef,
+    acceptance: AcceptedStoreCommitEvidence,
     history_evidence: RetainedMergeCommitEvidence,
     membership_objects: Option<VerifiedMergeMembershipObjects>,
     packages: Vec<AudiencePackage>,
@@ -291,9 +281,10 @@ pub struct InstalledReplayBaseline {
     >,
     summary: Option<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
     /// The snapshot this baseline was installed or advanced from, when it came
-    /// from one. Naming it is what lets a device answer "am I already standing
-    /// on that?" without reading the snapshot back to compare coverages.
-    snapshot: Option<coven_protocol::store_commit::StoreSnapshotRef>,
+    /// from one. Keeping the exact published snapshot lets pre-activation join
+    /// verification read its installed starting point without requiring a
+    /// local author registration.
+    snapshot: Option<PublishedStoreSnapshot>,
 }
 
 impl Default for InstalledReplayBaseline {
@@ -320,7 +311,7 @@ impl InstalledReplayBaseline {
             std::sync::Arc<coven_protocol::store_commit::ResolvedStoreDeviceState>,
         >,
         summary: Option<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
-        snapshot: Option<coven_protocol::store_commit::StoreSnapshotRef>,
+        snapshot: Option<PublishedStoreSnapshot>,
     ) -> Self {
         Self {
             coverage,
@@ -332,7 +323,14 @@ impl InstalledReplayBaseline {
 
     /// Whether this baseline was installed from `snapshot` itself.
     pub fn stands_on(&self, snapshot: &coven_protocol::store_commit::StoreSnapshotRef) -> bool {
-        self.snapshot.as_ref() == Some(snapshot)
+        self.snapshot
+            .as_ref()
+            .is_some_and(|installed| &installed.reference == snapshot)
+    }
+
+    /// The exact snapshot installed as this replay's starting point.
+    pub fn snapshot(&self) -> Option<&PublishedStoreSnapshot> {
+        self.snapshot.as_ref()
     }
 
     /// The signed history summary standing for everything under the coverage.
@@ -391,8 +389,7 @@ impl OwnedVerifiedMergeMaterialization {
         registrations: Vec<ActivatedStoreDeviceRegistration>,
         device_operations: VerifiedStoreDeviceOperations,
         circle_activations: VerifiedCircleActivations,
-        activation_head: StoreDeviceHead,
-        activation_head_object: ExactObjectRef,
+        acceptance: AcceptedStoreCommitEvidence,
         history_evidence: RetainedMergeCommitEvidence,
         membership_objects: Option<VerifiedMergeMembershipObjects>,
         packages: Vec<AudiencePackage>,
@@ -405,8 +402,7 @@ impl OwnedVerifiedMergeMaterialization {
             &registrations,
             &device_operations,
             &circle_activations,
-            &activation_head,
-            &activation_head_object,
+            &acceptance,
             &history_evidence,
             membership_objects.as_ref(),
             &packages,
@@ -418,8 +414,7 @@ impl OwnedVerifiedMergeMaterialization {
             registrations,
             device_operations,
             circle_activations,
-            activation_head,
-            activation_head_object,
+            acceptance,
             history_evidence,
             membership_objects,
             packages,
@@ -485,12 +480,8 @@ impl OwnedVerifiedMergeMaterialization {
         Ok(activation)
     }
 
-    pub fn activation_head(&self) -> &StoreDeviceHead {
-        &self.activation_head
-    }
-
-    pub fn activation_head_object(&self) -> &ExactObjectRef {
-        &self.activation_head_object
+    pub fn acceptance(&self) -> &AcceptedStoreCommitEvidence {
+        &self.acceptance
     }
 
     pub fn history_evidence(&self) -> &RetainedMergeCommitEvidence {
@@ -499,6 +490,38 @@ impl OwnedVerifiedMergeMaterialization {
 
     pub fn membership_objects(&self) -> Option<&VerifiedMergeMembershipObjects> {
         self.membership_objects.as_ref()
+    }
+
+    pub(crate) fn membership_remote_objects(
+        &self,
+    ) -> Result<Vec<coven_protocol::remote_object::ClosedRemoteObject>, DbError> {
+        let Some(objects) = self.membership_objects() else {
+            return Ok(Vec::new());
+        };
+        let proof = self
+            .history_evidence
+            .membership_proof
+            .as_ref()
+            .expect("verified membership objects have their exact retained proof");
+        // Verification binds these canonical plaintext bytes to the exact
+        // objects. A retained image need not carry a second remote-record copy.
+        let entry = serde_json::to_vec(&proof.entry_value)?;
+        let head = serde_json::to_vec(&proof.head_value)?;
+        let resolution = proof
+            .resolution_value
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()?
+            .map(|bytes| MembershipAuthorityBytes::new(bytes.clone(), bytes));
+        activated_merge_membership_remote_objects(
+            self.commit().candidate_family(),
+            objects,
+            MembershipAuthorityBytes::new(entry.clone(), entry),
+            MembershipAuthorityBytes::new(head.clone(), head),
+            resolution,
+            self.commit_ref(),
+        )
+        .map_err(DbError::from)
     }
 
     pub fn packages(&self) -> &[AudiencePackage] {
@@ -539,12 +562,8 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         self.circle_activations
     }
 
-    pub fn activation_head(&self) -> &StoreDeviceHead {
-        self.activation_head
-    }
-
-    pub fn activation_head_object(&self) -> &ExactObjectRef {
-        self.activation_head_object
+    pub fn acceptance(&self) -> &AcceptedStoreCommitEvidence {
+        self.acceptance
     }
 
     pub fn history_evidence(&self) -> &RetainedMergeCommitEvidence {
@@ -569,8 +588,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         registrations: &'a [ActivatedStoreDeviceRegistration],
         device_operations: &'a VerifiedStoreDeviceOperations,
         circle_activations: &'a VerifiedCircleActivations,
-        activation_head: &'a StoreDeviceHead,
-        activation_head_object: &'a ExactObjectRef,
+        acceptance: &'a AcceptedStoreCommitEvidence,
         history_evidence: &'a RetainedMergeCommitEvidence,
         membership_objects: Option<&'a VerifiedMergeMembershipObjects>,
         packages: &'a [AudiencePackage],
@@ -583,8 +601,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             .map_err(DbError::from)?;
         if verified_commit.store_root_hash() != root.store_root_hash
             || commit.store_root_hash != root.store_root_hash
-            || activation_head.author_registration != commit.author_registration
-            || activation_head.commit != *commit_ref
+            || acceptance.commit_ref() != commit_ref
             || circle_activations.stream_activations().activating_commit() != commit_ref
             || circle_activations.stream_activations().as_slice() != commit.stream_activations()
             || circle_activations.circles().len() != commit.circle_controls().len()
@@ -600,31 +617,22 @@ impl<'a> VerifiedMergeMaterialization<'a> {
                 "verified Merge materialization differs from its exact Store commit".to_string(),
             ));
         }
-        let verified_head = StoreDeviceHead::parse_at(
-            &activation_head.to_bytes(),
-            root.store_root_hash,
-            verified_commit.author(),
-            commit_ref,
-        )
-        .map_err(|error| DbError::context("verify Merge materialization head", error))?;
-        if &verified_head != activation_head {
+        let retained_objects = history_evidence
+            .membership_proof
+            .as_ref()
+            .map(|proof| {
+                VerifiedMergeMembershipObjects::verify(
+                    commit,
+                    commit_ref,
+                    &proof.entry_value,
+                    &proof.head_value,
+                    proof.head.clone(),
+                )
+            })
+            .transpose()?;
+        if membership_objects != retained_objects.as_ref() {
             return Err(DbError::Message(
-                "Merge materialization head differs from its verified bytes".to_string(),
-            ));
-        }
-        activation_head_object
-            .verify(&activation_head.to_bytes())
-            .map_err(|error| DbError::context("verify Merge materialization head object", error))?;
-        let expected_head_key = format!(
-            "{}.json",
-            coven_protocol::store_commit::head_slot_prefix(
-                &activation_head.author_registration.device_id.to_string(),
-                commit_ref.coord.sequence(),
-            )
-        );
-        if activation_head_object.slot().logical_key() != expected_head_key {
-            return Err(DbError::Message(
-                "Merge materialization head object occupies another protocol slot".to_string(),
+                "Merge membership objects differ from their retained exact proof".into(),
             ));
         }
         RetainedStoreDeviceRegistrationActivations::from_verified(root, commit, registrations)
@@ -634,8 +642,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             verified_commit,
             device_operations,
             circle_activations,
-            activation_head,
-            activation_head_object,
+            acceptance,
             history_evidence,
             membership_objects,
             packages,
@@ -653,8 +660,7 @@ pub struct PreparedMergeMaterializationPackage {
 pub struct PreparedMergeMaterialization {
     pub root: StoreRootRef,
     pub verified_commit: VerifiedStoreBatchCommit,
-    pub activation_head: StoreDeviceHead,
-    pub activation_head_object: ExactObjectRef,
+    pub acceptance: AcceptedStoreCommitEvidence,
     pub history_evidence: RetainedMergeCommitEvidence,
     pub membership_objects: Option<VerifiedMergeMembershipObjects>,
     pub membership_remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
@@ -735,6 +741,13 @@ pub struct VerifiedStoreSnapshotAuthority {
     authority: RetainedReplaySnapshotAuthority,
 }
 
+pub(crate) struct PreparedSnapshotReplayBaselineAdvance {
+    pub(crate) changes_publication_base: bool,
+    pub(crate) expected_current_cut: coven_protocol::store_commit::CommitFrontier,
+    pub(crate) image: Vec<u8>,
+    pub(crate) folded: Vec<crate::SettledStoreWrite>,
+}
+
 impl VerifiedStoreSnapshotAuthority {
     pub fn from_authority(
         authority: RetainedReplaySnapshotAuthority,
@@ -748,76 +761,12 @@ impl VerifiedStoreSnapshotAuthority {
     }
 }
 
-/// One snapshot verified as acknowledged by every device active at its cut.
-/// Reclaim deletes history behind a snapshot only against this, and carries the
-/// acknowledgements it names as the claim's evidence.
-#[derive(Debug)]
-pub struct VerifiedAcknowledgedStoreSnapshot {
-    acknowledged: coven_protocol::store_commit::AcknowledgedStoreSnapshot,
-}
-
-impl VerifiedAcknowledgedStoreSnapshot {
-    pub fn from_acknowledged(
-        acknowledged: coven_protocol::store_commit::AcknowledgedStoreSnapshot,
-    ) -> Result<Self, crate::DbError> {
-        acknowledged.validate()?;
-        Ok(Self { acknowledged })
-    }
-
-    /// The authority a device adopts when it advances its own replay baseline
-    /// over this snapshot.
-    ///
-    /// Every device required by cloud reclaim acknowledged this exact snapshot.
-    pub fn authority(&self) -> &coven_protocol::store_commit::RetainedReplaySnapshotAuthority {
-        &self.acknowledged.authority
-    }
-
-    pub fn into_acknowledged(self) -> coven_protocol::store_commit::AcknowledgedStoreSnapshot {
-        self.acknowledged
-    }
-
-    pub fn acknowledgement_refs(
-        &self,
-    ) -> Result<Vec<coven_protocol::store_commit::StoreAckRef>, crate::DbError> {
-        self.acknowledged
-            .acknowledgement_refs()
-            .map_err(crate::DbError::from)
-    }
-}
-
-/// A snapshot verified against every writer active in current Store authority.
-/// Local replay retirement requires this stronger proof; cloud reclaim keeps
-/// using [`VerifiedAcknowledgedStoreSnapshot`].
-#[derive(Debug)]
-pub struct VerifiedReplayBaselineRetirementProof {
-    proof: coven_protocol::store_commit::ReplayBaselineRetirementProof,
-}
-
-impl VerifiedReplayBaselineRetirementProof {
-    pub fn from_proof(
-        proof: coven_protocol::store_commit::ReplayBaselineRetirementProof,
-        accepted_membership: &coven_protocol::membership::MembershipChain,
-    ) -> Result<Self, crate::DbError> {
-        proof.validate(accepted_membership)?;
-        Ok(Self { proof })
-    }
-
-    pub(crate) fn into_proof(self) -> coven_protocol::store_commit::ReplayBaselineRetirementProof {
-        self.proof
-    }
-}
-
+#[derive(Clone)]
 pub struct DeviceJoinBootstrapCommit {
     pub reference: StoreBatchCommitRef,
     pub commit: VerifiedStoreBatchCommit,
     pub registrations: Vec<ActivatedStoreDeviceRegistration>,
     pub device_operations: VerifiedStoreDeviceOperations,
-    pub activation: DeviceJoinBootstrapActivation,
-}
-
-pub struct DeviceJoinBootstrapActivation {
-    pub head: StoreDeviceHead,
-    pub object: ExactObjectRef,
     pub history_evidence: RetainedMergeCommitEvidence,
 }
 
@@ -827,6 +776,7 @@ pub struct DeviceJoinBootstrapPlan {
     pub founder_bytes: Vec<u8>,
     pub genesis: ResolvedStoreDeviceState,
     pub membership: InitialStoreMembershipAuthority,
+    pub publication: AcceptedStorePublicationInterval,
     pub commits: Vec<DeviceJoinBootstrapCommit>,
 }
 
@@ -849,148 +799,12 @@ pub struct DeviceJoinBootstrapRowData {
 /// whose rows were never resolved.
 pub struct ResolvedDeviceJoinBootstrap {
     pub plan: DeviceJoinBootstrapPlan,
+    pub snapshot_circles: crate::StagedCircleRestore,
     pub row_data: std::collections::BTreeMap<StoreBatchCommitRef, DeviceJoinBootstrapRowData>,
     pub local_store_membership: coven_protocol::membership::LocalStoreMembership,
     pub routing_key: Option<coven_protocol::circle::RowRoutingKey>,
     pub receiver_wall_ms: u64,
 }
 
-impl DeviceJoinBootstrapPlan {
-    pub fn verified_commit(
-        &self,
-        reference: &StoreBatchCommitRef,
-    ) -> Option<&VerifiedStoreBatchCommit> {
-        self.commits
-            .iter()
-            .find(|commit| &commit.reference == reference)
-            .map(|commit| &commit.commit)
-    }
-
-    pub fn into_closure(
-        self,
-        root: &StoreRootRef,
-    ) -> Result<
-        coven_protocol::store_commit::device_join_exchange::DeviceJoinBootstrapClosure,
-        DbError,
-    > {
-        if self.founder.store_root != *root || self.founder.to_bytes() != self.founder_bytes {
-            return Err(DbError::Message(
-                "device join bootstrap founder differs from its canonical bytes".to_string(),
-            ));
-        }
-        let founder = coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
-            self.founder_reference,
-            self.founder,
-        )
-        .map_err(DbError::from)?;
-        let commits = self
-            .commits
-            .into_iter()
-            .map(|commit| {
-                let value = commit.commit.value();
-                if commit.commit.reference() != &commit.reference
-                    || commit.commit.store_root_hash() != root.store_root_hash
-                {
-                    return Err(DbError::Message(
-                        "device join bootstrap commit differs from its exact reference"
-                            .to_string(),
-                    ));
-                }
-                let author =
-                    coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
-                        value.author_registration.clone(),
-                        commit.commit.author().clone(),
-                    )
-                    .map_err(DbError::from)?;
-                let registrations = RetainedStoreDeviceRegistrationActivations::from_verified(
-                    root,
-                    value,
-                    &commit.registrations,
-                )
-                .map_err(DbError::from)?;
-                Ok(coven_protocol::store_commit::device_join_exchange::DeviceJoinBootstrapCommitClosure {
-                    reference: commit.reference,
-                    canonical_commit: value.to_bytes(),
-                    author,
-                    registrations,
-                    device_operations: commit.device_operations.to_retained(),
-                    activation_head: commit.activation.head,
-                    activation_object: commit.activation.object,
-                    history_evidence: commit.activation.history_evidence,
-                })
-            })
-            .collect::<Result<Vec<_>, DbError>>()?;
-        Ok(
-            coven_protocol::store_commit::device_join_exchange::DeviceJoinBootstrapClosure {
-                founder,
-                genesis: self.genesis,
-                membership: coven_protocol::membership::MembershipFloor(self.membership.head_refs),
-                commits,
-            },
-        )
-    }
-
-    pub fn from_closure(
-        root: &StoreRootRef,
-        closure: coven_protocol::store_commit::device_join_exchange::DeviceJoinBootstrapClosure,
-    ) -> Result<Self, DbError> {
-        if closure.founder.value().store_root != *root {
-            return Err(DbError::Message(
-                "device join bootstrap founder belongs to another Store root".to_string(),
-            ));
-        }
-        closure.membership.validate().map_err(|error| {
-            DbError::Message(format!("device join bootstrap membership: {error}"))
-        })?;
-        let founder_reference = closure.founder.reference().clone();
-        let founder = closure.founder.value().clone();
-        let founder_bytes = founder.to_bytes();
-        let commits = closure
-            .commits
-            .into_iter()
-            .map(|commit| {
-                let verified = VerifiedStoreBatchCommit::parse(
-                    &commit.canonical_commit,
-                    root.store_root_hash,
-                    &commit.reference,
-                    commit.author.value(),
-                )
-                .map_err(DbError::from)?;
-                if commit.author.reference() != &verified.value().author_registration {
-                    return Err(DbError::Message(
-                        "device join bootstrap author differs from its exact commit".to_string(),
-                    ));
-                }
-                let registrations = commit
-                    .registrations
-                    .verify_for(root, verified.value())
-                    .map_err(DbError::from)?;
-                let device_operations = commit
-                    .device_operations
-                    .verify_for(root, verified.value())
-                    .map_err(DbError::from)?;
-                Ok(DeviceJoinBootstrapCommit {
-                    reference: commit.reference,
-                    commit: verified,
-                    registrations,
-                    device_operations,
-                    activation: DeviceJoinBootstrapActivation {
-                        head: commit.activation_head,
-                        object: commit.activation_object,
-                        history_evidence: commit.history_evidence,
-                    },
-                })
-            })
-            .collect::<Result<Vec<_>, DbError>>()?;
-        Ok(Self {
-            founder_reference,
-            founder,
-            founder_bytes,
-            genesis: closure.genesis,
-            membership: InitialStoreMembershipAuthority {
-                head_refs: closure.membership.0,
-            },
-            commits,
-        })
-    }
-}
+#[path = "device_join_bootstrap.rs"]
+mod device_join_bootstrap;

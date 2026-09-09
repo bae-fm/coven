@@ -3,8 +3,9 @@
 //! clock-retaining service that mints and advances them.
 
 /// `protocol_state` key under which the clock's high-water mark is persisted, so it
-/// cannot regress across restarts (see [`Hlc::seed`]). Written whenever the
-/// clock advances (host stamp flushed at cycle end, and on apply-merge).
+/// cannot regress across restarts (see [`Hlc::seed`]). Accepted row and Circle
+/// metadata floors commit with their data; cycle-end flushes also retain locally
+/// minted timestamps. Every write raises the persisted floor monotonically.
 pub const HIGHWATER_STATE_KEY: &str = "hlc_highwater";
 
 /// How far ahead of the receiver's wall clock an incoming `_updated_at`'s
@@ -80,10 +81,10 @@ impl std::fmt::Display for Timestamp {
 
 /// Hybrid Logical Clock (HLC) for causal ordering of writes across devices.
 ///
-/// This clock is coven's `_updated_at` register: hosts stamp every synced
-/// row's `_updated_at` with `SqlContext::stamp`, and pull records every
-/// applied row's `_updated_at` as a floor so a subsequent local write sorts causally
-/// after anything just pulled. The row arbiter (`conflict.rs`) picks a conflict
+/// This clock orders synced-row `_updated_at` registers and Circle metadata.
+/// Hosts stamp rows with `SqlContext::stamp`; Circle commands use the same clock.
+/// Acceptance records admitted timestamps as a floor so a subsequent local edit
+/// sorts after the state it has observed. The row arbiter (`conflict.rs`) picks a conflict
 /// winner by comparing these strings, whose order is lexicographic. Because the
 /// clock never mints a
 /// stamp behind a value it has already seen — even under wall-clock skew or a
@@ -95,18 +96,17 @@ impl std::fmt::Display for Timestamp {
 ///
 /// The in-memory monotonic state is seeded on construction ([`Hlc::seed`]) so
 /// it cannot regress across restarts. The seed floor is the max of two sources:
-/// the persisted high-water mark ([`Hlc::high_water`], flushed at cycle end) and
-/// the max `_updated_at` coven scans across the synced tables in
-/// its open path. The on-disk row scan is the authoritative floor — the
-/// high-water flush lags any local row stamp minted between cycles, so seeding
-/// from it alone could let the first post-restart stamp sort below the device's
-/// own un-flushed rows.
-use std::sync::{Arc, Mutex};
+/// the persisted high-water mark ([`Hlc::high_water`]) and the max `_updated_at`
+/// scanned across synced tables at open. Circle metadata and incoming row floors
+/// persist atomically with acceptance. The row scan additionally covers local row
+/// timestamps minted since the last cycle-end flush.
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Hybrid Logical Clock.
 ///
 /// Thread-safe via interior `Mutex`. Create one per application lifetime,
 /// pass by reference to write methods.
+#[derive(Clone, Copy)]
 struct HlcState {
     millis: u64,
     counter: u16,
@@ -120,6 +120,39 @@ fn increment(state: &mut HlcState) {
         state.counter = 0;
     } else {
         state.counter = COUNTER_MAX;
+    }
+}
+
+impl HlcState {
+    fn seed(&mut self, floor: &Timestamp) {
+        if floor.millis > self.millis
+            || (floor.millis == self.millis && floor.counter > self.counter)
+        {
+            self.millis = floor.millis;
+            self.counter = floor.counter;
+        }
+    }
+
+    fn tick(&mut self, wall: u64) {
+        if wall > self.millis {
+            self.millis = wall;
+            self.counter = 0;
+        } else {
+            increment(self);
+        }
+    }
+
+    fn advance_past(&mut self, wall: u64, remote: &Timestamp) {
+        if wall > self.millis && wall > remote.millis {
+            self.millis = wall;
+            self.counter = 0;
+        } else {
+            self.seed(remote);
+        }
+    }
+
+    fn timestamp(&self, device_id: &str) -> Timestamp {
+        Timestamp::new(self.millis, self.counter, device_id.to_owned())
     }
 }
 
@@ -169,13 +202,7 @@ impl Hlc {
     /// re-seeding can only push the clock forward. The seeded `device_id` is
     /// irrelevant — only `millis`/`counter` gate future stamps.
     pub fn seed(&self, high_water: &Timestamp) {
-        let mut state = self.state.lock().unwrap();
-        if high_water.millis > state.millis
-            || (high_water.millis == state.millis && high_water.counter > state.counter)
-        {
-            state.millis = high_water.millis;
-            state.counter = high_water.counter;
-        }
+        self.state.lock().unwrap().seed(high_water);
     }
 
     /// The clock's current high-water mark: a [`Timestamp`] at the latest
@@ -184,7 +211,24 @@ impl Hlc {
     /// [`Hlc::seed`] on the next construction.
     pub fn high_water(&self) -> Timestamp {
         let state = self.state.lock().unwrap();
-        Timestamp::new(state.millis, state.counter, self.device_id.clone())
+        state.timestamp(&self.device_id)
+    }
+
+    /// Stage clock changes while retaining exclusive access to this clock.
+    ///
+    /// Keep the guard through the synchronous database transaction, persist its
+    /// high-water mark with the rows, and call [`HlcTransaction::commit`] only
+    /// after the database commits. Dropping the guard discards staged changes.
+    /// Other clock operations wait for the guard; code holding it must use the
+    /// guard's methods instead of locking this clock again.
+    pub fn transaction(&self) -> HlcTransaction<'_> {
+        let state = self.state.lock().unwrap();
+        let staged = *state;
+        HlcTransaction {
+            hlc: self,
+            state,
+            staged,
+        }
     }
 
     /// The receiver's current wall-clock millis, read from the same injected
@@ -203,18 +247,12 @@ impl Hlc {
         let wall = self.wall_millis();
         let mut state = self.state.lock().unwrap();
 
-        if wall > state.millis {
-            state.millis = wall;
-            state.counter = 0;
-        } else {
-            increment(&mut state);
-        }
-
-        Timestamp::new(state.millis, state.counter, self.device_id.clone())
+        state.tick(wall);
+        state.timestamp(&self.device_id)
     }
 
-    /// Record an applied row's `_updated_at` as the clock floor, so the next local
-    /// stamp sorts causally after it. `remote` is an authoritative register
+    /// Record an accepted row or metadata timestamp as the clock floor, so the
+    /// next local stamp sorts after it. `remote` is an authoritative register
     /// value the LWW layer already accepted and wrote to disk — never an
     /// untrusted peer wall clock — so recording it is **unconditional**: no skew
     /// cap. Capping here would let the next local edit mint a stamp below an
@@ -226,18 +264,42 @@ impl Hlc {
         let wall = self.wall_millis();
         let mut state = self.state.lock().unwrap();
 
-        if wall > state.millis && wall > remote.millis {
-            // Wall clock is ahead of both: adopt it, reset counter.
-            state.millis = wall;
-            state.counter = 0;
-        } else if remote.millis > state.millis {
-            // Remote is ahead of local: adopt remote's register floor.
-            state.millis = remote.millis;
-            state.counter = remote.counter;
-        } else if state.millis == remote.millis && remote.counter > state.counter {
-            // Same millis: keep the higher register floor.
-            state.counter = remote.counter;
-        }
+        state.advance_past(wall, remote);
+    }
+}
+
+/// Clock state staged beside a synchronous database transaction.
+///
+/// Timestamps returned here belong to that transaction and must not be exposed
+/// as committed values before [`Self::commit`]. The existing clock mutex stays
+/// locked until this guard is consumed or dropped, so concurrent stampers cannot
+/// mint from the uncommitted state.
+pub struct HlcTransaction<'clock> {
+    hlc: &'clock Hlc,
+    state: MutexGuard<'clock, HlcState>,
+    staged: HlcState,
+}
+
+impl HlcTransaction<'_> {
+    /// Mint a timestamp after the staged acceptance floor and prior stamps.
+    pub fn now(&mut self) -> Timestamp {
+        self.staged.tick(self.hlc.wall_millis());
+        self.high_water()
+    }
+
+    /// Stage an authoritative register floor using [`Hlc::advance_past`]'s rules.
+    pub fn advance_past(&mut self, remote: &Timestamp) {
+        self.staged.advance_past(self.hlc.wall_millis(), remote);
+    }
+
+    /// The staged floor to persist in the database transaction.
+    pub fn high_water(&self) -> Timestamp {
+        self.staged.timestamp(&self.hlc.device_id)
+    }
+
+    /// Publish staged clock state after the matching database transaction commits.
+    pub fn commit(mut self) {
+        *self.state = self.staged;
     }
 }
 
@@ -346,6 +408,83 @@ mod tests {
 
         assert!(t3 > t2);
         assert!(t2 > t1);
+    }
+
+    #[test]
+    fn transaction_rollback_discards_accepted_floor_and_stamps() {
+        let hlc = Hlc::new("dev-local".into(), fixed_clock(1000));
+        let before = hlc.now();
+        let remote = Timestamp::new(5000, COUNTER_MAX, "dev-remote".into());
+        {
+            let mut transaction = hlc.transaction();
+            transaction.advance_past(&remote);
+            let first = transaction.now();
+            let second = transaction.now();
+            assert!(first > remote);
+            assert!(second > first);
+            assert_eq!(transaction.high_water(), second);
+        }
+        assert_eq!(hlc.high_water(), before);
+        assert_eq!(hlc.now(), Timestamp::new(1000, 1, "dev-local".into()));
+    }
+
+    #[test]
+    fn transaction_commit_publishes_stamps_above_the_accepted_floor() {
+        let hlc = Hlc::new("dev-local".into(), fixed_clock(1000));
+        let remote = Timestamp::new(5000, COUNTER_MAX, "dev-remote".into());
+        let mut transaction = hlc.transaction();
+        transaction.advance_past(&remote);
+        let first = transaction.now();
+        let second = transaction.now();
+        assert_eq!(first, Timestamp::new(5001, 0, "dev-local".into()));
+        assert!(second > first);
+        transaction.advance_past(&remote);
+        let persisted = transaction.high_water();
+        assert_eq!(persisted, second);
+        transaction.commit();
+
+        assert_eq!(hlc.high_water(), persisted);
+        assert!(hlc.now() > persisted);
+    }
+
+    #[test]
+    fn transaction_serializes_external_stamping_on_commit_and_rollback() {
+        for commit in [true, false] {
+            let hlc = Arc::new(Hlc::new("dev-local".into(), fixed_clock(1000)));
+            let before = hlc.now();
+            let mut transaction = hlc.transaction();
+            transaction.advance_past(&Timestamp::new(5000, 3, "dev-remote".into()));
+            let staged = transaction.now();
+            let stamper = UpdatedAtStamper::new(hlc.clone());
+            let (ready, started) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                ready.send(()).expect("notify concurrent stamper started");
+                stamper.stamp()
+            });
+            started
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("concurrent stamper starts");
+            assert!(matches!(
+                hlc.state.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            if commit {
+                transaction.commit();
+            } else {
+                drop(transaction);
+            }
+            let external = Timestamp::parse(&worker.join().expect("concurrent stamp succeeds"))
+                .expect("stamper returns canonical timestamp");
+            if commit {
+                assert_eq!(external.millis, staged.millis);
+                assert_eq!(external.counter, staged.counter + 1);
+                assert!(external > staged);
+            } else {
+                assert_eq!(external.millis, before.millis);
+                assert_eq!(external.counter, before.counter + 1);
+                assert!(external < staged);
+            }
+        }
     }
 
     #[test]

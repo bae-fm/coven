@@ -34,7 +34,7 @@ impl StoreCreationDescriptor {
         &self,
         founder: &MembershipEntry,
     ) -> Result<(), StoreProtocolError> {
-        let MembershipChange::Founder {
+        let StoreAuthorityChange::Founder {
             creation_id,
             owner_pubkey,
             owner_grant_id,

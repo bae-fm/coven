@@ -222,8 +222,8 @@ pub(crate) fn suspend_leased_blob_cleanup_for_restoration_on(
             1 => taken.push(LocalBlobCleanupIntent::local(namespace, blob_id)),
             count => {
                 return Err(DbError::Message(format!(
-                "local cleanup restoration removed {count} obligations for {namespace}/{blob_id}"
-            )))
+                    "local cleanup restoration removed {count} obligations for {namespace}/{blob_id}"
+                )));
             }
         }
     }

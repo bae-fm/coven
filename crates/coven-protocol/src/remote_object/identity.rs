@@ -420,19 +420,6 @@ pub(super) fn validate_retained_authority_identity(
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
-        RetainedAuthorityObjectDomain::DeviceHead {
-            reference,
-            head_commit,
-        } => {
-            let head: crate::store_commit::StoreDeviceHead =
-                serde_json::from_slice(canonical_semantic_bytes)?;
-            if head.head_hash() != reference.head_hash
-                || reference.object != identity.object
-                || head.commit != *head_commit
-            {
-                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-            }
-        }
         RetainedAuthorityObjectDomain::Acknowledgement { reference } => {
             let acknowledgement: crate::store_commit::StoreAck =
                 serde_json::from_slice(canonical_semantic_bytes)?;
@@ -484,6 +471,34 @@ pub(super) fn validate_retained_authority_identity(
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
+        RetainedAuthorityObjectDomain::ProviderAccessGrant { reference } => {
+            let grant: crate::provider::StoreMemberProviderAccessGrant =
+                serde_json::from_slice(canonical_semantic_bytes)?;
+            reference
+                .verify(&grant)
+                .map_err(|_| RemoteObjectRecordError::StoredReferenceMismatch)?;
+            if reference.object != identity.object {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::DeviceJoinAbandonment { reference } => {
+            let abandonment: crate::store_commit::device_join_exchange::DeviceJoinAbandonmentObject =
+                serde_json::from_slice(canonical_semantic_bytes)?;
+            if reference.attempt_id != abandonment.attempt_id
+                || reference.abandonment_hash != abandonment.abandonment_hash()
+                || reference.object != identity.object
+            {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::DeviceRegistration { reference } => {
+            let registration: crate::store_commit::StoreDeviceRegistration =
+                serde_json::from_slice(canonical_semantic_bytes)?;
+            reference.verify_registration(&registration)?;
+            if reference.object != identity.object {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
         RetainedAuthorityObjectDomain::MergeMembershipEntry { reference } => {
             let entry: crate::membership::MembershipEntry =
                 serde_json::from_slice(canonical_semantic_bytes)?;
@@ -500,6 +515,44 @@ pub(super) fn validate_retained_authority_identity(
             {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
+        }
+        RetainedAuthorityObjectDomain::OwnerPromotionRequestPublication {
+            promotion_id,
+            activation,
+        } => {
+            let value: crate::store_commit::OwnerPromotionRequestPublication =
+                serde_json::from_slice(canonical_semantic_bytes)?;
+            value.require_version()?;
+            value.publication.validate_slot()?;
+            let expected = format!(
+                "{}.json",
+                crate::store_commit::owner_promotion_request_publication_semantic_prefix(
+                    *promotion_id
+                ),
+            );
+            if value.body() != activation
+                || value.to_bytes() != canonical_semantic_bytes
+                || identity.object.slot().logical_key() != expected
+            {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+            identity.object.verify(canonical_semantic_bytes)?;
+        }
+        RetainedAuthorityObjectDomain::MembershipHeadAcceptance { head, publication } => {
+            let value: crate::membership::MembershipHeadAcceptance =
+                serde_json::from_slice(canonical_semantic_bytes)?;
+            let expected = format!(
+                "{}.json",
+                crate::membership::membership_head_acceptance_semantic_prefix(&head.coord),
+            );
+            if value.head != *head
+                || value.publication()? != publication
+                || value.store_root_hash != publication.store_root_hash
+                || identity.object.slot().logical_key() != expected
+            {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+            identity.object.verify(canonical_semantic_bytes)?;
         }
         RetainedAuthorityObjectDomain::DeviceExclusionProposal { reference } => {
             let proposal: crate::store_commit::StoreDeviceExclusionProposal =

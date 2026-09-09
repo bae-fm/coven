@@ -6,6 +6,7 @@ pub(crate) struct StoreOperationSigningContext {
     pub(super) root: coven_protocol::store_commit::StoreRootRef,
     pub(super) coord: coven_protocol::store_commit::StoreCommitCoord,
     pub(super) order: coven_protocol::store_commit::StoreCommitOrder,
+    pub(super) publication_base: coven_protocol::store_commit::StorePublicationBase,
     pub(super) membership_state: coven_protocol::circle_control::StoreMembershipStateRef,
     pub(super) device_state: coven_protocol::store_commit::StoreDeviceStateRef,
     pub(super) membership_authority:
@@ -36,6 +37,19 @@ impl LocalStoreWriter {
             registration,
             device_signer,
         }
+    }
+
+    pub(crate) fn local_membership(
+        &self,
+        membership: &coven_protocol::membership::MembershipChain,
+    ) -> Result<
+        coven_protocol::membership::LocalStoreMembership,
+        coven_protocol::membership::MembershipError,
+    > {
+        coven_protocol::membership::LocalStoreMembership::from_membership(
+            membership,
+            Some(&self.identity),
+        )
     }
 
     pub(crate) fn author_pubkey(&self) -> String {
@@ -78,12 +92,6 @@ impl LocalStoreWriter {
         &self.registration.value().device_id
     }
 
-    pub(super) fn registration_ref(
-        &self,
-    ) -> &coven_protocol::store_commit::StoreDeviceRegistrationRef {
-        self.registration.reference()
-    }
-
     pub(crate) fn is_authored_by_registration(
         &self,
         registration: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
@@ -100,7 +108,7 @@ impl LocalStoreWriter {
             && self.registration.value().author_pubkey == author_pubkey
     }
 
-    pub(super) async fn authorize_retained_outbound(
+    pub(super) async fn authorize_retained_preparation(
         &self,
         history: &super::AuthorizedStoreHistory<'_>,
         order: &coven_protocol::store_commit::StoreCommitOrder,
@@ -110,7 +118,7 @@ impl LocalStoreWriter {
         super::pull::StorePullError,
     > {
         history
-            .authorize_retained_outbound(order, membership_heads, self.registration.reference())
+            .authorize_retained_preparation(order, membership_heads, self.registration.reference())
             .await
     }
 
@@ -139,6 +147,7 @@ impl LocalStoreWriter {
         coverage: &coven_protocol::store_commit::CommitFrontier,
         membership: &coven_protocol::membership::MembershipChain,
         state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
+        publication: &coven_protocol::store_commit::StoreCurrentPublicationRecord,
     ) -> Result<
         coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         super::pull::StorePullError,
@@ -150,6 +159,7 @@ impl LocalStoreWriter {
                 state,
                 self.registration.reference(),
                 self.registration.value(),
+                publication,
             )
             .await
     }
@@ -308,18 +318,6 @@ impl LocalStoreWriter {
         )
     }
 
-    pub(crate) fn announcement_activation_id(
-        &self,
-    ) -> Result<
-        coven_protocol::store_commit::StreamActivationId,
-        coven_protocol::store_commit::StoreProtocolError,
-    > {
-        self.registration
-            .value()
-            .store_announcement_activation(self.registration.reference())
-            .map(|activation| activation.activation_id())
-    }
-
     pub(crate) fn acknowledgement_activation_id(
         &self,
     ) -> Result<
@@ -330,22 +328,6 @@ impl LocalStoreWriter {
             .value()
             .store_acknowledgement_activation(self.registration.reference())
             .map(|activation| activation.activation_id())
-    }
-
-    pub(crate) fn snapshot_activation_id(
-        &self,
-    ) -> Result<
-        coven_protocol::store_commit::StreamActivationId,
-        coven_protocol::store_commit::StoreProtocolError,
-    > {
-        self.registration
-            .value()
-            .store_snapshot_activation(self.registration.reference())
-            .map(|activation| activation.activation_id())
-    }
-
-    pub(crate) fn first_snapshot_slot(&self) -> coven_protocol::objects::ObjectSlot {
-        self.registration.value().snapshots.first_slot().clone()
     }
 
     pub(crate) fn first_acknowledgement_slot(&self) -> coven_protocol::objects::ObjectSlot {

@@ -3,10 +3,6 @@ use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord};
 use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::write::{AffectedRow, WriteId, WriteResolution, WriteStatus};
 
-use super::candidate_records::{
-    load_merge_candidate_head_cleanup_on, parse_prepared_merge_candidate_on,
-    MergeCandidateHeadCleanup,
-};
 use super::payload_store::PayloadStoreError;
 use super::publication_state::PreparedStoreWriteState;
 use super::{StoreRecords, StoreTransaction};
@@ -18,6 +14,7 @@ use crate::{
 struct UnpublishedWriteCleanup {
     removable: Vec<ObjectHash>,
     candidate: Option<coven_protocol::store_commit::StoreBatchCommitRef>,
+    active_publication: Option<crate::ActiveStorePublication>,
 }
 
 impl<'store, 'connection> StoreTransaction<'store, 'connection> {
@@ -29,6 +26,104 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             transaction,
             store_dir,
         }
+    }
+
+    pub(super) fn require_accepted_membership(
+        self,
+        authority: &mut super::VerifiedStoreAuthority,
+        membership: &coven_protocol::membership::MembershipChain,
+        publication: &coven_protocol::store_commit::StorePublicationRef,
+    ) -> Result<coven_protocol::store_commit::CommitFrontier, DbError> {
+        use coven_protocol::membership::MembershipFloor;
+        use coven_protocol::store_commit::CommitFrontier;
+        use std::collections::BTreeSet;
+        let records = StoreRecords::new(self.transaction, self.store_dir);
+        let root = authority.required_root_authority_on(records)?;
+        let boundary =
+            super::observed_store_publication::load_store_current_publication_on(self.transaction)?;
+        let coverage = CommitFrontier::from_refs(records.materialized_frontier()?)?;
+        if boundary.record().accepted() != Some(publication) {
+            return Err(DbError::StorePublicationChanged);
+        }
+        if records.store_publication_entries()?.iter().any(|entry| {
+            matches!(&entry.value.payload,
+                coven_protocol::store_commit::StorePublicationPayload::Commit(commit)
+                    if !coverage.covers_commit(commit))
+        }) {
+            return Err(DbError::Message(
+                "accepted membership verification cannot pass an accepted held publication".into(),
+            ));
+        }
+        let baseline = authority.retained_replay_baseline_on(records)?.clone();
+        let inputs = authority.retained_replay_inputs_on(records, &root)?;
+        let mut heads = Vec::new();
+        let mut resolutions = BTreeSet::new();
+        let mut entries = BTreeSet::new();
+        let mut proofs = Vec::new();
+        if let crate::RetainedReplayAuthority::InstalledSnapshot(snapshot) = &baseline.authority {
+            heads.extend(snapshot.metadata.state.membership.heads.iter().cloned());
+            resolutions.extend(
+                snapshot
+                    .metadata
+                    .state
+                    .membership
+                    .resolutions
+                    .iter()
+                    .cloned(),
+            );
+            proofs.extend(snapshot.metadata.history_summary.membership_proofs.values());
+        }
+        for input in &inputs {
+            if baseline.exact_cut.covers_commit(input.commit_ref()) {
+                continue;
+            }
+            if !coverage.covers_commit(input.commit_ref()) {
+                return Err(DbError::Message(
+                    "accepted membership verification membership input is outside its accepted coverage".into(),
+                ));
+            }
+            heads.extend(input.commit().membership_state.heads.iter().cloned());
+            resolutions.extend(input.commit().membership_state.resolutions.iter().cloned());
+            if let Some(proof) = &input.history_evidence().membership_proof {
+                proofs.push(proof.as_ref());
+            }
+        }
+        for proof in proofs {
+            entries.insert(proof.entry.coord.clone());
+            heads.push(proof.head.clone());
+            if let Some(predecessor) = proof.head_value.body.predecessor_head() {
+                // In particular, the first accepted successor authenticates
+                // the creation-owned Founder entry without a receipt of its own.
+                entries.insert(predecessor.coord.clone());
+            }
+            resolutions.extend(proof.head_value.body.resolutions.iter().cloned());
+            resolutions.extend(proof.resolution.iter().cloned());
+        }
+        entries.extend(heads.iter().map(|head| head.coord.clone()));
+        let heads = MembershipFloor::from_heads(heads).map_err(|error| {
+            DbError::Message(format!(
+                "accepted membership verification membership heads: {error}"
+            ))
+        })?;
+        let actual_entries = membership
+            .entries()
+            .iter()
+            .map(|entry| entry.coord())
+            .collect::<BTreeSet<_>>();
+        if actual_entries != entries
+            || membership.head_refs() != heads.0.as_slice()
+            || membership
+                .resolution_refs()
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != resolutions
+        {
+            return Err(DbError::Message(
+                "accepted membership verification membership differs from accepted history".into(),
+            ));
+        }
+        Ok(coverage)
     }
 
     pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadStoreError> {
@@ -74,160 +169,6 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         )
     }
 
-    pub(super) fn prepared_merge_candidate(
-        self,
-        authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
-        prepared: &super::publication_state::PreparedStoreWriteState,
-    ) -> Result<super::candidate_records::PreparedMergeCandidate, DbError> {
-        super::candidate_records::parse_prepared_merge_candidate_on(
-            StoreRecords::new(self.transaction, self.store_dir),
-            authority,
-            prepared,
-        )
-    }
-
-    pub(super) fn prepared_merge_candidate_parts(
-        self,
-        authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
-        commit_bytes: &[u8],
-        commit_object: &coven_protocol::objects::ExactObjectRef,
-        head_bytes: &[u8],
-        head_object: &coven_protocol::objects::ExactObjectRef,
-    ) -> Result<super::candidate_records::PreparedMergeCandidate, DbError> {
-        super::candidate_records::parse_prepared_merge_candidate_parts_on(
-            StoreRecords::new(self.transaction, self.store_dir),
-            authority,
-            commit_bytes,
-            commit_object,
-            head_bytes,
-            head_object,
-        )
-    }
-
-    pub(super) fn prepared_merge_publication(
-        self,
-        authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
-        prepared: &super::publication_state::PreparedStoreWriteState,
-    ) -> Result<super::candidate_records::PreparedMergeCandidate, DbError> {
-        super::candidate_records::parse_prepared_merge_publication_on(
-            StoreRecords::new(self.transaction, self.store_dir),
-            authority,
-            prepared,
-        )
-    }
-
-    pub(super) fn author_exclusion_activation_for_candidate(
-        self,
-        retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
-        author: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-    ) -> Result<Option<crate::AuthorExclusionActivationLocator>, DbError> {
-        super::candidate_records::author_exclusion_activation_for_candidate_on(
-            StoreRecords::new(self.transaction, self.store_dir),
-            retained,
-            root,
-            candidate,
-            author,
-        )
-    }
-
-    pub(super) fn load_author_exclusion_activation_locator(
-        self,
-        retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
-    ) -> Result<crate::AuthorExclusionActivationLocator, DbError> {
-        super::candidate_records::load_author_exclusion_activation_locator_on(
-            StoreRecords::new(self.transaction, self.store_dir),
-            retained,
-            root,
-            exclusion,
-        )
-    }
-
-    pub(super) fn validate_terminal_nonactivation_authority(
-        self,
-        retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        durable: &coven_protocol::remote_object::CandidateNonactivation,
-    ) -> Result<(), DbError> {
-        super::candidate_records::validate_terminal_nonactivation_authority_on(
-            StoreRecords::new(self.transaction, self.store_dir),
-            retained,
-            root,
-            durable,
-        )
-    }
-
-    pub(super) fn validate_terminal_candidate_authority(
-        self,
-        retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        candidate: &super::candidate_records::PreparedMergeCandidate,
-        durable: &coven_protocol::remote_object::CandidateNonactivation,
-    ) -> Result<(), DbError> {
-        super::candidate_records::validate_terminal_candidate_authority_on(
-            StoreRecords::new(self.transaction, self.store_dir),
-            retained,
-            root,
-            candidate,
-            durable,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn begin_blocked_merge_candidate_nonactivation(
-        self,
-        retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        write_id: &WriteId,
-        candidate: &super::candidate_records::PreparedMergeCandidate,
-        nonactivation: &super::candidate_records::BlockedMergeCandidateNonactivation,
-        include_indexed_blobs: bool,
-        extra_objects: &[coven_protocol::objects::ExactObjectRef],
-    ) -> Result<(), DbError> {
-        if let super::candidate_records::BlockedMergeCandidateNonactivation::Terminal {
-            durable,
-            ..
-        } = nonactivation
-        {
-            super::candidate_records::validate_terminal_candidate_authority_on(
-                StoreRecords::new(self.transaction, self.store_dir),
-                retained,
-                root,
-                candidate,
-                durable,
-            )?;
-        }
-        match nonactivation {
-            super::candidate_records::BlockedMergeCandidateNonactivation::Merge(durable) => {
-                super::candidate_records::begin_merge_candidate_nonactivation_on(
-                    self.transaction,
-                    write_id,
-                    candidate,
-                    durable,
-                    include_indexed_blobs,
-                    extra_objects,
-                )
-            }
-            super::candidate_records::BlockedMergeCandidateNonactivation::Terminal {
-                durable,
-                head_nonactivation,
-            } => {
-                super::candidate_records::begin_merge_candidate_nonactivation_with_verified_head_on(
-                    self.transaction,
-                    write_id,
-                    candidate,
-                    durable,
-                    include_indexed_blobs,
-                    extra_objects,
-                    head_nonactivation,
-                )
-            }
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn advance_owner_promotion_journal(
         self,
@@ -245,6 +186,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             previous_value,
             next_value,
             remote_objects,
+            None,
         )
     }
 
@@ -329,7 +271,41 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             ],
         )
         .map_err(DbError::from)?;
-        let mut payloads = std::collections::BTreeSet::from([changeset_hash]);
+        let payloads = self.replace_store_write_partitions(
+            write_id,
+            partitions,
+            std::collections::BTreeSet::from([changeset_hash]),
+        )?;
+        crate::payload_store::set_payload_owner_claims_on(
+            tx,
+            &crate::payload_store::store_write_owner_key(write_id),
+            &payloads,
+        )?;
+        for fact in &blob_facts.blobs {
+            if fact.blob.provenance != coven_protocol::blob::Provenance::HostProvided {
+                continue;
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO store_write_blob_leases
+                 (write_id, namespace, blob_id) VALUES (?1, ?2, ?3)",
+                (write_id.as_str(), &fact.blob.namespace, &fact.blob.id),
+            )
+            .map_err(DbError::from)?;
+        }
+        Ok(status)
+    }
+
+    pub(super) fn replace_store_write_partitions(
+        self,
+        write_id: &WriteId,
+        partitions: &[AudiencePartition],
+        mut payloads: std::collections::BTreeSet<ObjectHash>,
+    ) -> Result<std::collections::BTreeSet<ObjectHash>, DbError> {
+        let tx = self.transaction;
+        tx.execute(
+            "DELETE FROM store_write_partitions WHERE write_id = ?1",
+            [write_id.as_str()],
+        )?;
         for partition in partitions {
             let audience = match partition.audience {
                 coven_protocol::circle::Audience::Store => "store".to_string(),
@@ -355,23 +331,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             )
             .map_err(DbError::from)?;
         }
-        crate::payload_store::set_payload_owner_claims_on(
-            tx,
-            &crate::payload_store::store_write_owner_key(write_id),
-            &payloads,
-        )?;
-        for fact in &blob_facts.blobs {
-            if fact.blob.provenance != coven_protocol::blob::Provenance::HostProvided {
-                continue;
-            }
-            tx.execute(
-                "INSERT OR IGNORE INTO store_write_blob_leases
-                 (write_id, namespace, blob_id) VALUES (?1, ?2, ?3)",
-                (write_id.as_str(), &fact.blob.namespace, &fact.blob.id),
-            )
-            .map_err(DbError::from)?;
-        }
-        Ok(status)
+        Ok(payloads)
     }
 
     fn unpublished_write_cleanup(
@@ -389,27 +349,44 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             .map_err(DbError::from)?;
         let mut removable = Vec::new();
         let mut candidate = None;
+        let mut active_publication =
+            super::active_store_publication::load_active_store_publication_on(tx)?.filter(
+                |active| {
+                    active.owner()
+                        == &crate::ActiveStorePublicationOwner::StoreWrite(write_id.clone())
+                },
+            );
         if let Some(raw_prepared) = raw_prepared.as_deref() {
             let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
                 .map_err(|error| DbError::context("resolved prepared write", error))?;
-            let merge = parse_prepared_merge_candidate_on(
+            let merge = authority.verified_prepared_store_commit_on(
                 StoreRecords::new(self.transaction, self.store_dir),
-                authority,
                 &prepared,
             )?;
-            removable.push(remote_object_id(&merge.reference.object));
-            match load_merge_candidate_head_cleanup_on(tx, &merge.head_object, &merge.reference)? {
-                MergeCandidateHeadCleanup::Remote { .. } => {
-                    removable.push(remote_object_id(&merge.head_object))
-                }
-                MergeCandidateHeadCleanup::ProtocolInert => {}
+            let reference = merge.reference().clone();
+            removable.push(remote_object_id(&reference.object));
+            let active = super::active_store_publication::load_active_store_publication_on(tx)?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "prepared write {write_id} has no active Store publication"
+                    ))
+                })?;
+            if active.owner() != &crate::ActiveStorePublicationOwner::StoreWrite(write_id.clone())
+                || active.commit_reservation()
+                    != Some((write_id, &merge.author_registration, &reference.coord))
+            {
+                return Err(DbError::Message(format!(
+                    "prepared write {write_id} differs from active Store publication {:?}",
+                    active.owner()
+                )));
             }
             removable.extend(
-                candidate_graph_exact_objects(&merge.commit)?
+                candidate_graph_exact_objects(merge.value())?
                     .iter()
                     .map(remote_object_id),
             );
-            candidate = Some(merge.reference);
+            candidate = Some(reference);
+            active_publication = Some(active);
         }
         let mut statement = tx
             .prepare("SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1")
@@ -430,6 +407,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         Ok(UnpublishedWriteCleanup {
             removable,
             candidate,
+            active_publication,
         })
     }
 
@@ -437,6 +415,13 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         self,
         cleanup: &UnpublishedWriteCleanup,
     ) -> Result<bool, DbError> {
+        if cleanup.active_publication.as_ref().is_some_and(|active| {
+            active.is_awaiting_preparation()
+                || !active.retired_candidates().is_empty()
+                || active.superseded_entry().is_some()
+        }) {
+            return Ok(false);
+        }
         let Some(candidate) = &cleanup.candidate else {
             return Ok(true);
         };
@@ -509,12 +494,6 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
                                 coven_protocol::remote_object::CandidateObjectState::AbsentVerified { .. },
                             ..
                         }
-                    ) | RemoteObjectRecord::RetainedAuthority(
-                        coven_protocol::remote_object::RetainedAuthorityRecord {
-                            state:
-                                coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. },
-                            ..
-                        }
                     )
                 );
                 if absent {
@@ -526,6 +505,9 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
                 [write_id.as_str()],
             )
             .map_err(DbError::from)?;
+            if let Some(active) = cleanup.active_publication.as_ref() {
+                super::active_store_publication::clear_active_store_publication_on(tx, active)?;
+            }
             Database::set_write_status_on(tx, write_id, &status)?;
         }
         Ok(())

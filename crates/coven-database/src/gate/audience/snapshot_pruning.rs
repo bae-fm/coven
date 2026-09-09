@@ -12,6 +12,15 @@ pub(crate) fn retain_snapshot_audience_rows(
         ));
     };
     let retained = circle_snapshot_retained_rows(conn, gates, *circle_id)?;
+    retain_projection_rows(conn, gates, &retained)
+}
+
+/// Keep an already resolved row set and its exact private routing rows.
+pub(crate) fn retain_projection_rows(
+    conn: &Connection,
+    gates: &Gates,
+    retained: &BTreeSet<(String, String)>,
+) -> Result<(), GateError> {
     let mut tables = gates.sorted_synced_table_names();
     conn.execute_batch(
         "CREATE TEMP TABLE snapshot_retained_rows (
@@ -21,7 +30,7 @@ pub(crate) fn retain_snapshot_audience_rows(
          ) STRICT;",
     )
     .map_err(|error| GateError::Sql("create snapshot retained rows".to_string(), error))?;
-    for (table, row_id) in &retained {
+    for (table, row_id) in retained {
         conn.execute(
             "INSERT INTO snapshot_retained_rows (table_name, row_id) VALUES (?1, ?2)",
             (table, row_id),
@@ -43,10 +52,11 @@ pub(crate) fn retain_snapshot_audience_rows(
             ),
             [&table],
         )
-        .map_err(|error| GateError::Sql(format!("scope {table} to Circle snapshot rows"), error))?;
+        .map_err(|error| GateError::Sql(format!("retain projected rows in {table}"), error))?;
     }
-    conn.execute_batch(
-        "DELETE FROM _coven_row_routes
+    if gates.has_scoped_graph() {
+        conn.execute_batch(
+            "DELETE FROM _coven_row_routes
          WHERE NOT EXISTS (
              SELECT 1 FROM snapshot_retained_rows AS retained
              WHERE retained.table_name = _coven_row_routes.table_name
@@ -56,10 +66,12 @@ pub(crate) fn retain_snapshot_audience_rows(
          WHERE NOT EXISTS (
              SELECT 1 FROM _coven_row_routes AS route
              WHERE route.routing_id = _coven_audience.routing_id
-         );
-         DROP TABLE snapshot_retained_rows;",
-    )
-    .map_err(|error| GateError::Sql("scope Circle snapshot routing".to_string(), error))?;
+         );",
+        )
+        .map_err(|error| GateError::Sql("retain projected routing rows".to_string(), error))?;
+    }
+    conn.execute_batch("DROP TABLE snapshot_retained_rows;")
+        .map_err(|error| GateError::Sql("drop snapshot retained rows".to_string(), error))?;
     Ok(())
 }
 

@@ -4,7 +4,7 @@ use crate::sync::store::StoreRegistrationError;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::store_commit::VerifiedStoreBatchCommit;
 use coven_protocol::store_commit::{
-    ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckExclusionState, StoreAckRef,
+    ack_slot_prefix, DeviceStreamAnchor, SnapshotMeta, StoreAck, StoreAckRef, StoreSnapshotRef,
     SuccessorLink,
 };
 
@@ -88,12 +88,47 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         // for this plan, so the history it already holds is that image's
         // coverage. Reading it here is what stops the closure at the snapshot
         // rather than at genesis.
-        let installed = self.database.snapshot_coverage_frontier().await?;
+        let installed = self.database.installed_replay_baseline().await?;
+        let snapshot = installed.snapshot().cloned().ok_or_else(|| {
+            StorePullError::InvalidState(
+                "device join bootstrap has no installed Store snapshot".to_string(),
+            )
+        })?;
+        if let Some(closure) = self
+            .history
+            .retained_device_join_bootstrap(attempt_activation)
+        {
+            let opening = closure.verified_commit(attempt_activation)?;
+            if !opening.device_join_attempt_decisions().contains(
+                &coven_protocol::store_commit::DeviceJoinAttemptDecisionRef::Attempt(attempt_id),
+            ) || closure
+                .publication
+                .current
+                .latest_snapshot()
+                .map(|base| &base.snapshot)
+                != Some(&snapshot.reference)
+            {
+                return Err(StorePullError::InvalidState(
+                    "retained Attempt differs from the installed bootstrap image".into(),
+                ));
+            }
+            let cut = opening.order.predecessor_cut()?;
+            let plan = DeviceJoinBootstrapPlan::from_closure(
+                self.root().reference(),
+                snapshot.meta.publication_predecessor.clone(),
+                closure,
+            )?;
+            return Ok((cut, plan));
+        }
+        let publication = self
+            .accepted_publication_interval(&snapshot.reference, &snapshot.meta)
+            .await?;
         self.history
             .verify_attempt_and_prepare_device_join_bootstrap(
                 attempt_id,
                 attempt_activation,
-                &installed,
+                installed.coverage(),
+                publication,
             )
             .await
     }
@@ -101,8 +136,47 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
     pub(crate) async fn prepare_same_principal_installation(
         &mut self,
         attempt_activation: &StoreBatchCommitRef,
+        accepted_current: coven_protocol::store_commit::StoreCurrentPublicationRecord,
     ) -> Result<SamePrincipalStoreInstallation, DeviceJoinError> {
         let root = self.root().reference().clone();
+        let installed = self.database.installed_replay_baseline().await?;
+        if installed.coverage().covers_commit(attempt_activation) {
+            let snapshot = installed.snapshot().ok_or_else(|| {
+                DeviceJoinError::Store("covered Join has no accepted snapshot".into())
+            })?;
+            let bootstrap = snapshot
+                .meta
+                .history_summary
+                .pending_device_joins
+                .get(attempt_activation)
+                .filter(|closure| closure.publication.current == accepted_current)
+                .cloned()
+                .ok_or_else(|| {
+                    DeviceJoinError::Store("covered Join has no exact retained handoff".into())
+                })?;
+            let base = bootstrap
+                .publication
+                .current
+                .latest_snapshot()
+                .ok_or_else(|| {
+                    DeviceJoinError::Store("retained Join has no snapshot boundary".into())
+                })?;
+            let snapshot = self.history.verify_retained_join_snapshot(base).await?;
+            // The authenticated retained closure and its selected image must start
+            // from the same exact publication predecessor.
+            DeviceJoinBootstrapPlan::from_closure(
+                &root,
+                snapshot.snapshot.meta.publication_predecessor.clone(),
+                bootstrap.clone(),
+            )?;
+            return Ok(SamePrincipalStoreInstallation {
+                store_root: self.root().protocol().clone(),
+                authority: snapshot.verified.into_authority(),
+                bootstrap,
+            });
+        }
+        self.retain_same_principal_join_activation(attempt_activation)
+            .await?;
         // The activation commit is the attempt: its predecessor cut is the
         // history the joining device installs from, and its membership state is
         // the authority that cut is read under.
@@ -113,46 +187,41 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             "Same-provider join installation plan",
             self.storage.provider_requests(),
         );
-        let snapshots = self.database.local_store_snapshots().await?;
-        if snapshots.is_empty() {
-            return Err(DeviceJoinError::Store(
-                "same-provider device join requires a published Store snapshot".to_string(),
-            ));
-        }
-        // The joining device installs this image and then materializes the
-        // bootstrap plan on top of it, so the plan's cut has to reach at least
-        // as far as the image does. A snapshot published past the attempt's cut
-        // would hand the joiner rows its plan then disagrees with, which the
-        // installation refuses — so it is never offered in the first place.
-        let bootstrap_frontier = bootstrap_cut.frontier();
-        let candidates = snapshots
-            .into_iter()
-            .filter(|snapshot| bootstrap_frontier.covers(&snapshot.meta.coverage))
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return Err(DeviceJoinError::Store(
-                "same-provider device join has no published Store snapshot within its bootstrap cut"
-                    .to_string(),
-            ));
-        }
+        let base = accepted_current.latest_snapshot().ok_or_else(|| {
+            DeviceJoinError::Store(
+                "same-provider device join has no accepted snapshot boundary".into(),
+            )
+        })?;
         let selected = timings
             .stage(
-                "select the snapshot",
-                self.history
-                    .select_maximal_installable_store_snapshot(candidates),
+                "verify the accepted snapshot",
+                self.history.verify_retained_join_snapshot(base),
             )
             .await
-            .map_err(|error| StorePullError::context("verify same-provider join snapshot", error))?
-            .ok_or_else(|| {
-                DeviceJoinError::Store(
-                    "same-provider device join has no installable Store snapshot".to_string(),
-                )
+            .map_err(|error| {
+                StorePullError::context("verify same-provider join snapshot", error)
             })?;
+        if !bootstrap_cut
+            .frontier()
+            .covers(&selected.snapshot.meta.coverage)
+        {
+            return Err(DeviceJoinError::Store(
+                "accepted Join snapshot is outside its bootstrap cut".into(),
+            ));
+        }
         let snapshot = selected.snapshot;
         let authority = selected.verified;
+        let publication = self
+            .history
+            .retained_store_publication_prefix(
+                &self.database,
+                snapshot.meta.publication_predecessor.clone(),
+                accepted_current,
+            )
+            .await?;
         // The joining device installs this snapshot's image before it applies
         // the plan, so the plan starts where that image ends. The candidate
-        // filter above already established the bootstrap cut reaches past the
+        // check above already established the bootstrap cut reaches past the
         // snapshot's coverage, so the trimmed closure still lands on the cut
         // the attempt's activation commit names.
         let plan = timings
@@ -163,6 +232,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
                     attempt_activation,
                     &membership_state,
                     &snapshot.meta.coverage,
+                    publication,
                 ),
             )
             .await
@@ -173,11 +243,40 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         timings.report();
         Ok(SamePrincipalStoreInstallation {
             store_root: self.root().protocol().clone(),
-            snapshot: snapshot.reference,
-            metadata: snapshot.meta,
             authority: authority.into_authority(),
             bootstrap,
         })
+    }
+
+    async fn accepted_publication_interval(
+        &mut self,
+        snapshot: &StoreSnapshotRef,
+        metadata: &SnapshotMeta,
+    ) -> Result<coven_database::AcceptedStorePublicationInterval, StorePullError> {
+        let publication = self
+            .history
+            .load_current_store_publication_interval(metadata.publication_predecessor.clone())
+            .await?;
+        let includes_snapshot = publication.interval.entries().iter().any(|entry| {
+            entry.author().reference() == &metadata.author_registration
+                && matches!(
+                    &entry.entry().payload,
+                    coven_protocol::store_commit::StorePublicationPayload::Snapshot(reference)
+                        if reference == snapshot
+                )
+        });
+        if !includes_snapshot {
+            return Err(StorePullError::InvalidState(
+                "device join bootstrap snapshot is absent from its accepted publication interval"
+                    .to_string(),
+            ));
+        }
+        Ok(
+            coven_database::AcceptedStorePublicationInterval::from_verified(
+                publication.interval,
+                publication.version,
+            ),
+        )
     }
 
     pub(crate) async fn retain_same_principal_join_activation(
@@ -434,10 +533,6 @@ pub(crate) async fn bootstrap_pending_device_on(
                 registration: registration_ref.clone(),
                 store_cut: bootstrap_cut.clone(),
                 device_state,
-                snapshot: None,
-                exclusions: StoreAckExclusionState {
-                    proposal_freezes: Vec::new(),
-                },
             },
             published_at.to_string(),
             SuccessorLink {

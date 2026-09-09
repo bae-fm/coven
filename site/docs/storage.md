@@ -1,19 +1,27 @@
 # Storage
 
 coven syncs over a [`CloudHome`](rustdoc:trait:coven::CloudHome):
-a trait that moves opaque encrypted bytes between a device and storage the user
+a trait that moves object bytes between a device and storage the user
 already controls. coven owns encryption, the key layout, ordering, and retry.
-A `CloudHome` never sees plaintext and never assigns protocol sequence numbers
-or coordinates a global transaction order.
+A provider handles bytes without interpreting application rows or assigning
+protocol sequence numbers. Coven signs the publication order; the provider
+enforces conditional replacement of its current record.
 
-The provider boundary has two parts: `CloudHome` supplies flat-key byte
+The provider boundary combines two traits: `CloudHome` supplies flat-key byte
 operations, while
-[`ExactSlotStorage`](rustdoc:trait:coven::ExactSlotStorage),
-which every sync home must also supply, allocates a provider-specific location
-before publication and creates it once. A repeated create of the same exact
+[`ExactSlotStorage`](rustdoc:trait:coven::ExactSlotStorage)
+allocates a provider-specific location before publication and creates it once.
+[`ExactCloudHome`](rustdoc:trait:coven::ExactCloudHome) requires both traits on
+the same provider. A repeated create of the same exact
 object reports `AlreadyPresent`; different bytes report `SlotCollision` and
-never replace the first object. This is collision safety for immutable objects,
-not a mutable global head.
+never replace the first object.
+
+`ExactSlotStorage` also reads a mutable record with its provider revision and
+replaces it only if that revision still matches. Store publication uses this
+operation on one root-bound current record. Immutable candidates carry the
+content; the successful conditional replacement accepts a publication. A
+changed revision reports `VersionChanged`, so the publisher verifies the
+competing accepted history before retrying.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
@@ -27,15 +35,15 @@ not a mutable global head.
 <text class="sub" x="330" y="110" text-anchor="middle">seals and opens · maps concepts to flat keys</text>
 <line class="arr" x1="330" y1="122" x2="330" y2="136" marker-end="url(#fa)"/>
 <rect class="chipo" x="80" y="140" width="500" height="40" rx="9"/>
-<text class="lbl s11" x="330" y="158" text-anchor="middle">CloudHome</text>
-<text class="sub" x="330" y="172" text-anchor="middle">bytes by key · create-once exact slots · provider access</text>
+<text class="lbl s11" x="330" y="158" text-anchor="middle">ExactCloudHome</text>
+<text class="sub" x="330" y="172" text-anchor="middle">bytes · immutable slots · conditional record replacement · access</text>
 <line class="arr" x1="330" y1="184" x2="330" y2="196" marker-end="url(#fa)"/>
-<text class="sub" x="330" y="208" text-anchor="middle">Google Drive · Dropbox · OneDrive · iCloud · S3</text>
+<text class="sub" x="330" y="208" text-anchor="middle">S3 · Dropbox · OneDrive · CloudKit</text>
 </svg>
 
-Examples use the todos app. Its encrypted changesets, snapshots, attachment
+Examples use the todos app. Its changesets, snapshots, attachment
 blobs, and membership records all land in one cloud home under keys like
-`store-v1/candidates/<family>/commits/<device>/42/<hash>.json.enc`.
+`store-v1/candidates/<family>/commits/<device>/42/<hash>.json`.
 
 ## What the host configures
 
@@ -57,12 +65,11 @@ keyring").
 Encryption, protocol ordering, verification, and retry live above the provider
 implementations. A backend supplies bytes by key plus the provider-shaped
 operations no wrapper can manufacture: multipart uploads, create-once exact
-slots, and account access.
+slots, conditional replacement, and account access. These excerpts show the
+publication boundary; the linked trait definitions include the complete API.
 
 ```rust
 pub trait CloudHome: Send + Sync {
-    fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>>;
-
     async fn probe(&self) -> Result<(), CloudHomeError> { /* default: no-op list */ }
 
     // Uploads: one bounded request, or a streaming multipart session.
@@ -72,7 +79,7 @@ pub trait CloudHome: Send + Sync {
     fn multipart_threshold(&self) -> u64;
 
     // Provided: picks put_object vs multipart and pumps the parts.
-    async fn write(&self, key: &str, body: BlobBody, progress: &UploadProgress<'_>)
+    async fn write(&self, key: &str, body: BlobBody, progress: &UploadProgress)
         -> Result<(), CloudHomeError> { /* central driver */ }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError>;
@@ -92,20 +99,37 @@ pub trait ExactSlotStorage: Send + Sync {
         -> Result<CrossPrincipalProviderEvidence, CloudHomeError>;
     async fn allocate_slot(&self, logical_key: &str)
         -> Result<ObjectSlot, CloudHomeError>;
-    async fn create_at(&self, upload: &ExactUpload<'_>, progress: &UploadProgress<'_>)
+    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError>;
+    async fn create_at(&self, upload: &ExactUpload<'_>, control: &UploadControl)
         -> Result<ExactCreateOutcome, CloudHomeError>;
+    async fn create_versioned_at(&self, upload: &ExactUpload<'_>, control: &UploadControl)
+        -> Result<ExactCreateOutcome, CloudHomeError>;
+    async fn read_versioned_at(&self, slot: &ObjectSlot)
+        -> Result<CloudVersionedObject, CloudHomeError>;
+    async fn replace_at_if_version(
+        &self, slot: &ObjectSlot, expected: &CloudObjectVersion, bytes: Vec<u8>,
+    ) -> Result<ConditionalWriteOutcome, CloudHomeError>;
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError>;
     async fn read_range_at(&self, slot: &ObjectSlot, start: u64, end: u64)
         -> Result<Vec<u8>, CloudHomeError>;
-    async fn read_at_to_file(&self, slot: &ObjectSlot, destination: &Path)
+    async fn read_at_to_file(
+        &self, slot: &ObjectSlot, destination: &Path, progress: DownloadProgress,
+    )
         -> Result<(), CloudFileReadError>;
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError>;
 }
+
+pub trait ExactCloudHome: CloudHome + ExactSlotStorage {}
 ```
 
-- `exact_slot_storage` supplies the create-once object operations required by
-  Store commits, heads, membership, snapshots, blobs, and other immutable
-  objects. Sync setup refuses a home that returns `None`.
+- `ExactCloudHome` supplies raw operations and exact storage through one
+  provider value. There is no optional second provider object to obtain after
+  opening the home.
+- `create_at` preserves immutable object identity. `read_versioned_at` returns
+  bytes and the revision that `replace_at_if_version` must present for that
+  exact slot. A revision mismatch is a competing writer; an unavailable or
+  ambiguous result remains an error. The current record is not deleted during
+  Store publication.
 - `probe` checks that the backend is reachable with the configured credentials.
   Setup flows call it before persisting credentials, so a typo or a missing
   bucket fails at setup instead of via a delayed reconnect banner. The default
@@ -173,6 +197,8 @@ host can't translate it either; it doesn't know S3 from Dropbox. So every
 failure crosses this boundary as a sentence a UI can show verbatim.
 
 ```rust
+// Selected error variants; the enum also preserves typed backend,
+// local-filesystem, blob-source, and protocol failures.
 pub enum CloudHomeError {
     NotFound(String),
     AlreadyExists(String),
@@ -231,11 +257,13 @@ provider transport typed through this boundary.
 
 ## Providers
 
-Five cloud backends ship, plus an in-memory home for tests. Each maps the same
-flat keys onto its own naming and upload protocol; the differences below are the
-only places a provider deviates from "write opaque bytes by key".
+The storage crate contains five cloud adapters plus an in-memory home for tests.
+Sync requires both exact immutable objects and provider-enforced conditional
+replacement. The Google Drive adapter rejects the versioned-record operations
+with a configuration error, so its byte-storage support does not make it a
+usable Store publication home.
 
-Every built-in backend supplies exact slots internally. The host selects one
+The host selects one
 local `exact_upload_verification` policy: `upload_checksum`, `metadata_hash`,
 `readback`, or `unchecked`. Invitations and restore codes do not carry that
 choice. Upload-checksum enforcement is available on S3; Dropbox, Google Drive,
@@ -261,7 +289,9 @@ presence alone.
 
 - **Google Drive**
   (`GoogleDriveCloudHome`)
-  stores files flat in one folder. Drive filenames cannot carry the key's
+  implements immutable slots and raw storage, but refuses the conditional
+  record operations required by Store publication. Its storage methods keep
+  files flat in one folder. Drive filenames cannot carry the key's
   slashes, so each key is hex-encoded into a slash-free filename and decoded on
   list; the encoding is exact and reversible, never a lossy substitution. Large
   files use a resumable upload session in 8 MiB chunks (Drive requires 256
@@ -331,7 +361,7 @@ implementation instead of five slightly different ones. `CloudHome` deals
 only in raw bytes. The at-rest protection and the key layout
 live one level up, in
 `CloudSyncConnection`,
-which wraps any `dyn CloudHome`: it seals on the way down, opens on the way up,
+which wraps an `Arc<dyn ExactCloudHome>`: it seals on the way down, opens on the way up,
 and owns the mapping from Store protocol objects, blob ids, and wrapped member
 keys to the flat keys the trait stores. Both how it seals (the
 [`CloudCipher`](rustdoc:enum:coven::CloudCipher)) and how it
@@ -340,16 +370,21 @@ keys blobs (the
 from the home's [storage mode](/docs/encryption#opaque-and-browsable-homes), one
 choice set when the home is created:
 
-- An **opaque** home (the default) encrypts every object under the store key
-  and adds the `.enc` suffix beneath logical Store paths such as
-  `store-v1/candidates/{family}/packages/{device}/{seq}/{hash}.pkg` and
-  `store-v1/snapshots/{author}/{hash}.json`. It keys each blob
-  by its content-addressed shard `{namespace}/{ab}/{cd}/{id}`. The provider sees
-  ciphertext under protocol coordinates and opaque blob keys.
-- A **browsable** home stores every object verbatim and drops the suffix, so the
-  same Store objects are at their bare logical names and stores each blob at the consumer's
-  readable [`{namespace}/{cloud_path}`](/docs/blobs#browsable-home-blob-paths).
-  Anyone with bucket access reads the actual bytes by name.
+- An **opaque** home (the default) encrypts objects whose protocol context
+  selects the Store cipher, including Store packages. Blob paths use
+  `{namespace}/opaque/{locator_hash}`.
+- A **browsable** home keeps Store-cipher objects in plaintext. Each blob uses
+  the consumer's readable path followed by an immutable version:
+  [`{namespace}/readable/{cloud_path}/.coven-versions/{locator_hash}`](/docs/blobs#browsable-home-blob-paths).
+  Anyone with bucket access can read that Store content by name.
+
+Exact protocol slots and blob paths do not acquire a cipher-dependent suffix.
+
+Object context determines protection independently of the home's blob naming.
+Signed plaintext controls, including Store commits and publication entries,
+remain readable so a device can verify authority before obtaining Store keys.
+Recipient-sealed objects arrive already encrypted for their recipient. Circle
+objects use their Circle key, rather than the Store cipher.
 
 ## Ranged reads
 

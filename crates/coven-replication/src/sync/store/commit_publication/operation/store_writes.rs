@@ -11,12 +11,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self.membership
     }
 
-    pub(crate) fn local_registration_ref(
-        &self,
-    ) -> &coven_protocol::store_commit::StoreDeviceRegistrationRef {
-        self.writer.registration_ref()
-    }
-
     pub(crate) fn announcement_stream_id(&self) -> coven_protocol::membership::AuthorStreamId {
         self.writer
             .announcement_stream_id(self.store_root().store_root_hash)
@@ -37,17 +31,26 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<u64, StoreError> {
         let operation = self;
-        let database = &operation.database;
-        // Each candidate here takes a position on this device's own stream by
-        // publishing its head, so this waits its turn behind any operation composing
-        // against that same position. Queued writes are the one composer that can
-        // lose a position safely — they re-prepare against the winner — but nothing
-        // else can, so they must not be the ones to take it out from under an
-        // operation that is mid-activation.
+        let database = operation.database.clone();
+        // Each candidate here takes a position on this device's own stream, so
+        // this waits its turn behind any operation composing against that same
+        // position.
         let _authorship = database.author_own_stream().await;
         timings
             .stage("retire blob spools", database.retire_uploaded_blob_spools())
             .await?;
+        if database
+            .active_store_publication()
+            .await?
+            .is_some_and(|active| active.is_awaiting_preparation())
+            && !operation
+                .prepare_store_write_with_authorship(timings, &_authorship)
+                .await?
+        {
+            return Err(StoreError::InvalidOutbound(
+                "reserved rebased write cannot enter preparation".to_string(),
+            ));
+        }
         let Some(first) = database.oldest_prepared_store_write().await? else {
             return Ok(0);
         };
@@ -60,23 +63,23 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             })
             .transpose()?;
         let database = operation.database.clone();
-        let storage = operation.storage.as_ref();
+        let storage = operation.storage.clone();
         #[cfg(any(test, feature = "test-utils"))]
         let db = &database;
         let mut published = 0_u64;
         let mut next = Some(first);
         while let Some(batch) = next {
+            operation.retire_replaced_store_write_candidates().await?;
             let root = operation.store_root().clone();
             let write_id = batch.commit.value.write_id.clone();
             database
                 .set_write_status(&write_id, coven_protocol::write::WriteStatus::Publishing)
                 .await?;
             let attempt = async {
-                Box::pin(operation.reject_excluded_merge_candidate(
-                    &batch.head.value.commit,
-                    &batch.commit.value.author_registration,
-                ))
-                .await?;
+                if let Some(covered) = database.covered_store_write(batch.commit.value.clone()).await? {
+                    operation.complete_snapshot_covered_write(covered).await?;
+                    return Ok(true);
+                }
                 let store_root_hash = root.store_root_hash;
                 let commit = &batch.commit.value;
                 if !matches!(
@@ -93,8 +96,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         .stage("retire blob spools", database.retire_uploaded_blob_spools())
                         .await?;
                 }
-                let head = &batch.head.value;
-                let stream_id = head.commit.coord.stream_id.to_string();
+                let commit_ref = batch.commit.value.reference();
+                let stream_id = commit_ref.coord.stream_id.to_string();
                 let commit_context = ProtocolObjectContext::signed_plaintext(
                     store_root_hash,
                     ProtocolObjectDomain::StoreCommit,
@@ -118,7 +121,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .await
                     .map_err(StoreError::prepared_object)?;
                 database
-                    .mark_candidate_commit_uploaded(head.commit.clone())
+                    .mark_candidate_commit_uploaded(commit_ref.clone())
                     .await?;
                 #[cfg(any(test, feature = "test-utils"))]
                 db.reach_test_point(
@@ -127,159 +130,86 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     },
                 )
                 .await;
-                Box::pin(
-                    operation
-                        .reject_excluded_merge_candidate(&head.commit, &commit.author_registration),
-                )
-                .await?;
-                let head_prefix = head_slot_prefix(
-                    &head.author_registration.device_id.to_string(),
-                    commit.seq(),
-                );
-                let head_create = timings
+                let accepted_publication = timings
                     .stage(
-                        "publish head",
-                        storage.create_protocol_object(&batch.head.prepared),
+                        "publish shared position",
+                        operation.publish_store_commit_publication(&batch.commit.value),
                     )
-                    .await;
-                if let Err(error) = head_create {
-                    if !matches!(error, StorageError::SlotCollision(_)) {
-                        return Err(StoreObjectError::from(error).into());
+                    .await?;
+                let accepted_publication = match accepted_publication {
+                    crate::sync::store::authorization::history::publication::StoreCommitPublicationAttemptOutcome::Published(outcome) => outcome,
+                    crate::sync::store::authorization::history::publication::StoreCommitPublicationAttemptOutcome::SnapshotCovered(covered) => {
+                        operation.complete_snapshot_covered_write(covered).await?;
+                        return Ok(true);
                     }
-                    let observation = operation
-                        .observe_occupied_merge_head(
-                            head,
-                            commit,
-                            batch.head.prepared.reference().slot(),
-                            &head_prefix,
-                        )
-                        .await?;
-                    if observation.winner().commit == head.commit {
-                        let registration = database
-                            .activated_store_device_registration(head.author_registration.clone())
-                            .await?;
-                        let nonactivations = observation.verified_nonactivations(
-                            commit
-                                .abandoned_candidates()
-                                .iter()
-                                .map(|manifest| manifest.candidate.clone()),
-                            registration.value(),
-                        )?;
-                        let (winner, winner_prepared) = observation.into_head();
-                        database
-                            .adopt_alternate_merge_head(write_id.clone(), winner, winner_prepared)
-                            .await?;
-                        #[cfg(any(test, feature = "test-utils"))]
-                        db.reach_test_point(
-                            coven_database::DatabaseTestPoint::StoreWriteHeadReadBack {
-                                write_id: write_id.clone(),
-                            },
-                        )
-                        .await;
-                        match database
-                            .complete_prepared_store_write(
-                                root.clone(),
-                                head.commit.clone(),
-                                nonactivations,
-                                routing_key.clone(),
-                            )
-                            .await?
-                        {
-                            coven_database::CompletePreparedStoreWriteOutcome::Published => {}
-                            coven_database::CompletePreparedStoreWriteOutcome::AuthorExcluded {
-                                device_id,
-                            } => return Err(StoreError::AuthorExcluded { device_id }),
+                    crate::sync::store::authorization::history::publication::StoreCommitPublicationAttemptOutcome::AwaitingPreparation(reserved) => {
+                        if reserved != write_id {
+                            return Err(StoreError::InvalidOutbound("publication rebase returned another write reservation".to_string()));
                         }
-                        return Ok::<bool, StoreError>(true);
+                        return Ok(false);
                     }
-                    let registration = database
-                        .activated_store_device_registration(head.author_registration.clone())
-                        .await?;
-                    let nonactivations = observation.verified_nonactivations(
-                        std::iter::once(StoreBatchCommitDeletionTarget {
-                            coord: head.commit.coord.clone(),
-                            object: head.commit.object.clone(),
-                            canonical_signed_bytes: commit.to_bytes(),
-                        })
-                        .chain(
-                            commit
-                                .abandoned_candidates()
-                                .iter()
-                                .map(|manifest| manifest.candidate.clone()),
-                        ),
-                        registration.value(),
-                    )?;
-                    database
-                        .mark_merge_candidate_conflict(write_id.clone(), nonactivations)
-                        .await?;
-                    return Ok::<bool, StoreError>(false);
-                }
-                let observation = timings
-                    .stage(
-                        "read back head",
-                        operation.observe_occupied_merge_head(
-                            head,
-                            commit,
-                            batch.head.prepared.reference().slot(),
-                            &head_prefix,
-                        ),
-                    )
-                    .await?;
-                if observation.winner() != head
-                    || observation.winner_prepared().reference() != batch.head.prepared.reference()
-                {
-                    return Err(StoreError::InvalidOutbound(
-                        "occupied Merge head body differs from the prepared signed bytes"
-                            .to_string(),
-                    ));
-                }
-                let registration = database
-                    .activated_store_device_registration(head.author_registration.clone())
-                    .await?;
-                let nonactivations = observation.verified_nonactivations(
-                    commit
-                        .abandoned_candidates()
-                        .iter()
-                        .map(|manifest| manifest.candidate.clone()),
-                    registration.value(),
-                )?;
-                database
-                    .mark_store_head_uploaded(StoreDeviceHeadRef {
-                        head_hash: head.head_hash(),
-                        object: batch.head.prepared.reference().clone(),
-                    })
-                    .await?;
+                    crate::sync::store::authorization::history::publication::StoreCommitPublicationAttemptOutcome::SnapshotRetired(_) => {
+                        return Err(StoreError::InvalidOutbound("snapshot installation did not retire the reserved row-write candidate".into()));
+                    }
+                };
                 #[cfg(any(test, feature = "test-utils"))]
-                db.reach_test_point(coven_database::DatabaseTestPoint::StoreWriteHeadReadBack {
-                    write_id: write_id.clone(),
-                })
+                db.reach_test_point(
+                    coven_database::DatabaseTestPoint::StoreWritePublicationAccepted {
+                        write_id: write_id.clone(),
+                    },
+                )
                 .await;
-                match timings
+                let materialization = timings
                     .stage(
                         "complete write",
                         database.complete_prepared_store_write(
-                            root,
-                            head.commit.clone(),
-                            nonactivations,
+                            accepted_publication,
                             routing_key.clone(),
                         ),
                     )
-                    .await?
-                {
-                    coven_database::CompletePreparedStoreWriteOutcome::Published => {}
-                    coven_database::CompletePreparedStoreWriteOutcome::AuthorExcluded {
-                        device_id,
-                    } => return Err(StoreError::AuthorExcluded { device_id }),
+                    .await?;
+                if let Some(materialization) = materialization {
+                    operation
+                        .history
+                        .admit_materialized_publication(&materialization)
+                        .map_err(StoreError::from)?;
                 }
                 Ok::<bool, StoreError>(true)
             }
             .await;
             match attempt {
-                Ok(false) => return Ok(published),
+                Ok(false) => {
+                    if !operation
+                        .prepare_store_write_with_authorship(timings, &_authorship)
+                        .await?
+                    {
+                        return Err(StoreError::InvalidOutbound(
+                            "rebased write did not resume its reserved preparation".to_string(),
+                        ));
+                    }
+                    next = Some(database.oldest_prepared_store_write().await?.ok_or_else(
+                        || {
+                            StoreError::InvalidOutbound(
+                                "rebased write preparation produced no reserved candidate"
+                                    .to_string(),
+                            )
+                        },
+                    )?);
+                    continue;
+                }
                 Ok(true) => {}
                 Err(error) => {
-                    if let Some(block) = error.write_block() {
-                        database.block_write_if_unresolved(&write_id, block).await?;
+                    if let Some((blocked_write, block)) = error.write_block(&write_id) {
+                        if let Err(status) = database
+                            .block_write_if_unresolved(&blocked_write, block)
+                            .await
+                        {
+                            return Err(StoreError::WriteBlockNotRecorded {
+                                write_id: blocked_write,
+                                operation: Box::new(error),
+                                status,
+                            });
+                        }
                     }
                     return Err(error);
                 }
@@ -292,15 +222,66 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(published)
     }
 
+    async fn complete_snapshot_covered_write(
+        &self,
+        covered: coven_database::store::CoveredStoreWrite,
+    ) -> Result<(), StoreError> {
+        let _upload = self.database.blob_upload_drain_permit().await;
+        let _snapshot = self.database.snapshot_publication_permit().await;
+        let completion = self
+            .database
+            .begin_covered_write_completion(covered)
+            .await?;
+        #[cfg(any(test, feature = "test-utils"))]
+        self.database
+            .reach_test_point(coven_database::DatabaseTestPoint::CoveredWriteCleanupPrepared)
+            .await;
+        for object in completion.protocol_objects() {
+            self.storage
+                .delete_protocol_object(object)
+                .await
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
+        }
+        for blob in completion.blob_objects() {
+            self.storage
+                .delete_blob_object(blob)
+                .await
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
+        }
+        self.database.complete_covered_write(completion).await?;
+        Ok(())
+    }
+
+    async fn retire_replaced_store_write_candidates(&self) -> Result<(), StoreError> {
+        let Some(active) = self.database.active_store_publication().await? else {
+            return Ok(());
+        };
+        crate::sync::store::authorization::retire_store_write_candidates(
+            &self.database,
+            self.storage.as_ref(),
+            active,
+        )
+        .await
+    }
+
+    pub(crate) async fn publish_store_commit_publication(
+        &mut self,
+        commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+    ) -> Result<crate::sync::store::authorization::history::publication::StoreCommitPublicationAttemptOutcome, StoreError>{
+        self.writer
+            .publish_store_commit(&mut self.history, &mut self.membership, commit)
+            .await
+    }
+
     pub(crate) async fn publish_pending_store_writes(
         &mut self,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<u64, SyncCycleFailure> {
         // Publishing one release's worth of host writes was the slowest stage of
         // a live cycle. Each commit it publishes costs several provider round
-        // trips — two slot allocations while preparing, then the packages, the
-        // commit, the head, and the read-back that confirms the head — on top of
-        // sealing a package per audience. Counting the run says how many of
+        // trips for its packages, commit, publication entry, and conditional
+        // current-record update, on top of sealing a package per audience.
+        // Counting the run says how many of
         // those each stage actually made rather than leaving it to be read off
         // this comment, and both the times and the counts accumulate across
         // every commit the loop publishes, so a slow cycle is described by one

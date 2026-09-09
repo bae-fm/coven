@@ -89,7 +89,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
-    let commit_coord = journal.operation().commit_ref.coord.clone();
+    let commit_coord = journal.operation().commit_ref().coord.clone();
     let original_control = &old_commit.circle_controls()[0];
     let circle_reference = journal
         .operation()
@@ -147,97 +147,6 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
             .contains("circle access envelope failed verification"),
         "{error}"
     );
-
-    let verified_commit = coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
-        &commit.to_bytes(),
-        store.root().store_root_hash,
-        &commit_ref,
-        author.value(),
-    )
-    .expect("authenticate re-signed Store commit");
-    store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
-        .await
-        .expect("bind forged Circle Store")
-        .prepare_merge_history_successor_for_test(
-            &verified_commit,
-            None,
-            crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence::none(),
-        )
-        .await
-        .expect("prepare matching retained history for the forged Circle commit");
-    let original_head = &journal.operation().policy.head;
-    let forged_head = device
-        .sign_device_head_for_test(commit_ref.clone(), original_head.successor.clone())
-        .await
-        .expect("sign Store head naming the re-signed commit");
-    let original_head_object = journal
-        .operation()
-        .prepared_objects
-        .get("store-head")
-        .expect("Circle operation carries its Store head");
-    let head_context = ProtocolObjectContext::signed_plaintext(
-        commit.store_root_hash,
-        ProtocolObjectDomain::StoreHead,
-    );
-    let forged_head_object = cloud_storage
-        .prepare_protocol_object(
-            &head_context,
-            original_head_object.slot().clone(),
-            &head_slot_prefix(
-                &commit.author_registration.device_id.to_string(),
-                commit.seq(),
-            ),
-            forged_head.to_bytes(),
-        )
-        .expect("prepare Store head naming the re-signed commit");
-    _home.replace_exact_object(
-        original_head_object.slot(),
-        forged_head_object.stored_bytes().to_vec(),
-    );
-
-    let loaded_store = store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
-        .await
-        .expect("load Store pull");
-    let pull = loaded_store
-        .authorize_writer()
-        .await
-        .expect("authorize Store pull")
-        .pull(None)
-        .await
-        .expect("pull reports the invented access commit as held");
-    assert!(
-        pull.held_positions.iter().any(|held| {
-            matches!(
-                &held.reason,
-                crate::sync::store::pull::HeldStorePositionReason::CirclePackageRead(error)
-                    if matches!(
-                        error.as_ref(),
-                        crate::sync::store::circles::CirclePackageReadError::CircleOperation(source)
-                            if matches!(
-                                source.as_ref(),
-                                crate::sync::store::circles::CircleOperationError::InvalidState(reason)
-                                    if reason == "circle access envelope failed verification"
-                            )
-                    )
-            )
-        }),
-        "{:#?}",
-        pull.held_positions
-    );
-    assert_eq!(
-        StoreDatabase::new(&db)
-            .circle_control_activation_count_for_test(journal.circle_id())
-            .await
-            .expect("count circle activations"),
-        0
-    );
-    assert!(coven_database::StoreDatabase::new(&db)
-        .exact_materialized_ref(&stream_id.to_string(), commit.seq())
-        .await
-        .expect("read invented access commit position")
-        .is_none());
 }
 
 #[tokio::test]
@@ -300,7 +209,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
             .await
             .expect("publish exact promoted access object");
     }
-    let commit_coord = journal.operation().commit_ref.coord.clone();
+    let commit_coord = journal.operation().commit_ref().coord.clone();
     let circle_reference = creation.control_ref(objects, control_head_object);
     let commit = device
         .sign_circle_commit(
@@ -448,7 +357,7 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
         .journal
         .commit()
         .expect("parse founder Circle commit");
-    let commit_ref = prepared.journal.operation().commit_ref.clone();
+    let commit_ref = prepared.journal.operation().commit_ref().clone();
     coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
@@ -511,7 +420,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .await
         .expect("bind baseline Circle activation Store")
         .load_circle_activations(
-            &baseline.operation().commit_ref,
+            baseline.operation().commit_ref(),
             &baseline_commit,
             baseline_author.value(),
         )
@@ -555,7 +464,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .expect("read interrupted Circle rename")
         .expect("interrupted Circle rename journal remains durable");
     let old_commit = journal.commit().expect("parse prepared Store commit");
-    let commit_coord = journal.operation().commit_ref.coord.clone();
+    let commit_coord = journal.operation().commit_ref().coord.clone();
     let mut draft = draft_from_transition(&journal.operation().creation);
     let store_root_hash = draft.control.value.store_root_hash;
     let roster = &mut draft.roster;

@@ -7,7 +7,8 @@ use crate::circle::{
     PreparedCircleTransition,
 };
 use crate::objects::{ExactObjectRef, PreparedExactObject};
-use crate::store_commit::{StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead};
+use crate::prepared_commit::PreparedStoreOperationCommit;
+use crate::store_commit::{StoreBatchCommit, StoreBatchCommitRef};
 
 /// A journal whose recorded state contradicts itself or the commit it
 /// describes. Produced by the journal's own validation; workflow errors wrap
@@ -20,19 +21,14 @@ pub enum CircleJournalError {
     Protocol(#[from] crate::store_commit::StoreProtocolError),
     #[error("Circle operation journal remote object: {0}")]
     RemoteObject(#[from] crate::remote_object::RemoteObjectRecordError),
+    #[error("Circle operation journal Store publication: {0}")]
+    PreparedCommit(#[from] crate::prepared_commit::PreparedCommitError),
     #[error("{operation}: {source}")]
     Json {
         operation: &'static str,
         #[source]
         source: serde_json::Error,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CircleOperationPolicy {
-    pub head: StoreDeviceHead,
-    pub history_evidence: crate::store_commit::RetainedMergeCommitEvidence,
 }
 
 /// One Circle operation as prepared: everything the publication pipeline needs
@@ -48,13 +44,54 @@ pub struct CircleOperationPolicy {
 pub struct PreparedCircleOperation {
     pub creation: PreparedCircleTransition,
     pub history: CircleTransitionHistory,
-    pub commit_bytes: Vec<u8>,
-    pub commit_ref: StoreBatchCommitRef,
+    pub store_commit: PreparedStoreOperationCommit,
     pub prepared_objects: BTreeMap<String, ExactObjectRef>,
-    pub policy: CircleOperationPolicy,
 }
 
 impl PreparedCircleOperation {
+    pub fn commit(&self) -> &StoreBatchCommit {
+        &self.store_commit.commit
+    }
+
+    pub fn commit_ref(&self) -> &StoreBatchCommitRef {
+        &self.store_commit.reference
+    }
+
+    /// Exact previously accepted blobs borrowed by this operation's bootstraps.
+    pub fn bootstrap_blobs(
+        &self,
+    ) -> Result<
+        BTreeMap<crate::store_commit::ObjectHash, crate::blob::locator::StoredBlobRef>,
+        CircleJournalError,
+    > {
+        let mut bootstrap_blobs = BTreeMap::new();
+        for access in &self.creation.access {
+            if let crate::circle::CircleAccessDisposition::Active {
+                bootstrap: Some(bootstrap),
+                ..
+            } = &access.leaf.value.disposition
+            {
+                for blob in &bootstrap.blobs {
+                    let stored = blob.stored().ok_or_else(|| {
+                        CircleJournalError::Invariant(
+                            "Circle bootstrap row blob has no exact stored locator".to_string(),
+                        )
+                    })?;
+                    let object_id = crate::remote_object::remote_object_id(stored.object());
+                    if bootstrap_blobs
+                        .insert(object_id, stored.clone())
+                        .is_some_and(|existing| existing != *stored)
+                    {
+                        return Err(CircleJournalError::Invariant(format!(
+                            "Circle bootstrap blob {object_id} has conflicting exact references"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(bootstrap_blobs)
+    }
+
     /// Refuse a byte-carrying object map that is not this operation's own.
     ///
     /// The spool holds the bytes and this value holds the references; a caller
@@ -197,8 +234,8 @@ impl CircleOperationJournal {
     }
 
     /// The objects of this operation that `remote_objects` holds a record for:
-    /// its commit's candidate-exclusive graph, plus the commit and the Store
-    /// head published with it.
+    /// its commit's candidate-exclusive graph, plus the commit itself.
+    /// The Store publication entry belongs to the publication attempt.
     ///
     /// The rest of an operation's objects — its control head, roster and
     /// metadata — are shared Circle objects the candidate does not own
@@ -207,24 +244,13 @@ impl CircleOperationJournal {
     /// discovering it by a lookup that comes back empty.
     pub fn candidate_owned_objects(&self) -> Result<BTreeSet<ExactObjectRef>, CircleJournalError> {
         let operation = self.operation();
-        let commit = self.commit()?;
-        operation.commit_ref.verify_commit(&commit)?;
-        let mut objects = crate::remote_object::CandidateObjectGraph::from_commit(&commit)?
+        operation.store_commit.validate_closed_shape()?;
+        let commit = operation.commit();
+        let mut objects = crate::remote_object::CandidateObjectGraph::from_commit(commit)?
             .exact_objects()
             .cloned()
             .collect::<BTreeSet<_>>();
-        objects.insert(operation.commit_ref.object.clone());
-        objects.insert(
-            operation
-                .prepared_objects
-                .get("store-head")
-                .ok_or_else(|| {
-                    CircleJournalError::Invariant(
-                        "Circle operation lacks its prepared Store head".to_string(),
-                    )
-                })?
-                .clone(),
-        );
+        objects.insert(operation.commit_ref().object.clone());
         Ok(objects)
     }
 
@@ -240,14 +266,8 @@ impl CircleOperationJournal {
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, CircleJournalError> {
         let operation = self.operation();
         operation.require_prepared_objects(prepared_objects)?;
-        let commit: StoreBatchCommit =
-            serde_json::from_slice(&operation.commit_bytes).map_err(|source| {
-                CircleJournalError::Json {
-                    operation: "parse Circle commit",
-                    source,
-                }
-            })?;
-        operation.commit_ref.verify_commit(&commit)?;
+        operation.store_commit.validate_closed_shape()?;
+        let commit = operation.commit();
         let access_refs = commit
             .circle_controls()
             .iter()
@@ -354,7 +374,6 @@ impl CircleOperationJournal {
                 ));
             }
         }
-        let mut bootstrap_blobs = BTreeMap::new();
         for (access, reference) in operation.creation.access.iter().zip(access_refs) {
             let leaf = prepared_for(&reference.leaf.object)?;
             materials.push(crate::remote_object::CandidateObjectMaterial {
@@ -386,36 +405,14 @@ impl CircleOperationJournal {
                     stored_bytes: image.stored_bytes().to_vec(),
                 });
             }
-            if let crate::circle::CircleAccessDisposition::Active {
-                bootstrap: Some(bootstrap),
-                ..
-            } = &access.leaf.value.disposition
-            {
-                for blob in &bootstrap.blobs {
-                    let stored = blob.stored().ok_or_else(|| {
-                        CircleJournalError::Invariant(
-                            "Circle bootstrap row blob has no exact stored locator".to_string(),
-                        )
-                    })?;
-                    let object_id = crate::remote_object::remote_object_id(stored.object());
-                    if bootstrap_blobs
-                        .insert(object_id, stored.clone())
-                        .is_some_and(|existing| existing != *stored)
-                    {
-                        return Err(CircleJournalError::Invariant(format!(
-                            "Circle bootstrap blob {object_id} has conflicting exact references"
-                        )));
-                    }
-                }
-            }
         }
-        let mut remotes = crate::remote_object::CandidateObjectGraph::from_commit(&commit)
-            .and_then(|graph| graph.close(&commit, &operation.commit_ref, materials))?;
-        for blob in bootstrap_blobs.into_values() {
+        let mut remotes = crate::remote_object::CandidateObjectGraph::from_commit(commit)
+            .and_then(|graph| graph.close(commit, operation.commit_ref(), materials))?;
+        for blob in operation.bootstrap_blobs()?.into_values() {
             remotes.push(
                 crate::remote_object::RemoteObjectRecord::candidate_owned_blob(
                     &blob,
-                    operation.commit_ref.clone(),
+                    operation.commit_ref().clone(),
                     true,
                 )?,
             );
@@ -426,26 +423,10 @@ impl CircleOperationJournal {
             )
         })?;
         remotes.push(crate::remote_object::RemoteObjectRecord::candidate_commit(
-            operation.commit_ref.clone(),
-            &operation.commit_bytes,
+            operation.commit_ref().clone(),
+            &commit.to_bytes(),
             commit_prepared.stored_bytes(),
         )?);
-        let prepared = prepared_objects.get("store-head").ok_or_else(|| {
-            CircleJournalError::Invariant(
-                "Circle operation lacks its prepared Store head".to_string(),
-            )
-        })?;
-        remotes.push(
-            crate::remote_object::RemoteObjectRecord::candidate_activated_store_head(
-                crate::store_commit::StoreDeviceHeadRef {
-                    head_hash: operation.policy.head.head_hash(),
-                    object: prepared.reference().clone(),
-                },
-                &operation.policy.head.to_bytes(),
-                prepared.stored_bytes(),
-                operation.commit_ref.clone(),
-            )?,
-        );
         Ok(remotes)
     }
 
@@ -582,12 +563,7 @@ impl CircleOperationJournal {
     }
 
     pub fn commit(&self) -> Result<StoreBatchCommit, CircleJournalError> {
-        serde_json::from_slice(&self.operation().commit_bytes).map_err(|source| {
-            CircleJournalError::Json {
-                operation: "parse Store commit",
-                source,
-            }
-        })
+        Ok(self.operation().commit().clone())
     }
 
     pub fn validate_identity(&self) -> Result<(), CircleJournalError> {
@@ -600,19 +576,33 @@ impl CircleOperationJournal {
             )));
         }
         let commit = self.commit()?;
-        let expected_write_id = if self.is_finalizing() {
-            if self.operation().creation.close_cancellation.is_some() {
-                self.operation_id.cancellation_write_id()
-            } else {
-                self.operation_id.finalization_write_id()
+        let creation = &self.operation().creation;
+        let expected_write_id = match (&creation.close_outcome, &creation.close_cancellation) {
+            (Some(_), None) => self.operation_id.finalization_write_id(),
+            (None, Some(_)) => self.operation_id.cancellation_write_id(),
+            (None, None) => {
+                crate::write::WriteId::from_generated(self.operation_id.as_str().to_string())
             }
-        } else {
-            crate::write::WriteId::from_generated(self.operation_id.as_str().to_string())
+            (Some(_), Some(_)) => {
+                return Err(CircleJournalError::Invariant(format!(
+                    "circle operation {} carries both a close outcome and cancellation",
+                    self.operation_id
+                )));
+            }
         };
         if commit.write_id != expected_write_id {
             return Err(CircleJournalError::Invariant(format!(
                 "circle operation id {} differs from payload commit operation id {}",
                 self.operation_id, commit.write_id
+            )));
+        }
+        if !self.is_discarding()
+            && self.is_finalizing()
+                != (creation.close_outcome.is_some() || creation.close_cancellation.is_some())
+        {
+            return Err(CircleJournalError::Invariant(format!(
+                "circle operation {} progress differs from its prepared close outcome",
+                self.operation_id
             )));
         }
         Ok(())

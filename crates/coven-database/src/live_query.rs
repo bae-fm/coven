@@ -208,7 +208,7 @@ pub(crate) fn decode_changeset(
             action => {
                 return Err(DbError::Message(format!(
                     "unexpected live-query changeset action {action:?}"
-                )))
+                )));
             }
         };
         let mut old_key = BTreeMap::new();

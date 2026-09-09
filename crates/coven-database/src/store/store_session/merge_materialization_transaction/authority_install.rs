@@ -5,50 +5,79 @@ impl MergeMaterializationTransaction<'_, '_> {
         &self,
         materialization: &PreparedMergeMaterialization,
     ) -> Result<(), DbError> {
+        let packages = materialization
+            .packages
+            .iter()
+            .map(|prepared| prepared.package.clone())
+            .collect::<Vec<_>>();
+        let verified = VerifiedMergeMaterialization::verify(
+            &materialization.root,
+            &materialization.verified_commit,
+            &materialization.registrations,
+            &materialization.device_operations,
+            &materialization.circle_activations,
+            &materialization.acceptance,
+            &materialization.history_evidence,
+            materialization.membership_objects.as_ref(),
+            &packages,
+            materialization.package_application,
+        )?;
+        self.record_verified_materialization_authority(
+            &verified,
+            &materialization.membership_remote_objects,
+        )
+    }
+
+    pub(crate) fn record_verified_materialization_authority(
+        &self,
+        materialization: &VerifiedMergeMaterialization<'_>,
+        membership_remote_objects: &[coven_protocol::remote_object::ClosedRemoteObject],
+    ) -> Result<(), DbError> {
         let conn = self.store.transaction;
-        let commit = materialization.verified_commit.value();
-        let commit_ref = materialization.verified_commit.reference();
+        let commit = materialization.commit();
+        let commit_ref = materialization.commit_ref();
         crate::store::record_activated_store_device_registrations_on(
             conn,
             commit,
-            &materialization.registrations,
+            materialization.registrations(),
         )?;
-        if !materialization.registrations.is_empty() {
-            complete_matching_owner_recovery_publication_on(
-                conn,
-                &materialization.verified_commit,
-                &materialization.activation_head,
-                &materialization.activation_head_object,
-            )?;
-        }
-        for bootstrap in materialization.circle_activations.bootstraps() {
+        for bootstrap in materialization.circle_activations().bootstraps() {
             crate::install_circle_bootstrap_remote_objects_on(conn, commit_ref, bootstrap)?;
         }
         self.record_verified_circle_activations(
-            &materialization.verified_commit,
-            materialization.circle_activations.circles(),
+            materialization.verified_commit(),
+            materialization.circle_activations().circles(),
         )?;
-        for prepared in &materialization.packages {
-            let retained = crate::RetainedAudiencePackage::verify(
-                commit,
-                commit_ref,
-                prepared.package.clone(),
-            )?;
-            crate::install_pulled_package_activation_on(
-                conn,
-                self.store.store_dir,
-                commit_ref,
-                retained.domain(),
-                retained.object(),
-                retained.package(),
-            )?;
-            Database::install_pulled_blob_activations_on(conn, &prepared.package, commit_ref)?;
+        for package in materialization.packages() {
+            let retained =
+                crate::RetainedAudiencePackage::verify(commit, commit_ref, package.clone())?;
+            self.record_package_activation(commit_ref, &retained)?;
         }
         crate::install_pulled_merge_membership_activations_on(
             conn,
             self.store.store_dir,
             commit_ref,
-            &materialization.membership_remote_objects,
+            membership_remote_objects,
+        )
+    }
+
+    pub(crate) fn record_package_activation(
+        &self,
+        commit: &StoreBatchCommitRef,
+        retained: &crate::RetainedAudiencePackage,
+    ) -> Result<(), DbError> {
+        crate::install_pulled_package_activation_on(
+            self.store.transaction,
+            self.store.store_dir,
+            commit,
+            retained.domain(),
+            retained.object(),
+            retained.package(),
+        )?;
+        Database::install_pulled_blob_activations_on(
+            self.store.transaction,
+            retained.package(),
+            commit,
         )
     }
 
@@ -68,8 +97,7 @@ impl MergeMaterializationTransaction<'_, '_> {
             &materialization.registrations,
             &materialization.device_operations,
             &materialization.circle_activations,
-            &materialization.activation_head,
-            &materialization.activation_head_object,
+            &materialization.acceptance,
             &materialization.history_evidence,
             materialization.membership_objects.as_ref(),
             &retained_packages,

@@ -2,7 +2,7 @@ use super::*;
 
 impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn stage_acknowledgements(
-        &self,
+        &mut self,
         frontier: &coven_protocol::store_commit::CommitFrontier,
         sync_time: &str,
     ) -> Result<(), StoreAckError> {
@@ -18,12 +18,25 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 .database
                 .latest_published_circle_ack(input.circle_id())
                 .await?;
-            if previous.as_ref().is_some_and(|previous| {
-                &previous.store_cut == frontier && &previous.control == input.control()
-            }) {
+            let standing_still_holds = match &previous {
+                Some(previous) if &previous.control == input.control() => self
+                    .writer
+                    .history_has_only_acknowledgements(
+                        &coven_protocol::store_commit::StoreHistoryCut::from_commits(
+                            previous.store_cut.0.clone(),
+                        ),
+                        &coven_protocol::store_commit::StoreHistoryCut::from_commits(
+                            frontier.0.clone(),
+                        ),
+                    )
+                    .await
+                    .map_err(crate::sync::store::StoreError::from)?,
+                Some(_) | None => false,
+            };
+            if standing_still_holds {
                 tracing::debug!(
                     circle_id = %input.circle_id(),
-                    "skip Circle acknowledgement: accepted frontier and control unchanged"
+                    "skip Circle acknowledgement: the standing one still holds"
                 );
                 continue;
             }
@@ -134,7 +147,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     )
                 })?;
             self.database
-                .mark_remote_object_uploaded(remote.into_record())
+                .mark_reusable_retained_authority_uploaded(remote.into_record())
                 .await?;
         }
         Ok(())

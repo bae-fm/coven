@@ -209,7 +209,7 @@ pub(crate) fn validate_synced_table_contract(
             return Err(DbError::Message(format!(
                 "synced table {table:?} has no primary key; the contract requires a single \
                  `id` TEXT primary key at column 0"
-            )))
+            )));
         }
         _ => {
             let names: Vec<&str> = pk_columns.iter().map(|c| c.name.as_str()).collect();

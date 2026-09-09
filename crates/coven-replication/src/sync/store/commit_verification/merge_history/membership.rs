@@ -1,7 +1,7 @@
 use crate::sync::store::membership::AnchoredChainError;
 use coven_protocol::membership::{
-    validate_membership_floor, AuthorHead, MembershipChain, MembershipChange, MembershipCoord,
-    MembershipEntry, MembershipGrantId, MembershipHeadRef, StoreMembershipConflictResolution,
+    validate_membership_floor, AuthorHead, MembershipChain, MembershipCoord, MembershipEntry,
+    MembershipGrantId, MembershipHeadRef, StoreAuthorityChange, StoreMembershipConflictResolution,
     StoreMembershipConflictResolutionRef,
 };
 use coven_protocol::objects::StorageError;
@@ -11,7 +11,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 
+mod accepted_device_authority;
+mod accepted_membership_authority;
+pub use accepted_membership_authority::AcceptedMembershipAuthority;
+mod discovery;
 mod graph;
+mod stream;
+use accepted_device_authority::AcceptedDeviceAuthority;
+use stream::LoadedHeadAcceptance;
 
 /// One author stream as the anchored walk actually read it: every head from
 /// the stream's anchor to its tip, with the entry each head selects.
@@ -37,39 +44,68 @@ pub(crate) struct TraversedMembership {
 
 impl TraversedMembership {
     /// The published form of what the walk read.
-    pub(crate) fn into_rollup_parts(
+    pub(crate) async fn into_rollup_parts(
         self,
-    ) -> (
-        Vec<coven_protocol::store_commit::MembershipRollupStream>,
-        Vec<coven_protocol::store_commit::MembershipRollupResolution>,
-    ) {
-        let streams = self
-            .streams
-            .into_iter()
-            // A stream the chain activates whose first head the walk cannot yet
-            // reach carries nothing to hand a reader, and a reader that finds
-            // no entry for it lists and walks it the way it always did.
-            .filter(|stream| !stream.heads.is_empty())
-            .map(
-                |stream| coven_protocol::store_commit::MembershipRollupStream {
-                    author_pubkey: stream.author_pubkey,
-                    author_owner_grant: stream.author_owner_grant,
-                    stream_id: stream.stream_id,
-                    heads: stream
-                        .heads
-                        .into_iter()
-                        .map(|(reference, head, entry)| {
-                            coven_protocol::store_commit::MembershipRollupHead {
-                                entry: head.body.entry.clone(),
-                                head: reference,
-                                head_value: head,
-                                entry_value: entry,
-                            }
-                        })
-                        .collect(),
-                },
-            )
-            .collect();
+        verifier: &crate::sync::store::commit_verification::commit::StoreCommitVerifier<'_>,
+    ) -> Result<
+        (
+            Vec<coven_protocol::store_commit::MembershipRollupStream>,
+            Vec<coven_protocol::store_commit::MembershipRollupResolution>,
+        ),
+        AnchoredChainError,
+    > {
+        let mut streams = Vec::new();
+        for stream in self.streams {
+            if stream.heads.is_empty() {
+                continue;
+            }
+            let mut heads = Vec::with_capacity(stream.heads.len());
+            for (index, (reference, head, entry)) in stream.heads.iter().enumerate() {
+                let predecessor_acceptance = match &head.body.predecessor {
+                    Some(previous) => {
+                        let (_, previous_head, _) = index
+                            .checked_sub(1)
+                            .and_then(|previous| stream.heads.get(previous))
+                            .ok_or_else(|| {
+                                AnchoredChainError::LoadFailed(
+                                    "traversed membership predecessor is absent".into(),
+                                )
+                            })?;
+                        previous
+                            .verify_head(previous_head)
+                            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+                        match previous.acceptance() {
+                            Some(object) => Some(
+                                verifier
+                                    .membership_objects()
+                                    .load_head_acceptance_at(
+                                        previous.head(),
+                                        previous_head,
+                                        Some(object),
+                                    )
+                                    .await?
+                                    .value,
+                            ),
+                            None => None,
+                        }
+                    }
+                    None => None,
+                };
+                heads.push(coven_protocol::store_commit::MembershipRollupHead {
+                    entry: head.body.entry.clone(),
+                    head: reference.clone(),
+                    head_value: head.clone(),
+                    entry_value: entry.clone(),
+                    predecessor_acceptance,
+                });
+            }
+            streams.push(coven_protocol::store_commit::MembershipRollupStream {
+                author_pubkey: stream.author_pubkey,
+                author_owner_grant: stream.author_owner_grant,
+                stream_id: stream.stream_id,
+                heads,
+            });
+        }
         let resolutions = self
             .resolutions
             .into_iter()
@@ -80,7 +116,7 @@ impl TraversedMembership {
                 },
             )
             .collect();
-        (streams, resolutions)
+        Ok((streams, resolutions))
     }
 }
 
@@ -107,6 +143,11 @@ enum MembershipActivationAuthority<'operation, 'storage> {
             'storage,
         >,
     },
+    AcceptedHeads {
+        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
+        commit_verifier: &'operation crate::sync::store::commit_verification::commit::StoreCommitVerifier<'storage>,
+        device_authority: AcceptedDeviceAuthority,
+    },
     VerifiedPrefix {
         root: crate::sync::store::protocol_root::VerifiedStoreRoot,
         commit_verifier: &'operation crate::sync::store::commit_verification::commit::StoreCommitVerifier<'storage>,
@@ -115,12 +156,142 @@ enum MembershipActivationAuthority<'operation, 'storage> {
     },
 }
 
+pub(super) struct AcceptedMembershipActivation<'operation, 'storage> {
+    authority: MembershipActivationAuthority<'operation, 'storage>,
+}
+
 pub(super) struct HistoryMembershipActivation<'operation, 'storage> {
     authority: MembershipActivationAuthority<'operation, 'storage>,
 }
 
 pub(super) struct VerifiedPrefixMembershipActivation<'operation, 'storage> {
     authority: MembershipActivationAuthority<'operation, 'storage>,
+}
+
+impl<'operation, 'storage> AcceptedMembershipActivation<'operation, 'storage> {
+    pub(super) fn new(
+        root: &crate::sync::store::protocol_root::VerifiedStoreRoot,
+        commit_verifier: &'operation crate::sync::store::commit_verification::commit::StoreCommitVerifier<'storage>,
+    ) -> Self {
+        Self {
+            authority: MembershipActivationAuthority::AcceptedHeads {
+                root: root.clone(),
+                commit_verifier,
+                device_authority: AcceptedDeviceAuthority::default(),
+            },
+        }
+    }
+
+    pub(super) async fn load_exact_anchored_chain(
+        &mut self,
+        cursors: &[MembershipHeadRef],
+        owner_pubkey: Option<&str>,
+    ) -> Result<MembershipChain, AnchoredChainError> {
+        self.authority
+            .load_exact_anchored_chain(cursors, owner_pubkey)
+            .await
+            .map(|(membership, _)| membership)
+    }
+
+    pub(super) async fn load_anchored_authority(
+        mut self,
+        cursors: &[MembershipHeadRef],
+        owner_pubkey: Option<&str>,
+    ) -> Result<AcceptedMembershipAuthority, AnchoredChainError> {
+        let (membership, _) = self
+            .authority
+            .load_exact_anchored_chain(cursors, owner_pubkey)
+            .await?;
+        let MembershipActivationAuthority::AcceptedHeads {
+            root,
+            device_authority,
+            ..
+        } = self.authority
+        else {
+            unreachable!("accepted membership authority has one construction state")
+        };
+        Ok(AcceptedMembershipAuthority::new(
+            root.reference().clone(),
+            membership,
+            device_authority,
+        ))
+    }
+
+    pub(super) async fn load_snapshot_membership(
+        &mut self,
+        snapshot: &coven_protocol::store_commit::SnapshotMeta,
+    ) -> Result<MembershipChain, crate::sync::store::StorePullError> {
+        let exact_heads = &snapshot.state.membership.heads;
+        let resolutions = &snapshot.state.membership.resolutions;
+        let predecessor = &snapshot.publication_predecessor;
+        // Discover from root-owned successor slots before accepting the image's
+        // chosen heads. An absent acceptance result is an unfinished authority
+        // transition and must not let an older authority state authorize a cut.
+        let (_, traversed) = self.authority.load_exact_anchored_chain(&[], None).await?;
+        let MembershipActivationAuthority::AcceptedHeads {
+            device_authority, ..
+        } = &self.authority
+        else {
+            unreachable!("accepted membership authority has one construction state")
+        };
+        for selected in exact_heads {
+            if !device_authority.contains(&selected.coord)
+                || !traversed
+                    .streams
+                    .iter()
+                    .flat_map(|stream| &stream.heads)
+                    .any(|(rooted, _, _)| rooted == selected)
+            {
+                return Err(AnchoredChainError::LoadFailed(
+                    "snapshot membership does not select an exact rooted head in accepted authority"
+                        .into(),
+                )
+                .into());
+            }
+        }
+        let membership = self
+            .authority
+            .load_at_exact_heads(exact_heads, resolutions, None)
+            .await?;
+        let MembershipActivationAuthority::AcceptedHeads {
+            root,
+            commit_verifier,
+            device_authority,
+        } = &self.authority
+        else {
+            unreachable!("accepted membership authority has one construction state")
+        };
+        for stream in &traversed.streams {
+            for (reference, head, _) in &stream.heads {
+                if !device_authority.contains(&reference.coord) {
+                    continue;
+                }
+                let coven_protocol::membership::MembershipHeadActivation::StoreCommit { .. } =
+                    &head.activation
+                else {
+                    continue;
+                };
+                let accepted = device_authority.receipt(reference)?.publication()?;
+                let included = membership.contains_coord(&reference.coord);
+                let before_snapshot = predecessor
+                    .accepted()
+                    .is_some_and(|last| accepted.position <= last.position);
+                if predecessor
+                    .accepted()
+                    .is_some_and(|last| accepted.position == last.position && accepted != last)
+                    || included != before_snapshot
+                {
+                    return Err(AnchoredChainError::LoadFailed(
+                        "snapshot membership omits or advances an independently accepted authority transition".into(),
+                    ).into());
+                }
+            }
+        }
+        device_authority
+            .verify_snapshot(root, commit_verifier, snapshot, &membership, &traversed)
+            .await?;
+        Ok(membership)
+    }
 }
 
 impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
@@ -183,7 +354,9 @@ impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
             node.reference.coord = node.entry.coord();
             let head = node.head.body_mut();
             head.body.entry.coord = node.reference.coord.clone();
-            head.body.predecessor = predecessor.clone();
+            head.body.predecessor = predecessor
+                .clone()
+                .map(|head| coven_protocol::membership::MembershipHeadPredecessor::Direct { head });
             predecessor = Some(node.reference.clone());
             path_heads.insert(node.reference.coord.clone(), node);
         }
@@ -264,180 +437,10 @@ impl<'operation, 'storage> VerifiedPrefixMembershipActivation<'operation, 'stora
 }
 
 fn membership_entry_requires_store_activation(entry: &MembershipEntry) -> bool {
-    match &entry.change {
-        MembershipChange::Founder { .. } | MembershipChange::ProviderAdmin => false,
-        MembershipChange::SetMember {
-            role,
-            retirement_barriers,
-            ..
-        } => {
-            matches!(
-                role,
-                coven_protocol::membership::StoreMembershipRoleGrant::Owner { .. }
-            ) || retirement_barriers.values().any(|barrier| {
-                matches!(
-                    barrier,
-                    coven_protocol::membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
-                )
-            })
-        }
-        MembershipChange::RemoveMember {
-            retirement_barriers,
-            ..
-        } => retirement_barriers.values().any(|barrier| {
-            matches!(
-                barrier,
-                coven_protocol::membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
-            )
-        }),
-        MembershipChange::ResolutionActivation { .. } => true,
-    }
+    !matches!(entry.change, StoreAuthorityChange::Founder { .. })
 }
 
 impl<'storage> MembershipActivationAuthority<'_, 'storage> {
-    async fn load_exact_anchored_chain(
-        &mut self,
-        cursors: &[MembershipHeadRef],
-        owner_pubkey: Option<&str>,
-    ) -> Result<(MembershipChain, TraversedMembership), AnchoredChainError> {
-        let root = self.root().clone();
-        let root_value = self.verified_root().clone();
-        if let Some(owner) = owner_pubkey {
-            if root_value.descriptor.founder_pubkey != owner {
-                return Err(AnchoredChainError::FounderMismatch {
-                    founder: Some(root_value.descriptor.founder_pubkey.clone()),
-                    owner: owner.to_string(),
-                });
-            }
-        }
-        let anchor = &root_value.descriptor.founder_membership;
-        let founder_stream = coven_protocol::membership::derive_founder_stream_id(
-            &root.store_root_id.to_string(),
-            &root_value.descriptor.founder_pubkey,
-        );
-        let cursor = cursors.iter().find(|cursor| {
-            cursor.coord.author_pubkey == root_value.descriptor.founder_pubkey
-                && cursor.coord.author_owner_grant == root_value.descriptor.founder_grant
-                && cursor.coord.stream_id == founder_stream
-        });
-        let founder_loaded = Box::pin(self.traverse_exact_membership_stream(
-            &root_value.descriptor.founder_pubkey,
-            &root_value.descriptor.founder_grant,
-            founder_stream,
-            anchor,
-            cursor,
-        ))
-        .await?;
-        let founder_latest = founder_loaded.heads.last().cloned().ok_or_else(|| {
-            AnchoredChainError::LoadFailed("founder membership head is absent".to_string())
-        })?;
-        let founder = founder_loaded
-            .entries
-            .first()
-            .map(|(_, entry)| entry)
-            .ok_or_else(|| {
-                AnchoredChainError::LoadFailed("founder membership entry is absent".to_string())
-            })?;
-        if root_value
-            .descriptor
-            .validate_merge_founder_entry(founder)
-            .is_err()
-        {
-            return Err(AnchoredChainError::LoadFailed(
-                "first exact membership entry differs from the signed Store founder".to_string(),
-            ));
-        }
-        let mut discovered =
-            std::collections::BTreeSet::from([founder_latest.0.coord.stream_key()]);
-        let mut consumed_cursors = std::collections::BTreeSet::new();
-        if let Some(cursor) = cursor {
-            consumed_cursors.insert(cursor.clone());
-        }
-        let mut latest_heads = vec![founder_latest];
-        let mut traversed = vec![TraversedMembershipStream {
-            author_pubkey: root_value.descriptor.founder_pubkey.clone(),
-            author_owner_grant: root_value.descriptor.founder_grant.clone(),
-            stream_id: founder_stream,
-            heads: zip_traversed_heads(&founder_loaded),
-        }];
-        let mut resolutions = founder_loaded.resolutions;
-
-        loop {
-            let exact_heads = latest_heads
-                .iter()
-                .map(|(reference, _)| reference.clone())
-                .collect::<Vec<_>>();
-            let resolution_refs = resolutions.keys().cloned().collect::<Vec<_>>();
-            let chain = Box::pin(self.load_anchored_chain_at_exact_heads(
-                &exact_heads,
-                &resolution_refs,
-                None,
-            ))
-            .await?;
-            let pending = chain
-                .activated_membership_streams()
-                .into_iter()
-                .filter(|(stream, _)| !discovered.contains(stream))
-                .collect::<Vec<_>>();
-            if pending.is_empty() {
-                if consumed_cursors.len() != cursors.len() {
-                    return Err(AnchoredChainError::LoadFailed(
-                        "membership cursor names a stream that is not activated by the anchored chain"
-                            .to_string(),
-                    ));
-                }
-                traversed.sort_by(|left, right| {
-                    (
-                        &left.author_pubkey,
-                        &left.author_owner_grant,
-                        left.stream_id,
-                    )
-                        .cmp(&(
-                            &right.author_pubkey,
-                            &right.author_owner_grant,
-                            right.stream_id,
-                        ))
-                });
-                return Ok((
-                    chain,
-                    TraversedMembership {
-                        streams: traversed,
-                        resolutions: resolutions.into_iter().collect(),
-                    },
-                ));
-            }
-
-            for (stream, anchor) in pending {
-                let cursor = cursors
-                    .iter()
-                    .find(|cursor| cursor.coord.stream_key() == stream);
-                let loaded = Box::pin(self.traverse_exact_membership_stream(
-                    &stream.author_pubkey,
-                    &stream.author_owner_grant,
-                    stream.stream_id,
-                    &anchor,
-                    cursor,
-                ))
-                .await?;
-                if let Some(cursor) = cursor {
-                    consumed_cursors.insert(cursor.clone());
-                }
-                traversed.push(TraversedMembershipStream {
-                    author_pubkey: stream.author_pubkey.clone(),
-                    author_owner_grant: stream.author_owner_grant.clone(),
-                    stream_id: stream.stream_id,
-                    heads: zip_traversed_heads(&loaded),
-                });
-                resolutions.extend(loaded.resolutions);
-                if let Some(latest) = loaded.heads.last().cloned() {
-                    latest_heads.push(latest);
-                    latest_heads.sort_by_key(|(reference, _)| reference.coord.stream_key());
-                }
-                discovered.insert(stream);
-            }
-        }
-    }
-
     async fn load_at_exact_heads(
         &mut self,
         exact_heads: &[MembershipHeadRef],
@@ -500,7 +503,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                             }
                         }
                     }
-                    current = node.head.body.predecessor.clone();
+                    current = node.head.body.predecessor_head().cloned();
                 }
                 heads.push(requested_head.ok_or_else(|| {
                     AnchoredChainError::LoadFailed(
@@ -531,6 +534,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                     &node.reference,
                     &node.head,
                     &node.entry,
+                    None,
                 ))
                 .await?
                 {
@@ -590,6 +594,11 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                             ));
                         }
                     }
+                    MembershipActivationAuthority::AcceptedHeads { .. } => {
+                        // The exact activation head's accepted result establishes
+                        // publication. The graph below verifies the resolver's
+                        // predecessor authority and exact resolution cut.
+                    }
                     MembershipActivationAuthority::History { history, .. } => {
                         Box::pin(history.verify_owner_conflict_acceptance(
                             &value.replacement_acceptance,
@@ -605,7 +614,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             let target_cut = exact_resolutions.iter().cloned().collect::<BTreeSet<_>>();
             let mut activation_counts = BTreeMap::<_, usize>::new();
             for entry in graph.entries.values() {
-                if let MembershipChange::ResolutionActivation { resolution } = &entry.change {
+                if let StoreAuthorityChange::ResolutionActivation { resolution } = &entry.change {
                     if entry.resolution_dependencies == exact_resolutions {
                         *activation_counts.entry(resolution.clone()).or_default() += 1;
                     }
@@ -752,6 +761,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             Self::History { history } => history.commit_verifier.load_registration(reference).await,
             Self::VerifiedPrefix {
                 commit_verifier, ..
+            }
+            | Self::AcceptedHeads {
+                commit_verifier, ..
             } => commit_verifier.load_registration(reference).await,
         }
     }
@@ -805,6 +817,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             Self::History { history } => history.commit_verifier.load_founder_registration().await,
             Self::VerifiedPrefix {
                 commit_verifier, ..
+            }
+            | Self::AcceptedHeads {
+                commit_verifier, ..
             } => commit_verifier.load_founder_registration().await,
         }
     }
@@ -812,14 +827,16 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
     fn root(&self) -> &StoreRootRef {
         match self {
             Self::History { history } => history.root.reference(),
-            Self::VerifiedPrefix { root, .. } => root.reference(),
+            Self::VerifiedPrefix { root, .. } | Self::AcceptedHeads { root, .. } => {
+                root.reference()
+            }
         }
     }
 
     fn verified_root(&self) -> &coven_protocol::store_commit::StoreProtocolRoot {
         match self {
             Self::History { history } => history.root.protocol(),
-            Self::VerifiedPrefix { root, .. } => root.protocol(),
+            Self::VerifiedPrefix { root, .. } | Self::AcceptedHeads { root, .. } => root.protocol(),
         }
     }
 
@@ -836,6 +853,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                     .await
             }
             Self::VerifiedPrefix {
+                commit_verifier, ..
+            }
+            | Self::AcceptedHeads {
                 commit_verifier, ..
             } => {
                 commit_verifier
@@ -884,6 +904,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             }
             Self::VerifiedPrefix {
                 commit_verifier, ..
+            }
+            | Self::AcceptedHeads {
+                commit_verifier, ..
             } => {
                 commit_verifier
                     .membership_objects()
@@ -909,6 +932,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                     .await
             }
             Self::VerifiedPrefix {
+                commit_verifier, ..
+            }
+            | Self::AcceptedHeads {
                 commit_verifier, ..
             } => {
                 commit_verifier
@@ -936,6 +962,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                     .await
             }
             Self::VerifiedPrefix {
+                commit_verifier, ..
+            }
+            | Self::AcceptedHeads {
                 commit_verifier, ..
             } => {
                 commit_verifier
@@ -973,6 +1002,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             }
             Self::VerifiedPrefix {
                 commit_verifier, ..
+            }
+            | Self::AcceptedHeads {
+                commit_verifier, ..
             } => {
                 commit_verifier
                     .membership_objects()
@@ -1004,6 +1036,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                     .await
             }
             Self::VerifiedPrefix {
+                commit_verifier, ..
+            }
+            | Self::AcceptedHeads {
                 commit_verifier, ..
             } => {
                 commit_verifier
@@ -1124,6 +1159,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         reference: &MembershipHeadRef,
         head: &AuthorHead,
         entry: &MembershipEntry,
+        acceptance: Option<LoadedHeadAcceptance>,
     ) -> Result<bool, AnchoredChainError> {
         match (
             membership_entry_requires_store_activation(entry),
@@ -1132,7 +1168,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             (false, coven_protocol::membership::MembershipHeadActivation::Direct) => Ok(true),
             (
                 true,
-                coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit },
+                coven_protocol::membership::MembershipHeadActivation::StoreCommit {
+                    commit, ..
+                },
             ) => match self {
                 MembershipActivationAuthority::VerifiedPrefix {
                     activations: verified_activations,
@@ -1155,6 +1193,15 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                     }
                     Ok(true)
                 }
+                MembershipActivationAuthority::AcceptedHeads {
+                    commit_verifier,
+                    device_authority,
+                    ..
+                } => {
+                    device_authority
+                        .observe(commit_verifier, reference, head, entry, acceptance)
+                        .await
+                }
                 MembershipActivationAuthority::History { history, .. } => {
                     Box::pin(history.verify_membership_head_activation(reference, head, commit))
                         .await
@@ -1172,150 +1219,6 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                 ))
             }
         }
-    }
-
-    async fn traverse_exact_membership_stream(
-        &mut self,
-        author: &str,
-        grant: &MembershipGrantId,
-        stream_id: coven_protocol::membership::AuthorStreamId,
-        anchor: &GrantStreamAnchor,
-        cursor: Option<&MembershipHeadRef>,
-    ) -> Result<ExactMembershipStream, AnchoredChainError> {
-        let GrantStreamAnchor::StoreMembership { first_slot } = anchor else {
-            return Err(AnchoredChainError::LoadFailed(
-                "membership stream uses a recovery anchor".to_string(),
-            ));
-        };
-        let prefetched = self
-            .prefetch_membership_stream(author, grant, stream_id, first_slot)
-            .await?;
-        let mut slot = first_slot.clone();
-        let mut expected_sequence = 1_u64;
-        let mut predecessor: Option<MembershipHeadRef> = None;
-        let mut entries = Vec::new();
-        let mut heads = Vec::new();
-        let mut resolutions = BTreeMap::new();
-        let mut reached_cursor = cursor.is_none();
-
-        loop {
-            let read = match prefetched.get(&slot) {
-                Some(read) => {
-                    self.verify_membership_head_at_slot(
-                        read,
-                        author,
-                        grant,
-                        stream_id,
-                        expected_sequence,
-                    )
-                    .await
-                }
-                None => {
-                    self.load_membership_head_at_slot(
-                        &slot,
-                        author,
-                        grant,
-                        stream_id,
-                        expected_sequence,
-                    )
-                    .await
-                }
-            };
-            let loaded = match read {
-                Ok(value) => value,
-                Err(StoreObjectError::Storage(StorageError::NotFound(_))) => break,
-                Err(StoreObjectError::Storage(source)) if source.is_transport() => {
-                    return Err(AnchoredChainError::StorageUnavailable {
-                        operation: format!(
-                            "read membership head {author}/{grant}/{stream_id}/{expected_sequence}"
-                        ),
-                        source,
-                    })
-                }
-                Err(error) => return Err(map_membership_object_error(error)),
-            };
-            let object = loaded.object;
-            let head = loaded.value;
-            let coord = head.entry_coord();
-            let reference = MembershipHeadRef {
-                coord: coord.clone(),
-                head_hash: head.head_hash(),
-                object,
-            };
-            if head.body.predecessor != predecessor
-                || head.body.successor.predecessor
-                    != predecessor
-                        .as_ref()
-                        .map(|reference| reference.object.clone())
-            {
-                return Err(AnchoredChainError::LoadFailed(format!(
-                    "membership head {coord:?} does not extend its exact predecessor"
-                )));
-            }
-            if head.body.successor.activation
-                != coven_protocol::store_commit::StreamActivation::grant_authorized(
-                    self.root().store_root_hash,
-                    head.body.author_registration.clone(),
-                    grant.clone(),
-                    anchor.clone(),
-                )
-                .activation_id()
-            {
-                return Err(AnchoredChainError::LoadFailed(format!(
-                    "membership head {coord:?} is not signed by its activated certified device"
-                )));
-            }
-            let loaded_entry = self
-                .load_membership_entry(&head.body.entry)
-                .await
-                .map_err(map_membership_object_error)?;
-            if loaded_entry.value.resolution_dependencies != head.body.resolutions {
-                return Err(AnchoredChainError::LoadFailed(format!(
-                    "membership head {coord:?} carries a resolution cut different from its entry"
-                )));
-            }
-            if !self
-                .validate_head_activation(&reference, &head, &loaded_entry.value)
-                .await?
-            {
-                if cursor == Some(&reference) {
-                    return Err(AnchoredChainError::LoadFailed(
-                        "membership cursor names an unactivated Store-bound head".to_string(),
-                    ));
-                }
-                break;
-            }
-            for resolution_ref in &head.body.resolutions {
-                if !resolutions.contains_key(resolution_ref) {
-                    let resolution = self
-                        .load_membership_resolution(resolution_ref)
-                        .await
-                        .map_err(map_membership_object_error)?
-                        .value;
-                    resolutions.insert(resolution_ref.clone(), resolution);
-                }
-            }
-            if cursor == Some(&reference) {
-                reached_cursor = true;
-            }
-            entries.push((coord, loaded_entry.value));
-            heads.push((reference.clone(), head.clone()));
-            predecessor = Some(reference);
-            slot = head.body.successor.next_slot.clone();
-            expected_sequence = expected_sequence.checked_add(1).ok_or_else(|| {
-                AnchoredChainError::LoadFailed("membership head sequence overflow".to_string())
-            })?;
-        }
-        if !reached_cursor {
-            return Err(AnchoredChainError::LoadFailed(
-                "membership head successor chain regressed below its durable cursor".to_string(),
-            ));
-        }
-        Ok(ExactMembershipStream {
-            entries,
-            heads,
-            resolutions,
-        })
     }
 }
 

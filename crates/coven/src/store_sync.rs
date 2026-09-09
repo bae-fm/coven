@@ -11,7 +11,8 @@ use coven_database::StoreDatabase;
 use coven_foundation::clock::ClockRef;
 use coven_foundation::config::Config;
 use coven_foundation::store_dir::StoreOpenGuard;
-use coven_protocol::blob::{BlobRef, BlobTransitionObserver};
+use coven_protocol::blob::BlobTransitionObserver;
+#[cfg(test)]
 use coven_protocol::objects::StorageError;
 use coven_replication::blob::transition::{MakeLocalError, MakeRemoteError};
 use coven_replication::sync::sync_loop::{
@@ -20,8 +21,8 @@ use coven_replication::sync::sync_loop::{
 use coven_replication::sync::Store;
 use coven_storage::cloud::setup::StorageSetupError;
 #[cfg(test)]
-use coven_storage::BlobChunking;
-use coven_storage::{BlobPathScheme, CloudSyncConnection, CloudSyncObjectStorage};
+use coven_storage::{BlobChunking, BlobPathScheme};
+use coven_storage::{CloudSyncConnection, CloudSyncObjectStorage};
 
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 

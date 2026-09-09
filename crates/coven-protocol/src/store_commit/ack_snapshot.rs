@@ -1,6 +1,5 @@
 use super::validation::{
-    validate_ack_state, validate_commit_frontier, validate_store_device_state_ref,
-    validate_successor_sequence,
+    validate_ack_state, validate_commit_frontier, validate_successor_sequence,
 };
 use super::*;
 
@@ -12,8 +11,6 @@ pub struct StoreAckBody {
     pub sequence: u64,
     pub store_cut: StoreHistoryCut,
     pub device_state: StoreDeviceStateRef,
-    pub snapshot: Option<StoreSnapshotLocator>,
-    pub exclusions: StoreAckExclusionState,
     pub last_sync: String,
     pub successor: SuccessorLink,
 }
@@ -37,8 +34,6 @@ pub struct StoreAckAssertion {
     pub registration: StoreDeviceRegistrationRef,
     pub store_cut: StoreHistoryCut,
     pub device_state: StoreDeviceStateRef,
-    pub snapshot: Option<StoreSnapshotLocator>,
-    pub exclusions: StoreAckExclusionState,
 }
 
 /// The acknowledgement a device currently stands behind: what it asserted, and
@@ -63,32 +58,11 @@ pub struct StandingStoreAck {
 impl StandingStoreAck {
     /// Whether `assertion` says exactly what this acknowledgement already said.
     ///
-    /// Destructured exhaustively for the same reason [`StoreAckBody::assertion`]
-    /// is: a field added to the assertion has to be compared here, or the
-    /// acknowledgement could change without anything noticing.
+    /// This comparison needs no historical bodies when the cut differs only by
+    /// the activating commit. Other acknowledgement-only advances are proved by
+    /// the verified history owner.
     pub fn still_holds(&self, assertion: &StoreAckAssertion) -> bool {
-        let StoreAckAssertion {
-            registration,
-            store_cut,
-            device_state,
-            snapshot,
-            exclusions,
-        } = assertion;
-        if registration != &self.assertion.registration
-            || snapshot != &self.assertion.snapshot
-            || exclusions != &self.assertion.exclusions
-        {
-            return false;
-        }
-        // A device-state reference names both the device set and the cut it was
-        // read at. The cut half moves with `store_cut` and is compared there; the
-        // device set is what this reference actually asserts.
-        if device_state.state_hash() != self.assertion.device_state.state_hash()
-            || device_state.recovery() != self.assertion.device_state.recovery()
-        {
-            return false;
-        }
-        *store_cut == self.covered_cut()
+        self.assertion.same_state_as(assertion) && assertion.store_cut == self.covered_cut()
     }
 
     /// The Store history this acknowledgement leaves behind it: what it asserted,
@@ -100,6 +74,30 @@ impl StandingStoreAck {
             cut.insert(commit.coord.stream_id, commit.clone());
         }
         StoreHistoryCut(cut)
+    }
+}
+
+impl StoreAckAssertion {
+    /// Compare the asserted device state. The history
+    /// owner separately decides whether a changed cut contains new work.
+    pub fn same_state_as(&self, assertion: &Self) -> bool {
+        let StoreAckAssertion {
+            registration,
+            store_cut: _,
+            device_state,
+        } = assertion;
+        if registration != &self.registration {
+            return false;
+        }
+        // A device-state reference names both the device set and the cut it was
+        // read at. The cut is compared separately; the device set is what this
+        // reference asserts independently of that cut.
+        if device_state.state_hash() != self.device_state.state_hash()
+            || device_state.recovery() != self.device_state.recovery()
+        {
+            return false;
+        }
+        true
     }
 }
 
@@ -117,8 +115,6 @@ impl StoreAckBody {
             sequence: _,
             store_cut,
             device_state,
-            snapshot,
-            exclusions,
             last_sync: _,
             successor: _,
         } = self;
@@ -126,8 +122,6 @@ impl StoreAckBody {
             registration: registration.clone(),
             store_cut: store_cut.clone(),
             device_state: device_state.clone(),
-            snapshot: snapshot.clone(),
-            exclusions: exclusions.clone(),
         }
     }
 }
@@ -143,51 +137,23 @@ pub struct StoreAckRef {
     pub object: ExactObjectRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreSnapshotLocator {
-    pub author_registration: StoreDeviceRegistrationRef,
-    pub snapshot: StoreSnapshotRef,
-}
-
 /// The exact membership and device state represented by one Store snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreSnapshotState {
     pub membership: StoreMembershipStateRef,
-    pub devices: StoreDeviceStateRef,
+    pub devices: ResolvedStoreDeviceState,
 }
 
 impl StoreSnapshotState {
-    fn validate(
-        &self,
-        store_root_hash: ObjectHash,
-        coverage: &CommitFrontier,
-    ) -> Result<(), StoreProtocolError> {
+    fn validate(&self) -> Result<(), StoreProtocolError> {
         self.membership.validate_shape()?;
-        validate_store_device_state_ref(&self.devices)?;
-        if self.membership.recovery() != self.devices.recovery() {
+        self.devices.validate_canonical()?;
+        if self.membership.recovery() != self.devices.recovery {
             return Err(StoreProtocolError::OwnerRecoveryMismatch);
         }
-        if self.devices.frontier() != coverage {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-        let _ = store_root_hash;
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreAckExclusionState {
-    pub proposal_freezes: Vec<StoreDeviceProposalAck>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreDeviceProposalAck {
-    pub proposal: StoreDeviceExclusionProposalRef,
-    pub target_cut: StoreHistoryCut,
 }
 
 impl StoreAck {
@@ -204,16 +170,8 @@ impl StoreAck {
             registration,
             store_cut,
             device_state,
-            snapshot,
-            exclusions,
         } = assertion;
-        validate_ack_state(
-            store_root_hash,
-            &registration,
-            &store_cut,
-            &device_state,
-            &exclusions,
-        )?;
+        validate_ack_state(&store_cut, &device_state)?;
         Ok(Signed::sign(
             StoreAckBody {
                 store_root_hash,
@@ -221,8 +179,6 @@ impl StoreAck {
                 sequence,
                 store_cut,
                 device_state,
-                snapshot,
-                exclusions,
                 last_sync,
                 successor,
             },
@@ -266,13 +222,7 @@ impl StoreAck {
             });
         }
         validate_successor_sequence(ack.sequence, &ack.successor)?;
-        validate_ack_state(
-            ack.store_root_hash,
-            &ack.registration,
-            &ack.store_cut,
-            &ack.device_state,
-            &ack.exclusions,
-        )?;
+        validate_ack_state(&ack.store_cut, &ack.device_state)?;
         let activation = author
             .store_acknowledgement_activation(&ack.registration)?
             .activation_id();
@@ -297,8 +247,11 @@ impl StoreAck {
 pub struct SnapshotMetaBody {
     pub store_root_hash: ObjectHash,
     pub author_registration: StoreDeviceRegistrationRef,
-    pub generation: u64,
-    pub predecessor: Option<StoreSnapshotRef>,
+    /// The exact accepted publication boundary whose complete shared state is
+    /// represented by this image. Snapshot acceptance extends this record;
+    /// after compaction it remains the authenticated start of the retained
+    /// publication interval.
+    pub publication_predecessor: StoreCurrentPublicationRecord,
     pub image: SnapshotImageRef,
     /// The membership objects a reader needs to reach `state.membership`,
     /// published beside the image. A joining device opens the Store keyring out
@@ -311,7 +264,6 @@ pub struct SnapshotMetaBody {
     pub history_summary: RetainedVerifiedMergeHistorySummary,
     pub schema_version: u32,
     pub created_at: String,
-    pub successor: SnapshotSuccessorLink,
 }
 
 impl SignedBody for SnapshotMetaBody {
@@ -330,7 +282,8 @@ impl RetainedVerifiedMergeHistorySummary {
         self.validate_snapshot_baseline()?;
         if self.store_root_hash != store_root_hash
             || self.frontier()? != coverage.0
-            || self.post_state != state.devices
+            || self.post_state
+                != StoreDeviceStateRef::from_resolved(coverage.clone(), &state.devices)?
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
@@ -348,25 +301,50 @@ pub struct SnapshotImageRef {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreSnapshotRef {
-    pub generation: u64,
     pub snapshot_hash: ObjectHash,
     pub object: ExactObjectRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SnapshotSuccessorLink {
-    pub activation: StreamActivationId,
-    pub predecessor: Option<StoreSnapshotRef>,
-    pub next_slot: ObjectSlot,
+impl StoreSnapshotRef {
+    /// A fresh metadata slot owns its image and rollup. An artifact from another
+    /// candidate cannot acquire a new owner after its old snapshot is retired.
+    pub fn validate_artifact_slots(
+        &self,
+        image: &SnapshotImageRef,
+        rollup: &MembershipRollupRef,
+    ) -> Result<(), StoreProtocolError> {
+        for (object, expected) in [
+            (
+                &image.object,
+                format!(
+                    "{}.db",
+                    snapshot_image_semantic_prefix(self.object.slot(), image.image_hash)
+                ),
+            ),
+            (
+                &rollup.object,
+                format!(
+                    "{}.json",
+                    membership_rollup_semantic_prefix(self.object.slot(), rollup.rollup_hash)
+                ),
+            ),
+        ] {
+            if object.slot().logical_key() != expected {
+                return Err(StoreProtocolError::RelocatedSlot {
+                    expected,
+                    actual: object.slot().logical_key().into(),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 impl SnapshotMeta {
     pub fn signed(
         store_root_hash: ObjectHash,
         author_registration: StoreDeviceRegistrationRef,
-        generation: u64,
-        predecessor: Option<StoreSnapshotRef>,
+        publication_predecessor: StoreCurrentPublicationRecord,
         image: SnapshotImageRef,
         membership_rollup: MembershipRollupRef,
         coverage: CommitFrontier,
@@ -374,19 +352,22 @@ impl SnapshotMeta {
         history_summary: RetainedVerifiedMergeHistorySummary,
         schema_version: u32,
         created_at: String,
-        successor: SnapshotSuccessorLink,
         device_signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        validate_snapshot_generation(generation, predecessor.as_ref())?;
+        if publication_predecessor.store_root_hash != store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: store_root_hash,
+                actual: publication_predecessor.store_root_hash,
+            });
+        }
         validate_commit_frontier(&coverage)?;
-        state.validate(store_root_hash, &coverage)?;
+        state.validate()?;
         history_summary.validate(store_root_hash, &coverage, &state)?;
         Ok(Signed::sign(
             SnapshotMetaBody {
                 store_root_hash,
                 author_registration,
-                generation,
-                predecessor,
+                publication_predecessor,
                 image,
                 membership_rollup,
                 coverage,
@@ -394,7 +375,6 @@ impl SnapshotMeta {
                 history_summary,
                 schema_version,
                 created_at,
-                successor,
             },
             device_signer,
         ))
@@ -416,88 +396,67 @@ impl SnapshotMeta {
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
         let meta: Self = crate::objects::decode_protocol_object(bytes)?;
-        meta.require_version()?;
-        crate::objects::verify_store_root(expected_store_root_hash, meta.store_root_hash)?;
-        meta.author_registration.verify_registration(author)?;
-        if meta.generation != expected.generation {
-            return Err(StoreProtocolError::RelocatedSlot {
-                expected: snapshot_semantic_prefix(
-                    &author.device_id.to_string(),
-                    expected.snapshot_hash,
-                ),
-                actual: snapshot_semantic_prefix(
-                    &author.device_id.to_string(),
-                    meta.snapshot_hash(),
-                ),
-            });
-        }
-        validate_snapshot_generation(meta.generation, meta.predecessor.as_ref())?;
-        validate_commit_frontier(&meta.coverage)?;
-        meta.state
-            .validate(expected_store_root_hash, &meta.coverage)?;
-        meta.history_summary
-            .validate(expected_store_root_hash, &meta.coverage, &meta.state)?;
-        meta.verify_by(&author.device_signing_pubkey)?;
-        let actual = meta.snapshot_hash();
+        meta.verify_bytes_at(bytes, expected_store_root_hash, expected, author)?;
+        Ok(meta)
+    }
+
+    /// Verify an already decoded snapshot against its exact canonical object.
+    pub fn verify_at(
+        &self,
+        expected_store_root_hash: ObjectHash,
+        expected: &StoreSnapshotRef,
+        author: &StoreDeviceRegistration,
+    ) -> Result<(), StoreProtocolError> {
+        self.verify_bytes_at(&self.to_bytes(), expected_store_root_hash, expected, author)
+    }
+
+    fn verify_bytes_at(
+        &self,
+        bytes: &[u8],
+        expected_store_root_hash: ObjectHash,
+        expected: &StoreSnapshotRef,
+        author: &StoreDeviceRegistration,
+    ) -> Result<(), StoreProtocolError> {
+        self.require_version()?;
+        crate::objects::verify_store_root(expected_store_root_hash, self.store_root_hash)?;
+        self.author_registration.verify_registration(author)?;
+        crate::objects::verify_store_root(
+            expected_store_root_hash,
+            author.store_root.store_root_hash,
+        )?;
+        crate::objects::verify_store_root(
+            expected_store_root_hash,
+            self.publication_predecessor.store_root_hash,
+        )?;
+        let prefix = semantic_prefix_from_exact_object(&expected.object, ".json")?;
+        let author_prefix = format!("{STORE_SNAPSHOT_META_PREFIX}{}/", author.device_id);
+        let candidate = prefix.strip_prefix(&author_prefix).ok_or_else(|| {
+            StoreProtocolError::Malformed(
+                "Store snapshot candidate is outside its author's metadata path".to_string(),
+            )
+        })?;
+        coven_foundation::store_dir::validate_path_token(candidate).map_err(|error| {
+            StoreProtocolError::Malformed(format!("invalid Store snapshot candidate: {error}"))
+        })?;
+        crate::objects::ProtocolObjectContext::signed_plaintext(
+            expected_store_root_hash,
+            crate::objects::ProtocolObjectDomain::StoreSnapshotMeta,
+        )
+        .validate_reference(&expected.object, &prefix)?;
+        expected.object.verify(bytes)?;
+        validate_commit_frontier(&self.coverage)?;
+        self.state.validate()?;
+        self.history_summary
+            .validate(expected_store_root_hash, &self.coverage, &self.state)?;
+        self.verify_by(&author.device_signing_pubkey)?;
+        let actual = self.snapshot_hash();
         if actual != expected.snapshot_hash {
             return Err(StoreProtocolError::ObjectHashMismatch {
                 expected: expected.snapshot_hash,
                 actual,
             });
         }
-        Ok(meta)
-    }
-
-    pub fn parse_stream_entry_at(
-        bytes: &[u8],
-        expected_store_root: &StoreRootRef,
-        expected_registration: &StoreDeviceRegistrationRef,
-        author: &StoreDeviceRegistration,
-        expected: &StoreSnapshotRef,
-    ) -> Result<Self, StoreProtocolError> {
-        let meta = Self::parse_at(bytes, expected_store_root.store_root_hash, expected, author)?;
-        let next_generation = expected.generation.checked_add(1).ok_or_else(|| {
-            StoreProtocolError::Malformed("Store snapshot generation overflow".to_string())
-        })?;
-        let activation = author
-            .store_snapshot_activation(expected_registration)?
-            .activation_id();
-        if meta.author_registration != *expected_registration
-            || meta.successor.activation != activation
-            || meta.successor.predecessor != meta.predecessor
-            || meta.successor.next_slot.logical_key()
-                != format!(
-                    "{}.json",
-                    snapshot_slot_prefix(&author.device_id.to_string(), next_generation)
-                )
-        {
-            return Err(StoreProtocolError::Malformed(
-                "Store snapshot metadata is outside its activated exact stream".to_string(),
-            ));
-        }
-        Ok(meta)
-    }
-}
-
-fn validate_snapshot_generation(
-    generation: u64,
-    predecessor: Option<&StoreSnapshotRef>,
-) -> Result<(), StoreProtocolError> {
-    match (generation, predecessor) {
-        (0, None) => Ok(()),
-        (0, Some(_)) | (_, None) => Err(StoreProtocolError::Malformed(
-            "Store snapshot generation and predecessor disagree".to_string(),
-        )),
-        (generation, Some(predecessor)) => {
-            let expected = predecessor.generation.checked_add(1).ok_or_else(|| {
-                StoreProtocolError::Malformed("Store snapshot generation overflow".to_string())
-            })?;
-            if generation != expected {
-                return Err(StoreProtocolError::Malformed(
-                    "Store snapshot generation does not follow its predecessor".to_string(),
-                ));
-            }
-            Ok(())
-        }
+        expected.validate_artifact_slots(&self.image, &self.membership_rollup)?;
+        Ok(())
     }
 }

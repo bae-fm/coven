@@ -12,20 +12,6 @@ pub(crate) fn reclaim_test_object(path: &str) -> ExactObjectRef {
     )
 }
 
-pub(crate) fn reclaim_test_activation(
-    commit: StoreBatchCommitRef,
-    label: &str,
-) -> ReclaimCommitActivation {
-    ReclaimCommitActivation::new(
-        commit,
-        coven_protocol::store_commit::StoreDeviceHeadRef {
-            head_hash: ObjectHash::digest(format!("{label} reclaim head").as_bytes()),
-            object: reclaim_test_object(&format!("store-v1/test/{label}/reclaim-head.json")),
-        },
-    )
-    .expect("valid reclaim activation")
-}
-
 pub(crate) fn snapshot_activation(label: &str) -> StreamActivationId {
     let registration_bytes = format!("{label} snapshot registration");
     let registration = coven_protocol::store_commit::StoreDeviceRegistrationRef {
@@ -38,7 +24,8 @@ pub(crate) fn snapshot_activation(label: &str) -> StreamActivationId {
     coven_protocol::store_commit::StreamActivation::device_authorized(
         ObjectHash::digest(format!("{label} Store root").as_bytes()),
         registration,
-        coven_protocol::store_commit::DeviceStreamAnchor::StoreSnapshots {
+        coven_protocol::store_commit::DeviceStreamAnchor::CircleSnapshots {
+            circle_id: coven_protocol::circle::CircleId::from_bytes([7; 16]),
             first_slot: coven_protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/test/{label}/snapshots/1.json"
             ))

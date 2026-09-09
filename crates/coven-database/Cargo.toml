@@ -32,6 +32,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rusqlite = { workspace = true, features = ["backup"] }
 # A `cfg(test)` build of this crate reaches the foundation and protocol test
 # hooks, which exist only under those crates' own `test-utils`. `cfg(test)`
 # enables no `[features]` of this crate, so they arrive through these edges.
@@ -42,7 +43,7 @@ coven-protocol = { workspace = true, features = ["test-utils"] }
 [features]
 # The synthetic store, schema fixtures, and tamper helpers the layers above
 # build their database tests from.
-test-utils = ["coven-protocol/test-utils"]
+test-utils = ["coven-protocol/test-utils", "rusqlite/backup"]
 
 [lints]
 workspace = true

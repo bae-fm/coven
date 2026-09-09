@@ -68,34 +68,6 @@ fn open_persistent_circle_test_db(
     (database, store_dir)
 }
 
-/// A Circle-scoped `documents` table whose rows carry a blob.
-fn open_circle_blob_test_db(store_dir: coven_foundation::store_dir::StoreDir) -> Database {
-    crate::sync::test_helpers::open_test_db_schema(
-        store_dir,
-        vec![coven_protocol::synced_schema::SyncedTable::new(
-            "documents",
-            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
-        )
-        .scoped_by("audience")
-        .carries_blob(coven_protocol::synced_schema::BlobDecl::new(
-            "files",
-            coven_protocol::blob::Provenance::HostProvided,
-            coven_protocol::blob::CacheFill::CacheEager,
-        ))],
-        vec![coven_database::Migration::sql(
-            1,
-            "Circle member bootstrap schema",
-            "CREATE TABLE documents (
-                 id TEXT PRIMARY KEY,
-                 audience TEXT,
-                 size INTEGER NOT NULL,
-                 hash TEXT NOT NULL,
-                 _updated_at TEXT NOT NULL
-             ) STRICT;",
-        )],
-    )
-}
-
 /// A Circle-scoped `documents` table whose rows carry their bytes inline, so a
 /// single row can make the Circle's database image arbitrarily large.
 fn open_circle_bulk_row_test_db(store_dir: coven_foundation::store_dir::StoreDir) -> Database {
@@ -151,7 +123,7 @@ async fn installed_document_row(
 async fn applicable_circle_packages(
     device: &crate::sync::test_helpers::TestDevice,
     verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-    activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+    activations: &[&coven_protocol::circle_activation::VerifiedCircleActivations],
     author: &coven_protocol::store_commit::StoreDeviceRegistration,
     purpose: &str,
 ) -> Vec<crate::sync::store::pull::LoadedCirclePackage> {
@@ -672,7 +644,11 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
     )
     .await;
     components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("publish the Circle's bulk row");
 
@@ -749,6 +725,26 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
 
 #[tokio::test]
 async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
+    check_member_bootstrap_blob_history(BootstrapBlobHistory::Installed).await;
+}
+
+#[tokio::test]
+async fn member_bootstrap_verifies_blob_lineage_prepared_in_the_same_pull() {
+    check_member_bootstrap_blob_history(BootstrapBlobHistory::PreparedLineage).await;
+}
+
+#[tokio::test]
+async fn member_bootstrap_verifies_blob_control_prepared_in_the_same_pull() {
+    check_member_bootstrap_blob_history(BootstrapBlobHistory::PreparedControl).await;
+}
+
+enum BootstrapBlobHistory {
+    Installed,
+    PreparedLineage,
+    PreparedControl,
+}
+
+async fn check_member_bootstrap_blob_history(history: BootstrapBlobHistory) {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = open_circle_blob_test_db(db_store_dir.clone());
     let (store_fixture, _home, signer, founder) =
@@ -790,6 +786,15 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
         .await
         .expect("activate Store member device");
+    if matches!(history, BootstrapBlobHistory::PreparedControl) {
+        store
+            .bind_device_in(&db, db_store_dir.clone(), &signer)
+            .await
+            .expect("bind the Circle author")
+            .rename_circle("0000000002000-0000-owner", circle_id, "Shared attachments")
+            .await
+            .expect("publish the blob's control after the recipient last synchronized");
+    }
     let store_dir = db_store_dir.clone();
     let blob_id = "00000000-0000-4000-8000-000000000001";
     let blob_bytes = b"Circle bootstrap attachment";
@@ -823,7 +828,11 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     )
     .await;
     components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("publish Circle row and blob");
     let historical_commit = match coven_database::StoreDatabase::new(&db)
@@ -831,13 +840,16 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("load historical Circle write status")
     {
-        coven_protocol::write::WriteStatus::Published(position) => position.commit,
+        coven_protocol::write::WriteStatus::Published(position) => position
+            .exact_commit()
+            .expect("published Circle write has an exact commit")
+            .clone(),
         status => panic!("historical Circle write was not published: {status:?}"),
     };
     let historical_blob = db
         .row_blob_ref("documents", blob_id)
         .await
-        .expect("load blob reference from the founder control");
+        .expect("load blob reference from its publishing control");
 
     let concurrent_writer = UserKeypair::generate();
     let concurrent_writer_pubkey = keys::public_key_hex(&concurrent_writer);
@@ -871,11 +883,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .add_circle_member(circle_id, concurrent_writer_pubkey, CircleRole::Member)
         .await
         .expect("add concurrent Circle writer");
-    let concurrent_bootstrap_commit = coven_database::StoreDatabase::new(&db)
+    let (concurrent_control, concurrent_bootstrap_commit) = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
-        .expect("load concurrent writer Circle bootstrap commit")
-        .1;
+        .expect("load concurrent writer Circle bootstrap commit");
     let concurrent_store = store
         .bind_device_in(
             &concurrent_db,
@@ -896,13 +907,48 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .bind_device_in(&member_db, member_db_store_dir.clone(), &member)
         .await
         .expect("load Circle member Store");
-    member_store
-        .authorize_writer()
-        .await
-        .expect("authorize Store member before Circle access")
-        .pull(Some(&EncryptionService::from_key([42; 32])))
-        .await
-        .expect("recipient learns the concurrent Store writer");
+    if matches!(history, BootstrapBlobHistory::Installed) {
+        let pulled = member_store
+            .authorize_writer()
+            .await
+            .expect("authorize Store member before Circle access")
+            .pull(Some(&EncryptionService::from_key([42; 32])))
+            .await
+            .expect("recipient learns the concurrent Store writer");
+        assert!(
+            pulled.held_positions.is_empty(),
+            "{:?}",
+            pulled.held_positions
+        );
+    }
+    assert_eq!(
+        StoreDatabase::new(&member_db)
+            .verified_circle_activation(
+                store.root().clone(),
+                circle_id,
+                concurrent_control.control.coord.clone(),
+            )
+            .await
+            .expect("read the recipient's installed intermediate blob lineage")
+            .is_some(),
+        matches!(history, BootstrapBlobHistory::Installed),
+        "the cold recipient must verify the intermediate control in the bootstrap pull",
+    );
+    let coven_protocol::blob::RowBlobAuthority::Remote(
+        coven_protocol::audience_package::PackageAudience::Circle { control, .. },
+    ) = historical_blob.authority()
+    else {
+        panic!("the historical blob must name its exact Circle control");
+    };
+    assert_eq!(
+        StoreDatabase::new(&member_db)
+            .verified_circle_activation(store.root().clone(), circle_id, control.clone())
+            .await
+            .expect("read the recipient's installed blob control")
+            .is_some(),
+        !matches!(history, BootstrapBlobHistory::PreparedControl),
+        "the blob control must be supplied by the prepared prefix when it is not installed",
+    );
     let late_id = "00000000-0000-4000-8000-000000000002";
     let late_bytes = b"late concurrent Circle attachment";
     let late_insert = format!(
@@ -946,6 +992,9 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         concurrent_storage.clone(),
         concurrent_store_dir.clone(),
         concurrent_writer.clone(),
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("load concurrent Circle writer Store");
@@ -973,7 +1022,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("load late concurrent Circle write status")
     {
-        coven_protocol::write::WriteStatus::Published(position) => position.commit,
+        coven_protocol::write::WriteStatus::Published(position) => position
+            .exact_commit()
+            .expect("published Circle write has an exact commit")
+            .clone(),
         status => panic!("late concurrent Circle write was not published: {status:?}"),
     };
     let target_control = coven_database::StoreDatabase::new(&db)
@@ -1191,7 +1243,11 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             .circle_control_activation_count_for_test(circle_id)
             .await
             .expect("count circle activations"),
-        3
+        if matches!(history, BootstrapBlobHistory::PreparedControl) {
+            4
+        } else {
+            3
+        }
     );
     assert!(coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
@@ -1360,7 +1416,11 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .expect("capture pre-close Circle row")
         .write_id;
     components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("publish pre-close Circle package");
     let package_commit_ref = match coven_database::StoreDatabase::new(&db)
@@ -1368,7 +1428,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .expect("load pre-close Circle write status")
     {
-        coven_protocol::write::WriteStatus::Published(position) => position.commit,
+        coven_protocol::write::WriteStatus::Published(position) => position
+            .exact_commit()
+            .expect("published Circle write has an exact commit")
+            .clone(),
         status => panic!("pre-close Circle write was not published: {status:?}"),
     };
     let device = store
@@ -1552,10 +1615,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     );
     let error = authorized_store
         .circles()
-        .finalize_ready_circle_epoch_closes(
-            "2026-07-23T00:00:01Z",
-            &EncryptionService::from_key([42; 32]),
-        )
+        .finalize_ready_circle_epoch_closes(&EncryptionService::from_key([42; 32]))
         .await
         .expect_err("malformed occupied response must prevent finalization");
     assert!(matches!(
@@ -1567,7 +1627,11 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     _home.replace_exact_object(&participant.response_slot, correct_stored);
 
     components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("activate the exact Circle epoch-close outcome");
     assert!(coven_database::StoreDatabase::new(&db)
@@ -1922,10 +1986,14 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .expect("bind candidate successor Circle Store");
     _home.clear_exact_reads();
+    let successor_materialization = device
+        .retained_merge_materialization_for_test(successor_commit_ref.clone())
+        .await
+        .expect("read exact accepted successor activation");
     let omitted_by_candidate_successor = applicable_circle_packages(
         &candidate_device,
         &verified_candidate,
-        std::slice::from_ref(&activation),
+        &[successor_materialization.circle_activations()],
         successor_author,
         "classify package against candidate successor cutoff",
     )
@@ -2296,6 +2364,9 @@ impl ClosingFounderCircle {
             member_storage.clone(),
             member_db_store_dir.clone(),
             member.clone(),
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
         )
         .await
         .expect("load Circle member Store")
@@ -2412,7 +2483,11 @@ impl ClosingFounderCircle {
             .await
             .expect("capture owner Circle row");
         self.components
-            .run_cycle(&coven_foundation::clock::SystemClock, None)
+            .run_cycle(
+                &coven_foundation::clock::SystemClock,
+                None,
+                coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+            )
             .await
             .expect("publish owner Circle row");
         match coven_database::StoreDatabase::new(&self.db)
@@ -2608,7 +2683,11 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
         .await
         .expect("bind member Circle package Store");
     let member_package_commit = member_device
-        .load_commit_for_test(published.commit())
+        .load_commit_for_test(
+            published
+                .exact_commit()
+                .expect("published Circle write has an exact commit"),
+        )
         .await
         .expect("load the member's published old-epoch package commit");
     let member_package = member_package_commit
@@ -2924,7 +3003,7 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("bind forged Circle activation Store")
-        .load_circle_activations(&journal.operation().commit_ref, &forged_commit, author)
+        .load_circle_activations(journal.operation().commit_ref(), &forged_commit, author)
         .await
         .expect_err("reopen without a slot cancellation must fail activation");
     assert!(
@@ -2935,24 +3014,26 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     );
 }
 
-// Runs `flow` on a thread whose stack is capped at 1.5 MiB — below the 2 MiB
-// default thread stack, above the ~1.05 MiB an optimized build of these Circle
-// operations measures at. An unoptimized (`opt-level = 0`) build of the same
-// flow needs ~2 MiB and overflows here; `[profile.test] opt-level = 1` in the
-// workspace `Cargo.toml` is what keeps the poll-frame
-// scratch small enough to fit. This guards that profile setting on every
-// platform: drop the optimization (or regrow the operation graph past the cap
-// in optimized frames) and this thread overflows and aborts the test binary, so
-// macOS/Windows CI catch the regression, not only the tighter-stacked Linux job.
-//
-// The cap is a budget over the whole composed flow — a founder Circle, two
-// member additions and an epoch close driven from one future — so it moves when
-// that flow's frames do, not only when the profile changes.
+// Run the entire composed flow on a 1.5 MiB stack, below the default
+// 2 MiB thread stack. This guards async frame growth and changes to the test
+// profile across founder creation, member additions, epoch close, and retry.
 fn run_circle_flow_on_a_bounded_stack<Flow, Fut>(flow: Flow)
 where
     Flow: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()>,
 {
+    // Construct on this same bounded thread, but release the construction
+    // frame before polling. Inlining keeps the future's stack temporary alive
+    // throughout block_on even though the polled future is heap-owned.
+    #[inline(never)]
+    fn prepare_flow<Flow, Fut>(flow: Flow) -> std::pin::Pin<Box<Fut>>
+    where
+        Flow: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        Box::pin(flow())
+    }
+
     std::thread::Builder::new()
         .name("circle-bounded-stack".to_string())
         .stack_size(3 * 512 * 1024)
@@ -2961,7 +3042,7 @@ where
                 .enable_all()
                 .build()
                 .expect("build bounded-stack Circle runtime")
-                .block_on(flow());
+                .block_on(prepare_flow(flow));
         })
         .expect("spawn bounded-stack Circle thread")
         .join()
@@ -2973,10 +3054,7 @@ async fn interrupted_cancellation_resumes_idempotently() {
     interrupted_cancellation_flow().await;
 }
 
-// A regression guard for the deep, non-recursive async frames of the Circle
-// resume/prepare path: it runs the same flow on a capped stack (see
-// `run_circle_flow_on_a_bounded_stack`). Optimized, the flow fits; unoptimized
-// it needs ~2 MiB and this overflows.
+// Exercise the same cancellation and retry on the fixed stack cap.
 #[test]
 fn interrupted_cancellation_resumes_within_a_bounded_stack() {
     run_circle_flow_on_a_bounded_stack(interrupted_cancellation_flow);
@@ -3023,56 +3101,77 @@ async fn interrupted_cancellation_flow() {
         .expect("second resume is idempotent");
     before_publication.assert_cancellation_reopened().await;
 
-    // A crash between publication and activation: the reopening control commit
-    // reaches durable storage, but the head create fails before the operation
-    // claims its device-stream head and records the activation. Resume finds the
-    // commit already published and completes idempotently. The reopen publishes
-    // 2*access + 5 exact objects (cancellation, access leaves, control, control
-    // head, access envelopes, then the commit and the head); failing before the
-    // final head create leaves the commit published and activation not recorded.
-    let after_publication = ClosingFounderCircle::build("circle-cancel-restart-after").await;
-    after_publication.begin_cancellation_finalization().await;
-    let journal = StoreDatabase::new(&after_publication.db)
-        .circle_operation(&after_publication.operation_id)
+    // Interrupt after the control commit upload and before its publication
+    // entry upload. The shared current record must not advance; retry keeps
+    // the durable operation and activates its control exactly once.
+    let after_commit_upload = ClosingFounderCircle::build("circle-cancel-restart-after").await;
+    after_commit_upload.begin_cancellation_finalization().await;
+    let journal = StoreDatabase::new(&after_commit_upload.db)
+        .circle_operation(&after_commit_upload.operation_id)
         .await
         .expect("read finalizing cancellation operation")
         .expect("cancellation operation is durable");
-    let activations_before = StoreDatabase::new(&after_publication.db)
-        .circle_control_activation_count_for_test(after_publication.circle_id)
+    let activations_before = StoreDatabase::new(&after_commit_upload.db)
+        .circle_control_activation_count_for_test(after_commit_upload.circle_id)
         .await
         .expect("count circle activations");
-    let head_create_call = 2 * journal.operation().creation.access.len() + 5;
-    after_publication
+    let publication_entry_create_call = 2 * journal.operation().creation.access.len() + 5;
+    after_commit_upload
         .home
-        .fail_exact_create_before_call(head_create_call);
+        .fail_exact_create_before_call(publication_entry_create_call);
 
-    let interrupted = after_publication
+    let interrupted = after_commit_upload
         .store
         .bind_device(
-            &after_publication.db,
-            after_publication.db_store_dir.clone(),
-            &after_publication.signer,
+            &after_commit_upload.db,
+            after_commit_upload.db_store_dir.clone(),
+            &after_commit_upload.signer,
         )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
-        .expect_err("the head create fails after the commit is published");
+        .expect_err("the publication entry upload fails after the commit upload");
     assert!(
-        matches!(interrupted, CircleOperationError::Object(_)),
+        matches!(
+            interrupted,
+            CircleOperationError::StoreOutbound(crate::sync::store::StoreError::Object(
+                coven_protocol::objects::StoreObjectError::Storage(_)
+            ))
+        ),
         "{interrupted}"
     );
     assert_eq!(
-        StoreDatabase::new(&after_publication.db)
-            .circle_control_activation_count_for_test(after_publication.circle_id)
+        after_commit_upload.store.exact_creates().last(),
+        Some(
+            journal
+                .operation()
+                .store_commit
+                .publication
+                .entry_object
+                .slot()
+        ),
+        "the injected failure must target the shared publication entry",
+    );
+    assert_eq!(
+        StoreDatabase::new(&after_commit_upload.db)
+            .store_current_publication()
+            .await
+            .expect("read unchanged publication boundary")
+            .record(),
+        &journal.operation().store_commit.publication.previous,
+    );
+    assert_eq!(
+        StoreDatabase::new(&after_commit_upload.db)
+            .circle_control_activation_count_for_test(after_commit_upload.circle_id)
             .await
             .expect("count circle activations"),
         activations_before,
         "the interrupted cancellation has not activated"
     );
     assert_eq!(
-        StoreDatabase::new(&after_publication.db)
-            .circle_operation(&after_publication.operation_id)
+        StoreDatabase::new(&after_commit_upload.db)
+            .circle_operation(&after_commit_upload.operation_id)
             .await
             .expect("read interrupted cancellation")
             .expect("the interrupted cancellation remains durable")
@@ -3080,22 +3179,22 @@ async fn interrupted_cancellation_flow() {
         CircleOperationState::Finalizing
     );
 
-    after_publication
+    after_commit_upload
         .store
         .bind_device(
-            &after_publication.db,
-            after_publication.db_store_dir.clone(),
-            &after_publication.signer,
+            &after_commit_upload.db,
+            after_commit_upload.db_store_dir.clone(),
+            &after_commit_upload.signer,
         )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("resume completes the published-but-unactivated cancellation");
-    after_publication.assert_cancellation_reopened().await;
+    after_commit_upload.assert_cancellation_reopened().await;
     assert_eq!(
-        StoreDatabase::new(&after_publication.db)
-            .circle_control_activation_count_for_test(after_publication.circle_id)
+        StoreDatabase::new(&after_commit_upload.db)
+            .circle_control_activation_count_for_test(after_commit_upload.circle_id)
             .await
             .expect("count circle activations"),
         activations_before + 1,
@@ -3127,10 +3226,7 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
     fixture.home.fail_exact_create_before_call(1);
     let interrupted = authorized
         .circles()
-        .finalize_ready_circle_epoch_closes(
-            "2026-07-24T03:00:00Z",
-            &EncryptionService::from_key([42; 32]),
-        )
+        .finalize_ready_circle_epoch_closes(&EncryptionService::from_key([42; 32]))
         .await
         .expect_err("the first finalization upload fails");
     assert!(
@@ -3150,7 +3246,7 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
     let recorded_control = creation.control.coord.clone();
     let recorded_epoch = creation.control.value.epoch_id();
     let recorded_key = creation.control.value.key_fingerprint();
-    let recorded_commit_object = recorded.operation().commit_ref.object.clone();
+    let recorded_commit_object = recorded.operation().commit_ref().object.clone();
     assert_eq!(
         recorded.commit().expect("parse recorded commit").write_id,
         fixture.operation_id.finalization_write_id(),
@@ -3383,8 +3479,8 @@ impl SilentParticipantCircle {
             .await
     }
 
-    /// Publish the silent participant's pending Store write from its own device,
-    /// without pulling, so it authors under the epoch its device currently holds.
+    /// Prepare and publish the silent participant's pending Store write. Shared
+    /// publication may pull accepted controls before settling the prepared commit.
     async fn silent_publish_pending_write(&self) {
         let device = self
             .store
@@ -3435,10 +3531,9 @@ impl SilentParticipantCircle {
             .expect("Owner pulls the published commits");
     }
 
-    /// Publish an accepted old-epoch row, pull it onto the silent participant,
-    /// then close the epoch, exclude that participant, and finalize the successor
-    /// without pulling the participant's later writes.
-    async fn close_and_exclude_silent(&self, covered_id: &str) -> StoreBatchCommitRef {
+    /// Publish the covered row and the Owner's close response before any late
+    /// participant write, fixing the responder's accepted cutoff.
+    async fn open_close_with_owner_response(&self, covered_id: &str) -> StoreBatchCommitRef {
         let covered_write = self
             .db
             .capture_circle_document_for_test(
@@ -3449,7 +3544,11 @@ impl SilentParticipantCircle {
             .await
             .expect("capture Circle document row");
         self.components
-            .run_cycle(&coven_foundation::clock::SystemClock, None)
+            .run_cycle(
+                &coven_foundation::clock::SystemClock,
+                None,
+                coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+            )
             .await
             .expect("publish the accepted old-epoch Circle row");
         let covered_commit_ref = match coven_database::StoreDatabase::new(&self.db)
@@ -3457,12 +3556,22 @@ impl SilentParticipantCircle {
             .await
             .expect("read the accepted pre-close write status")
         {
-            coven_protocol::write::WriteStatus::Published(position) => position.commit,
+            coven_protocol::write::WriteStatus::Published(position) => position
+                .exact_commit()
+                .expect("published Circle write has an exact commit")
+                .clone(),
             status => panic!("the accepted pre-close Circle write must publish: {status:?}"),
         };
         self.silent_pull()
             .await
             .expect("silent participant pulls the active epoch");
+        assert!(
+            self.silent_db
+                .circle_document_present_for_test(covered_id)
+                .await
+                .expect("query the covered Circle row"),
+            "the silent participant materializes the accepted Circle row"
+        );
         self.components
             .remove_circle_member(self.circle_id, self.removed_pubkey.clone())
             .await
@@ -3474,15 +3583,86 @@ impl SilentParticipantCircle {
             .publish_circle_epoch_close_response()
             .await
             .expect("publish Owner close response");
+        covered_commit_ref
+    }
+
+    async fn exclude_silent_and_finalize(&self) {
         self.components
             .exclude_circle_close_device(self.circle_id, self.silent_device_id)
             .await
             .expect("exclude the silent participant");
         self.components
-            .run_cycle(&coven_foundation::clock::SystemClock, None)
+            .run_cycle(
+                &coven_foundation::clock::SystemClock,
+                None,
+                coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+            )
             .await
             .expect("finalize the successor after exclusion");
-        covered_commit_ref
+    }
+
+    async fn close_and_exclude_silent(&self, covered_id: &str) -> StoreBatchCommitRef {
+        let covered = self.open_close_with_owner_response(covered_id).await;
+        self.exclude_silent_and_finalize().await;
+        covered
+    }
+
+    /// Accept a late old-epoch write after the responder's cutoff is fixed but
+    /// before finalization, leaving the participant's projection awaiting reset.
+    async fn close_and_exclude_silent_after_late_write(&self, covered_id: &str, beyond_id: &str) {
+        let covered = self.open_close_with_owner_response(covered_id).await;
+        let write_id = self
+            .silent_db
+            .capture_circle_document_for_test(
+                beyond_id,
+                self.circle_id,
+                "0000000009000-0000-silent",
+            )
+            .await
+            .expect("capture the late old-epoch Circle row");
+        self.silent_publish_pending_write().await;
+        let accepted = match StoreDatabase::new(&self.silent_db)
+            .write_status(&write_id)
+            .await
+            .expect("read the accepted late Circle write")
+        {
+            coven_protocol::write::WriteStatus::Published(position) => position
+                .exact_commit()
+                .expect("published Circle write has an exact commit")
+                .clone(),
+            status => panic!("the late Circle write must be accepted: {status:?}"),
+        };
+        let status = self
+            .components
+            .circle_close_status(self.circle_id)
+            .await
+            .expect("read the participant settlement after publishing the late write");
+        assert_eq!(
+            settlement_of_in(&status, self.silent_device_id),
+            coven_protocol::circle::CircleCloseSettlement::Pending,
+            "publishing the late write must not respond to the close"
+        );
+        self.exclude_silent_and_finalize().await;
+        let outcome = self
+            .owner_device
+            .finalized_circle_close_outcome_for_test(self.circle_id)
+            .await
+            .expect("read the finalized cutoff");
+        assert!(
+            outcome.cutoff.covers_commit(&covered),
+            "the accepted cutoff retains the covered Circle row"
+        );
+        assert!(
+            !outcome.cutoff.covers_commit(&accepted),
+            "the finalized cutoff excludes the exact accepted late commit {accepted:?}"
+        );
+        assert!(
+            self.silent_db
+                .circle_document_present_for_test(beyond_id)
+                .await
+                .expect("query the accepted late Circle row before reset"),
+            "the participant retains its accepted beyond-cutoff row until it pulls the successor"
+        );
     }
 }
 
@@ -3503,15 +3683,55 @@ impl SilentParticipantClose {
             .authorize_writer()
             .await
             .expect("authorize silent participant Store");
-        writer
+        let pulled = writer
             .pull(Some(&EncryptionService::from_key([42; 32])))
             .await
             .expect("silent participant pulls the epoch close");
+        assert!(
+            pulled.held_positions.is_empty(),
+            "the participant must install the close before responding: {:?}",
+            pulled.held_positions
+        );
+        let (closing, _) = StoreDatabase::new(&self.silent_db)
+            .circle_closing_context(self.circle_id, &keys::public_key_hex(&self.silent))
+            .await
+            .expect("the participant has the accepted close and its own active access");
+        let expected_close = StoreDatabase::new(&self.db)
+            .circle_operation(&self.operation_id)
+            .await
+            .expect("read the Owner's waiting close")
+            .expect("the Owner still waits for responses")
+            .operation()
+            .creation
+            .control
+            .clone();
+        assert_eq!(closing.control, expected_close);
+        let before = self
+            .components
+            .circle_close_status(self.circle_id)
+            .await
+            .expect("read the response slot before the participant publishes");
+        let expected_settlement = match settlement_of_in(&before, self.silent_device_id) {
+            coven_protocol::circle::CircleCloseSettlement::Pending => {
+                coven_protocol::circle::CircleCloseSettlement::Responded
+            }
+            settled => settled,
+        };
         writer
             .circles()
             .publish_circle_epoch_close_responses()
             .await
             .expect("silent participant publishes its close response");
+        let after = self
+            .components
+            .circle_close_status(self.circle_id)
+            .await
+            .expect("read the exact response slot after the participant publishes");
+        assert_eq!(
+            settlement_of_in(&after, self.silent_device_id),
+            expected_settlement,
+            "the response occupies the empty slot or preserves its existing winner"
+        );
     }
 
     async fn finalized_close_outcome(&self) -> coven_protocol::circle::CircleEpochCloseOutcome {
@@ -3600,7 +3820,11 @@ async fn owner_exclusion_completes_a_stalled_close() {
         .expect("publish Owner close response");
     fixture
         .components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("cycle cannot finalize the stalled close");
     assert_eq!(
@@ -3623,7 +3847,11 @@ async fn owner_exclusion_completes_a_stalled_close() {
         .expect("exclude the silent participant");
     fixture
         .components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("finalize the close after exclusion");
     assert!(StoreDatabase::new(&fixture.db)
@@ -3781,80 +4009,11 @@ fn settlement_of_in(
 async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
     let fixture = SilentParticipantCircle::build("circle-exclude-reset").await;
 
-    // An accepted old-epoch Circle row the close cutoff covers, published under
-    // the active epoch before the close.
     let covered_id = "00000000-0000-4000-8000-000000000001";
-    fixture
-        .db
-        .capture_circle_document_for_test(covered_id, fixture.circle_id, "0000000003000-0000-owner")
-        .await
-        .expect("capture Circle document row");
-    fixture
-        .components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
-        .await
-        .expect("publish the accepted old-epoch Circle row");
-
-    // The silent participant pulls the active epoch: it installs its Circle
-    // access and materializes the covered row.
-    fixture
-        .silent_pull()
-        .await
-        .expect("silent participant pulls the active epoch");
-    assert!(
-        fixture
-            .silent_db
-            .circle_document_present_for_test(covered_id)
-            .await
-            .expect("query Circle document presence"),
-        "the silent participant materializes the accepted Circle row"
-    );
-
-    // The Owner closes the epoch and excludes the silent participant, finalizing
-    // the successor — never pulling the participant's later write.
-    fixture
-        .components
-        .remove_circle_member(fixture.circle_id, fixture.removed_pubkey.clone())
-        .await
-        .expect("activate the Circle epoch close");
-    fixture
-        .store
-        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
-        .await
-        .expect("bind Circle test Store")
-        .publish_circle_epoch_close_response()
-        .await
-        .expect("publish Owner close response");
-    let silent_device_id = fixture.silent_device_id;
-    fixture
-        .components
-        .exclude_circle_close_device(fixture.circle_id, silent_device_id)
-        .await
-        .expect("exclude the silent participant");
-    fixture
-        .components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
-        .await
-        .expect("finalize the successor after exclusion");
-
-    // The silent participant — still on the old epoch, unaware of the close —
-    // authors a Circle row beyond the accepted cutoff and publishes it on its own
-    // stream.
     let beyond_id = "00000000-0000-4000-8000-000000000002";
     fixture
-        .silent_db
-        .capture_circle_document_for_test(beyond_id, fixture.circle_id, "0000000009000-0000-silent")
-        .await
-        .expect("capture Circle document row");
-    fixture.silent_publish_pending_write().await;
-    assert!(
-        fixture
-            .silent_db
-            .circle_document_present_for_test(beyond_id)
-            .await
-            .expect("query Circle document presence"),
-        "the silent participant accepts its own beyond-cutoff Circle row"
-    );
+        .close_and_exclude_silent_after_late_write(covered_id, beyond_id)
+        .await;
 
     // The silent participant pulls the successor. Its beyond-cutoff acceptance is
     // dropped and its projection reseeds from the successor bootstrap.
@@ -3931,7 +4090,10 @@ async fn circle_package_beyond_the_close_cutoff_reclaims_without_coverage() {
         .await
         .expect("read the beyond-cutoff write status")
     {
-        coven_protocol::write::WriteStatus::Published(position) => position.commit,
+        coven_protocol::write::WriteStatus::Published(position) => position
+            .exact_commit()
+            .expect("published Circle write has an exact commit")
+            .clone(),
         status => panic!("the beyond-cutoff Circle write must publish: {status:?}"),
     };
     let beyond_package = fixture.store.circle_package_in(&beyond_commit_ref).await;
@@ -4016,7 +4178,11 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .expect("capture Circle document row");
     fixture
         .components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("publish the accepted old-epoch Circle row");
     fixture
@@ -4044,6 +4210,9 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         fixture.silent_storage.clone(),
         fixture.silent_db_store_dir.clone(),
         fixture.silent.clone(),
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("load responding member Store");
@@ -4074,7 +4243,11 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .expect("publish Owner close response");
     fixture
         .components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("finalize the successor with both responses");
 
@@ -4125,7 +4298,10 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
 async fn excluded_device_publication_is_gated_until_the_reset_completes() {
     let fixture = SilentParticipantCircle::build("circle-exclude-gate").await;
     fixture
-        .close_and_exclude_silent("00000000-0000-4000-8000-000000000001")
+        .close_and_exclude_silent_after_late_write(
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+        )
         .await;
 
     // The successor bootstrap image objects, one per remaining member — read from
@@ -4169,18 +4345,6 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
             )
         })
         .collect();
-
-    // The silent participant authors a beyond-cutoff row on the old epoch.
-    fixture
-        .silent_db
-        .capture_circle_document_for_test(
-            "00000000-0000-4000-8000-000000000002",
-            fixture.circle_id,
-            "0000000009000-0000-silent",
-        )
-        .await
-        .expect("capture Circle document row");
-    fixture.silent_publish_pending_write().await;
 
     // Hold the bootstrap unreadable for one pull: the successor is held and the
     // exclusion recorded, but the reseed cannot complete.
@@ -4255,7 +4419,11 @@ async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
         .expect("capture Circle document row");
     fixture
         .components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("publish the accepted Circle row");
     fixture
@@ -4312,15 +4480,16 @@ async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
 async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
     let fixture = SilentParticipantCircle::build("circle-exclude-crash").await;
     let covered_id = "00000000-0000-4000-8000-000000000001";
-    fixture.close_and_exclude_silent(covered_id).await;
-
     let beyond_id = "00000000-0000-4000-8000-000000000002";
     fixture
-        .silent_db
-        .capture_circle_document_for_test(beyond_id, fixture.circle_id, "0000000009000-0000-silent")
+        .close_and_exclude_silent_after_late_write(covered_id, beyond_id)
+        .await;
+    let publication_before = StoreDatabase::new(&fixture.silent_db)
+        .store_current_publication()
         .await
-        .expect("capture Circle document row");
-    fixture.silent_publish_pending_write().await;
+        .expect("read the publication boundary before reset")
+        .record()
+        .clone();
 
     // Crash at the reset's projection-replacement boundary: the whole pull rolls
     // back, leaving the pre-reset state exactly as it was.
@@ -4331,6 +4500,15 @@ async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
         .silent_pull()
         .await
         .expect_err("the injected reset failure fails the pull");
+    assert_eq!(
+        StoreDatabase::new(&fixture.silent_db)
+            .store_current_publication()
+            .await
+            .expect("read the publication boundary after failed reset")
+            .record(),
+        &publication_before,
+        "the failed reset rolls back the accepted publication observation"
+    );
     assert!(
         fixture
             .silent_db
@@ -4388,7 +4566,11 @@ async fn slot_race_response_first_adopts_the_response() {
         .expect("exclusion adopts the participant's response");
     fixture
         .components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("finalize the close");
     assert!(StoreDatabase::new(&fixture.db)
@@ -4442,7 +4624,11 @@ async fn slot_race_exclusion_first_drops_the_late_response() {
     fixture.silent_publish_response().await;
     fixture
         .components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("finalize the close after exclusion");
     assert!(StoreDatabase::new(&fixture.db)
@@ -4513,7 +4699,11 @@ async fn interrupted_exclusion_publication_resumes_idempotently() {
         .expect("re-running the exclusion is idempotent");
     fixture
         .components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("finalize the close after exclusion");
     assert!(StoreDatabase::new(&fixture.db)
@@ -4533,6 +4723,126 @@ async fn interrupted_exclusion_publication_resumes_idempotently() {
             .count(),
         1,
         "the resumed exclusion settles the slot exactly once"
+    );
+}
+
+#[tokio::test]
+async fn cold_pull_verifies_close_responses_from_a_participant_joined_in_the_same_batch() {
+    let fixture = SilentParticipantCircle::build("circle-cold-close-participant").await;
+    let responding_dir = crate::sync::test_helpers::test_store_dir();
+    let responding_db = open_circle_routing_test_db(responding_dir.clone());
+    let responding = fixture
+        .store
+        .activate_joined_device(
+            &fixture.db,
+            fixture.db_store_dir.clone(),
+            &responding_db,
+            responding_dir,
+            &fixture.signer,
+            "2026-07-24T02:00:00Z",
+        )
+        .await
+        .expect("activate another Owner device after the receiver last synchronized");
+    let responding_id = responding_db
+        .local_store_device_id_for_test()
+        .await
+        .expect("read the new responding device identity");
+    let registration = StoreDatabase::new(&fixture.db)
+        .activated_store_device_registration_for_device(responding_id)
+        .await
+        .expect("read the accepted responding registration")
+        .expect("the Owner installed the new responding registration");
+
+    let operation = fixture
+        .components
+        .remove_circle_member(fixture.circle_id, fixture.removed_pubkey.clone())
+        .await
+        .expect("publish the close after the new device joined");
+    fixture
+        .owner_device
+        .publish_circle_epoch_close_response()
+        .await
+        .expect("publish the original Owner device response");
+    let mut responding_writer = responding
+        .authorize_writer()
+        .await
+        .expect("authorize the newly joined Owner device");
+    let pulled = responding_writer
+        .pull(Some(&EncryptionService::from_key([42; 32])))
+        .await
+        .expect("the new participant pulls the close");
+    assert!(
+        pulled.held_positions.is_empty(),
+        "{:?}",
+        pulled.held_positions
+    );
+    responding_writer
+        .circles()
+        .publish_circle_epoch_close_responses()
+        .await
+        .expect("publish the newly joined participant's response");
+    let status = fixture
+        .components
+        .circle_close_status(fixture.circle_id)
+        .await
+        .expect("read the new participant's exact response settlement");
+    assert_eq!(
+        settlement_of_in(&status, responding_id),
+        coven_protocol::circle::CircleCloseSettlement::Responded,
+    );
+    fixture.exclude_silent_and_finalize().await;
+    assert!(StoreDatabase::new(&fixture.db)
+        .circle_operation(&operation)
+        .await
+        .expect("read completed close operation")
+        .is_none());
+    let successor = fixture.successor_control_coord().await;
+    let outcome = fixture
+        .owner_device
+        .finalized_circle_close_outcome_for_test(fixture.circle_id)
+        .await
+        .expect("read the finalized outcome");
+    assert!(
+        outcome.responses.iter().any(|settlement| matches!(
+            settlement,
+            coven_protocol::circle::CircleEpochCloseSettlement::Response(response)
+                if response.registration == *registration.reference()
+        )),
+        "the outcome requires the new participant's response signature"
+    );
+
+    // The receiver has not pulled the join, close, or outcome separately.
+    assert!(StoreDatabase::new(&fixture.silent_db)
+        .activated_store_device_registration_for_device(responding_id)
+        .await
+        .expect("check the receiver's installed registrations")
+        .is_none());
+    let pulled = fixture
+        .silent_pull()
+        .await
+        .expect("pull the participant activation, close, and outcome together");
+    assert!(
+        pulled.held_positions.is_empty(),
+        "verified participant authority must not require an earlier installation: {:?}",
+        pulled.held_positions
+    );
+    let installed = StoreDatabase::new(&fixture.silent_db)
+        .activated_store_device_registration_for_device(responding_id)
+        .await
+        .expect("read the responding registration after cold pull")
+        .expect("the same pull installs the responding registration");
+    assert_eq!(installed.reference(), registration.reference());
+    let (current, _) = StoreDatabase::new(&fixture.silent_db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.silent))
+        .await
+        .expect("the same pull installs the successor and reset bootstrap");
+    assert_eq!(current.control.coord, successor);
+    assert_eq!(
+        StoreDatabase::new(&fixture.silent_db)
+            .circle_bootstrap_coverage_count_for_test(fixture.circle_id)
+            .await
+            .expect("read the completed reset coverage"),
+        1
     );
 }
 
@@ -4591,7 +4901,11 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
     // Finalize honestly to obtain a real signed outcome and its successor.
     fixture
         .components
-        .run_cycle(&coven_foundation::clock::SystemClock, None)
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
         .await
         .expect("finalize the honest close");
     let honest = fixture.finalized_close_outcome().await;
@@ -4699,6 +5013,9 @@ async fn cancelling_a_deleted_circles_close_is_refused() {
         cloud_storage,
         db_store_dir,
         signer.clone(),
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("load Store for cancellation")

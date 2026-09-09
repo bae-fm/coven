@@ -108,15 +108,20 @@ impl StoreSession<'_> {
                 "pending write {write_id} carries no commit base or blob facts"
             )));
         };
-        let partitions = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
-            .store_write_partitions(&write_id)?;
-        Ok(Some(PreparedStoreWrite {
-            write_id: WriteId::from_generated(write_id),
-            partitions,
-            base: serde_json::from_str(&base)
-                .map_err(|error| DbError::context("pending write base", error))?,
-            blob_facts: serde_json::from_str(&blob_facts)
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
+        let partitions = records.store_write_partitions(&write_id)?;
+        let write_id = WriteId::from_generated(write_id);
+        let effective_base = records.effective_store_write_base(&write_id, &base)?;
+        let effective_blob_facts = match records.rebased_store_write(&write_id)? {
+            Some(rebased) => rebased.blob_facts,
+            None => serde_json::from_str(&blob_facts)
                 .map_err(|error| DbError::context("pending write blob facts", error))?,
+        };
+        Ok(Some(PreparedStoreWrite {
+            write_id,
+            partitions,
+            base: effective_base,
+            blob_facts: effective_blob_facts,
         }))
     }
 }
@@ -251,8 +256,7 @@ impl StoreDatabase {
         synced_tables: &[SyncedTable],
     ) -> Result<Vec<u8>, DbError> {
         let captured = Self::drain_host_change_journal_on(session)?;
-        crate::changeset_identity::validate_changeset_row_identities(&captured, synced_tables)
-            .map_err(DbError::from)?;
+        crate::changeset_identity::validate_captured_row_identities(&captured, synced_tables)?;
         Ok(captured)
     }
 
@@ -296,7 +300,7 @@ impl StoreDatabase {
         })
     }
 
-    fn capture_store_write_blob_fact_on(
+    pub(super) fn capture_store_write_blob_fact_on(
         tx: &rusqlite::Transaction<'_>,
         publication: PublicationBlob,
     ) -> Result<StoreWriteBlobFact, DbError> {
@@ -354,7 +358,7 @@ impl StoreDatabase {
         })
     }
 
-    fn capture_audience_move_blob_facts_on(
+    pub(super) fn capture_audience_move_blob_facts_on(
         tx: &rusqlite::Transaction<'_>,
         moves: &[AudienceMove],
         blob_decls: &BlobDecls,
@@ -408,7 +412,7 @@ impl StoreDatabase {
     /// construction. Rows the caller already stamped past the move are left alone —
     /// their bindings are new stamps already, and lowering them would reorder the
     /// caller's own writes.
-    fn advance_moved_blob_row_stamps_on(
+    pub(super) fn advance_moved_blob_row_stamps_on(
         tx: &rusqlite::Transaction<'_>,
         moves: &[AudienceMove],
         blob_decls: &BlobDecls,
@@ -919,36 +923,24 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 .validate_changed_rows(&tx, &captured)
                 .map_err(DbError::from)
                 .map_err(E::from)?;
-            let partitioned = match routing {
+            let routing_key = match routing {
                 StoreWriteRouting::MergeScoped(encryption) => {
-                    let store_root_hash =
-                        crate::store::store_session::StoreTransaction::new(&tx, store_dir)
-                            .required_root_authority(verified_authority)
-                            .map_err(E::from)?
-                            .store_root_hash;
-                    let key =
+                    let store_root_hash = StoreTransaction::new(&tx, store_dir)
+                        .required_root_authority(verified_authority)
+                        .map_err(E::from)?
+                        .store_root_hash;
+                    Some(
                         coven_protocol::circle::derive_row_routing_key(encryption, store_root_hash)
                             .map_err(|error| {
                                 E::from(DbError::context("derive row routing key", error))
-                            })?;
-                    let routing_changeset = capture_routing_changes(&tx, &captured, gates, &key)
-                        .map_err(|error| {
-                            E::from(DbError::context("capture scoped routing changes", error))
-                        })?;
-                    partition_outbound(&tx, &captured, &routing_changeset, gates).map_err(
-                        |error| {
-                            E::from(DbError::context("partition scoped host transaction", error))
-                        },
-                    )?
+                            })?,
+                    )
                 }
-                StoreWriteRouting::Unscoped => {
-                    partition_outbound(&tx, &captured, &RoutingChanges::empty(), gates).map_err(
-                        |error| {
-                            E::from(DbError::context("partition gated host transaction", error))
-                        },
-                    )?
-                }
+                StoreWriteRouting::Unscoped => None,
             };
+            let partitioned =
+                partition_captured_write_on(&tx, &captured, gates, routing_key.as_ref())
+                    .map_err(E::from)?;
             // A capture that partitioned into nothing said nothing this store
             // has any use for: no partition to publish, no local partition to
             // put back over a canonical replay, no audience move, and so no
@@ -1100,4 +1092,25 @@ pub fn audience_moves_by_row(
         }
     }
     Ok(moved_rows)
+}
+
+/// Capture routing and audience closure from the actual changed columns on the
+/// target database. Host writes and recorded-edit rebase use this same owner.
+pub(super) fn partition_captured_write_on(
+    transaction: &rusqlite::Transaction<'_>,
+    captured: &[u8],
+    gates: &Gates,
+    routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+) -> Result<crate::gate::PartitionedAudienceWrite, DbError> {
+    let routing = if gates.has_scoped_graph() {
+        let key = routing_key.ok_or_else(|| {
+            DbError::Message("scoped capture requires the Store routing key".to_string())
+        })?;
+        capture_routing_changes(transaction, captured, gates, key)
+            .map_err(|error| DbError::context("capture scoped routing changes", error))?
+    } else {
+        RoutingChanges::empty()
+    };
+    partition_outbound(transaction, captured, &routing, gates)
+        .map_err(|error| DbError::context("partition captured write", error))
 }

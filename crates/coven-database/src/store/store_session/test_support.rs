@@ -1,19 +1,8 @@
 use super::{DbError, StoreDatabase, StoreSession};
-use coven_protocol::store_commit::{
-    ObjectHash, StoreBatchCommitRef, StoreDeviceExclusionRef, StoreDeviceHeadRef,
-};
+use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
 use coven_protocol::write::WriteId;
 use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
-
-#[derive(Clone, Copy, Debug)]
-pub enum AuthorExclusionLocatorTamper {
-    Missing,
-    ExclusionReference,
-    AcceptedCut,
-    ActivationCommit,
-    ActivationHead,
-}
 
 struct PreparedWriteTransfer {
     write: (String, String, String, String, String, String),
@@ -701,27 +690,6 @@ impl StoreSession<'_> {
         Ok(error.to_string())
     }
 
-    fn author_exclusion_activation_evidence_for_test(
-        &self,
-        exclusion: &str,
-    ) -> Result<(String, String), DbError> {
-        self.conn
-            .query_row(
-                "SELECT accepted_cut, activation_head
-                 FROM store_author_exclusion_activations
-                 WHERE exclusion_ref = ?1",
-                [exclusion],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(DbError::from)
-    }
-
-    fn sole_author_exclusion_activation_evidence_for_test(
-        &self,
-    ) -> Result<(String, String, String, String), DbError> {
-        crate::test_support::author_exclusion_activation_evidence(self.conn)
-    }
-
     fn latest_local_write_facts_for_test(&self) -> Result<(String, i64, i64), DbError> {
         crate::DatabaseTestSql::for_store(self.conn, self.store_dir).latest_local_write_facts()
     }
@@ -897,107 +865,9 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         crate::DatabaseTestSql::new(self.conn).forge_circle_close_exclusion(circle_id)
     }
-
-    fn tamper_author_exclusion_locator_for_test(
-        &self,
-        exclusion: StoreDeviceExclusionRef,
-        candidate: &StoreBatchCommitRef,
-        tamper: AuthorExclusionLocatorTamper,
-    ) -> Result<(), DbError> {
-        let connection = self.conn;
-        let exact = serde_json::to_string(&exclusion)
-            .map_err(|error| DbError::context("serialize exact exclusion reference", error))?;
-        let affected = match tamper {
-            AuthorExclusionLocatorTamper::Missing => connection.execute(
-                "DELETE FROM store_author_exclusion_activations
-                 WHERE exclusion_ref = ?1",
-                [&exact],
-            ),
-            AuthorExclusionLocatorTamper::ExclusionReference => {
-                let mut wrong = exclusion;
-                wrong.outcome_hash = ObjectHash::digest(b"wrong exclusion reference");
-                let wrong = serde_json::to_string(&wrong).map_err(|error| {
-                    DbError::context("serialize wrong exclusion reference", error)
-                })?;
-                connection.execute(
-                    "UPDATE store_author_exclusion_activations
-                     SET exclusion_ref = ?1 WHERE exclusion_ref = ?2",
-                    (&wrong, &exact),
-                )
-            }
-            AuthorExclusionLocatorTamper::AcceptedCut => {
-                let cut: String = connection
-                    .query_row(
-                        "SELECT accepted_cut
-                         FROM store_author_exclusion_activations
-                         WHERE exclusion_ref = ?1",
-                        [&exact],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                let mut cut: std::collections::BTreeMap<
-                    coven_protocol::causal_grants::AuthorStreamId,
-                    StoreBatchCommitRef,
-                > = serde_json::from_str(&cut)
-                    .map_err(|error| DbError::context("parse exclusion accepted cut", error))?;
-                cut.insert(
-                    coven_protocol::causal_grants::AuthorStreamId::from_digest(ObjectHash::digest(
-                        b"wrong exclusion accepted-cut stream",
-                    )),
-                    candidate.clone(),
-                );
-                let wrong = serde_json::to_string(&cut).map_err(|error| {
-                    DbError::context("serialize wrong exclusion accepted cut", error)
-                })?;
-                connection.execute(
-                    "UPDATE store_author_exclusion_activations
-                     SET accepted_cut = ?1 WHERE exclusion_ref = ?2",
-                    (&wrong, &exact),
-                )
-            }
-            AuthorExclusionLocatorTamper::ActivationCommit => {
-                let wrong = serde_json::to_string(candidate).map_err(|error| {
-                    DbError::context("serialize wrong exclusion activation commit", error)
-                })?;
-                connection.execute(
-                    "UPDATE store_author_exclusion_activations
-                     SET activation_commit = ?1 WHERE exclusion_ref = ?2",
-                    (&wrong, &exact),
-                )
-            }
-            AuthorExclusionLocatorTamper::ActivationHead => {
-                let head: String = connection
-                    .query_row(
-                        "SELECT activation_head
-                         FROM store_author_exclusion_activations
-                         WHERE exclusion_ref = ?1",
-                        [&exact],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                let mut head: StoreDeviceHeadRef = serde_json::from_str(&head)
-                    .map_err(|error| DbError::context("parse exclusion activation head", error))?;
-                head.head_hash = ObjectHash::digest(b"wrong exclusion activation head");
-                let wrong = serde_json::to_string(&head).map_err(|error| {
-                    DbError::context("serialize wrong exclusion activation head", error)
-                })?;
-                connection.execute(
-                    "UPDATE store_author_exclusion_activations
-                     SET activation_head = ?1 WHERE exclusion_ref = ?2",
-                    (&wrong, &exact),
-                )
-            }
-        }
-        .map_err(DbError::from)?;
-        if affected != 1 {
-            return Err(DbError::Message(format!(
-                "locator tamper {tamper:?} changed {affected} rows"
-            )));
-        }
-        Ok(())
-    }
 }
 
 mod blob;
 mod database;
 mod device_exclusion;
+mod journal;

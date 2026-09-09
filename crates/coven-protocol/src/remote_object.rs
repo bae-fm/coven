@@ -18,6 +18,7 @@ mod identity;
 mod lifecycle;
 mod nonactivation;
 mod ownership;
+mod pending_release;
 mod reclaim;
 
 pub use domains::{
@@ -26,15 +27,12 @@ pub use domains::{
     SharedLiveSetObjectRef,
 };
 pub use graph::{CandidateObjectGraph, CandidateObjectMaterial};
-pub use nonactivation::{
-    CandidateNonactivation, CandidateNonactivationProof, VerifiedCandidateHead,
-    VerifiedCandidateHeadNonactivation, VerifiedCandidateNonactivation,
-    VerifiedDependencyRetractionAuthority,
-};
+pub use nonactivation::{CandidateNonactivation, CandidateNonactivationProof};
 pub use ownership::{
     CandidateOwnership, OwnedObjectState, PendingCandidateOwnership, RetainedReplayOwner,
     SharedObjectOwner, SharedObjectOwnership, SnapshotObjectOwner,
 };
+pub use pending_release::PendingCandidateRelease;
 
 const REMOTE_OBJECT_ID_DOMAIN: &[u8] = b"coven.remote-object-id.v1\0";
 
@@ -99,9 +97,6 @@ pub enum RetainedAuthorityObjectState {
     AbsentVerified {
         former_candidates: Vec<CandidateNonactivation>,
     },
-    UncreatedVerified {
-        former_candidates: Vec<CandidateNonactivation>,
-    },
 }
 
 impl RetainedAuthorityObjectState {
@@ -110,8 +105,7 @@ impl RetainedAuthorityObjectState {
             Self::Prepared { ownership } => ownership.validate(),
             Self::UploadedVerified { ownership } => ownership.validate(),
             Self::CleanupPending { former_candidates }
-            | Self::AbsentVerified { former_candidates }
-            | Self::UncreatedVerified { former_candidates } => {
+            | Self::AbsentVerified { former_candidates } => {
                 validate_nonactivations(former_candidates)
             }
         }
@@ -374,8 +368,6 @@ pub enum RemoteObjectRecordError {
     EmptyNonactivation,
     #[error("candidate nonactivation proof is invalid: {0}")]
     InvalidProof(String),
-    #[error("candidate nonactivation proof has invalid Store protocol: {0}")]
-    InvalidProofProtocol(#[source] crate::store_commit::StoreProtocolError),
     #[error("candidate does not own this remote object")]
     CandidateOwnerMismatch,
     #[error("remote object does not retain this candidate's nonactivation proof")]

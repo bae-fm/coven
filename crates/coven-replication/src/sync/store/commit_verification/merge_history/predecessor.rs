@@ -118,12 +118,80 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         &self,
         expected: coven_protocol::store_commit::DeviceJoinAttemptId,
     ) -> Result<bool, StorePullError> {
+        if let Some(baseline) = self.history.baseline.history_summary() {
+            for (reference, closure) in &baseline.summary.pending_device_joins {
+                let opening = closure.verified_commit(reference)?;
+                if opening
+                    .device_join_attempt_decisions()
+                    .contains(&DeviceJoinAttemptDecisionRef::Attempt(expected))
+                {
+                    return Ok(true);
+                }
+            }
+        }
         self.find(None, |_, commit| {
             commit.device_join_attempt_decisions().iter().any(|decision| {
                 matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(opened) if *opened == expected)
             })
         })
         .map(|found| matches!(found, PredecessorSearch::Found(_)))
+    }
+
+    pub(super) fn contains_reclaim_authorization(
+        &self,
+        authorization: &coven_protocol::reclaim::ReclaimAuthorizationRef,
+    ) -> Result<bool, StorePullError> {
+        if self
+            .history
+            .baseline
+            .history_summary()
+            .is_some_and(|baseline| {
+                baseline
+                    .summary
+                    .reclaim
+                    .authorizations
+                    .get(&authorization.authorization_hash)
+                    .is_some_and(|accepted| &accepted.authorization == authorization)
+            })
+        {
+            return Ok(true);
+        }
+        self.find(None, |_, commit| {
+            commit.reclaim_authorization() == Some(authorization)
+        })
+        .map(|found| matches!(found, PredecessorSearch::Found(_)))
+    }
+
+    /// An exact live package in an authenticated checkpoint remains an accepted
+    /// predecessor even when its separately retained body is no longer reachable
+    /// through the suffix. The requested history must reach that checkpoint.
+    fn checkpoint_authenticates_package(
+        &self,
+        package: &coven_protocol::reclaim::AudienceBlobBindingPackage,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<bool, RegistrationLoadError> {
+        let Some(baseline) = self.history.baseline.history_summary() else {
+            return Ok(false);
+        };
+        let id = coven_protocol::remote_object::remote_object_id(package.object());
+        if !baseline
+            .summary
+            .reclaim
+            .packages
+            .get(&id)
+            .is_some_and(|retained| retained.matches_package(package, activation))
+        {
+            return Ok(false);
+        }
+        let closure = verified_merge_commit_closure(self.history, self.frontier.iter().cloned())
+            .map_err(registration_attempt_error)?;
+        Ok(self
+            .history
+            .baseline
+            .coverage()
+            .commits()
+            .values()
+            .all(|reference| closure.contains(reference)))
     }
 
     /// Bind a row blob to the package that published it. The blob is never named in a
@@ -137,51 +205,52 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
     pub(super) fn validate_package_bound_reclaim_target(
         &self,
         target: &coven_protocol::reclaim::ReclaimTarget,
-        activation: &coven_protocol::reclaim::PackageBlobBindingActivation<'_>,
+        activation: &coven_protocol::reclaim::CirclePackageReclaimTarget,
     ) -> Result<(), RegistrationLoadError> {
         let coven_protocol::reclaim::ReclaimTarget::AudienceBlob(blob) = target else {
             return Err(RegistrationLoadError::Invalid(
                 "reclaim target is not published by a package binding".to_string(),
             ));
         };
+        if blob.blob().locator().audience()
+            != coven_protocol::blob::locator::RemoteAudience::Circle(activation.package.circle_id)
+        {
+            return Err(RegistrationLoadError::Invalid(
+                "reclaim evidence blob names a package for another audience".to_string(),
+            ));
+        }
+        let package =
+            coven_protocol::reclaim::AudienceBlobBindingPackage::Circle(activation.package.clone());
+        if self.checkpoint_authenticates_package(&package, &activation.activation)? {
+            return Ok(());
+        }
         let expected = activation.activation.clone();
         let activating = match self
             .find(Some(&expected), |candidate, _| candidate == &expected)
             .map_err(registration_attempt_error)?
         {
             PredecessorSearch::Found(activating) => activating,
-            // The activation is under this device's replay baseline: it is in
-            // the predecessor history, and its body — which is what would name
-            // the package again — was retired with the rest of the history the
-            // baseline restates. The device checked that binding when it
-            // materialized the activation, which is why the position is covered
-            // at all.
-            PredecessorSearch::Covered => return Ok(()),
+            PredecessorSearch::Covered => {
+                return Err(RegistrationLoadError::Invalid(
+                    "retired blob package has no exact retained activation in predecessor history"
+                        .to_string(),
+                ));
+            }
             PredecessorSearch::Absent => {
                 return Err(RegistrationLoadError::Invalid(
                     "reclaim evidence blob activation is absent from predecessor history"
                         .to_string(),
-                ))
+                ));
             }
         };
-        let names_package = match activation.package {
-            coven_protocol::reclaim::AudienceBlobBindingPackage::Store(package) => {
-                activating.verified.value().store_package() == Some(package)
-            }
-            coven_protocol::reclaim::AudienceBlobBindingPackage::Circle(package) => activating
-                .verified
-                .value()
-                .circle_packages()
-                .contains(package),
-        };
+        let names_package = activating
+            .verified
+            .value()
+            .circle_packages()
+            .contains(&activation.package);
         if !names_package {
             return Err(RegistrationLoadError::Invalid(
                 "reclaim evidence blob package differs from its exact activation".to_string(),
-            ));
-        }
-        if blob.blob.locator().audience() != activation.package.remote_audience() {
-            return Err(RegistrationLoadError::Invalid(
-                "reclaim evidence blob names a package for another audience".to_string(),
             ));
         }
         Ok(())
@@ -195,22 +264,40 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         target: &coven_protocol::reclaim::ReclaimTarget,
         activating_commit: &StoreBatchCommitRef,
     ) -> Result<(), RegistrationLoadError> {
+        let package = match target {
+            coven_protocol::reclaim::ReclaimTarget::StorePackage(target) => Some(
+                coven_protocol::reclaim::AudienceBlobBindingPackage::Store(target.package.clone()),
+            ),
+            coven_protocol::reclaim::ReclaimTarget::CirclePackage(target) => Some(
+                coven_protocol::reclaim::AudienceBlobBindingPackage::Circle(target.package.clone()),
+            ),
+            _ => None,
+        };
+        if let Some(package) = &package {
+            if self.checkpoint_authenticates_package(package, activating_commit)? {
+                return Ok(());
+            }
+        }
         let expected = activating_commit.clone();
         let activation = match self
             .find(Some(&expected), |candidate, _| candidate == &expected)
             .map_err(registration_attempt_error)?
         {
             PredecessorSearch::Found(activation) => activation,
-            // Under the replay baseline. See the note on
-            // `validate_package_bound_reclaim_target`: the position is in this
-            // device's history on the coverage's authority, and the body that
-            // would name the target again is retired.
-            PredecessorSearch::Covered => return Ok(()),
+            PredecessorSearch::Covered => {
+                if package.is_some() {
+                    return Err(RegistrationLoadError::Invalid(
+                        "retired package has no exact retained activation in predecessor history"
+                            .to_string(),
+                    ));
+                }
+                return Ok(());
+            }
             PredecessorSearch::Absent => {
                 return Err(RegistrationLoadError::Invalid(
                     "reclaim evidence package activation is absent from predecessor history"
                         .to_string(),
-                ))
+                ));
             }
         };
         let names_target = match target {
@@ -232,7 +319,6 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                     access.bootstrap.as_ref() == Some(&bootstrap.coverage.bootstrap.image)
                 }),
             coven_protocol::reclaim::ReclaimTarget::CircleSnapshotImage(_)
-            | coven_protocol::reclaim::ReclaimTarget::StoreMembershipRollup(_)
             | coven_protocol::reclaim::ReclaimTarget::AudienceBlob(_) => {
                 return Err(RegistrationLoadError::Invalid(
                     "reclaim target claims a Store commit activation it is not published by"
@@ -247,4 +333,84 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         }
         Ok(())
     }
+}
+
+impl MergeHistoryVerifier<'_> {
+    pub(crate) fn verified_circle_predecessors(
+        &self,
+        candidate: &StoreBatchCommit,
+        circle_id: coven_protocol::circle::CircleId,
+        prepared: &[&coven_protocol::circle_activation::VerifiedCircleActivations],
+    ) -> Result<Vec<coven_protocol::circle_activation::VerifiedCircleReference>, StorePullError>
+    {
+        let closure =
+            verified_merge_commit_closure(&self.history, commit_predecessor_references(candidate))?;
+        let mut controls = Vec::new();
+        for group in prepared
+            .iter()
+            .filter(|group| closure.contains(group.stream_activations().activating_commit()))
+        {
+            for activation in group
+                .circles()
+                .iter()
+                .filter(|activation| activation.circle_id == circle_id)
+            {
+                let predecessor = self
+                    .history
+                    .commits
+                    .get(group.stream_activations().activating_commit())
+                    .ok_or_else(|| {
+                        StorePullError::InvalidState(
+                            "prepared Circle predecessor has no retained verified commit"
+                                .to_string(),
+                        )
+                    })?;
+                verify_circle_control_in_predecessor(&predecessor.verified, activation)?;
+                controls.push(activation.clone());
+            }
+        }
+        Ok(controls)
+    }
+
+    pub(crate) fn verify_prepared_circle_predecessor(
+        &self,
+        candidate: &StoreBatchCommit,
+        activating_commit: &StoreBatchCommitRef,
+        activation: &coven_protocol::circle_activation::VerifiedCircleReference,
+    ) -> Result<(), StorePullError> {
+        let frontier = commit_predecessor_references(candidate);
+        let predecessors = VerifiedMergePredecessorHistory::new(&self.history, &frontier);
+        let PredecessorSearch::Found(predecessor) =
+            predecessors.find(None, |reference, _| reference == activating_commit)?
+        else {
+            return Err(StorePullError::InvalidState(
+                "prepared Circle control is absent from the candidate's exact predecessor history"
+                    .to_string(),
+            ));
+        };
+        verify_circle_control_in_predecessor(&predecessor.verified, activation)
+    }
+}
+
+fn verify_circle_control_in_predecessor(
+    predecessor: &VerifiedStoreBatchCommit,
+    activation: &coven_protocol::circle_activation::VerifiedCircleReference,
+) -> Result<(), StorePullError> {
+    if !predecessor
+        .value()
+        .circle_controls()
+        .contains(&activation.reference)
+    {
+        return Err(StorePullError::InvalidState(
+            "prepared Circle control is absent from its exact activating commit".to_string(),
+        ));
+    }
+    coven_protocol::circle_activation::verify_control_context_for_verified_commit(
+        &activation.reference,
+        &activation.control,
+        predecessor,
+    )
+    .map_err(crate::sync::store::circles::CircleOperationError::from)
+    .map_err(crate::sync::store::circles::CirclePackageReadError::from)
+    .map_err(StorePullError::from)
 }

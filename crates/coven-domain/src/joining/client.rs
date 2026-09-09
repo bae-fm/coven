@@ -113,7 +113,9 @@ pub enum BootstrapError {
     /// Both are carried: `cause` is the original bootstrap failure that
     /// triggered the cleanup, `cleanup` is why the cleanup itself failed — the
     /// cause is preserved as a value, not flattened into a string.
-    #[error("could not clean up the partial store after bootstrap failed: {cleanup} (bootstrap error: {cause})")]
+    #[error(
+        "could not clean up the partial store after bootstrap failed: {cleanup} (bootstrap error: {cause})"
+    )]
     Cleanup {
         cleanup: BootstrapCleanupFailures,
         cause: Box<BootstrapError>,
@@ -498,7 +500,7 @@ struct DeviceJoinStorage {
     /// The owner-anchored membership chain the keyring open already walked and
     /// verified. Installing this device's owner anchor needs the same chain, so
     /// it is kept rather than walked from the cloud a second time.
-    membership: coven_protocol::membership::MembershipChain,
+    membership: coven_replication::sync::store::AcceptedMembershipAuthority,
 }
 
 impl DeviceJoinClient {
@@ -767,7 +769,7 @@ impl DeviceJoinClient {
         let snapshot = timings
             .stage(
                 "download snapshot",
-                PreparedSnapshotBootstrap::prepare(
+                PreparedSnapshotBootstrap::prepare_device_join(
                     &join.storage,
                     history_verifier,
                     &self.admission.membership_floor,
@@ -776,6 +778,10 @@ impl DeviceJoinClient {
                     &signer,
                     std::sync::Arc::clone(on_progress),
                     cancel,
+                    &bootstrap
+                        .bootstrap
+                        .publication_authorization
+                        .attempt_activation,
                 ),
             )
             .await?;
@@ -872,7 +878,7 @@ impl DeviceJoinClient {
             (Some(readiness), _) => readiness.proof.registration.device_id.to_string(),
             (None, Some(config)) => config.device_id.clone(),
             (None, None) => {
-                return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into())
+                return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into());
             }
         };
         let db_path = store_dir.db_path();
@@ -906,7 +912,8 @@ impl DeviceJoinClient {
                     database,
                     &store_dir,
                     signer.clone(),
-                    Some(join.membership.clone()),
+                    Some(join.membership.chain().clone()),
+                    Some(routing_encryption.clone()),
                 ),
             )
             .await?;
@@ -1008,6 +1015,7 @@ impl DeviceJoinClient {
                 PreparedDeviceJoinSnapshot::prepare(
                     &storage.storage,
                     (*join.installation).clone(),
+                    &storage.membership,
                     supported_version(&self.migrations),
                     &store_dir.db_path(),
                     on_progress,
@@ -1050,7 +1058,7 @@ impl DeviceJoinClient {
             installed,
             &self.clock.now().to_rfc3339(),
             Some(&routing_encryption),
-            Some(storage.membership.clone()),
+            Some(storage.membership.chain().clone()),
         ))
         .await?;
         if completion.joined().registration.device_id.to_string() != device_id {
@@ -1199,7 +1207,7 @@ impl DeviceJoinClient {
             .membership_floor
             .validate()
             .map_err(coven_replication::sync::store::MembershipMutationError::MembershipFloor)?;
-        let mut history = timings
+        let history = timings
             .stage(
                 "pin the Store root",
                 coven_replication::sync::store::HistoryConstructionAuthority::admission()
@@ -1219,7 +1227,7 @@ impl DeviceJoinClient {
         let chain = timings
             .stage(
                 "walk the membership chain",
-                history.load_exact_anchored_membership(
+                history.load_accepted_membership_authority(
                     &self.admission.membership_floor.0,
                     Some(&self.admission.owner_pubkey),
                 ),
@@ -1233,7 +1241,11 @@ impl DeviceJoinClient {
                     &bootstrap_storage,
                     self.admission.store_root.clone(),
                 )
-                .open_containing(signer, &chain, &self.admission.wrapped_key),
+                .open_containing(
+                    signer,
+                    chain.chain(),
+                    &self.admission.wrapped_key,
+                ),
             )
             .await?;
         let keyring = MasterKeyring::from(encryption.clone());

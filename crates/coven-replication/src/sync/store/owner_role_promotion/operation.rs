@@ -1,8 +1,7 @@
 use crate::sync::store::commit_publication::operation::commit_plan::{
-    PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
+    PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationCommitPlan,
 };
 use coven_keys::encryption::EncryptionService;
-use coven_keys::keys;
 use coven_protocol::circle_control::StoreMembershipStateRef;
 use coven_protocol::membership::StoreMembershipRoleGrant;
 use coven_protocol::membership_mutation::{
@@ -13,15 +12,15 @@ use coven_protocol::store_commit::{
     membership_head_slot_prefix, owner_recovery_semantic_prefix, GrantStreamAnchor,
     OwnerPromotionAcceptance, OwnerPromotionAnchors,
     OwnerPromotionFinalization as OwnerPromotionFinalizationPoint, OwnerPromotionId,
-    OwnerPromotionRequest, OwnerPromotionRequestActivation, OwnerPromotionStaleReason,
-    StoreDeviceRegistrationRef, StreamActivation, StreamAnchorDomain,
+    OwnerPromotionRequest, OwnerPromotionStaleReason, StoreDeviceRegistrationRef, StreamActivation,
+    StreamAnchorDomain,
 };
 use coven_protocol::wrapped_store_key::PreparedWrappedStoreKey;
 
 use super::journal::target_key;
 use super::journal::{
-    owner_promotion_published_objects, OwnerPromotionFinalizationReceipt, OwnerPromotionJournal,
-    OwnerPromotionJournalPredecessor, OwnerPromotionJournalState, OwnerPromotionStaleEvidence,
+    OwnerPromotionFinalizationReceipt, OwnerPromotionJournal, OwnerPromotionJournalPredecessor,
+    OwnerPromotionJournalState, OwnerPromotionStaleEvidence,
 };
 use super::OwnerPromotionError;
 
@@ -30,28 +29,6 @@ pub(crate) struct AuthorizedOwnerPromotion<'operation, 'storage> {
     database: coven_database::StoreDatabase,
     storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
     root: coven_protocol::store_commit::StoreRootRef,
-    membership: coven_protocol::membership::MembershipChain,
-}
-
-enum OwnerPromotionPreparation {
-    Continue(OwnerPromotionJournal),
-    Stale {
-        journal: OwnerPromotionJournal,
-        reason: OwnerPromotionStaleReason,
-    },
-}
-
-enum MergeHeadPublication {
-    Continue(OwnerPromotionJournal),
-    DurablyComplete {
-        membership: StoreMembershipStateRef,
-    },
-    /// The candidate lost its Store position. Its journal already rests on the
-    /// stale state and its published objects are already deleted, because both
-    /// belong to the step that read the winner.
-    Ended {
-        reason: OwnerPromotionStaleReason,
-    },
 }
 
 struct PublishedOwnerPromotionMergeHead {
@@ -76,14 +53,12 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         database: coven_database::StoreDatabase,
         storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
         root: coven_protocol::store_commit::StoreRootRef,
-        membership: coven_protocol::membership::MembershipChain,
     ) -> Self {
         Self {
             writer,
             database,
             storage,
             root,
-            membership,
         }
     }
 
@@ -93,44 +68,98 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
     ) -> Result<(), OwnerPromotionError> {
         crate::sync::store::authorization::delete_candidate_cleanup_targets(
             self.storage.as_ref(),
-            &self.database,
             targets,
         )
         .await
     }
 
-    async fn finish_stale_cleanup(
+    async fn finish_retired_cleanup(
         &self,
-        evidence: &OwnerPromotionStaleEvidence,
+        promotion_id: OwnerPromotionId,
+        _authorship: &coven_database::OwnStreamAuthorship,
     ) -> Result<(), OwnerPromotionError> {
-        let OwnerPromotionStaleEvidence::Candidate {
-            receipt, published, ..
-        } = evidence
-        else {
-            return Ok(());
-        };
-        let targets = self
+        let journal = self
             .database
-            .owner_promotion_candidate_cleanup_targets(
-                receipt.candidate.reference.clone(),
-                published.clone(),
-            )
+            .load_owner_promotion_journal(promotion_id)
+            .await?
+            .ok_or(OwnerPromotionError::NotFound(promotion_id))?;
+        if matches!(&journal.state, OwnerPromotionJournalState::Stale { evidence, .. }
+            if matches!(evidence.as_ref(), OwnerPromotionStaleEvidence::BeforePublication))
+        {
+            return Ok(());
+        }
+        let _upload = self.database.blob_upload_drain_permit().await;
+        let _snapshot = self.database.snapshot_publication_permit().await;
+        let (journal, targets) = self
+            .database
+            .owner_promotion_retirement_targets(journal)
             .await?;
-        self.delete_candidate_objects(targets).await
+        self.delete_candidate_objects(targets).await?;
+        self.database
+            .complete_owner_promotion_retirement(journal)
+            .await?;
+        Ok(())
+    }
+
+    async fn retire_candidate_with_lost_authority(
+        &mut self,
+        promotion_id: OwnerPromotionId,
+        authorship: &coven_database::OwnStreamAuthorship,
+    ) -> Result<(), OwnerPromotionError> {
+        self.writer.refresh_membership_publication().await?;
+        let journal = self
+            .database
+            .load_owner_promotion_journal(promotion_id)
+            .await?
+            .ok_or(OwnerPromotionError::NotFound(promotion_id))?;
+        let candidate = match &journal.state {
+            OwnerPromotionJournalState::RequestPrepared { candidate, .. }
+            | OwnerPromotionJournalState::MergeHeadPrepared { candidate, .. } => candidate,
+            _ => {
+                return Err(OwnerPromotionError::Protocol(
+                    "promotion retirement preflight lost its prepared candidate".into(),
+                ))
+            }
+        };
+        let retirement = self
+            .writer
+            .owner_promotion_history()
+            .candidate_grant_retirement(candidate)
+            .await?;
+        if let Some((membership, publication)) = retirement {
+            let retired = self
+                .database
+                .retire_owner_promotion_candidate_authority(journal, membership, publication)
+                .await?;
+            self.finish_retired_cleanup(promotion_id, authorship)
+                .await?;
+            return match retired.state {
+                OwnerPromotionJournalState::Nonactivated { .. } => {
+                    Err(OwnerPromotionError::RequestNotActivated)
+                }
+                OwnerPromotionJournalState::Stale { reason, .. } => {
+                    Err(OwnerPromotionError::Stale(Box::new(reason)))
+                }
+                _ => Err(OwnerPromotionError::Protocol(
+                    "promotion retirement did not retain its terminal outcome".into(),
+                )),
+            };
+        }
+        Ok(())
     }
 
     fn exact_member_grant(
-        &self,
+        membership: &coven_protocol::membership::MembershipChain,
         member_pubkey: &str,
     ) -> Result<coven_protocol::membership::MembershipGrantId, OwnerPromotionError> {
-        let grants = self.membership.active_grant_ids(member_pubkey);
+        let grants = membership.active_grant_ids(member_pubkey);
         let Some(grant) = grants.iter().next() else {
             return Err(OwnerPromotionError::Protocol(
                 "promotion target has no active Member grant".to_string(),
             ));
         };
         if grants.len() != 1
-            || self.membership.active_grant(grant).is_none_or(|record| {
+            || membership.active_grant(grant).is_none_or(|record| {
                 record.role != coven_protocol::membership::StoreMembershipRoleGrant::Member
             })
         {
@@ -147,21 +176,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         next: OwnerPromotionJournal,
     ) -> Result<(OwnerPromotionJournalPredecessor, OwnerPromotionJournalState), OwnerPromotionError>
     {
-        let remote_objects = match &next.state {
-            OwnerPromotionJournalState::MergeHeadPrepared {
-                wrapped_key,
-                transition,
-                publication,
-                candidate,
-                ..
-            } => candidate.merge_owner_promotion_remote_objects(
-                transition,
-                publication,
-                wrapped_key,
-            )?,
-            _ => Vec::new(),
-        };
-        let transition = previous.transition_to(&next, remote_objects)?;
+        let transition = previous.transition_to(&next)?;
         let (successor, state) = next.into_predecessor()?;
         self.database
             .advance_owner_promotion_journal(transition)
@@ -180,7 +195,6 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .await?
         {
             if let OwnerPromotionJournalState::AcceptanceReady { acceptance }
-            | OwnerPromotionJournalState::MergeMembershipPrepared { acceptance, .. }
             | OwnerPromotionJournalState::MergeHeadPrepared { acceptance, .. }
             | OwnerPromotionJournalState::Finalized { acceptance, .. }
             | OwnerPromotionJournalState::Stale { acceptance, .. } = existing.state
@@ -277,6 +291,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         &mut self,
         mut previous: OwnerPromotionJournalPredecessor,
         mut state: OwnerPromotionJournalState,
+        authorship: &coven_database::OwnStreamAuthorship,
     ) -> Result<OwnerPromotionRequest, OwnerPromotionError> {
         loop {
             match state {
@@ -286,50 +301,108 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                     ));
                 }
                 OwnerPromotionJournalState::RequestPrepared { request, candidate } => {
-                    let head = candidate.head_ref();
-                    let outcome = self.writer.publish_prepared(candidate, None, None).await?;
-                    let next_state = match outcome {
-                        StoreOperationPublicationOutcome::Activated(commit) => {
-                            let activation = OwnerPromotionRequestActivation { commit, head };
-                            OwnerPromotionJournalState::AwaitingAcceptance {
-                                request,
-                                activation,
-                            }
-                        }
-                        StoreOperationPublicationOutcome::RepreparedCandidate(candidate) => {
-                            OwnerPromotionJournalState::RequestPrepared { request, candidate }
-                        }
-                        StoreOperationPublicationOutcome::NonactivatedCandidate {
-                            nonactivation,
-                            ..
-                        } => OwnerPromotionJournalState::Nonactivated {
-                            request,
-                            nonactivation: nonactivation.into_durable(),
-                        },
-                        StoreOperationPublicationOutcome::Nonactivated(_) => {
-                            return Err(OwnerPromotionError::Protocol(
-                                "promotion request lost without exact nonactivation evidence"
-                                    .to_string(),
-                            ));
-                        }
-                        StoreOperationPublicationOutcome::Reprepared => {
-                            return Err(OwnerPromotionError::Protocol(
-                                "promotion request unexpectedly used acknowledgement reprepare"
-                                    .to_string(),
-                            ));
-                        }
-                    };
+                    self.retire_candidate_with_lost_authority(previous.promotion_id, authorship)
+                        .await?;
+                    let accepted = self
+                        .writer
+                        .publish_prepared(candidate.clone(), None, None)
+                        .await?;
+                    let exact = accepted.exact_publication().ok_or_else(|| {
+                        OwnerPromotionError::Protocol(
+                            "promotion request publication was retired before its activation was retained".into(),
+                        )
+                    })?;
+                    let value = self
+                        .writer
+                        .sign_owner_promotion_request_publication(&candidate.commit, exact)?;
+                    let context = ProtocolObjectContext::signed_plaintext(
+                        self.root.store_root_hash,
+                        ProtocolObjectDomain::OwnerPromotionRequestPublication,
+                    );
+                    let prefix = coven_protocol::store_commit::owner_promotion_request_publication_semantic_prefix(request.promotion_id);
+                    let prepared = self.storage.prepare_protocol_object(
+                        &context,
+                        request.publication_slot.clone(),
+                        &prefix,
+                        value.to_bytes(),
+                    )?;
                     let next = OwnerPromotionJournal {
                         promotion_id: previous.promotion_id,
                         target: previous.target.clone(),
-                        state: next_state,
+                        state: OwnerPromotionJournalState::RequestAccepted {
+                            request,
+                            candidate,
+                            publication: coven_protocol::store_commit::RetainedOwnerPromotionRequestPublication {
+                                value,
+                                object: prepared.reference().clone(),
+                            },
+                        },
+                    };
+                    let transition = previous.transition_to(&next)?;
+                    let successor = next.into_predecessor()?;
+                    self.database
+                        .advance_accepted_owner_promotion_request(transition, accepted)
+                        .await?;
+                    (previous, state) = successor;
+                }
+                OwnerPromotionJournalState::RequestAccepted {
+                    request,
+                    candidate,
+                    publication,
+                } => {
+                    let context = ProtocolObjectContext::signed_plaintext(
+                        self.root.store_root_hash,
+                        ProtocolObjectDomain::OwnerPromotionRequestPublication,
+                    );
+                    let prefix = coven_protocol::store_commit::owner_promotion_request_publication_semantic_prefix(request.promotion_id);
+                    let prepared = self.storage.prepare_protocol_object(
+                        &context,
+                        request.publication_slot.clone(),
+                        &prefix,
+                        publication.value.to_bytes(),
+                    )?;
+                    if prepared.reference() != &publication.object {
+                        return Err(OwnerPromotionError::Protocol(
+                            "request publication changed its exact object on restart".into(),
+                        ));
+                    }
+                    self.storage.create_protocol_object(&prepared).await?;
+                    let loaded = self
+                        .writer
+                        .owner_promotion_history()
+                        .load_request_publication(&candidate.commit)
+                        .await?;
+                    if loaded != publication {
+                        return Err(OwnerPromotionError::Protocol(
+                            "request publication slot contains another accepted result".into(),
+                        ));
+                    }
+                    let remote = coven_protocol::remote_object::RemoteObjectRecord::prepared_owner_promotion_request_publication(
+                        &publication,
+                        &candidate.commit,
+                    ).map_err(crate::sync::store::StoreError::from)?;
+                    self.database
+                        .mark_remote_object_uploaded(remote.into_record())
+                        .await?;
+                    let next = OwnerPromotionJournal {
+                        promotion_id: previous.promotion_id,
+                        target: previous.target.clone(),
+                        state: OwnerPromotionJournalState::AwaitingAcceptance {
+                            request,
+                            activation: (*publication.value).clone(),
+                        },
                     };
                     (previous, state) = self.advance_journal(previous, next).await?;
                 }
-                OwnerPromotionJournalState::AwaitingAcceptance { request, .. }
-                | OwnerPromotionJournalState::Nonactivated { request, .. } => return Ok(request),
+                OwnerPromotionJournalState::AwaitingAcceptance { request, .. } => {
+                    return Ok(request)
+                }
+                OwnerPromotionJournalState::Nonactivated { .. } => {
+                    self.finish_retired_cleanup(previous.promotion_id, authorship)
+                        .await?;
+                    return Err(OwnerPromotionError::RequestNotActivated);
+                }
                 OwnerPromotionJournalState::AcceptanceReady { acceptance }
-                | OwnerPromotionJournalState::MergeMembershipPrepared { acceptance, .. }
                 | OwnerPromotionJournalState::MergeHeadPrepared { acceptance, .. }
                 | OwnerPromotionJournalState::Finalized { acceptance, .. }
                 | OwnerPromotionJournalState::Stale { acceptance, .. } => {
@@ -346,6 +419,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
     ) -> Result<OwnerPromotionRequest, OwnerPromotionError> {
         let operation = self;
         let database = operation.database.clone();
+        let authorship = database.author_own_stream().await;
         let db = &database;
         let (allocated, failed_attempt) = if let Some(existing) = database
             .load_owner_promotion_target(target_key(&member_registration)?)
@@ -358,11 +432,14 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 OwnerPromotionJournalState::Nonactivated { .. }
                     | OwnerPromotionJournalState::Stale { .. }
             ) {
+                operation
+                    .finish_retired_cleanup(existing.promotion_id, &authorship)
+                    .await?;
                 (None, Some(existing))
             } else {
                 let (previous, state) = existing.into_predecessor()?;
                 return operation
-                    .resume_request_publication_state(previous, state)
+                    .resume_request_publication_state(previous, state, &authorship)
                     .await;
             }
         } else {
@@ -374,20 +451,25 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .load_registration(&member_registration)
             .await
             .map_err(OwnerPromotionError::from)?;
-        let plan = operation.writer.prepare_plan().await?;
-        let member_grant = operation.exact_member_grant(&member.value.author_pubkey)?;
+        operation.writer.refresh_membership_publication().await?;
+        let plan = operation
+            .writer
+            .prepare_plan_with_authorship(authorship)
+            .await?;
+        let member_grant =
+            Self::exact_member_grant(plan.membership(), &member.value.author_pubkey)?;
         let owner_grant = plan.owner_grant().cloned().ok_or_else(|| {
             OwnerPromotionError::Protocol("promotion author is not an Owner".to_string())
         })?;
         let author_pubkey = plan.author_pubkey();
-        let reusable = operation
-            .membership
+        let reusable = plan
+            .membership()
             .reusable_author_streams(&author_pubkey, &owner_grant);
         let author_stream = database
             .select_membership_author_stream(&author_pubkey, &owner_grant, reusable)
             .await?;
-        let (seq, previous_hash) = operation
-            .membership
+        let (seq, previous_hash) = plan
+            .membership()
             .next_stream_position(&author_pubkey, &owner_grant, author_stream)
             .map_err(OwnerPromotionError::from)?;
         let finalization = OwnerPromotionFinalizationPoint {
@@ -407,14 +489,6 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 };
                 match failed_attempt {
                     Some(previous) => {
-                        // The attempt being replaced may still owe deletions its
-                        // own retry would have finished. Nothing else names its
-                        // objects once this journal is gone, and its membership
-                        // slots are the ones this attempt composes into.
-                        if let OwnerPromotionJournalState::Stale { evidence, .. } = &previous.state
-                        {
-                            operation.finish_stale_cleanup(evidence).await?;
-                        }
                         database
                             .replace_failed_owner_promotion_journal(previous, allocation)
                             .await?
@@ -431,17 +505,30 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             }
         };
         let promotion_id = allocation.promotion_id;
+        let publication_context = ProtocolObjectContext::signed_plaintext(
+            operation.root.store_root_hash,
+            ProtocolObjectDomain::OwnerPromotionRequestPublication,
+        );
+        let publication_prefix =
+            coven_protocol::store_commit::owner_promotion_request_publication_semantic_prefix(
+                promotion_id,
+            );
+        let publication_slot = operation
+            .storage
+            .allocate_protocol_slot(&publication_context, &publication_prefix, ".json")
+            .await?;
         let request = plan.sign_owner_promotion_request(
             promotion_id,
             member_registration.clone(),
             member.value.author_pubkey.clone(),
             member_grant,
             finalization,
+            publication_slot,
         )?;
         let candidate = operation
             .writer
             .prepare_candidate(
-                plan,
+                &plan,
                 StoreOperationBatch::OwnerPromotionRequest(request.clone()),
             )
             .await?;
@@ -455,8 +542,9 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         };
         let (previous, _) = allocation.into_predecessor()?;
         let (previous, state) = operation.advance_journal(previous, prepared).await?;
+        let authorship = plan.into_authorship();
         operation
-            .resume_request_publication_state(previous, state)
+            .resume_request_publication_state(previous, state, &authorship)
             .await
     }
 
@@ -466,13 +554,6 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         encryption: &EncryptionService,
         acceptance: OwnerPromotionAcceptance,
     ) -> Result<StoreMembershipStateRef, OwnerPromotionError> {
-        Box::pin(
-            self.writer
-                .owner_promotion_history()
-                .verify_acceptance(&acceptance),
-        )
-        .await
-        .map_err(OwnerPromotionError::from)?;
         if !self
             .writer
             .is_local_registration(&acceptance.request.promoter_registration)
@@ -481,49 +562,30 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 "promotion finalizer is not the request promoter".to_string(),
             ));
         }
-        loop {
-            let resumed = self.resume(encryption, &acceptance).await?;
-            match resumed {
-                OwnerPromotionResumeOutcome::Complete(membership) => return Ok(membership),
-                OwnerPromotionResumeOutcome::PublishMergeHead { previous, pending } => {
-                    match self.activate_merge_head(&previous, pending).await? {
-                        MergeHeadPublication::Continue(next) => {
-                            self.advance_journal(previous, next).await?;
-                        }
-                        MergeHeadPublication::DurablyComplete { membership } => {
-                            return Ok(membership);
-                        }
-                        MergeHeadPublication::Ended { reason } => {
-                            return Err(OwnerPromotionError::Stale(Box::new(reason)));
-                        }
-                    }
-                }
+        let authorship = self.database.author_own_stream().await;
+        let (outcome, authorship) = self.resume(encryption, &acceptance, authorship).await?;
+        match outcome {
+            OwnerPromotionResumeOutcome::Complete(membership) => Ok(membership),
+            OwnerPromotionResumeOutcome::PublishMergeHead { previous, pending } => {
+                self.activate_merge_head(&previous, pending, &authorship)
+                    .await
             }
         }
     }
 
-    /// Publish the promotion's membership authority and compose the Store candidate
-    /// that activates it, journaled as `MergeHeadPrepared` for the publication that
-    /// follows. The turn that claimed the stream position is released with the plan,
-    /// so a writer can take that position before the publication runs; the candidate
-    /// is then bound to a head slot it can never take, and the publication ends the
-    /// attempt on the verified winner. Everything composed here — the membership
-    /// entry and head above all — sits in create-once slots the promoter's next
-    /// attempt composes into, which is why ending the attempt deletes them.
+    /// Compose membership authority and its activating Store candidate from one accepted plan.
+    /// Advancing the journal to `MergeHeadPrepared` reserves that candidate's
+    /// publication atomically, so another local operation cannot take its position.
     async fn prepare_merge_store_candidate(
         &mut self,
         journal: &OwnerPromotionJournalPredecessor,
+        plan: &StoreOperationCommitPlan,
         acceptance: &OwnerPromotionAcceptance,
         wrapped_key: PreparedWrappedStoreKey,
         transition: Box<PreparedMembershipTransition>,
     ) -> Result<OwnerPromotionJournal, OwnerPromotionError> {
         let acceptance = acceptance.clone();
         let root = self.root.clone();
-        self.writer
-            .publish_membership_authority(&transition, std::slice::from_ref(&wrapped_key))
-            .await
-            .map_err(OwnerPromotionError::from)?;
-        let plan = self.writer.prepare_plan().await?;
         let OwnerPromotionAnchors {
             membership: membership_anchor,
             recovery,
@@ -555,11 +617,9 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .await?;
         let publication = self
             .writer
-            .finish_membership_transition(
+            .finish_store_membership_transition(
                 transition.as_ref().clone(),
-                coven_protocol::membership::MembershipHeadActivation::StoreCommit {
-                    commit: candidate.reference.clone(),
-                },
+                candidate.reference.clone(),
             )
             .await
             .map_err(OwnerPromotionError::from)?;
@@ -581,10 +641,18 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
 
     async fn prepare(
         &mut self,
-        journal: &OwnerPromotionJournalPredecessor,
+        journal: OwnerPromotionJournalPredecessor,
         encryption: &EncryptionService,
         acceptance: &OwnerPromotionAcceptance,
-    ) -> Result<OwnerPromotionPreparation, OwnerPromotionError> {
+        authorship: coven_database::OwnStreamAuthorship,
+    ) -> Result<
+        (
+            OwnerPromotionJournalPredecessor,
+            OwnerPromotionJournalState,
+            coven_database::OwnStreamAuthorship,
+        ),
+        OwnerPromotionError,
+    > {
         let acceptance = acceptance.clone();
         let operation = &mut *self;
         let author_stream = acceptance.request.finalization.author_stream;
@@ -601,7 +669,12 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 "promotion finalizer is not the request promoter".to_string(),
             ));
         }
-        let membership = operation.membership.clone();
+        operation.writer.refresh_membership_publication().await?;
+        let plan = operation
+            .writer
+            .prepare_plan_with_authorship(authorship)
+            .await?;
+        let membership = plan.membership().clone();
         if let Some(winner) = membership.head_refs().iter().find(|head| {
             head.coord.author_pubkey == promoter_pubkey
                 && head.coord.author_owner_grant == acceptance.request.promoter_owner_grant
@@ -620,34 +693,15 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                     evidence: Box::new(OwnerPromotionStaleEvidence::BeforePublication),
                 },
             };
-            return Ok(OwnerPromotionPreparation::Stale {
-                journal: next,
-                reason,
-            });
+            operation.advance_journal(journal, next).await?;
+            return Err(OwnerPromotionError::Stale(Box::new(reason)));
         }
-        let authorized = operation
+        let recipient = &acceptance.request.member_pubkey;
+        let wrapped_key = operation
             .writer
-            .open_keyring_or_for_membership(&membership, encryption)
+            .prepare_member_wrapped_key(&membership, encryption, recipient)
             .await
             .map_err(OwnerPromotionError::from)?;
-        let recipient = &acceptance.request.member_pubkey;
-        let recipient_key =
-            keys::ed25519_hex_to_x25519_public_key(recipient).map_err(OwnerPromotionError::from)?;
-        let wrapped_key = operation
-            .writer
-            .seal_local_keyring(
-                membership.store_id().ok_or_else(|| {
-                    OwnerPromotionError::Protocol("membership Store id is absent".to_string())
-                })?,
-                recipient,
-                &recipient_key,
-                &authorized,
-            )
-            .map_err(OwnerPromotionError::from)?;
-        let wrapped_key = operation
-            .writer
-            .prepare_wrapped_key(recipient, wrapped_key)
-            .await?;
         let candidate = operation
             .writer
             .owner_promotion_history()
@@ -670,23 +724,32 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .prepare_membership_transition(&membership, entry)
             .await
             .map_err(OwnerPromotionError::from)?;
-        let next = OwnerPromotionJournal {
-            promotion_id: journal.promotion_id,
-            target: journal.target.clone(),
-            state: OwnerPromotionJournalState::MergeMembershipPrepared {
-                acceptance,
+        let next = operation
+            .prepare_merge_store_candidate(
+                &journal,
+                &plan,
+                &acceptance,
                 wrapped_key,
-                transition: Box::new(transition),
-            },
-        };
-        Ok(OwnerPromotionPreparation::Continue(next))
+                Box::new(transition),
+            )
+            .await?;
+        #[cfg(any(test, feature = "test-utils"))]
+        operation
+            .database
+            .reach_test_point(coven_database::DatabaseTestPoint::OwnerPromotionCandidatePrepared)
+            .await;
+        let (previous, state) = operation.advance_journal(journal, next).await?;
+        Ok((previous, state, plan.into_authorship()))
     }
 
     async fn activate_merge_head(
         &mut self,
         previous: &OwnerPromotionJournalPredecessor,
         published: Box<PublishedOwnerPromotionMergeHead>,
-    ) -> Result<MergeHeadPublication, OwnerPromotionError> {
+        authorship: &coven_database::OwnStreamAuthorship,
+    ) -> Result<StoreMembershipStateRef, OwnerPromotionError> {
+        self.retire_candidate_with_lost_authority(previous.promotion_id, authorship)
+            .await?;
         let operation = &mut *self;
         let database = operation.database.clone();
         let PublishedOwnerPromotionMergeHead {
@@ -713,7 +776,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 .matches_head(&publication.head, &publication.head_ref)
             || !matches!(
                 &publication.head.activation,
-                coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit }
+                coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit, .. }
                     if commit == &candidate_ref
             )
         {
@@ -758,7 +821,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 "finalized Owner promotion produced conflicted membership".to_string(),
             ));
         };
-        let coven_protocol::membership::MembershipChange::SetMember {
+        let coven_protocol::membership::StoreAuthorityChange::SetMember {
             user_pubkey,
             role:
                 StoreMembershipRoleGrant::Owner {
@@ -824,7 +887,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 }),
             },
         };
-        let journal_transition = previous.transition_to(&finalized, Vec::new())?;
+        let journal_transition = previous.transition_to(&finalized)?;
         let remote_objects = candidate.merge_owner_promotion_remote_objects(
             &transition,
             &publication,
@@ -845,9 +908,9 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 .mark_remote_object_uploaded(remote.into_record())
                 .await?;
         }
-        let outcome = operation
+        let accepted = operation
             .writer
-            .publish_membership_activation(
+            .publish_membership_activation_with_authorship(
                 &transition,
                 &publication,
                 candidate,
@@ -858,94 +921,35 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                         .map(|remote| remote.record().clone())
                         .collect(),
                 },
+                authorship,
             )
             .await
             .map_err(OwnerPromotionError::from)?;
-        match outcome {
-            StoreOperationPublicationOutcome::Activated(commit) => {
-                if commit != candidate_ref {
-                    return Err(OwnerPromotionError::Protocol(
-                        "Merge promotion activated another prepared candidate".to_string(),
-                    ));
-                }
-                Ok(MergeHeadPublication::DurablyComplete { membership })
-            }
-            StoreOperationPublicationOutcome::RepreparedCandidate(candidate) => {
-                let next = OwnerPromotionJournal {
-                    promotion_id: previous.promotion_id,
-                    target: previous.target.clone(),
-                    state: OwnerPromotionJournalState::MergeHeadPrepared {
-                        acceptance: *acceptance,
-                        wrapped_key: *wrapped_key,
-                        transition,
-                        publication,
-                        candidate,
-                    },
-                };
-                Ok(MergeHeadPublication::Continue(next))
-            }
-            StoreOperationPublicationOutcome::NonactivatedCandidate { nonactivation, .. } => {
-                let reason = OwnerPromotionStaleReason::MergeActivationRejected;
-                let published = owner_promotion_published_objects(
-                    &receipt_candidate,
-                    &transition,
-                    &publication,
-                    &wrapped_key,
-                )?;
-                let next = OwnerPromotionJournal {
-                    promotion_id: previous.promotion_id,
-                    target: previous.target.clone(),
-                    state: OwnerPromotionJournalState::Stale {
-                        acceptance: *acceptance,
-                        reason: reason.clone(),
-                        evidence: Box::new(OwnerPromotionStaleEvidence::Candidate {
-                            nonactivation: (*nonactivation).clone().into_durable(),
-                            receipt: Box::new(OwnerPromotionFinalizationReceipt {
-                                candidate: receipt_candidate,
-                                publication,
-                            }),
-                            published: published.clone(),
-                        }),
-                    },
-                };
-                let journal_transition = previous.transition_to(&next, Vec::new())?;
-                let targets = database
-                    .end_nonactivated_owner_promotion_candidate(
-                        journal_transition,
-                        candidate_ref,
-                        published,
-                        *nonactivation,
-                    )
-                    .await?;
-                self.delete_candidate_objects(targets).await?;
-                Ok(MergeHeadPublication::Ended { reason })
-            }
-            StoreOperationPublicationOutcome::Nonactivated(_) => {
-                Err(OwnerPromotionError::Protocol(
-                    "promotion finalization lost without exact nonactivation evidence".to_string(),
-                ))
-            }
-            StoreOperationPublicationOutcome::Reprepared => Err(OwnerPromotionError::Protocol(
-                "promotion finalization used acknowledgement reprepare".to_string(),
-            )),
+        if accepted != candidate_ref {
+            return Err(OwnerPromotionError::Protocol(
+                "Merge promotion accepted another prepared candidate".to_string(),
+            ));
         }
+        Ok(membership)
     }
 
     async fn resume(
         &mut self,
         encryption: &EncryptionService,
         acceptance: &OwnerPromotionAcceptance,
-    ) -> Result<OwnerPromotionResumeOutcome, OwnerPromotionError> {
+        mut authorship: coven_database::OwnStreamAuthorship,
+    ) -> Result<
+        (
+            OwnerPromotionResumeOutcome,
+            coven_database::OwnStreamAuthorship,
+        ),
+        OwnerPromotionError,
+    > {
         let acceptance = acceptance.clone();
         let database = self.database.clone();
         let existing = database
             .load_owner_promotion_journal(acceptance.request.promotion_id)
             .await?;
-        if let Some(existing) = &existing {
-            if let OwnerPromotionJournalState::Finalized { membership, .. } = &existing.state {
-                return Ok(OwnerPromotionResumeOutcome::Complete(membership.clone()));
-            }
-        }
         let journal = existing.ok_or(OwnerPromotionError::NotFound(
             acceptance.request.promotion_id,
         ))?;
@@ -965,10 +969,6 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             OwnerPromotionJournalState::AcceptanceReady {
                 acceptance: persisted,
             }
-            | OwnerPromotionJournalState::MergeMembershipPrepared {
-                acceptance: persisted,
-                ..
-            }
             | OwnerPromotionJournalState::MergeHeadPrepared {
                 acceptance: persisted,
                 ..
@@ -986,6 +986,24 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 ));
             }
             _ => {}
+        }
+        // New finalization preparation consumes the request's live or retained
+        // acceptance proof. A full prepared candidate already owns that verified
+        // input; its accepted head can outlive the now-consumed request after a
+        // peer compacts it. Resume that exact candidate through its publication
+        // owner instead of requiring the retired request again.
+        if matches!(
+            journal.state,
+            OwnerPromotionJournalState::AwaitingAcceptance { .. }
+                | OwnerPromotionJournalState::AcceptanceReady { .. }
+        ) {
+            Box::pin(
+                self.writer
+                    .owner_promotion_history()
+                    .verify_acceptance(&acceptance),
+            )
+            .await
+            .map_err(OwnerPromotionError::from)?;
         }
         let (mut previous, mut state) = journal.into_predecessor()?;
         loop {
@@ -1014,40 +1032,9 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                                 .to_string(),
                         ));
                     }
-                    let preparation = self.prepare(&previous, encryption, &persisted).await?;
-                    match preparation {
-                        OwnerPromotionPreparation::Continue(next) => {
-                            (previous, state) = self.advance_journal(previous, next).await?;
-                        }
-                        OwnerPromotionPreparation::Stale {
-                            journal: next,
-                            reason,
-                        } => {
-                            self.advance_journal(previous, next).await?;
-                            return Err(OwnerPromotionError::Stale(Box::new(reason)));
-                        }
-                    }
-                }
-                OwnerPromotionJournalState::MergeMembershipPrepared {
-                    acceptance: persisted,
-                    wrapped_key,
-                    transition,
-                } => {
-                    if persisted != acceptance {
-                        return Err(OwnerPromotionError::Protocol(
-                            "promotion finalization differs from its persisted acceptance"
-                                .to_string(),
-                        ));
-                    }
-                    let next = self
-                        .prepare_merge_store_candidate(
-                            &previous,
-                            &persisted,
-                            wrapped_key,
-                            transition,
-                        )
+                    (previous, state, authorship) = self
+                        .prepare(previous, encryption, &persisted, authorship)
                         .await?;
-                    (previous, state) = self.advance_journal(previous, next).await?;
                 }
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance,
@@ -1063,19 +1050,25 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                         publication,
                         candidate,
                     });
-                    return Ok(OwnerPromotionResumeOutcome::PublishMergeHead { previous, pending });
+                    return Ok((
+                        OwnerPromotionResumeOutcome::PublishMergeHead { previous, pending },
+                        authorship,
+                    ));
                 }
                 OwnerPromotionJournalState::Finalized { membership, .. } => {
-                    return Ok(OwnerPromotionResumeOutcome::Complete(membership));
+                    return Ok((
+                        OwnerPromotionResumeOutcome::Complete(membership),
+                        authorship,
+                    ));
                 }
-                OwnerPromotionJournalState::Stale {
-                    reason, evidence, ..
-                } => {
-                    self.finish_stale_cleanup(&evidence).await?;
+                OwnerPromotionJournalState::Stale { reason, .. } => {
+                    self.finish_retired_cleanup(previous.promotion_id, &authorship)
+                        .await?;
                     return Err(OwnerPromotionError::Stale(Box::new(reason)));
                 }
                 OwnerPromotionJournalState::Allocated
                 | OwnerPromotionJournalState::RequestPrepared { .. }
+                | OwnerPromotionJournalState::RequestAccepted { .. }
                 | OwnerPromotionJournalState::Nonactivated { .. } => {
                     return Err(OwnerPromotionError::RequestNotActivated)
                 }

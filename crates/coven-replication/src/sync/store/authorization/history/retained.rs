@@ -60,14 +60,68 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let checkpoints = self
             .retained_history_checkpoints(frontier.values().cloned().collect())
             .await?;
-        let prefix = VerifiedMergeMembershipPrefix::from_retained(&checkpoints)?;
+        self.authorize_outbound_at_checkpoints(
+            &frontier,
+            &checkpoints,
+            candidate_membership_heads,
+            author_registration,
+        )
+        .await
+    }
+
+    pub(crate) async fn authorize_retained_preparation(
+        &self,
+        order: &coven_protocol::store_commit::StoreCommitOrder,
+        discovered_heads: &[MembershipHeadRef],
+        author_registration: &StoreDeviceRegistrationRef,
+    ) -> Result<MergeOutboundAuthorization, pull::StorePullError> {
+        let frontier = order.predecessor_cut()?.0;
+        let checkpoints = self
+            .retained_history_checkpoints(frontier.values().cloned().collect())
+            .await?;
+        let mut heads = discovered_heads.to_vec();
+        for checkpoint in &checkpoints {
+            match checkpoint {
+                coven_database::RetainedMergeHistoryCheckpoint::Snapshot(snapshot) => {
+                    for proof in snapshot.summary.membership_proofs.values() {
+                        heads.extend(proof.commit_value.membership_state.heads.iter().cloned());
+                        heads.push(proof.head.clone());
+                    }
+                }
+                coven_database::RetainedMergeHistoryCheckpoint::Commit(input) => {
+                    heads.extend(input.commit().membership_state.heads.iter().cloned());
+                    if let Some(proof) = &input.history_evidence().membership_proof {
+                        heads.push(proof.head.clone());
+                    }
+                }
+            }
+        }
+        let heads = coven_protocol::membership::MembershipFloor::from_heads(heads)
+            .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
+        self.authorize_outbound_at_checkpoints(
+            &frontier,
+            &checkpoints,
+            &heads.0,
+            author_registration,
+        )
+        .await
+    }
+
+    async fn authorize_outbound_at_checkpoints(
+        &self,
+        frontier: &BTreeMap<AuthorStreamId, StoreBatchCommitRef>,
+        checkpoints: &[coven_database::RetainedMergeHistoryCheckpoint],
+        candidate_membership_heads: &[MembershipHeadRef],
+        author_registration: &StoreDeviceRegistrationRef,
+    ) -> Result<MergeOutboundAuthorization, pull::StorePullError> {
+        let prefix = VerifiedMergeMembershipPrefix::from_retained(checkpoints)?;
         let membership = self
             .project_membership_to_verified_prefix(candidate_membership_heads, &prefix)
             .await
             .map_err(pull::StorePullError::MembershipChain)?;
-        merge_conflict::validate_retained_membership_floors(&checkpoints, &membership)?;
+        merge_conflict::validate_retained_membership_floors(checkpoints, &membership)?;
         prefix.validate_complete_membership(&membership)?;
-        let (device_state_ref, device_state) = self.retained_merge_device_state(&frontier).await?;
+        let (device_state_ref, device_state) = self.retained_merge_device_state(frontier).await?;
         if !crate::sync::store::commit_verification::merge_history::registration::device_state_has_active_registration(
             &device_state,
             author_registration,
@@ -108,18 +162,19 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         membership: &coven_protocol::membership::MembershipChain,
         recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
-        state_after: coven_protocol::store_commit::ResolvedStoreDeviceState,
+        predecessor_state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
+        state_after: &coven_protocol::store_commit::ResolvedStoreDeviceState,
         evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
     ) -> Result<
         crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
         crate::sync::store::pull::StorePullError,
     > {
         prepare_merge_history_successor(
-            &self.database,
             &self.history_verifier,
             verified_commit,
             membership,
             recovery_author,
+            predecessor_state,
             state_after,
             evidence,
         )
@@ -133,6 +188,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
         author_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
         author: &coven_protocol::store_commit::StoreDeviceRegistration,
+        publication: &coven_protocol::store_commit::StoreCurrentPublicationRecord,
     ) -> Result<
         coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         crate::sync::store::pull::StorePullError,
@@ -142,6 +198,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let predecessors = self
             .retained_history_checkpoints(frontier.values().cloned().collect())
             .await?;
+        let receipts = predecessors
+            .iter()
+            .filter_map(|checkpoint| match checkpoint {
+                coven_database::RetainedMergeHistoryCheckpoint::Commit(input) => {
+                    input.commit().reclaim_receipt().cloned()
+                }
+                coven_database::RetainedMergeHistoryCheckpoint::Snapshot(_) => None,
+            })
+            .collect::<Vec<_>>();
         let mut summary = compose_merge_snapshot_history_summary(
             root,
             coverage,
@@ -149,8 +214,79 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             state,
             author_ref,
             author,
-            predecessors,
+            &predecessors,
         )?;
+        let mut requests = Vec::new();
+        for checkpoint in &predecessors {
+            let coven_database::RetainedMergeHistoryCheckpoint::Commit(input) = checkpoint else {
+                continue;
+            };
+            if input.commit().owner_promotion_request().is_none() {
+                continue;
+            }
+            let accepted = input.acceptance().exact_publication().ok_or_else(|| {
+                pull::StorePullError::InvalidState(
+                    "request retirement lacks its exact accepted publication".into(),
+                )
+            })?;
+            let predecessor_cut = input.commit().order.predecessor_cut()?;
+            let (_, predecessor_state) =
+                self.retained_merge_device_state(&predecessor_cut.0).await?;
+            requests.push((input.commit(), accepted, predecessor_state));
+        }
+        self.history_verifier
+            .retain_pending_owner_promotions(&mut summary, requests, membership, state)
+            .await?;
+        let mut join_commits = BTreeMap::new();
+        let mut join_publications = BTreeMap::new();
+        for checkpoint in &predecessors {
+            let coven_database::RetainedMergeHistoryCheckpoint::Commit(input) = checkpoint else {
+                continue;
+            };
+            join_commits.insert(
+                input.commit_ref().clone(),
+                coven_database::DeviceJoinBootstrapCommit {
+                    reference: input.commit_ref().clone(),
+                    commit: input.verified_commit().clone(),
+                    registrations: input.registrations().to_vec(),
+                    device_operations: input.device_operations().clone(),
+                    history_evidence: input.history_evidence().clone(),
+                },
+            );
+            if let Some(exact) = input.acceptance().exact_publication() {
+                join_publications.insert(input.commit_ref().clone(), exact.reference().clone());
+            }
+        }
+        self.history_verifier
+            .retain_pending_device_joins(
+                &mut summary,
+                state,
+                join_commits,
+                join_publications,
+                publication,
+            )
+            .await?;
+        if let Some(previous) = publication.latest_snapshot() {
+            let metadata = self
+                .history_verifier
+                .load_snapshot_metadata(&previous.snapshot)
+                .await?;
+            summary
+                .reclaim
+                .include_previous_snapshot(previous, &metadata)
+                .map_err(pull::StorePullError::Protocol)?;
+            summary
+                .reclaim
+                .retire_receipts(&receipts)
+                .map_err(pull::StorePullError::Protocol)?;
+        }
+        self.history_verifier
+            .prune_absent_snapshot_artifacts(&mut summary.reclaim)
+            .await?;
+        // Newly covered entries become deletion obligations without probing
+        // them. Only inherited obligations can be omitted after verified absence.
+        self.history_verifier
+            .retain_snapshot_publication_objects(&mut summary)?;
         // The fold above sees only the acknowledgements made inside this cut. A
         // summary has to state each device's chain from sequence one, because a
         // device restoring from it has no rows to walk — so walk each chain once,
@@ -189,10 +325,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
 /// Seed a history verifier from the history this device already holds.
 ///
-/// Three things in one order that matters. The baseline first, because it is
-/// the floor every later walk stops at. Then the announcement each stream's
-/// snapshot restates, because that is where a chain walk resumes. Then the
-/// retained rows themselves, whose accepted run starts one above the floor.
+/// The baseline is admitted before the retained rows because it is the floor
+/// every later history walk stops at.
 ///
 /// Getting the order wrong is not a slow path, it is a walk to genesis: a
 /// verifier that does not know where its baseline is asks the provider for
@@ -202,23 +336,25 @@ pub(crate) async fn seed_verifier_from_retained_history(
     history: &mut MergeHistoryVerifier<'_>,
 ) -> Result<Vec<coven_database::OwnedVerifiedMergeMaterialization>, pull::StorePullError> {
     let root = history.verified_root().reference().clone();
-    let baseline = database.installed_replay_baseline().await?;
+    let baseline = database
+        .installed_replay_baseline()
+        .await
+        .map_err(|error| {
+            pull::StorePullError::Database(coven_database::DbError::context(
+                "load installed replay baseline",
+                error,
+            ))
+        })?;
     history.admit_installed_baseline(baseline)?;
-    let announcements = database.snapshot_announcement_frontier().await?;
-    history.admit_snapshot_announcements(&announcements)?;
-    // This device's own snapshot stream, from the rows it wrote publishing it.
-    // Only a device whose registration is activated has authored any — a
-    // joining one is reading this before it has a registration at all.
-    if database
-        .latest_local_store_device_registration()
-        .await?
-        .is_some_and(|registration| registration.is_activated())
-    {
-        let mut published = database.local_store_snapshots().await?;
-        published.sort_by_key(|snapshot| snapshot.reference.generation);
-        history.admit_published_snapshots(published)?;
-    }
-    let retained = database.retained_merge_replay_inputs(root).await?;
+    let retained = database
+        .retained_merge_replay_inputs(root)
+        .await
+        .map_err(|error| {
+            pull::StorePullError::Database(coven_database::DbError::context(
+                "load retained Merge replay inputs",
+                error,
+            ))
+        })?;
     history.admit_retained_history(&retained)?;
     history
         .verify_refs(
@@ -271,12 +407,12 @@ pub(crate) async fn retained_merge_device_state(
 }
 
 pub(crate) async fn prepare_merge_history_successor(
-    database: &StoreDatabase,
     history: &MergeHistoryVerifier<'_>,
     verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
     membership: &coven_protocol::membership::MembershipChain,
     recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
-    state_after: coven_protocol::store_commit::ResolvedStoreDeviceState,
+    predecessor_state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
+    state_after: &coven_protocol::store_commit::ResolvedStoreDeviceState,
     evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
 ) -> Result<
     crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
@@ -289,21 +425,22 @@ pub(crate) async fn prepare_merge_history_successor(
         ));
     }
     let commit = verified_commit.value();
-    let commit_ref = verified_commit.reference();
-    let author = verified_commit.author();
     state_after.validate_canonical().map_err(|error| {
         crate::sync::store::pull::StorePullError::context(
             "validate Merge successor post-state",
             error,
         )
     })?;
-    let predecessor_refs = crate::sync::store::pull::commit_predecessor_references(commit);
-    let checkpoints =
-        retained_history_checkpoints(database, history, predecessor_refs.clone()).await?;
-    let (expected_predecessor_ref, predecessor_state) = database
-        .store_device_state_for_order(&commit.order)
-        .await
-        .map_err(crate::sync::store::pull::StorePullError::Database)?;
+    let predecessor_cut = commit
+        .order
+        .predecessor_cut()
+        .map_err(crate::sync::store::pull::StorePullError::Protocol)?;
+    let expected_predecessor_ref =
+        coven_protocol::store_commit::StoreDeviceStateRef::from_resolved(
+            coven_protocol::store_commit::CommitFrontier(predecessor_cut.0),
+            predecessor_state,
+        )
+        .map_err(crate::sync::store::pull::StorePullError::Protocol)?;
     if commit.device_state != expected_predecessor_ref {
         return Err(crate::sync::store::pull::StorePullError::InvalidState(
             "Merge successor names another predecessor device state".to_string(),
@@ -337,7 +474,7 @@ pub(crate) async fn prepare_merge_history_successor(
         }
     }
     if !crate::sync::store::commit_verification::merge_history::registration::device_state_has_active_registration(
-            &predecessor_state,
+            predecessor_state,
             &commit.author_registration,
         ) && recovery_author != Some(&commit.author_registration)
         {
@@ -348,65 +485,14 @@ pub(crate) async fn prepare_merge_history_successor(
     crate::sync::store::commit_verification::merge_history::verify_merge_membership_state_ref(
         &commit.membership_state,
         membership,
-        &predecessor_state,
+        predecessor_state,
     )?;
 
     let retained_evidence = coven_protocol::store_commit::RetainedMergeCommitEvidence {
         acknowledgement: evidence.acknowledgement.map(Box::new),
         membership_proof: evidence.membership_proof.map(Box::new),
     };
-    let predecessor = commit.order.predecessor();
-    let predecessor_announcement = predecessor
-        .map(|predecessor| {
-            checkpoints
-                .iter()
-                .find_map(|checkpoint| match checkpoint {
-                    coven_database::RetainedMergeHistoryCheckpoint::Commit(materialization)
-                        if materialization.commit_ref() == predecessor =>
-                    {
-                        Some(
-                            coven_protocol::store_commit::RetainedAcceptedStoreAnnouncement {
-                                reference: coven_protocol::store_commit::StoreDeviceHeadRef {
-                                    head_hash: materialization.activation_head().head_hash(),
-                                    object: materialization.activation_head_object().clone(),
-                                },
-                                value: materialization.activation_head().clone(),
-                            },
-                        )
-                    }
-                    coven_database::RetainedMergeHistoryCheckpoint::Snapshot(checkpoint) => {
-                        checkpoint
-                            .announcement_frontier
-                            .get(&predecessor.coord.stream_id)
-                            .filter(|announcement| &announcement.value.commit == predecessor)
-                            .cloned()
-                    }
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    pull::StorePullError::InvalidState(
-                        "Merge successor has no retained announcement predecessor".to_string(),
-                    )
-                })
-        })
-        .transpose()?;
-    let head_slot =
-        match &predecessor_announcement {
-            Some(announcement) => announcement.value.successor.next_slot.clone(),
-            None => match &author.store_commits {
-                coven_protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements {
-                    first_slot,
-                } if commit_ref.coord.sequence == 1 => first_slot.clone(),
-                _ => {
-                    return Err(pull::StorePullError::InvalidState(
-                        "first Merge successor has no announcement stream anchor".to_string(),
-                    ));
-                }
-            },
-        };
     Ok(PreparedMergeHistorySuccessor {
         history_evidence: retained_evidence,
-        head_slot,
-        predecessor_head: predecessor_announcement.map(|announcement| announcement.reference),
     })
 }

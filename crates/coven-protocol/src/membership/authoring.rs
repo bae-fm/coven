@@ -135,6 +135,45 @@ impl MembershipChain {
         ))
     }
 
+    /// Sign a change at the complete observed authority frontier. The chain
+    /// reducer checks the change against the signer's active Owner grant.
+    pub fn signed_change_in_stream(
+        &self,
+        signer: &UserKeypair,
+        stream_id: AuthorStreamId,
+        change: StoreAuthorityChange,
+        created_at: String,
+    ) -> Result<MembershipEntry, MembershipError> {
+        self.ensure_resolved()?;
+        let author = keys::public_key_hex(signer);
+        let author_grant = self
+            .active_owner_grant(&author)
+            .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
+        let (seq, previous_hash) = self.next_stream_position(&author, &author_grant, stream_id)?;
+        let entry = Signed::sign(
+            MembershipEntryBody {
+                store_id: self
+                    .store_id()
+                    .expect("validated chain has a Store id")
+                    .to_string(),
+                author_pubkey: author,
+                author_owner_grant: author_grant,
+                stream_id,
+                seq,
+                previous_hash,
+                dependencies: self.effective_frontier(),
+                resolution_dependencies: self.resolution_refs().to_vec(),
+                created_at,
+                change,
+                provider_admin: None,
+            },
+            signer,
+        );
+        let mut candidate = self.clone();
+        candidate.add_entry(entry.clone())?;
+        Ok(entry)
+    }
+
     pub fn signed_set_member_with_anchor_and_wrapped_key_in_stream(
         &self,
         signer: &UserKeypair,
@@ -174,11 +213,6 @@ impl MembershipChain {
         wrapped_key: WrappedStoreKeyRef,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
-        let author = keys::public_key_hex(signer);
-        let author_grant = self
-            .active_owner_grant(&author)
-            .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
-        let (seq, previous_hash) = self.next_stream_position(&author, &author_grant, stream_id)?;
         let replaces = self.active_grant_ids(&user_pubkey);
         let retirement_barriers = self.membership_retirement_barriers(&replaces, None)?;
         if role.is_owner() != membership.is_some() {
@@ -186,38 +220,22 @@ impl MembershipChain {
                 self.entries.len(),
             ));
         }
-        let entry = Signed::sign(
-            MembershipEntryBody {
-                store_id: self
-                    .store_id()
-                    .expect("validated chain has a store id")
-                    .to_string(),
-                author_pubkey: author,
-                author_owner_grant: author_grant,
-                stream_id,
-                seq,
-                previous_hash,
-                dependencies: self.effective_frontier(),
-                resolution_dependencies: self.resolution_refs().to_vec(),
-                created_at,
-                change: MembershipChange::SetMember {
-                    user_pubkey: user_pubkey.clone(),
-                    provider_account_email,
-                    role,
-                    grant_id,
-                    membership,
-                    replaces,
-                    retirement_barriers,
-                    retirement_device_state: None,
-                    wrapped_key,
-                },
-                provider_admin: None,
-            },
+        self.signed_change_in_stream(
             signer,
-        );
-        let mut candidate = self.clone();
-        candidate.add_entry(entry.clone())?;
-        Ok(entry)
+            stream_id,
+            StoreAuthorityChange::SetMember {
+                user_pubkey,
+                provider_account_email,
+                role,
+                grant_id,
+                membership,
+                replaces,
+                retirement_barriers,
+                retirement_device_state: None,
+                wrapped_key,
+            },
+            created_at,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -341,41 +359,20 @@ impl MembershipChain {
         if !retains_owner {
             return Err(MembershipError::NoActiveOwner);
         }
-        let author = keys::public_key_hex(signer);
-        let author_grant = self
-            .active_owner_grant(&author)
-            .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
-        let (seq, previous_hash) = self.next_stream_position(&author, &author_grant, stream_id)?;
         let retirement_barriers =
             self.membership_retirement_barriers(&removes, retirement_device_state.as_ref())?;
-        let entry = Signed::sign(
-            MembershipEntryBody {
-                store_id: self
-                    .store_id()
-                    .expect("validated chain has a store id")
-                    .to_string(),
-                author_pubkey: author,
-                author_owner_grant: author_grant,
-                stream_id,
-                seq,
-                previous_hash,
-                dependencies: self.effective_frontier(),
-                resolution_dependencies: self.resolution_refs().to_vec(),
-                created_at,
-                change: MembershipChange::RemoveMember {
-                    user_pubkey,
-                    removes,
-                    retirement_barriers,
-                    retirement_device_state,
-                    wrapped_keys,
-                },
-                provider_admin: None,
-            },
+        self.signed_change_in_stream(
             signer,
-        );
-        let mut candidate = self.clone();
-        candidate.add_entry(entry.clone())?;
-        Ok(entry)
+            stream_id,
+            StoreAuthorityChange::RemoveMember {
+                user_pubkey,
+                removes,
+                retirement_barriers,
+                retirement_device_state,
+                wrapped_keys,
+            },
+            created_at,
+        )
     }
 
     pub fn signed_resolution_activation_in_stream(
@@ -421,7 +418,7 @@ impl MembershipChain {
                 dependencies: self.effective_frontier(),
                 resolution_dependencies: self.resolution_refs().to_vec(),
                 created_at,
-                change: MembershipChange::ResolutionActivation {
+                change: StoreAuthorityChange::ResolutionActivation {
                     resolution: reference,
                 },
                 provider_admin: None,
@@ -605,15 +602,27 @@ impl MembershipChain {
                 seq,
                 previous_hash,
             },
+            publication_slot: crate::objects::ObjectSlot::logical(format!(
+                "{}.json",
+                crate::store_commit::owner_promotion_request_publication_semantic_prefix(
+                    promotion_id
+                ),
+            ))
+            .expect("test promotion publication slot"),
         });
         let acceptance =
             OwnerPromotionAcceptance::unsigned_for_test(OwnerPromotionAcceptanceBody {
                 request: Box::new(request),
                 activation: OwnerPromotionRequestActivation {
                     commit: activation_commit,
-                    head: crate::store_commit::StoreDeviceHeadRef {
-                        head_hash: ObjectHash::digest(b"test Owner-promotion activation head"),
-                        object: object("activation-head"),
+                    publication: crate::store_commit::StorePublicationRef {
+                        store_root_hash,
+                        position: crate::store_commit::StorePublicationPosition::new(1)
+                            .expect("test publication position"),
+                        entry_hash: ObjectHash::digest(
+                            b"test Owner-promotion activation publication",
+                        ),
+                        object: object("activation-publication"),
                     },
                 },
                 anchors: OwnerPromotionAnchors {

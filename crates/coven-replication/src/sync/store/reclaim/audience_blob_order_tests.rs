@@ -44,10 +44,7 @@ fn scoped_blob_migrations() -> Vec<coven_database::Migration> {
     )]
 }
 
-/// A one-device owner Store over the audience-scoped blob schema. One device is
-/// the whole point: the snapshot every reclaim run needs acknowledged is
-/// acknowledged by this device alone, so the run is deterministic without a
-/// second device's acknowledgement chain in the way.
+/// A one-device owner Store over the audience-scoped blob schema.
 /// The initialized production sync components the owner drives: the cycle is
 /// what carries the row-routing key a scoped write and its blob upload need.
 async fn prepare_owner_sync_components(
@@ -136,21 +133,15 @@ impl AudienceBlobPackageFixture {
         }
     }
 
-    /// The position in the provider's delete log at which `key`'s logical slot
-    /// was first deleted. Opaque exact slots record as
-    /// `<logical_key>#exact#<provider_id>`, so the logical part is compared.
-    fn first_delete_of(&self, key: &str) -> Option<usize> {
-        self.home
-            .deletes_seen()
-            .iter()
-            .position(|deleted| deleted.split("#exact#").next() == Some(key))
-    }
-
     /// Publish everything staged: the host write becomes a commit with its
     /// package, and the blob it binds is uploaded.
     async fn run_cycle(&self) {
         self.components
-            .run_cycle(&coven_foundation::clock::SystemClock, None)
+            .run_cycle(
+                &coven_foundation::clock::SystemClock,
+                None,
+                coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+            )
             .await
             .expect("run the owner sync cycle");
     }
@@ -206,8 +197,7 @@ impl AudienceBlobPackageFixture {
             .expect("move the document out of the Store audience");
     }
 
-    /// The one stored blob this Store published, and the Store package of the
-    /// commit that published it — the package a reclaim of that blob re-reads.
+    /// The exact stored blob and its original publishing package.
     async fn published_blob_and_its_package(
         &self,
     ) -> (
@@ -244,7 +234,7 @@ impl AudienceBlobPackageFixture {
     }
 
     /// Publish a document whose file blob is then stranded, and cover the
-    /// commit that published it with an acknowledged snapshot. The blob and the
+    /// commit that published it with an accepted snapshot. The blob and the
     /// package that bound it are both in reach of the next reclaim run.
     async fn strand_a_published_blob(
         &self,
@@ -252,12 +242,8 @@ impl AudienceBlobPackageFixture {
         coven_protocol::blob::locator::StoredBlobRef,
         coven_protocol::reclaim::StorePackageReclaimTarget,
     ) {
-        // Snapshot the empty store first. A published image is read by devices
-        // that restore from it, so every blob one lists is pinned against
-        // reclaim for good — and the cadence publishes an image on the first
-        // cycle whatever is in it. Spending that first image on an empty store
-        // keeps the blob below out of every image, which is what leaves it
-        // reclaimable once its rows let go of it.
+        // Publish the initial empty image before creating the payload, so the
+        // explicit successor below owns the first snapshot cut containing it.
         self.run_cycle().await;
 
         let document = "00000000-0000-4000-8000-0000000000e6";
@@ -282,16 +268,15 @@ impl AudienceBlobPackageFixture {
             "the package that bound the blob is at the provider"
         );
 
-        // Strand the ciphertext first, then snapshot: the image lists no blob a
-        // live row does not bind, while the coverage takes in the commit whose
-        // package bound it. Both are then reclaim targets of one run.
+        // The successor image records the orphan's exact original ownership,
+        // while its live payload graph excludes the released row.
         self.make_document_local(document, "2026-07-23T00:20:00Z")
             .await;
         self.run_cycle().await;
         self.device
             .publish_snapshot_generation_for_test()
             .await
-            .expect("publish and acknowledge a covering snapshot");
+            .expect("publish an accepted covering snapshot");
         self.db
             .release_retained_replay_ownership_for_test()
             .await
@@ -325,13 +310,10 @@ impl AudienceBlobPackageFixture {
     }
 }
 
-/// A blob reclaim proves its claim by re-reading the package that published the
-/// blob, so that package has to outlive the blob operation. With the blob and
-/// its package both in reach of one run, the blob is deleted first and the
-/// package after it — never the other way round, which would strand the blob
-/// operation at a read that can no longer succeed.
+/// The accepted snapshot carries the blob's binding after the source package
+/// is retired; both released objects can finish in the same reclaim run.
 #[tokio::test]
-async fn a_package_a_pending_blob_reclaim_names_is_deleted_only_after_the_blob() {
+async fn an_accepted_snapshot_reclaims_its_orphan_blob_and_original_package() {
     let fixture = AudienceBlobPackageFixture::build("blob-reclaim-package-order").await;
     let (source, binding) = fixture.strand_a_published_blob().await;
 
@@ -339,7 +321,7 @@ async fn a_package_a_pending_blob_reclaim_names_is_deleted_only_after_the_blob()
         .device
         .reclaim_packages()
         .await
-        .expect("one run reclaims the blob and then its package");
+        .expect("one run reclaims both released objects");
     assert!(
         run.store_packages.targets_considered >= 1,
         "the covering snapshot put the binding package in reach: {:?}",
@@ -356,20 +338,9 @@ async fn a_package_a_pending_blob_reclaim_names_is_deleted_only_after_the_blob()
     );
     assert!(
         !fixture.package_is_present(&binding).await,
-        "the package is deleted once its blob is gone: {:?}",
+        "the released package is deleted: {:?}",
         run.store_packages
     );
-    let blob_deleted = fixture
-        .first_delete_of(source.object().slot().logical_key())
-        .expect("the provider saw the blob's delete");
-    let package_deleted = fixture
-        .first_delete_of(binding.package.object.slot().logical_key())
-        .expect("the provider saw the package's delete");
-    assert!(
-        blob_deleted < package_deleted,
-        "the blob's delete ({blob_deleted}) precedes its package's ({package_deleted})"
-    );
-
     // A further run is idempotent: nothing is re-authorized or re-deleted.
     let again = fixture
         .device
@@ -379,15 +350,10 @@ async fn a_package_a_pending_blob_reclaim_names_is_deleted_only_after_the_blob()
     assert_eq!(again.packages_deleted, 0, "{:?}", again.store_packages);
 }
 
-/// A blob reclaim the provider refuses for good is stuck, not finished: the
-/// package that published the blob stays retained behind it.
-///
-/// Executing the blob operation re-reads that package to prove the binding, so
-/// a package reclaim that deleted it first would strand the blob operation at a
-/// read that can never succeed. Being stuck means waiting on a person, which is
-/// exactly the state in which the package must not go.
+/// A failed Store blob delete stays blocked while its original package retires;
+/// the accepted snapshot preserves the exact evidence needed for retry.
 #[tokio::test]
-async fn a_stuck_blob_reclaim_keeps_its_package_retained() {
+async fn a_stuck_store_blob_reclaim_does_not_retain_its_original_package() {
     let fixture = AudienceBlobPackageFixture::build("blob-reclaim-stuck-retention").await;
     let (source, binding) = fixture.strand_a_published_blob().await;
     fixture
@@ -408,14 +374,9 @@ async fn a_stuck_blob_reclaim_keeps_its_package_retained() {
             .expect("read the exact stored blob"),
         "the refused ciphertext is still at the provider"
     );
-    assert_eq!(
-        run.store_packages.retained_for_blob_reclaim, 1,
-        "the package is held for the stuck blob operation: {:?}",
-        run.store_packages
-    );
     assert!(
-        fixture.package_is_present(&binding).await,
-        "so the package that bound the blob is not deleted"
+        !fixture.package_is_present(&binding).await,
+        "the original package retires while its blob remains blocked"
     );
 
     let again = fixture
@@ -425,8 +386,8 @@ async fn a_stuck_blob_reclaim_keeps_its_package_retained() {
         .expect("a later run finds the operation still stuck");
     assert_eq!((again.packages_deleted, again.stuck), (0, 1));
     assert!(
-        fixture.package_is_present(&binding).await,
-        "and it stays retained for as long as the blob operation waits"
+        !fixture.package_is_present(&binding).await,
+        "blocked reporting remains available after source package retirement"
     );
 }
 
@@ -491,4 +452,125 @@ fn success() -> crate::sync::loop_policy::SyncLoopSuccess {
             local_blob_cleanup_pending: false,
         },
     }
+}
+
+#[tokio::test]
+async fn a_snapshot_preserves_its_blob_after_package_reclaim_until_a_successor_releases_it() {
+    let fixture = AudienceBlobPackageFixture::build("snapshot-blob-retirement").await;
+    fixture.run_cycle().await;
+    let document = "00000000-0000-4000-8000-0000000000e7";
+    fixture
+        .capture_document_with_file(
+            document,
+            "00000000-0000-4000-8000-0000000000f7",
+            b"snapshot payload outlives its package",
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
+    fixture.run_cycle().await;
+    let (blob, package) = fixture.published_blob_and_its_package().await;
+    super::tests::publish_current_snapshot(&fixture.device).await;
+    fixture
+        .device
+        .stand_on_accepted_snapshot()
+        .await
+        .expect("retire covered replay inputs");
+    fixture
+        .device
+        .reclaim_packages()
+        .await
+        .expect("reclaim covered source package");
+    assert!(
+        !fixture.package_is_present(&package).await,
+        "the snapshot replaces its source package"
+    );
+    assert!(fixture
+        .store
+        .contains_stored_blob_object(&blob)
+        .await
+        .expect("read snapshot payload"));
+
+    fixture
+        .make_document_local(document, "2026-07-23T00:20:00Z")
+        .await;
+    fixture
+        .device
+        .publish_pending_store_database()
+        .await
+        .expect("publish the row's Store deletion");
+    fixture
+        .device
+        .reclaim_packages()
+        .await
+        .expect("evaluate a blob whose source package was retired");
+    assert!(
+        fixture
+            .store
+            .contains_stored_blob_object(&blob)
+            .await
+            .expect("read retained snapshot payload"),
+        "the accepted snapshot still needs its blob after the live row leaves Store"
+    );
+
+    super::tests::publish_current_snapshot(&fixture.device).await;
+    fixture
+        .device
+        .stand_on_accepted_snapshot()
+        .await
+        .expect("adopt the snapshot that excludes the blob");
+    let snapshot = coven_database::StoreDatabase::new(&fixture.db)
+        .latest_local_store_snapshot()
+        .await
+        .expect("read accepted orphan snapshot")
+        .expect("accepted snapshot exists");
+    let bytes = fixture
+        .storage
+        .read_protocol_object(
+            &coven_protocol::objects::ProtocolObjectContext::store_encrypted(
+                fixture.store.root().store_root_hash,
+                coven_protocol::objects::ProtocolObjectDomain::StoreSnapshotImage,
+            ),
+            &snapshot.meta.image.object,
+            &coven_protocol::store_commit::snapshot_image_semantic_prefix(
+                snapshot.reference.object.slot(),
+                snapshot.meta.image.image_hash,
+            ),
+        )
+        .await
+        .expect("read accepted exact orphan inventory");
+    assert!(
+        coven_database::SnapshotDatabaseImage::contains_reclaimable_store_blob(
+            &bytes,
+            &snapshot.meta,
+            &blob,
+        )
+        .expect("accepted inventory proves the exact blob")
+    );
+    let mut omitted_owner = snapshot.meta.clone();
+    assert!(omitted_owner
+        .body_mut()
+        .history_summary
+        .causal_cut
+        .remove(&package.activation.coord)
+        .is_some());
+    let error = coven_database::SnapshotDatabaseImage::contains_reclaimable_store_blob(
+        &bytes,
+        &omitted_owner,
+        &blob,
+    )
+    .expect_err("an inventory record cannot invent its original publication");
+    assert!(
+        error
+            .to_string()
+            .contains("exact accepted publication owner"),
+        "{error}"
+    );
+    fixture.device.reclaim_packages().await.expect(
+        "reclaim the superseded snapshot payload without rereading its deleted source package",
+    );
+    assert!(!fixture
+        .store
+        .contains_stored_blob_object(&blob)
+        .await
+        .expect("read released blob"));
 }

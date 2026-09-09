@@ -7,28 +7,24 @@ mod publication;
 pub(crate) use circle::{CircleSnapshotReader, CircleSnapshotWriter};
 pub(crate) use publication::AuthorizedSnapshotPublication;
 
-pub(crate) use image::should_create_snapshot;
-pub use image::{
-    PreparedDeviceJoinSnapshot, PreparedSnapshotBootstrap, SnapshotError, SnapshotSpoolCleanupError,
-};
+pub use image::{PreparedDeviceJoinSnapshot, PreparedSnapshotBootstrap, SnapshotError};
 
-use coven_database::{CreatedSnapshot, SnapshotBlobAudience};
+use coven_database::CreatedSnapshot;
 
-use tracing::{info, warn};
+use tracing::info;
 
 use super::AuthorizedWriterOperation;
 use crate::sync::store::commit_publication::{LocalStoreWriter, SnapshotHistoryConstruction};
 use coven_database::StoreDatabase;
+use coven_foundation::id_provider::IdProvider;
 use coven_foundation::store_dir::StoreDir;
 #[cfg(test)]
 use coven_keys::keys::UserKeypair;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-#[cfg(test)]
-use coven_protocol::store_commit::StoreSnapshotRef;
 use coven_protocol::store_commit::{
-    membership_rollup_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
-    CommitFrontier, MembershipRollupRef, ObjectHash, SnapshotImageRef, SnapshotMeta,
-    SnapshotSuccessorLink, StoreHistoryCut, StoreSnapshotState,
+    membership_rollup_semantic_prefix, snapshot_candidate_semantic_prefix,
+    snapshot_image_semantic_prefix, CommitFrontier, MembershipRollupRef, ObjectHash,
+    SnapshotImageRef, SnapshotMeta, StoreHistoryCut, StoreSnapshotRef, StoreSnapshotState,
 };
 use coven_storage::CloudSyncObjectStorage;
 use std::sync::Arc;
@@ -68,25 +64,7 @@ impl SnapshotCut {
 pub(crate) struct StoreSnapshotCut {
     snapshot: CreatedSnapshot,
     coverage: CommitFrontier,
-}
-
-enum SnapshotBlobDestination {
-    Store,
-    Circle {
-        circle_id: coven_protocol::CircleId,
-        protection: coven_protocol::objects::BlobSpoolProtection,
-    },
-}
-
-impl SnapshotBlobDestination {
-    fn audience(&self) -> coven_protocol::blob::locator::RemoteAudience {
-        match self {
-            Self::Store => coven_protocol::blob::locator::RemoteAudience::Store,
-            Self::Circle { circle_id, .. } => {
-                coven_protocol::blob::locator::RemoteAudience::Circle(*circle_id)
-            }
-        }
-    }
+    authorship: coven_database::OwnStreamAuthorship,
 }
 
 impl StoreSnapshotCut {
@@ -101,7 +79,6 @@ pub(crate) struct AuthorizedSnapshots<'operation, 'storage> {
     database: StoreDatabase,
     storage: Arc<dyn CloudSyncObjectStorage>,
     store_dir: &'storage StoreDir,
-    membership: coven_protocol::membership::MembershipChain,
     local_writer: Arc<LocalStoreWriter>,
 }
 
@@ -112,7 +89,6 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         database: StoreDatabase,
         storage: Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage StoreDir,
-        membership: coven_protocol::membership::MembershipChain,
         local_writer: Arc<LocalStoreWriter>,
     ) -> Self {
         Self {
@@ -120,7 +96,6 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             database,
             storage,
             store_dir,
-            membership,
             local_writer,
         }
     }
@@ -130,7 +105,21 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         created_at: &str,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         rotation_pending: bool,
+        commit_threshold: std::num::NonZeroU64,
     ) -> Result<(), crate::sync::cycle::SyncCycleFailure> {
+        // Durable Circle work already owns its exact ciphertext. Finishing it
+        // neither captures new state nor depends on new snapshot eligibility.
+        self.writer
+            .snapshot_publication()
+            .await
+            .resume_pending_circles()
+            .await
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation(
+                    "publish pending Circle snapshots",
+                    error,
+                )
+            })?;
         let resumed = self
             .writer
             .resume_snapshot_publication()
@@ -146,56 +135,37 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             return Ok(());
         }
 
-        let local_position = self
-            .writer
-            .latest_local_store_position()
-            .await
-            .map_err(|error| {
-                crate::sync::cycle::SyncCycleFailure::operation(
-                    "read local Store snapshot cadence position",
-                    error,
-                )
-            })?;
-        let local_seq = local_position
-            .as_ref()
-            .map_or(0, |reference| reference.coord.sequence());
-        let last_snapshot = self
+        let publication = self
             .database
-            .latest_local_store_snapshot()
+            .store_current_publication()
             .await
             .map_err(|error| {
                 crate::sync::cycle::SyncCycleFailure::operation(
-                    "read latest local Store snapshot",
+                    "read accepted Store snapshot cadence",
                     error,
                 )
             })?;
-        let last_snapshot_position = last_snapshot
-            .as_ref()
-            .map(|snapshot| self.snapshot_position(snapshot));
-        let hours_since = match last_snapshot.as_ref() {
-            None => None,
-            Some(snapshot) => {
-                let current =
-                    chrono::DateTime::parse_from_rfc3339(created_at).map_err(|error| {
-                        crate::sync::cycle::SyncCycleFailure::operation(
-                            "read Store snapshot cadence",
-                            SnapshotError::Timestamp(error),
-                        )
-                    })?;
-                let previous = chrono::DateTime::parse_from_rfc3339(&snapshot.meta.created_at)
-                    .map_err(|error| {
-                        crate::sync::cycle::SyncCycleFailure::operation(
-                            "read Store snapshot cadence",
-                            SnapshotError::Timestamp(error),
-                        )
-                    })?;
-                Some(current.signed_duration_since(previous).num_hours().max(0) as u64)
-            }
-        };
-        let initial_snapshot = local_seq == 0 && last_snapshot.is_none();
-        if !initial_snapshot
-            && !should_create_snapshot(local_seq, last_snapshot_position, hours_since)
-        {
+        let record = publication.record();
+        let current_position = record.accepted().map_or(0, |entry| entry.position.get());
+        let snapshot_position = record
+            .latest_snapshot()
+            .map_or(0, |snapshot| snapshot.publication.position.get());
+        // Every accepted entry after the latest snapshot is a Store commit.
+        // Derive the interval from that shared record instead of maintaining
+        // another counter or inspecting one author's sequence.
+        let accepted_commits =
+            current_position
+                .checked_sub(snapshot_position)
+                .ok_or_else(|| {
+                    crate::sync::cycle::SyncCycleFailure::operation(
+                        "read accepted Store snapshot cadence",
+                        SnapshotError::PublicationState(
+                            "latest snapshot is ahead of the accepted publication".into(),
+                        ),
+                    )
+                })?;
+        let initial_snapshot = record.latest_snapshot().is_none();
+        if !initial_snapshot && accepted_commits < commit_threshold.get() {
             return Ok(());
         }
 
@@ -215,55 +185,46 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             info!("Snapshot policy triggered, creating snapshot");
         }
 
-        let snapshot = self.capture_snapshot_cut(routing_encryption).await;
-        match snapshot {
-            Ok(cut) => {
-                let meta = self
-                    .push_snapshot_cut(cut, created_at.to_string())
-                    .await
-                    .map_err(|error| {
-                        crate::sync::cycle::SyncCycleFailure::operation(
-                            "publish Store snapshot",
-                            error,
-                        )
-                    })?;
-                info!(
-                    local_seq,
-                    snapshot = %meta.snapshot_hash(),
-                    "Snapshot created and pushed"
-                );
-            }
-            Err(error) => warn!("Failed to create snapshot: {error}"),
-        }
-
+        // Circle failures leave this Store snapshot due. Accepting the Store
+        // checkpoint first would reset its cadence before dependent work finishes.
         let schema_version = self.database.schema_version();
-        if let Err(error) = self
-            .writer
+        self.writer
             .circles()
             .snapshots()
             .push_circle_snapshots(schema_version, created_at, routing_encryption)
             .await
-        {
-            warn!("Failed to author Circle snapshots: {error}");
-        }
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation("publish Circle snapshots", error)
+            })?;
+
+        let cut = self
+            .capture_snapshot_cut(routing_encryption)
+            .await
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation("capture Store snapshot", error)
+            })?;
+        let meta = self
+            .push_snapshot_cut(cut, created_at.to_string())
+            .await
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation("publish Store snapshot", error)
+            })?;
+        info!(
+            accepted_commits,
+            threshold = commit_threshold.get(),
+            snapshot = %meta.snapshot_hash(),
+            "Snapshot created and pushed"
+        );
+
         Ok(())
     }
 
-    fn snapshot_position(&self, snapshot: &coven_database::PublishedStoreSnapshot) -> u64 {
-        snapshot
-            .meta
-            .coverage
-            .clone()
-            .into_refs()
-            .remove(&self.writer.announcement_stream_id().to_string())
-            .map(|reference| reference.coord.sequence())
-            .unwrap_or(0)
-    }
-
     pub(crate) async fn capture_snapshot_cut(
-        &self,
+        &mut self,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-    ) -> Result<StoreSnapshotCut, coven_database::DbError> {
+    ) -> Result<StoreSnapshotCut, SnapshotError> {
+        let authorship = self.database.author_own_stream().await;
+        self.writer.prepare_publication_boundary().await?;
         let (snapshot, coverage) = self
             .database
             .capture_store_snapshot_cut(
@@ -272,7 +233,11 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                 routing_encryption.cloned(),
             )
             .await?;
-        Ok(StoreSnapshotCut { snapshot, coverage })
+        Ok(StoreSnapshotCut {
+            snapshot,
+            coverage,
+            authorship,
+        })
     }
 
     pub(crate) async fn push_snapshot_cut(
@@ -280,15 +245,17 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         cut: StoreSnapshotCut,
         created_at: String,
     ) -> Result<SnapshotMeta, SnapshotError> {
-        self.push_store_snapshot(
+        self.push_store_snapshot_with_authorship(
             cut.snapshot,
             cut.coverage,
             self.database.schema_version(),
             created_at,
+            cut.authorship,
         )
         .await
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn push_store_snapshot(
         &mut self,
         snapshot: CreatedSnapshot,
@@ -296,33 +263,141 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         schema_version: u32,
         created_at: String,
     ) -> Result<SnapshotMeta, SnapshotError> {
-        let store_root_hash = self.writer.store_root().store_root_hash;
-        let membership = self.membership.clone();
+        let authorship = self.database.author_own_stream().await;
+        self.push_store_snapshot_with_authorship(
+            snapshot,
+            coverage,
+            schema_version,
+            created_at,
+            authorship,
+        )
+        .await
+    }
+
+    async fn push_store_snapshot_with_authorship(
+        &mut self,
+        snapshot: CreatedSnapshot,
+        coverage: CommitFrontier,
+        schema_version: u32,
+        created_at: String,
+        _authorship: coven_database::OwnStreamAuthorship,
+    ) -> Result<SnapshotMeta, SnapshotError> {
         let database = self.database.clone();
         let storage = Arc::clone(&self.storage);
-        let store_dir = self.store_dir;
-        let membership = &membership;
-        let database = &database;
-        // Held over this whole operation, and taken from this owner's own
-        // handles rather than through the writer, so the writer stays free for
-        // the membership walk the rollup needs.
-        let publication =
-            AuthorizedSnapshotPublication::begin(database, storage.as_ref(), store_dir).await;
-        publication.drain_spool_cleanup().await?;
-        if let Some(pending) = database
-            .outbound_snapshot_publication()
-            .await
-            .map_err(SnapshotError::from)?
-        {
-            return publication.publish_store(pending).await;
+        let publication = AuthorizedSnapshotPublication::begin(&database, storage.as_ref()).await;
+        let pending = match database.outbound_snapshot_publication().await? {
+            Some(pending) => pending,
+            None => {
+                self.prepare_store_snapshot(
+                    coven_database::StoreSnapshotPublicationStage::Initial,
+                    snapshot,
+                    coverage,
+                    schema_version,
+                    created_at,
+                )
+                .await?
+            }
+        };
+        self.publish_pending(&publication, pending).await
+    }
+
+    pub(crate) async fn resume_pending_publication(
+        &mut self,
+    ) -> Result<Option<SnapshotMeta>, SnapshotError> {
+        let _authorship = self.database.author_own_stream().await;
+        let database = self.database.clone();
+        let storage = Arc::clone(&self.storage);
+        let publication = AuthorizedSnapshotPublication::begin(&database, storage.as_ref()).await;
+        let Some(pending) = database.outbound_snapshot_publication().await? else {
+            return Ok(None);
+        };
+        self.publish_pending(&publication, pending).await.map(Some)
+    }
+
+    async fn publish_pending(
+        &mut self,
+        publication: &AuthorizedSnapshotPublication<'_>,
+        mut pending: coven_database::DurableSnapshotPublication,
+    ) -> Result<SnapshotMeta, SnapshotError> {
+        use crate::sync::store::authorization::history::publication::StoreSnapshotPublicationAttemptOutcome;
+        loop {
+            publication.complete_candidate_cleanup().await?;
+            if let Some(active) = self.database.active_store_publication().await? {
+                if active.superseding_snapshot().is_some() {
+                    return Ok(self
+                        .database
+                        .complete_superseded_snapshot_publication(active)
+                        .await?);
+                }
+            }
+            match self
+                .writer
+                .publish_store_snapshot(&pending, publication)
+                .await?
+            {
+                StoreSnapshotPublicationAttemptOutcome::Accepted(accepted) => {
+                    return Ok(self
+                        .database
+                        .complete_snapshot_publication(accepted)
+                        .await?);
+                }
+                StoreSnapshotPublicationAttemptOutcome::Superseded { snapshot, accepted } => {
+                    self.database
+                        .supersede_snapshot_publication(
+                            pending.reference.clone(),
+                            snapshot,
+                            accepted,
+                        )
+                        .await?;
+                }
+                StoreSnapshotPublicationAttemptOutcome::Competing(accepted) => {
+                    let (snapshot, coverage) =
+                        self.writer.capture_current_store_snapshot_cut().await?;
+                    let created_at = pending.meta.value.created_at.clone();
+                    pending = self
+                        .prepare_store_snapshot(
+                            coven_database::StoreSnapshotPublicationStage::Replacing {
+                                previous: pending.reference,
+                                accepted,
+                            },
+                            snapshot,
+                            coverage,
+                            self.database.schema_version(),
+                            created_at,
+                        )
+                        .await?;
+                }
+            }
         }
+    }
+
+    async fn prepare_store_snapshot(
+        &mut self,
+        stage: coven_database::StoreSnapshotPublicationStage,
+        snapshot: CreatedSnapshot,
+        coverage: CommitFrontier,
+        schema_version: u32,
+        created_at: String,
+    ) -> Result<coven_database::DurableSnapshotPublication, SnapshotError> {
+        let store_root_hash = self.writer.store_root().store_root_hash;
+        let membership = self.writer.membership().clone();
+        let membership = &membership;
+        let database = self.database.clone();
+        let storage = Arc::clone(&self.storage);
         let device_id = self.writer.local_device_id().to_string();
         let author = self.local_writer.author_pubkey();
         if !membership.is_owner_now(&author) {
             return Err(SnapshotError::UnauthorizedAuthor(author));
         }
+        let publication_previous = database
+            .store_current_publication()
+            .await
+            .map_err(SnapshotError::from)?
+            .require_observed()
+            .map_err(SnapshotError::from)?
+            .clone();
         let history_cut = StoreHistoryCut(coverage.0.clone());
-        let (devices, resolved_devices) = database
+        let (_, resolved_devices) = database
             .store_device_state_for_history_cut(&history_cut)
             .await
             .map_err(SnapshotError::from)?;
@@ -341,11 +416,16 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         .map_err(SnapshotError::from)?;
         let state = StoreSnapshotState {
             membership: membership_state,
-            devices,
+            devices: resolved_devices.clone(),
         };
         let history_summary = self
             .writer
-            .prepare_merge_snapshot_history_summary(&coverage, membership, &resolved_devices)
+            .prepare_merge_snapshot_history_summary(
+                &coverage,
+                membership,
+                &resolved_devices,
+                publication_previous.record(),
+            )
             .await
             .map_err(SnapshotError::from)?;
         let (rollup_streams, rollup_resolutions) = self
@@ -358,44 +438,31 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             .sign_membership_rollup(store_root_hash, rollup_streams, rollup_resolutions)
             .map_err(SnapshotError::from)?;
         let storage = storage.as_ref();
-        let previous = database
-            .latest_local_store_snapshot()
+        let meta_context = ProtocolObjectContext::signed_plaintext(
+            store_root_hash,
+            ProtocolObjectDomain::StoreSnapshotMeta,
+        );
+        let semantic_prefix = snapshot_candidate_semantic_prefix(&device_id, &database.new_id());
+        let current_slot = storage
+            .allocate_protocol_slot(&meta_context, &semantic_prefix, ".json")
             .await
-            .map_err(SnapshotError::from)?;
-        let (generation, predecessor, current_slot) = match previous {
-            Some(previous) => (
-                previous
-                    .reference
-                    .generation
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        SnapshotError::PublicationState(
-                            "Store snapshot generation overflow".to_string(),
-                        )
-                    })?,
-                Some(previous.reference),
-                previous.successor_slot,
-            ),
-            None => (0, None, self.local_writer.first_snapshot_slot()),
-        };
+            .map_err(SnapshotError::Bucket)?;
 
-        let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner {
-            activation: self
-                .local_writer
-                .snapshot_activation_id()
-                .map_err(SnapshotError::from)?,
-            generation,
+        let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner::Store {
+            metadata_slot: current_slot.clone(),
         };
-        let (db_image, snapshot_blobs) = self
-            .prepare_snapshot_blobs(snapshot, snapshot_owner)
-            .await?;
+        let (db_image, snapshot_blobs) = Self::prepare_snapshot_blobs(
+            snapshot,
+            snapshot_owner,
+            &history_summary.pending_device_join_snapshot_slots(),
+        )?;
         let image_bytes = db_image.read().await.map_err(SnapshotError::from)?;
         let image_hash = ObjectHash::digest(&image_bytes);
         let image_context = ProtocolObjectContext::store_encrypted(
             store_root_hash,
             ProtocolObjectDomain::StoreSnapshotImage,
         );
-        let image_prefix = snapshot_image_semantic_prefix(&device_id, image_hash);
+        let image_prefix = snapshot_image_semantic_prefix(&current_slot, image_hash);
         let image_slot = storage
             .allocate_protocol_slot(&image_context, &image_prefix, ".db")
             .await
@@ -414,7 +481,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         );
         let rollup_bytes = rollup.to_bytes();
         let rollup_hash = ObjectHash::digest(&rollup_bytes);
-        let rollup_prefix = membership_rollup_semantic_prefix(&device_id, rollup_hash);
+        let rollup_prefix = membership_rollup_semantic_prefix(&current_slot, rollup_hash);
         let rollup_slot = storage
             .allocate_protocol_slot(&rollup_context, &rollup_prefix, ".json")
             .await
@@ -432,36 +499,11 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             object: rollup_prepared.reference().clone(),
         };
 
-        let meta_context = ProtocolObjectContext::signed_plaintext(
-            store_root_hash,
-            ProtocolObjectDomain::StoreSnapshotMeta,
-        );
-        let semantic_prefix = snapshot_slot_prefix(&device_id, generation);
-        let next_slot = storage
-            .allocate_protocol_slot(
-                &meta_context,
-                &snapshot_slot_prefix(
-                    &device_id,
-                    generation.checked_add(1).ok_or_else(|| {
-                        SnapshotError::PublicationState(
-                            "Store snapshot generation overflow".to_string(),
-                        )
-                    })?,
-                ),
-                ".json",
-            )
-            .await
-            .map_err(SnapshotError::Bucket)?;
-        let activation = self
-            .local_writer
-            .snapshot_activation_id()
-            .map_err(SnapshotError::from)?;
         let meta = self
             .local_writer
             .sign_snapshot(
                 store_root_hash,
-                generation,
-                predecessor.clone(),
+                publication_previous.record().clone(),
                 image,
                 membership_rollup,
                 coverage,
@@ -469,11 +511,6 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                 history_summary,
                 schema_version,
                 created_at,
-                SnapshotSuccessorLink {
-                    activation,
-                    predecessor,
-                    next_slot,
-                },
             )
             .map_err(SnapshotError::from)?;
         let meta_prepared = storage
@@ -484,10 +521,57 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                 meta.to_bytes(),
             )
             .map_err(SnapshotError::Bucket)?;
+        let snapshot_reference = StoreSnapshotRef {
+            snapshot_hash: meta.snapshot_hash(),
+            object: meta_prepared.reference().clone(),
+        };
+        let publication_entry = self
+            .local_writer
+            .sign_store_snapshot_publication_entry(
+                &publication_previous,
+                snapshot_reference.clone(),
+            )
+            .map_err(SnapshotError::from)?;
+        let publication_prefix =
+            coven_protocol::store_commit::store_publication_entry_semantic_prefix(
+                &publication_entry,
+            );
+        let publication_context = ProtocolObjectContext::signed_plaintext(
+            store_root_hash,
+            ProtocolObjectDomain::StorePublicationEntry,
+        );
+        let publication_slot = storage
+            .allocate_protocol_slot(&publication_context, &publication_prefix, ".json")
+            .await
+            .map_err(SnapshotError::Bucket)?;
+        let prepared_publication = storage
+            .prepare_protocol_object(
+                &publication_context,
+                publication_slot,
+                &publication_prefix,
+                publication_entry.to_bytes(),
+            )
+            .map_err(SnapshotError::Bucket)?;
+        let replacement = self
+            .local_writer
+            .advance_store_snapshot_publication(
+                &publication_previous,
+                &publication_entry,
+                &prepared_publication,
+            )
+            .map_err(SnapshotError::from)?;
         database
             .stage_snapshot_publication(
+                stage,
                 meta.clone(),
                 meta_prepared,
+                coven_protocol::prepared_commit::PreparedStorePublication {
+                    previous: publication_previous.record().clone(),
+                    previous_version: publication_previous.version().clone(),
+                    entry: publication_entry,
+                    entry_object: prepared_publication.reference().clone(),
+                    replacement,
+                },
                 rollup_bytes,
                 rollup_prepared,
                 db_image,
@@ -505,13 +589,13 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                     "staged snapshot publication row is absent".to_string(),
                 )
             })?;
-        publication.publish_store(pending).await
+        Ok(pending)
     }
 
-    async fn prepare_snapshot_blobs(
-        &self,
+    fn prepare_snapshot_blobs(
         snapshot: CreatedSnapshot,
         owner: coven_protocol::remote_object::SnapshotObjectOwner,
+        pending_store_snapshots: &std::collections::BTreeSet<coven_protocol::objects::ObjectSlot>,
     ) -> Result<
         (
             coven_database::SnapshotDatabaseImage,
@@ -519,163 +603,70 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         ),
         SnapshotError,
     > {
-        let database = &self.database;
-        let authority = self.local_writer.blob_write_authority();
-        let (db_image, mut blobs) = snapshot.into_parts();
-        blobs.sort_by_key(|captured| captured.fact.previous.is_none());
-        let mut prepared: Vec<coven_database::PreparedSnapshotBlob> = Vec::new();
-        let mut coalesced = std::collections::BTreeMap::<String, usize>::new();
-        let preparation = async {
+        let (db_image, blobs) = snapshot.into_parts();
+        let preparation = (|| {
+            let mut prepared: Vec<coven_database::PreparedSnapshotBlob> = Vec::new();
+            let mut exact_bindings = std::collections::BTreeMap::<String, usize>::new();
             for captured in blobs {
-                let (destination, package_authority) = match captured.audience {
-                    SnapshotBlobAudience::Store => (
-                        SnapshotBlobDestination::Store,
-                        coven_protocol::audience_package::PackageAudience::Store,
-                    ),
-                    SnapshotBlobAudience::Circle { circle_id, control } => {
-                        let access = database
-                            .circle_publication_context(circle_id, control.coordinate().clone())
-                            .await
-                            .map_err(SnapshotError::from)?;
-                        let key_fingerprint = access.key_fingerprint();
-                        (
-                            SnapshotBlobDestination::Circle {
-                                circle_id,
-                                protection: access.blob_protection(),
-                            },
-                            coven_protocol::audience_package::PackageAudience::Circle {
-                                circle_id,
-                                control: control.coordinate().clone(),
-                                key_fingerprint,
-                            },
-                        )
-                    }
-                };
-                let audience = destination.audience();
-                if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
-                    && captured.fact.previous.is_none()
+                let audience = captured.audience;
+                let previous = captured.fact.previous.ok_or_else(|| {
+                    SnapshotError::PublishBlobs(format!(
+                        "snapshot blob {}/{} has no accepted exact remote binding",
+                        captured.fact.blob.namespace, captured.fact.blob.id
+                    ))
+                })?;
+                if previous.authority.remote_audience() != audience
+                    || !coven_protocol::blob::locator_is_this_rows_upload(
+                        previous.stored.locator(),
+                        &captured.fact.blob,
+                        captured.fact.plaintext_size,
+                        captured.fact.plaintext_hash,
+                        &audience,
+                    )
                 {
                     return Err(SnapshotError::PublishBlobs(format!(
-                        "snapshot UserProvided blob {}/{} has no existing exact remote binding",
+                        "snapshot blob {}/{} differs from its accepted exact remote binding",
                         captured.fact.blob.namespace, captured.fact.blob.id
                     )));
                 }
-                if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
-                    && captured.fact.previous.as_ref().is_none_or(|previous| {
-                        !coven_protocol::blob::locator_is_this_rows_upload(
-                            previous.stored.locator(),
-                            &captured.fact.blob,
-                            captured.fact.plaintext_size,
-                            captured.fact.plaintext_hash,
-                            &audience,
-                        )
-                    })
-                {
-                    return Err(SnapshotError::PublishBlobs(format!(
-                "snapshot UserProvided blob {}/{} does not match its existing exact remote binding",
-                captured.fact.blob.namespace, captured.fact.blob.id
-            )));
-                }
-                let coalesce_key = serde_json::to_string(&(
-                    &package_authority,
-                    &captured.fact.blob.namespace,
-                    &captured.fact.blob.id,
-                    &captured.fact.blob.scope,
-                    &captured.fact.blob.cloud_path,
-                    captured.fact.plaintext_size,
-                    captured.fact.plaintext_hash,
-                ))
-                .map_err(SnapshotError::from)?;
-                if let Some(index) = coalesced.get(&coalesce_key).copied() {
-                    let stored = prepared[index].bindings[0].blob().clone();
-                    let binding = coven_protocol::audience_package::RowBlobLocatorBinding::new(
-                        captured.fact.table,
-                        captured.fact.row_id,
-                        captured.fact.row_stamp,
-                        captured.fact.column,
-                        stored,
-                    )
-                    .map_err(SnapshotError::from)?;
+                // Equal plaintext does not identify an uploaded object. Preserve
+                // the accepted locator, object, and authority together.
+                let key = serde_json::to_string(&previous)?;
+                let binding = coven_protocol::audience_package::RowBlobLocatorBinding::new(
+                    captured.fact.table,
+                    captured.fact.row_id,
+                    captured.fact.row_stamp,
+                    captured.fact.column,
+                    previous.stored.clone(),
+                )?;
+                if let Some(index) = exact_bindings.get(&key).copied() {
                     prepared[index].bindings.push(binding);
                     continue;
                 }
-                let prepared_blob = match destination {
-                    SnapshotBlobDestination::Store => {
-                        self.writer
-                            .prepare_store_partition_blob(&captured.fact, &authority)
-                            .await
-                    }
-                    SnapshotBlobDestination::Circle {
-                        circle_id,
-                        protection,
-                    } => {
-                        self.writer
-                            .prepare_circle_partition_blob(
-                                &captured.fact,
-                                coven_protocol::blob::locator::RemoteAudience::Circle(circle_id),
-                                protection,
-                                &authority,
-                            )
-                            .await
-                    }
-                };
-                let (binding, blob) = prepared_blob.map_err(SnapshotError::from)?;
-                if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
-                    && !blob.uploaded_verified
-                {
-                    return Err(SnapshotError::PublishBlobs(format!(
-                "snapshot UserProvided blob {}/{} does not match its existing exact remote binding",
-                captured.fact.blob.namespace, captured.fact.blob.id
-            )));
-                }
-                let spool_path = blob.spool_path;
-                if !blob.uploaded_verified && spool_path.is_none() {
-                    return Err(SnapshotError::PublicationState(
-                        "prepared snapshot blob awaiting upload has no exact spool".to_string(),
-                    ));
-                }
                 let remote =
                     coven_protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
-                        &blob.stored,
+                        &previous.stored,
                         owner.clone(),
-                    )
-                    .map_err(SnapshotError::from)?
+                    )?
                     .into_record();
                 prepared.push(coven_database::PreparedSnapshotBlob {
                     bindings: vec![binding],
-                    authority: package_authority,
+                    authority: previous.authority,
                     remote,
-                    spool_path,
                 });
-                coalesced.insert(coalesce_key, prepared.len() - 1);
+                exact_bindings.insert(key, prepared.len() - 1);
             }
-            Ok::<(), SnapshotError>(())
-        }
-        .await;
-        if let Err(error) = preparation {
-            return match cleanup_snapshot_spools(self.store_dir, &prepared).await {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(SnapshotError::SpoolCleanupAfterFailure {
-                    cause: Box::new(error),
-                    cleanup,
-                }),
-            };
-        }
-        if prepared.is_empty() {
-            return Ok((db_image, prepared));
-        }
-        let image = match db_image.install_blob_graph(&prepared) {
-            Ok(image) => image,
+            Ok::<_, SnapshotError>(prepared)
+        })();
+        let prepared = match preparation {
+            Ok(prepared) => prepared,
             Err(error) => {
-                return match cleanup_snapshot_spools(self.store_dir, &prepared).await {
-                    Ok(()) => Err(error.into()),
-                    Err(cleanup) => Err(SnapshotError::SpoolCleanupAfterFailure {
-                        cause: Box::new(error.into()),
-                        cleanup,
-                    }),
-                };
+                return db_image
+                    .finish_operation(Err(error))
+                    .map_err(SnapshotError::from);
             }
         };
+        let image = db_image.install_blob_graph(&owner, &prepared, pending_store_snapshots)?;
         Ok((image, prepared))
     }
 
@@ -686,63 +677,9 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         bytes: &[u8],
     ) -> Result<SnapshotMeta, SnapshotError> {
         self.local_writer
-            .parse_snapshot_stream_entry(bytes, self.writer.store_root(), reference)
+            .parse_snapshot(bytes, self.writer.store_root().store_root_hash, reference)
             .map_err(SnapshotError::from)
     }
-}
-
-async fn cleanup_snapshot_spools(
-    store_dir: &StoreDir,
-    prepared: &[coven_database::PreparedSnapshotBlob],
-) -> Result<(), SnapshotSpoolCleanupError> {
-    let mut paths = std::collections::BTreeSet::new();
-    for path in prepared.iter().filter_map(|blob| blob.spool_path.as_ref()) {
-        if paths.insert(path.clone()) {
-            remove_snapshot_spool(store_dir, path, true).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn remove_snapshot_spool(
-    store_dir: &StoreDir,
-    path: &std::path::Path,
-    require_present: bool,
-) -> Result<(), SnapshotSpoolCleanupError> {
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_present => {
-            return Ok(());
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(SnapshotSpoolCleanupError::Missing {
-                path: path.to_path_buf(),
-            });
-        }
-        Err(source) => {
-            return Err(coven_foundation::atomic_file::FileError::at(
-                "remove snapshot spool",
-                path,
-                source,
-            )
-            .into());
-        }
-    }
-    store_dir.sync_parent_dir(path).await.map_err(Into::into)
-}
-
-pub(crate) fn select_maximal_store_snapshot(
-    mut candidates: Vec<coven_database::PublishedStoreSnapshot>,
-) -> Option<coven_database::PublishedStoreSnapshot> {
-    let all = candidates.clone();
-    candidates.retain(|snapshot| {
-        !all.iter().any(|other| {
-            other.reference != snapshot.reference
-                && coverage_dominates(&other.meta.coverage, &snapshot.meta.coverage)
-        })
-    });
-    candidates.sort_by_key(|snapshot| snapshot.reference.snapshot_hash);
-    candidates.pop()
 }
 
 pub(crate) fn coverage_dominates(left: &CommitFrontier, right: &CommitFrontier) -> bool {
@@ -765,3 +702,12 @@ pub(crate) fn coverage_dominates(left: &CommitFrontier, right: &CommitFrontier) 
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod publication_race_tests;
+
+#[cfg(test)]
+mod blob_capture_tests;
+
+#[cfg(test)]
+mod cadence_tests;

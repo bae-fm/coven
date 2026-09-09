@@ -62,6 +62,7 @@ impl MigrationContext<'_> {
 }
 
 /// One ordered step in the host's synced-schema ladder.
+#[derive(Clone)]
 pub struct Migration {
     /// 1-based, contiguous across the registered set. A gap, duplicate, or a set
     /// that does not start at 1 is a startup error, not a silent skip.
@@ -71,23 +72,22 @@ pub struct Migration {
     pub up: MigrationStep,
 }
 
-/// The boxed closure a [`MigrationStep::Run`] holds. `Fn` (not `FnOnce`) because
-/// the engine runs migrations through a `&[Migration]`, and a step runs at most
-/// once anyway. `Send + Sync` keeps `Migration` `Sync`, so `&[Migration]` is
-/// `Send`: the bootstrap paths (`join`/`restore`) hold the slice across an
-/// `.await`, and a host that spawns those futures on a multi-threaded runtime
-/// needs them to stay `Send`.
-type MigrationFn = Box<
+/// The shared closure a [`MigrationStep::Run`] holds. The database retains the
+/// registered ladder to migrate received snapshot images on disposable
+/// connections. Each step runs once per image that has not reached its version.
+/// `Send + Sync` lets preparation retain the same definitions across `.await`.
+type MigrationFn = std::sync::Arc<
     dyn for<'connection> Fn(&MigrationContext<'connection>) -> Result<(), DbError> + Send + Sync,
 >;
 
 /// How a migration applies its change to the synced schema.
+#[derive(Clone)]
 pub enum MigrationStep {
     /// A DDL batch (`CREATE` / `ALTER` / `CREATE INDEX`), e.g. `include_str!` of a
     /// `.sql` file.
     Sql(&'static str),
     /// Table rebuilds and backfills that DDL alone cannot express. Invoked at most
-    /// once (only when its version is above the on-disk one). All pending steps
+    /// once per image (only when its version is above the on-disk one). All pending steps
     /// share the open transaction, so a failed step or routing validation rolls
     /// the full ladder back with `user_version`.
     Run(MigrationFn),
@@ -124,7 +124,7 @@ impl Migration {
         Migration {
             version,
             name,
-            up: MigrationStep::Run(Box::new(f)),
+            up: MigrationStep::Run(std::sync::Arc::new(f)),
         }
     }
 }

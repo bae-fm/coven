@@ -13,18 +13,61 @@ use crate::sync::store::commit_verification::merge_history::{
 use crate::sync::store::pull::StorePullError;
 
 pub(crate) struct OwnerPromotionHistory<'operation, 'storage> {
+    database: coven_database::StoreDatabase,
     history: &'operation mut MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> OwnerPromotionHistory<'operation, 'storage> {
-    pub(crate) fn new(history: &'operation mut MergeHistoryVerifier<'storage>) -> Self {
-        Self { history }
+    pub(crate) async fn candidate_grant_retirement(
+        &mut self,
+        candidate: &coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+    ) -> Result<
+        Option<(
+            MembershipChain,
+            coven_protocol::store_commit::StorePublicationRef,
+        )>,
+        StorePullError,
+    > {
+        let verified = self
+            .history
+            .authenticate_bytes(&candidate.reference, &candidate.commit.to_bytes())
+            .await?;
+        self.history
+            .candidate_grant_retirement(&self.database, &verified)
+            .await
+    }
+
+    pub(crate) async fn load_request_publication(
+        &self,
+        commit: &coven_protocol::store_commit::StoreBatchCommit,
+    ) -> Result<
+        coven_protocol::store_commit::RetainedOwnerPromotionRequestPublication,
+        StorePullError,
+    > {
+        self.history
+            .load_owner_promotion_request_publication(commit)
+            .await
+    }
+
+    pub(crate) fn new(
+        database: coven_database::StoreDatabase,
+        history: &'operation mut MergeHistoryVerifier<'storage>,
+    ) -> Self {
+        Self { database, history }
     }
 
     pub(crate) async fn find_request_activation(
         &mut self,
         request: &OwnerPromotionRequest,
     ) -> Result<VerifiedOwnerPromotionRequestActivation, StorePullError> {
+        let observed = self.database.store_current_publication().await?;
+        let publication = self
+            .history
+            .load_store_publication_interval(&observed)
+            .await?;
+        self.history
+            .verify_refs(publication.commits.into_keys())
+            .await?;
         self.history
             .find_owner_promotion_request_activation(request)
             .await

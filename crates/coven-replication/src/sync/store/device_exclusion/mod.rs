@@ -9,9 +9,7 @@ use coven_protocol::device_exclusion_journal::{
 };
 
 use super::{AuthorizedWriterOperation, StoreError};
-use crate::sync::store::commit_publication::operation::commit_plan::{
-    PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
-};
+use crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch;
 use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use coven_database::DbError;
 use coven_database::StoreDatabase;
@@ -19,9 +17,8 @@ use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
     device_exclusion_outcome_semantic_prefix, device_exclusion_proposal_semantic_prefix,
     ObjectHash, StoreBatchCommitRef, StoreDeviceExclusionOutcome, StoreDeviceExclusionOutcomeRef,
-    StoreDeviceExclusionProof, StoreDeviceExclusionProposal, StoreDeviceExclusionProposalId,
-    StoreDeviceExclusionProposalRef, StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut,
-    StoreProtocolError,
+    StoreDeviceExclusionProposalId, StoreDeviceExclusionProposalRef, StoreDeviceProposalState,
+    StoreDeviceStatus, StoreProtocolError,
 };
 use coven_storage::CloudSyncObjectStorage;
 
@@ -38,10 +35,6 @@ pub enum StoreDeviceExclusionResult {
     OutcomeSlotOccupied {
         intended: StoreDeviceExclusionOutcomeRef,
         winner: StoreDeviceExclusionOutcomeRef,
-    },
-    CandidateNonactivated {
-        object_hash: ObjectHash,
-        candidate: StoreBatchCommitRef,
     },
 }
 
@@ -81,6 +74,8 @@ pub enum StoreDeviceExclusionError {
     Outbound(#[from] StoreError),
     #[error("Store-device exclusion storage: {0}")]
     Storage(#[from] coven_protocol::objects::StorageError),
+    #[error("Store-device exclusion authority: {0}")]
+    Membership(#[from] crate::sync::store::membership::MembershipMutationError),
     #[error("Store-device exclusion journal: {0}")]
     Journal(#[from] StoreDeviceExclusionJournalError),
     #[error("Store-device exclusion state is invalid: {0}")]
@@ -356,11 +351,30 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             &proposal,
             target_registration.value(),
         )?;
-        let candidate = Box::pin(self.writer.prepare_candidate(
-            *plan,
-            StoreOperationBatch::DeviceExclusionProposal(retained),
+        let transition = self
+            .writer
+            .prepare_authority_change(
+                plan.membership(),
+                coven_protocol::membership::StoreAuthorityChange::DeviceExclusionProposal {
+                    proposal: reference.clone(),
+                },
+            )
+            .await?;
+        let mut candidate = Box::pin(self.writer.prepare_candidate(
+            &plan,
+            StoreOperationBatch::DeviceExclusionProposal {
+                proposal: retained,
+                transition: transition.transition.clone(),
+            },
         ))
         .await?;
+        let publication = self
+            .writer
+            .finish_store_membership_transition(transition, candidate.reference.clone())
+            .await?;
+        candidate
+            .attach_merge_membership_proof_with(&publication, None)
+            .map_err(StoreError::from)?;
         let operation = DurableStoreDeviceExclusionOperation::prepared(
             DurableStoreDeviceExclusionObject::Proposal {
                 reference,
@@ -370,6 +384,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             candidate,
         )?;
         let durable = Box::pin(database.begin_outbound_store_device_exclusion(operation)).await?;
+        drop(plan);
         #[cfg(any(test, feature = "test-utils"))]
         database
             .reach_test_point(
@@ -420,15 +435,11 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
                 )?)
             }
             OutcomeIntent::Exclude => {
-                let proof = self
-                    .build_exclusion_proof(proposal_ref, &proposal.object.value)
-                    .await?;
                 StoreDeviceExclusionOutcome::Excluded(plan.sign_device_exclusion(
                     proposal_ref.clone(),
                     &proposal.object.value,
                     proposal_ref.target.clone(),
                     &proposal.target,
-                    proof,
                     owner_grant,
                 )?)
             }
@@ -458,11 +469,30 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             );
         let retained =
             plan.retain_device_exclusion_outcome(&reference, retained_proposal, &outcome)?;
-        let candidate = Box::pin(
-            self.writer
-                .prepare_candidate(plan, StoreOperationBatch::DeviceExclusionOutcome(retained)),
-        )
+        let transition = self
+            .writer
+            .prepare_authority_change(
+                plan.membership(),
+                coven_protocol::membership::StoreAuthorityChange::DeviceExclusionOutcome {
+                    outcome: reference.clone(),
+                },
+            )
+            .await?;
+        let mut candidate = Box::pin(self.writer.prepare_candidate(
+            &plan,
+            StoreOperationBatch::DeviceExclusionOutcome {
+                outcome: retained,
+                transition: transition.transition.clone(),
+            },
+        ))
         .await?;
+        let publication = self
+            .writer
+            .finish_store_membership_transition(transition, candidate.reference.clone())
+            .await?;
+        candidate
+            .attach_merge_membership_proof_with(&publication, None)
+            .map_err(StoreError::from)?;
         let operation = DurableStoreDeviceExclusionOperation::prepared(
             DurableStoreDeviceExclusionObject::Outcome {
                 reference,
@@ -472,6 +502,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             candidate,
         )?;
         let durable = Box::pin(database.begin_outbound_store_device_exclusion(operation)).await?;
+        drop(plan);
         #[cfg(any(test, feature = "test-utils"))]
         database
             .reach_test_point(
@@ -483,111 +514,53 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
 
     async fn drive(
         &mut self,
-        mut operation: Box<DurableStoreDeviceExclusionOperation>,
+        operation: Box<DurableStoreDeviceExclusionOperation>,
     ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        loop {
-            if let Some(result) = self.resume_candidate(&mut operation).await? {
-                return Ok(result);
-            }
-            if let Some(result) = self.ensure_authority_uploaded(operation.as_ref()).await? {
-                return Ok(result);
-            }
-            match self.publish_candidate(&mut operation).await? {
-                DeviceExclusionPublicationProgress::Completed(result) => return Ok(result),
-                DeviceExclusionPublicationProgress::Continue => {}
-                DeviceExclusionPublicationProgress::ReplacementRequired(proof) => {
-                    self.replace_candidate(&mut operation, proof).await?;
-                }
-            }
+        if operation.is_completed() {
+            return completion_result(&operation);
         }
+        if let Some(result) = self.ensure_authority_uploaded(&operation).await? {
+            return Ok(result);
+        }
+        self.publish_candidate(&operation).await
     }
 
     async fn publish_candidate(
         &mut self,
-        operation: &mut Box<DurableStoreDeviceExclusionOperation>,
-    ) -> Result<DeviceExclusionPublicationProgress, StoreDeviceExclusionError> {
-        let database = self.database.clone();
+        operation: &DurableStoreDeviceExclusionOperation,
+    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
         let candidate = operation.candidate().cloned().ok_or_else(|| {
             StoreDeviceExclusionError::InvalidState(
                 "active exclusion operation has no activation candidate".to_string(),
             )
         })?;
-        let publication = Box::new(
-            self.writer
-                .publish_prepared(Box::new(candidate), None, None)
-                .await?,
-        );
-        match publication.as_ref() {
-            StoreOperationPublicationOutcome::Activated(_) => {
-                **operation = Box::pin(
-                    database.complete_outbound_store_device_exclusion_activation(
-                        operation.as_ref().clone(),
-                    ),
-                )
-                .await?;
-                completion_result(operation.as_ref())
-                    .map(DeviceExclusionPublicationProgress::Completed)
-            }
-            StoreOperationPublicationOutcome::RepreparedCandidate(candidate) => {
-                **operation = Box::pin(database.replace_outbound_store_device_exclusion_candidate(
-                    operation.as_ref().clone(),
-                    candidate.as_ref().clone(),
-                ))
-                .await?;
-                Ok(DeviceExclusionPublicationProgress::Continue)
-            }
-            StoreOperationPublicationOutcome::NonactivatedCandidate {
-                candidate,
-                nonactivation,
-            } => {
-                if operation.candidate() != Some(candidate.as_ref()) {
-                    return Err(StoreDeviceExclusionError::InvalidState(
-                        "publication conflict names another exclusion candidate".to_string(),
-                    ));
-                }
-                if matches!(
-                    operation.object(),
-                    DurableStoreDeviceExclusionObject::Outcome { .. }
-                ) {
-                    return Ok(DeviceExclusionPublicationProgress::ReplacementRequired(
-                        nonactivation.as_ref().clone(),
-                    ));
-                } else {
-                    **operation = Box::pin(
-                        database.begin_outbound_store_device_exclusion_nonactivation(
-                            operation.as_ref().clone(),
-                            nonactivation.as_ref().clone(),
-                        ),
-                    )
-                    .await?;
-                }
-                Ok(DeviceExclusionPublicationProgress::Continue)
-            }
-            StoreOperationPublicationOutcome::Reprepared
-            | StoreOperationPublicationOutcome::Nonactivated(_) => {
-                Err(StoreDeviceExclusionError::InvalidState(
-                    "exclusion publication entered acknowledgement-only conflict state".to_string(),
-                ))
-            }
-        }
-    }
-
-    async fn replace_candidate(
-        &mut self,
-        operation: &mut Box<DurableStoreDeviceExclusionOperation>,
-        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
-    ) -> Result<(), StoreDeviceExclusionError> {
-        let database = self.database.clone();
-        let replacement = self
-            .prepare_replacement_candidate(operation.object())
+        let publication = candidate
+            .prepared_membership_publication()
+            .map_err(StoreError::from)?;
+        let transition = publication.transition();
+        self.writer
+            .publish_membership_authority(&transition, &[])
             .await?;
-        **operation = Box::pin(database.begin_outbound_store_device_exclusion_replacement(
-            operation.as_ref().clone(),
-            replacement,
-            nonactivation,
-        ))
-        .await?;
-        Ok(())
+        let completion = coven_protocol::membership_mutation::StoreMembershipJournalCompletion::DeviceExclusion {
+            operation: Box::new(operation.clone()),
+            remote_objects: operation.remote_objects()?.into_iter().map(|object| object.record().clone()).collect(),
+        };
+        self.database
+            .mark_remote_object_uploaded(
+                completion
+                    .remote_object(&publication.entry_ref.object)
+                    .map_err(crate::sync::store::membership::MembershipMutationError::from)?,
+            )
+            .await?;
+        self.writer
+            .publish_membership_activation(
+                &transition,
+                &publication,
+                Box::new(candidate),
+                completion,
+            )
+            .await?;
+        completion_result(&operation.activated()?)
     }
 
     async fn ensure_authority_uploaded(
@@ -609,112 +582,6 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         Box::pin(database.mark_store_device_exclusion_authority_uploaded(operation.clone()))
             .await?;
         Ok(None)
-    }
-
-    async fn resume_candidate(
-        &mut self,
-        operation: &mut Box<DurableStoreDeviceExclusionOperation>,
-    ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
-        let database = self.database.clone();
-        match operation.as_ref() {
-            DurableStoreDeviceExclusionOperation::CandidateNonactivating { .. } => {
-                let targets = Box::pin(
-                    database.nonactivating_store_device_exclusion_cleanup_targets(
-                        operation.as_ref().clone(),
-                    ),
-                )
-                .await?;
-                crate::sync::store::authorization::delete_candidate_cleanup_targets::<
-                    StoreDeviceExclusionError,
-                >(self.storage.as_ref(), &database, targets)
-                .await?;
-                **operation = Box::pin(
-                    database
-                        .complete_nonactivating_store_device_exclusion(operation.as_ref().clone()),
-                )
-                .await?;
-                completion_result(operation.as_ref()).map(Some)
-            }
-            DurableStoreDeviceExclusionOperation::ReplacingCandidate { .. } => {
-                let targets = Box::pin(
-                    database.nonactivating_store_device_exclusion_cleanup_targets(
-                        operation.as_ref().clone(),
-                    ),
-                )
-                .await?;
-                crate::sync::store::authorization::delete_candidate_cleanup_targets::<
-                    StoreDeviceExclusionError,
-                >(self.storage.as_ref(), &database, targets)
-                .await?;
-                **operation = Box::pin(
-                    database.complete_store_device_exclusion_replacement_cleanup(
-                        operation.as_ref().clone(),
-                    ),
-                )
-                .await?;
-                Ok(None)
-            }
-            DurableStoreDeviceExclusionOperation::CandidatePrepared { candidate, .. } => {
-                let reference = candidate.reference.clone();
-                let stream = reference.coord.stream_id.to_string();
-                if database
-                    .exact_materialized_ref(&stream, reference.coord.sequence())
-                    .await?
-                    == Some(reference)
-                {
-                    **operation = Box::pin(
-                        database.complete_outbound_store_device_exclusion_activation(
-                            operation.as_ref().clone(),
-                        ),
-                    )
-                    .await?;
-                    completion_result(operation.as_ref()).map(Some)
-                } else {
-                    Ok(None)
-                }
-            }
-            DurableStoreDeviceExclusionOperation::Completed(_) => {
-                completion_result(operation.as_ref()).map(Some)
-            }
-        }
-    }
-
-    async fn prepare_replacement_candidate(
-        &mut self,
-        object: &DurableStoreDeviceExclusionObject,
-    ) -> Result<PreparedStoreOperationCommit, StoreDeviceExclusionError> {
-        let database = self.database.clone();
-        let DurableStoreDeviceExclusionObject::Outcome {
-            reference, value, ..
-        } = object
-        else {
-            return Err(StoreDeviceExclusionError::InvalidState(
-                "only an exclusion outcome can acquire a replacement candidate".to_string(),
-            ));
-        };
-        let plan = self.writer.prepare_plan().await?;
-        let state = database
-            .resolved_store_device_state(plan.device_state())
-            .await?;
-        require_pending_proposal(&state, reference.proposal())?;
-        let proposal = self
-            .writer
-            .device_exclusion_history()
-            .load_proposal(reference.proposal())
-            .await?;
-        let retained = plan.retain_device_exclusion_outcome(
-            reference,
-            coven_protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_verified(
-                &proposal,
-            ),
-            value,
-        )?;
-        Box::pin(
-            self.writer
-                .prepare_candidate(plan, StoreOperationBatch::DeviceExclusionOutcome(retained)),
-        )
-        .await
-        .map_err(StoreDeviceExclusionError::from)
     }
 
     async fn resolve_object_collision(
@@ -781,82 +648,12 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         .await?;
         Ok(Some(completed))
     }
-
-    async fn build_exclusion_proof(
-        &mut self,
-        proposal_ref: &StoreDeviceExclusionProposalRef,
-        proposal: &StoreDeviceExclusionProposal,
-    ) -> Result<StoreDeviceExclusionProof, StoreDeviceExclusionError> {
-        let database = self.database.clone();
-        let frozen = database
-            .resolved_store_device_state(&proposal.frozen_device_state)
-            .await?;
-        let mut acknowledgements = Vec::new();
-        let mut cutoff: Option<StoreHistoryCut> = None;
-        for record in frozen.devices.values() {
-            if record.registration == proposal.target
-                || !matches!(record.status, StoreDeviceStatus::Active)
-            {
-                continue;
-            }
-            let reference = database
-                .activated_store_ack(&record.registration)
-                .await?
-                .ok_or_else(|| {
-                    StoreDeviceExclusionError::InvalidState(format!(
-                        "registration {} has not acknowledged exclusion proposal {}",
-                        record.registration.device_id, proposal_ref.proposal_id
-                    ))
-                })?
-                .reference;
-            let registration = database
-                .activated_store_device_registration(record.registration.clone())
-                .await?;
-            let acknowledgement = self
-                .writer
-                .device_exclusion_history()
-                .load_acknowledgement(&reference, registration.value())
-                .await?;
-            let proposal_freezes = &acknowledgement.exclusions.proposal_freezes;
-            let freeze = proposal_freezes
-                .iter()
-                .find(|freeze| freeze.proposal == *proposal_ref)
-                .ok_or_else(|| {
-                    StoreDeviceExclusionError::InvalidState(format!(
-                        "registration {} acknowledgement omits exclusion proposal {}",
-                        record.registration.device_id, proposal_ref.proposal_id
-                    ))
-                })?;
-            cutoff = Some(match cutoff {
-                Some(current) => current.join(freeze.target_cut.clone())?,
-                None => freeze.target_cut.clone(),
-            });
-            acknowledgements.push(reference);
-        }
-        acknowledgements.sort();
-        let cutoff = cutoff.ok_or_else(|| {
-            StoreDeviceExclusionError::InvalidState(
-                "Merge exclusion has no remaining active-device acknowledgement".to_string(),
-            )
-        })?;
-        Ok(StoreDeviceExclusionProof {
-            frozen_device_state: proposal.frozen_device_state.clone(),
-            remaining_device_acks: acknowledgements,
-            cutoff,
-        })
-    }
 }
 
 #[derive(Clone, Copy)]
 enum OutcomeIntent {
     Exclude,
     Cancel,
-}
-
-enum DeviceExclusionPublicationProgress {
-    Completed(StoreDeviceExclusionResult),
-    Continue,
-    ReplacementRequired(coven_protocol::remote_object::VerifiedCandidateNonactivation),
 }
 
 fn completion_result(
@@ -902,12 +699,6 @@ fn completion_result(
                 winner: winner.clone(),
             }
         }
-        StoreDeviceExclusionCompletion::CandidateNonactivated {
-            object, candidate, ..
-        } => StoreDeviceExclusionResult::CandidateNonactivated {
-            object_hash: object.operation_id(),
-            candidate: candidate.reference.clone(),
-        },
     })
 }
 
@@ -943,5 +734,11 @@ fn require_pending_proposal(
     Ok(())
 }
 
+#[cfg(test)]
+mod completion_tests;
+#[cfg(test)]
+mod recovery_authority_tests;
+#[cfg(test)]
+mod snapshot_authority_tests;
 #[cfg(test)]
 mod tests;

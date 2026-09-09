@@ -6,7 +6,7 @@
 //! handle and never assembles coven's internals by hand or hands them back to
 //! coven on every call. The handle delegates to retained owners for rows,
 //! blobs, sync, security, membership, joining, recovery, and Circles; the
-//! caller passes only descriptors (a [`BlobRef`], SQL, or a config).
+//! caller passes only descriptors (a [`RowBlobRef`], SQL, or a config).
 //!
 //! The stack runs on Tokio and is `Send + Sync` throughout.
 //!
@@ -45,10 +45,9 @@ use coven_keys::encryption::SealError;
 use coven_keys::keys::{
     DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys,
 };
-use coven_protocol::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
+use coven_protocol::blob::{BlobTransitionObserver, RowBlobRef};
 use coven_protocol::membership::MemberInfo;
 use coven_protocol::membership::MemberRole;
-use coven_protocol::objects::StorageError;
 use coven_replication::blob::transition::{MakeLocalError, MakeRemoteError};
 use coven_replication::blob::DrainOutcome;
 use coven_replication::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache};
@@ -757,8 +756,8 @@ impl CovenHandle {
     /// coven's at-rest encryption is cloud-side; the local database is plaintext
     /// SQLite, so a host with a secret to keep in a row seals it here first.
     ///
-    /// The output records the generation it was sealed under, so it stays
-    /// openable after any number of key rotations. `aad` binds the ciphertext to
+    /// The output records the key fingerprint, so it stays openable after key
+    /// rotation while that key remains in custody. `aad` binds the ciphertext to
     /// its context — the owning row's primary key, say — and
     /// [`open_app_data`](Self::open_app_data) with a different `aad` fails, so a
     /// payload moved to another row does not silently open there.
@@ -771,11 +770,11 @@ impl CovenHandle {
     }
 
     /// Open a payload [`seal_app_data`](Self::seal_app_data) produced, under
-    /// whichever generation it names — a rotated keyring still opens everything
-    /// it sealed before rotating.
+    /// the key fingerprint it names. Rotation preserves access while custody
+    /// retains the named key.
     ///
     /// [`SealError::Locked`] if the store is locked; a wrong `aad`, a tampered
-    /// payload, an unreadable version, or a generation this store's keyring lacks
+    /// payload, an unreadable version, or a fingerprint this store's keyring lacks
     /// each surface their own typed error.
     pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
         self.security.open_app_data(sealed, aad)
@@ -832,23 +831,6 @@ impl CovenHandle {
     /// evictable `storage/cache/` (still readable, now droppable). No cloud read.
     pub async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
         self.blobs.unpin(blobs).await
-    }
-
-    /// The cloud object key a blob's bytes live at, derived under the connected
-    /// home's path scheme (`Hashed` → `{namespace}/{ab}/{cd}/{id}`, `Plain` →
-    /// `{namespace}/{cloud_path}`).
-    ///
-    /// Read-only: coven owns this derivation and every operation that needs a key
-    /// derives its own (a delete resolves it from the stored ref), so nothing a
-    /// host calls takes one back. It exists so a host can *observe* the key coven
-    /// would use — asserting an upload landed where a read looks for it, or
-    /// naming an object in a diagnostic — without reimplementing the layout and
-    /// drifting from it.
-    ///
-    /// A `Plain` home whose `cloud_path` is absent, or does not name the blob it
-    /// carries, is a surfaced error — see `CloudSyncConnection::blob_key`.
-    pub fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
-        self.sync.blob_cloud_key(blob)
     }
 
     /// Whether every blob in `blobs` is pinned for offline — present in coven's

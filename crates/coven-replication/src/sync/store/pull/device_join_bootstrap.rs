@@ -51,6 +51,7 @@ impl PullHistory<'_, '_> {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         timings: &mut StageTimings,
     ) -> Result<ResolvedDeviceJoinBootstrap, StorePullError> {
+        self.prepare_device_join_history(&plan).await?;
         let (plan, unrepresented) = self
             .unrepresented_device_join_bootstrap_commits(plan)
             .await
@@ -77,6 +78,25 @@ impl PullHistory<'_, '_> {
         } else {
             None
         };
+        let snapshot_circles = if local_store_membership.allows_circle_access() {
+            let coverage = self.snapshot_coverage().await?;
+            self.circles()
+                .snapshots()
+                .select_staged_installs(
+                    &coverage,
+                    identity,
+                    routing_key.as_ref(),
+                    local_store_membership,
+                )
+                .await
+                .map_err(|error| StorePullError::SnapshotRestoration(Box::new(error)))?
+        } else {
+            coven_database::StagedCircleRestore {
+                access: Vec::new(),
+                bases: Vec::new(),
+                packages: None,
+            }
+        };
         let receiver_wall_ms = self.receive_wall_ms();
         let schema = self.package_schema().await.map_err(|error| {
             StorePullError::Database(coven_database::DbError::context(
@@ -95,8 +115,10 @@ impl PullHistory<'_, '_> {
             StageTimings::counting("Device join bootstrap row data", self.provider_requests());
         let row_data = Box::pin(self.resolve_bootstrap_row_data(
             &plan,
+            &snapshot_circles,
             unrepresented,
             local_store_membership,
+            identity,
             routing_key.as_ref(),
             &schema,
             timings,
@@ -106,6 +128,7 @@ impl PullHistory<'_, '_> {
         inner.report();
         Ok(ResolvedDeviceJoinBootstrap {
             plan,
+            snapshot_circles,
             row_data: row_data?,
             local_store_membership,
             routing_key,
@@ -117,14 +140,17 @@ impl PullHistory<'_, '_> {
     async fn resolve_bootstrap_row_data(
         &mut self,
         plan: &DeviceJoinBootstrapPlan,
+        snapshot_circles: &coven_database::StagedCircleRestore,
         unrepresented: Vec<StoreBatchCommitRef>,
         local_store_membership: LocalStoreMembership,
+        identity: &UserKeypair,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         schema: &std::sync::Arc<coven_database::TableSchema>,
         timings: &mut StageTimings,
         inner: &mut StageTimings,
     ) -> Result<BTreeMap<StoreBatchCommitRef, DeviceJoinBootstrapRowData>, StorePullError> {
         let mut row_data = BTreeMap::new();
+        let mut verified_prefix = VerifiedStreamActivationPrefix::empty();
         for reference in unrepresented {
             let prepared = plan
                 .commits
@@ -147,13 +173,18 @@ impl PullHistory<'_, '_> {
                     Box::pin(Self::resolve_bootstrap_commit_row_data(
                         self,
                         candidate,
+                        &row_data,
+                        snapshot_circles,
+                        &verified_prefix,
                         local_store_membership,
+                        identity,
                         routing_key,
                         schema,
                         inner,
                     )),
                 )
                 .await?;
+            verified_prefix.include(resolved.circle_activations.stream_activations())?;
             row_data.insert(reference, resolved);
         }
         Ok(row_data)
@@ -162,7 +193,11 @@ impl PullHistory<'_, '_> {
     async fn resolve_bootstrap_commit_row_data(
         &mut self,
         candidate: Candidate,
+        prepared: &BTreeMap<StoreBatchCommitRef, DeviceJoinBootstrapRowData>,
+        snapshot_circles: &coven_database::StagedCircleRestore,
+        verified_prefix: &VerifiedStreamActivationPrefix,
         local_store_membership: LocalStoreMembership,
+        identity: &UserKeypair,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         schema: &std::sync::Arc<coven_database::TableSchema>,
         timings: &mut StageTimings,
@@ -174,11 +209,13 @@ impl PullHistory<'_, '_> {
         // the same verification the pull performs; every other commit resolves
         // its activations from the Circle control objects it names.
         //
-        // The joining device holds no Circle access of its own — its
-        // registration is activated only after this bootstrap — so it reads the
-        // activations without an identity. Circle rows reach it through the
-        // Circle bootstrap image on its first pull, the same way any device that
-        // gains access later receives them.
+        // Circle access belongs to the joining identity. Resolve its own signed
+        // access leaf while staging the bootstrap so access and rows are
+        // installed together before the joining device becomes usable.
+        let mut available_circles = prepared
+            .values()
+            .map(|data| &data.circle_activations)
+            .collect::<Vec<_>>();
         let circle_activations = if commit.control().is_some() {
             timings
                 .stage("verify commits", self.verify_refs([reference.clone()]))
@@ -207,16 +244,18 @@ impl PullHistory<'_, '_> {
                 .await?;
             let membership_prefix =
                 self.verified_membership_prefix(commit_predecessor_references(&commit))?;
-            let verified_prefix = VerifiedStreamActivationPrefix::empty();
             timings
                 .stage(
                     "read Circle activations",
                     self.circles().activations().load_payload(
                         &verified,
-                        None,
+                        local_store_membership
+                            .allows_circle_access()
+                            .then_some(identity),
                         routing_key,
-                        &verified_prefix,
+                        verified_prefix,
                         &membership_prefix,
+                        &available_circles,
                     ),
                 )
                 .await
@@ -261,12 +300,14 @@ impl PullHistory<'_, '_> {
             );
         }
         let author = verified.author().clone();
+        available_circles.push(&circle_activations);
         let circle_packages = timings
             .stage(
                 "read Circle packages",
                 self.circles().packages().load_applicable(
                     &verified,
-                    circle_activations.circles(),
+                    &available_circles,
+                    &snapshot_circles.access,
                     &author,
                     local_store_membership,
                 ),

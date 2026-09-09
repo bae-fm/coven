@@ -22,7 +22,7 @@ fn every_protocol_domain_requires_its_exact_path_grammar() {
         DomainPathCase {
             domain: ProtectedObjectDomain::StoreProtocolRoot,
             valid: &["store-v1/store-protocol-root"],
-            cross_domain: "store-v1/heads/device/1",
+            cross_domain: "store-v1/devices/device",
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::StoreCommit,
@@ -30,14 +30,9 @@ fn every_protocol_domain_requires_its_exact_path_grammar() {
             cross_domain: "store-v1/candidates/family/packages/device/1/hash",
         },
         DomainPathCase {
-            domain: ProtectedObjectDomain::StoreHead,
-            valid: &["store-v1/heads/device/1"],
-            cross_domain: "store-v1/acks/device/1",
-        },
-        DomainPathCase {
             domain: ProtectedObjectDomain::StoreAck,
             valid: &["store-v1/acks/device/1"],
-            cross_domain: "store-v1/heads/device/1",
+            cross_domain: "store-v1/devices/device",
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::StoreDeviceRegistration,

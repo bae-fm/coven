@@ -30,11 +30,24 @@ pub(crate) async fn publish_owner_snapshot(
     root: StoreRootRef,
     snapshot_dir: &std::path::Path,
 ) {
-    let image = database
-        .capture_snapshot_image_for_test(root, snapshot_dir.to_path_buf(), None)
+    owner_device
+        .prepare_pending_store_write()
         .await
-        .expect("capture the Store snapshot image");
-    let coverage = captured_coverage(database).await;
+        .expect("prepare the rows the snapshot represents");
+    owner_device
+        .drain_store_writes()
+        .await
+        .expect("accept the rows before snapshot capture");
+    let (snapshot, coverage) = database
+        .capture_store_snapshot_cut(root, snapshot_dir.to_path_buf(), None)
+        .await
+        .expect("capture the accepted Store snapshot image");
+    let (image, blobs) = snapshot.into_parts();
+    assert!(
+        blobs.is_empty(),
+        "this row-only fixture has no blob uploads"
+    );
+    let image = image.read_and_discard().expect("read the accepted image");
     owner_device
         .publish_snapshot(image, coverage.clone())
         .await

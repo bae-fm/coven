@@ -28,6 +28,8 @@ use coven_storage::CloudSyncObjectStorage;
 
 mod authorized_join;
 mod error;
+#[cfg(test)]
+mod finalization_tests;
 pub(super) mod history;
 mod joiner;
 mod journal;

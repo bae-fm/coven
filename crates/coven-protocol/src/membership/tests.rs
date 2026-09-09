@@ -77,14 +77,8 @@ fn registration(
                 access_key_id_hash: ObjectHash::digest(label.as_bytes()),
             },
         },
-        DeviceStreamAnchor::StoreAnnouncements {
-            first_slot: slot(format!("test/{label}/announcements/1.json")),
-        },
         DeviceStreamAnchor::StoreAcknowledgements {
             first_slot: slot(format!("test/{label}/acks/1.json")),
-        },
-        DeviceStreamAnchor::StoreSnapshots {
-            first_slot: slot(format!("test/{label}/snapshots/1.json")),
         },
         signer,
     )
@@ -369,7 +363,7 @@ fn merge_active_grant_lookup_returns_only_the_exact_live_record() {
             "add member".to_string(),
         )
         .unwrap();
-    let MembershipChange::SetMember { grant_id, .. } = &addition.change else {
+    let StoreAuthorityChange::SetMember { grant_id, .. } = &addition.change else {
         unreachable!()
     };
     let grant_id = grant_id.clone();
@@ -445,7 +439,7 @@ fn merge_active_grant_lookup_returns_only_the_exact_live_record() {
             "reuse retired grant".to_string(),
         )
         .unwrap();
-    let MembershipChange::SetMember {
+    let StoreAuthorityChange::SetMember {
         grant_id: candidate,
         ..
     } = &mut reuse.body_mut().change
@@ -472,7 +466,7 @@ fn grant_mapping_returns_an_error_when_signed_retirement_evidence_is_absent() {
         "founder",
         membership_anchor("missing-retirement-evidence"),
     );
-    let MembershipChange::Founder { owner_grant_id, .. } = &founder.change else {
+    let StoreAuthorityChange::Founder { owner_grant_id, .. } = &founder.change else {
         panic!("test entry is the founder")
     };
     let owner_grant_id = owner_grant_id.clone();
@@ -532,7 +526,7 @@ fn concurrent_effective_removals_union_exact_retirement_entries() {
         )
         .unwrap();
     let member_grant = match &add_member.change {
-        MembershipChange::SetMember { grant_id, .. } => grant_id.clone(),
+        StoreAuthorityChange::SetMember { grant_id, .. } => grant_id.clone(),
         _ => unreachable!(),
     };
     base.add_entry(add_member).unwrap();
@@ -1808,7 +1802,7 @@ fn owner_barrier_must_be_strictly_ordered_by_author_stream() {
             "remove owner".to_string(),
         )
         .unwrap();
-    let MembershipChange::RemoveMember {
+    let StoreAuthorityChange::RemoveMember {
         retirement_barriers,
         ..
     } = &mut removal.body_mut().change
@@ -1919,7 +1913,7 @@ fn owner_self_removal_remains_effective_when_its_grant_is_capped_before_first() 
         .unwrap();
     assert!(matches!(
         &self_removal.change,
-        MembershipChange::RemoveMember { retirement_barriers, .. }
+        StoreAuthorityChange::RemoveMember { retirement_barriers, .. }
             if retirement_barriers.values().all(|barrier| barrier.author_streams().observed_streams.is_empty())
     ));
     chain.add_entry(self_removal).unwrap();
@@ -1962,7 +1956,7 @@ fn before_first_barrier_excludes_every_entry_from_the_revoked_owner_stream() {
         .unwrap();
     assert!(matches!(
         &removal.change,
-        MembershipChange::RemoveMember { retirement_barriers, .. }
+        StoreAuthorityChange::RemoveMember { retirement_barriers, .. }
             if retirement_barriers.values().all(|barrier| barrier.author_streams().observed_streams.is_empty())
     ));
 
@@ -2018,7 +2012,7 @@ fn through_barrier_keeps_its_exact_prefix_and_prunes_the_stale_suffix() {
         .unwrap();
     assert!(matches!(
         &removal.change,
-        MembershipChange::RemoveMember { retirement_barriers, .. }
+        StoreAuthorityChange::RemoveMember { retirement_barriers, .. }
             if retirement_barriers.values().any(|barrier| barrier.author_streams().observed_streams == vec![first.coord()])
     ));
 
@@ -2091,7 +2085,7 @@ fn through_barrier_rejects_a_coordinate_hash_that_is_not_its_dependency() {
             "remove owner".to_string(),
         )
         .unwrap();
-    let MembershipChange::RemoveMember {
+    let StoreAuthorityChange::RemoveMember {
         retirement_barriers,
         ..
     } = &mut removal.body_mut().change

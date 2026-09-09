@@ -10,20 +10,6 @@ use coven_protocol::objects::StorageError;
 use coven_protocol::synced_schema::SyncedTable;
 use coven_storage::CloudSyncObjectStorage;
 
-#[derive(Debug, thiserror::Error)]
-pub enum SnapshotSpoolCleanupError {
-    #[error("snapshot spool is absent: {}", path.display())]
-    Missing { path: PathBuf },
-    #[error("snapshot spool file: {0}")]
-    File(#[from] coven_foundation::atomic_file::FileError),
-}
-
-/// Default: create a snapshot after this many changesets since the last one.
-const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;
-
-/// Default: create a snapshot after this many hours since the last one.
-const SNAPSHOT_HOURS_THRESHOLD: u64 = 24;
-
 /// Error type for snapshot operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
@@ -96,15 +82,8 @@ pub enum SnapshotError {
     AnchoredChain(#[source] Box<crate::sync::store::AnchoredChainError>),
     #[error("snapshot acknowledgement: {0}")]
     Acknowledgement(#[source] Box<crate::sync::store::StoreAckError>),
-    #[error("snapshot spool cleanup: {0}")]
-    SpoolCleanup(#[from] SnapshotSpoolCleanupError),
     #[error("snapshot download was cancelled")]
     Cancelled,
-    #[error("snapshot operation failed: {cause}; spool cleanup also failed: {cleanup}")]
-    SpoolCleanupAfterFailure {
-        cause: Box<SnapshotError>,
-        cleanup: SnapshotSpoolCleanupError,
-    },
     #[error(
         "could not remove staged snapshot database {path}: {cleanup}",
         path = .path.display()
@@ -198,10 +177,10 @@ async fn download_snapshot_image(
         root.store_root_hash,
         coven_protocol::objects::ProtocolObjectDomain::StoreSnapshotImage,
     );
-    let semantic_prefix = coven_protocol::store_commit::snapshot_image_semantic_prefix(
-        &snapshot.meta.author_registration.device_id.to_string(),
-        snapshot.meta.image.image_hash,
-    );
+    let semantic_prefix = coven_protocol::store_commit::semantic_prefix_from_exact_object(
+        &snapshot.meta.image.object,
+        ".db",
+    )?;
     let mut progress = crate::blob::progress::TransferProgress::new();
     let download = storage.read_protocol_object_with_progress(
         &context,
@@ -268,6 +247,7 @@ impl PreparedDeviceJoinSnapshot {
     pub async fn prepare(
         storage: &std::sync::Arc<dyn CloudSyncObjectStorage>,
         installation: coven_protocol::store_commit::device_join_exchange::SamePrincipalStoreInstallation,
+        accepted_membership: &crate::sync::store::AcceptedMembershipAuthority,
         binary_schema_version: u32,
         target_path: &Path,
         on_progress: &crate::sync::JoiningDeviceJoinProgressObserver,
@@ -280,9 +260,9 @@ impl PreparedDeviceJoinSnapshot {
         timings.mark("verify the snapshot authority", || {
             installation.authority.validate()
         })?;
-        if installation.metadata.schema_version > binary_schema_version {
+        if installation.authority.metadata.schema_version > binary_schema_version {
             return Err(SnapshotError::SchemaTooNew {
-                snapshot_version: installation.metadata.schema_version,
+                snapshot_version: installation.authority.metadata.schema_version,
                 supported: binary_schema_version,
             });
         }
@@ -304,6 +284,18 @@ impl PreparedDeviceJoinSnapshot {
             semantic_hash: root_ref.store_root_hash,
             object: root_ref.object.clone(),
         };
+        if installation
+            .bootstrap
+            .publication
+            .current
+            .latest_snapshot()
+            .map(|accepted| &accepted.snapshot)
+            != Some(&installation.authority.snapshot)
+        {
+            return Err(SnapshotError::BootstrapState(
+                "device join prefix selects another snapshot".into(),
+            ));
+        }
         let founder_reference = installation.bootstrap.founder.reference().clone();
         let carried_founder = installation.bootstrap.founder.value().clone();
         let founder_bytes = carried_founder.to_bytes();
@@ -333,12 +325,20 @@ impl PreparedDeviceJoinSnapshot {
         // whole life — the rest arrives inside the image, under the owner's
         // signature over the snapshot metadata validated above.
         let bootstrap = timings.mark("verify the carried history", || {
-            coven_database::DeviceJoinBootstrapPlan::from_closure(&root_ref, installation.bootstrap)
+            coven_database::DeviceJoinBootstrapPlan::from_closure(
+                &root_ref,
+                installation
+                    .authority
+                    .metadata
+                    .publication_predecessor
+                    .clone(),
+                installation.bootstrap,
+            )
         })?;
+        accepted_membership.verify_join_bootstrap(&root_ref, &bootstrap)?;
         let snapshot = coven_database::PublishedStoreSnapshot {
-            reference: installation.snapshot,
-            successor_slot: installation.metadata.successor.next_slot.clone(),
-            meta: installation.metadata,
+            reference: installation.authority.snapshot.clone(),
+            meta: installation.authority.metadata.clone(),
         };
         let authority =
             coven_database::VerifiedStoreSnapshotAuthority::from_authority(installation.authority)?;
@@ -411,7 +411,11 @@ impl PreparedDeviceJoinSnapshot {
                 membership,
                 Some(routing_encryption),
             )?
-            .with_circle_installs(Vec::new());
+            .with_circle_installs(coven_database::StagedCircleRestore {
+                access: Vec::new(),
+                bases: Vec::new(),
+                packages: None,
+            });
             let db = Database::open_initialized_store(
                 &bound_path,
                 &install,
@@ -449,8 +453,12 @@ impl PreparedDeviceJoinSnapshot {
 ///
 /// The authority is consumed by installation and cannot be duplicated:
 ///
+/// ```
+/// fn accepts_prepared(_: &coven_replication::sync::store::PreparedSnapshotBootstrap<'_>) {}
+/// ```
+///
 /// ```compile_fail
-/// fn duplicate(result: crate::sync::store::snapshot::PreparedSnapshotBootstrap) {
+/// fn duplicate(result: coven_replication::sync::store::PreparedSnapshotBootstrap<'_>) {
 ///     let _copy = result.clone();
 /// }
 /// ```
@@ -511,7 +519,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
     /// Authenticate and stage one snapshot image as installation authority.
     pub async fn prepare(
         storage: &'storage std::sync::Arc<dyn CloudSyncObjectStorage>,
-        mut history_verifier: crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
+        history_verifier: crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
             'storage,
         >,
         membership_floor: &coven_protocol::membership::MembershipFloor,
@@ -521,14 +529,96 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         on_progress: crate::sync::JoiningDeviceJoinProgressObserver,
         cancel: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<Self, SnapshotError> {
+        Box::pin(Self::prepare_for_attempt(
+            storage,
+            history_verifier,
+            membership_floor,
+            binary_schema_version,
+            target_path,
+            restorer_identity,
+            on_progress,
+            cancel,
+            None,
+        ))
+        .await
+    }
+
+    pub async fn prepare_device_join(
+        storage: &'storage std::sync::Arc<dyn CloudSyncObjectStorage>,
+        history_verifier: crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
+            'storage,
+        >,
+        membership_floor: &coven_protocol::membership::MembershipFloor,
+        binary_schema_version: u32,
+        target_path: &Path,
+        restorer_identity: &coven_keys::keys::UserKeypair,
+        on_progress: crate::sync::JoiningDeviceJoinProgressObserver,
+        cancel: &tokio::sync::watch::Receiver<bool>,
+        attempt: &coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<Self, SnapshotError> {
+        Box::pin(Self::prepare_for_attempt(
+            storage,
+            history_verifier,
+            membership_floor,
+            binary_schema_version,
+            target_path,
+            restorer_identity,
+            on_progress,
+            cancel,
+            Some(attempt),
+        ))
+        .await
+    }
+
+    async fn prepare_for_attempt(
+        storage: &'storage std::sync::Arc<dyn CloudSyncObjectStorage>,
+        mut history_verifier: crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
+            'storage,
+        >,
+        membership_floor: &coven_protocol::membership::MembershipFloor,
+        binary_schema_version: u32,
+        target_path: &Path,
+        restorer_identity: &coven_keys::keys::UserKeypair,
+        on_progress: crate::sync::JoiningDeviceJoinProgressObserver,
+        cancel: &tokio::sync::watch::Receiver<bool>,
+        attempt: Option<&coven_protocol::store_commit::StoreBatchCommitRef>,
+    ) -> Result<Self, SnapshotError> {
         let root = history_verifier.verified_root();
         if root.protocol().descriptor.store_root_id() != root.reference().store_root_id {
             return Err(SnapshotError::UnauthorizedAuthor(
                 "Store root differs from bootstrap authority".to_string(),
             ));
         }
+        let snapshot = history_verifier
+            .load_current_accepted_snapshot()
+            .await
+            .map_err(SnapshotError::from)?;
+        let selected = if let Some(attempt) =
+            attempt.filter(|attempt| snapshot.meta.coverage.covers_commit(attempt))
+        {
+            let closure = history_verifier
+                .retained_device_join_bootstrap(attempt)
+                .ok_or_else(|| {
+                    SnapshotError::BootstrapState(
+                        "covered Attempt has no retained bootstrap consumer".into(),
+                    )
+                })?;
+            let base = closure
+                .publication
+                .current
+                .latest_snapshot()
+                .ok_or_else(|| {
+                    SnapshotError::BootstrapState("retained Attempt has no snapshot image".into())
+                })?;
+            Some(history_verifier.verify_retained_join_snapshot(base).await?)
+        } else {
+            None
+        };
+        let (snapshot, retained_authority) = match selected {
+            Some(selected) => (selected.snapshot, Some(selected.verified)),
+            None => (snapshot, None),
+        };
         let heads = &membership_floor.0;
-        let mut registrations = std::collections::BTreeMap::new();
         let mut resolutions = std::collections::BTreeSet::new();
         for reference in heads {
             let head = history_verifier
@@ -536,38 +626,12 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 .await
                 .map_err(SnapshotError::from)?;
             resolutions.extend(head.body.resolutions.iter().cloned());
-            let registration = history_verifier
-                .load_registration(&head.body.author_registration)
-                .await
-                .map_err(SnapshotError::from)?
-                .value;
-            registrations.insert(head.body.author_registration.clone(), registration);
         }
         let resolutions = resolutions.into_iter().collect::<Vec<_>>();
         let membership = history_verifier
             .load_membership_at_exact_heads(heads, &resolutions)
             .await
             .map_err(SnapshotError::from)?;
-        let registrations = registrations
-            .into_iter()
-            .filter(|(_, registration)| membership.is_owner_now(&registration.author_pubkey))
-            .collect::<Vec<_>>();
-        let selected = Box::pin(
-            history_verifier.select_listed_installable_store_snapshot(
-                registrations
-                    .iter()
-                    .map(|(registration_ref, registration)| (registration_ref, registration)),
-                &mut crate::sync::store::commit_verification::merge_history::weigh_every_snapshot,
-            ),
-        )
-        .await
-        .map_err(SnapshotError::from)?
-        .ok_or_else(|| {
-            SnapshotError::Bucket(coven_protocol::objects::StorageError::NotFound(
-                "Store snapshot stream".to_string(),
-            ))
-        })?;
-        let snapshot = selected.snapshot;
         if snapshot.meta.schema_version > binary_schema_version {
             return Err(SnapshotError::SchemaTooNew {
                 snapshot_version: snapshot.meta.schema_version,
@@ -586,7 +650,14 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             .load_founder_registration()
             .await
             .map_err(SnapshotError::from)?;
-        let authority = selected.verified;
+        let authority = match retained_authority {
+            Some(authority) => authority,
+            None => {
+                history_verifier
+                    .verify_installable_snapshot(&snapshot)
+                    .await?
+            }
+        };
         let coverage = snapshot.meta.coverage.clone();
         let database_image =
             SnapshotDatabaseImage::create(target_path.to_path_buf(), &plaintext)?.canonicalize()?;
@@ -673,55 +744,66 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 routing_encryption,
             )?;
 
-            let circle_installs = match routing_encryption {
-                // Circles exist only in a scoped (Circle-routing) Store; without
-                // routing encryption there are no Circle images to stage.
-                Some(encryption) => {
-                    let routing_key = coven_protocol::circle::derive_row_routing_key(
-                        encryption,
-                        root_ref.store_root_hash,
+            let local_membership =
+                coven_protocol::membership::LocalStoreMembership::from_membership(
+                    &membership,
+                    Some(&restorer_identity),
+                )
+                .map_err(crate::sync::store::pull::StorePullError::MembershipProtocol)?;
+            let circle_installs = if local_membership.allows_circle_access() {
+                let routing_key = routing_encryption
+                    .map(|encryption| {
+                        coven_protocol::circle::derive_row_routing_key(
+                            encryption,
+                            root_ref.store_root_hash,
+                        )
+                    })
+                    .transpose()?;
+                let query_path = bound_path.with_extension("restore-select.db");
+                let query_image = SnapshotDatabaseImage::prepare(query_path)?;
+                if let Err(error) = std::fs::copy(&bound_path, query_image.path()) {
+                    return query_image
+                        .finish_operation(Err(SnapshotError::Io(error)))
+                        .map_err(SnapshotError::from);
+                }
+                let query_path = query_image.path().to_path_buf();
+                let staged = async {
+                    let query_db = Database::open_initialized_store(
+                        &query_path,
+                        &install,
+                        synced_tables.clone(),
+                        blob_tombstone_grace,
+                        transfer_limits,
+                        device_id.clone(),
+                        clock.clone(),
+                        coven_migration_policy,
+                        migrations,
                     )
                     .map_err(SnapshotError::from)?;
-                    let query_path = bound_path.with_extension("restore-select.db");
-                    let query_image = SnapshotDatabaseImage::prepare(query_path)?;
-                    if let Err(error) = std::fs::copy(&bound_path, query_image.path()) {
-                        return query_image
-                            .finish_operation(Err(SnapshotError::Io(error)))
-                            .map_err(SnapshotError::from);
-                    }
-                    let query_path = query_image.path().to_path_buf();
-                    let staged = async {
-                        let query_db = Database::open_initialized_store(
-                            &query_path,
-                            &install,
-                            synced_tables.clone(),
-                            blob_tombstone_grace,
-                            transfer_limits,
-                            device_id.clone(),
-                            clock.clone(),
-                            coven_migration_policy,
-                            migrations,
-                        )
-                        .map_err(SnapshotError::from)?;
-                        let store_database = coven_database::StoreDatabase::from_database(query_db);
-                        crate::sync::store::snapshots::CircleSnapshotReader::new(
-                            &store_database,
-                            storage.as_ref(),
-                            &mut history_verifier,
-                        )
-                        .select_staged_installs(
-                            &store_frontier,
-                            &restorer_identity,
-                            Some(&routing_key),
-                        )
-                        .await
-                    }
-                    .await;
-                    query_image
-                        .finish_operation(staged)
-                        .map_err(SnapshotError::from)?
+                    let store_database = coven_database::StoreDatabase::from_database(query_db);
+                    crate::sync::store::snapshots::CircleSnapshotReader::new(
+                        &store_database,
+                        storage.as_ref(),
+                        &mut history_verifier,
+                    )
+                    .select_staged_installs(
+                        &store_frontier,
+                        &restorer_identity,
+                        routing_key.as_ref(),
+                        local_membership,
+                    )
+                    .await
                 }
-                None => Vec::new(),
+                .await;
+                query_image
+                    .finish_operation(staged)
+                    .map_err(SnapshotError::from)?
+            } else {
+                coven_database::StagedCircleRestore {
+                    access: Vec::new(),
+                    bases: Vec::new(),
+                    packages: None,
+                }
             };
             let install = install.with_circle_installs(circle_installs);
             #[cfg(any(test, feature = "test-utils"))]
@@ -758,6 +840,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 crate::sync::store::authorization::history::AuthorizedStoreHistory::from_snapshot(
                     super::SnapshotHistoryConstruction,
                     database,
+                    routing_encryption.cloned(),
                     storage,
                     store_dir,
                     blob_cache,
@@ -808,37 +891,6 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
     pub(crate) fn staged_database_bytes_for_test(&self) -> Result<Vec<u8>, SnapshotError> {
         Ok(std::fs::read(self.database_image.path())?)
     }
-}
-
-/// Check whether it's time to create a new snapshot.
-///
-/// Returns true if:
-/// - `changesets_since_snapshot` >= the changeset threshold (100), OR
-/// - `hours_since_snapshot` >= the time threshold (24h), OR
-/// - No snapshot has ever been created (`last_snapshot_seq` is None)
-///   AND at least one changeset has been pushed.
-pub(crate) fn should_create_snapshot(
-    local_seq: u64,
-    last_snapshot_seq: Option<u64>,
-    hours_since_snapshot: Option<u64>,
-) -> bool {
-    // Never created a snapshot, and we have at least one changeset.
-    let Some(snap_seq) = last_snapshot_seq else {
-        return local_seq > 0;
-    };
-
-    let changesets_since = local_seq.saturating_sub(snap_seq);
-    if changesets_since >= SNAPSHOT_CHANGESET_THRESHOLD {
-        return true;
-    }
-
-    if let Some(hours) = hours_since_snapshot {
-        if hours >= SNAPSHOT_HOURS_THRESHOLD && changesets_since > 0 {
-            return true;
-        }
-    }
-
-    false
 }
 
 #[cfg(test)]

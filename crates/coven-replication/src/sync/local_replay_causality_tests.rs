@@ -692,7 +692,7 @@ async fn local_delete_cannot_remove_a_concurrently_shared_row() {
 }
 
 #[tokio::test]
-async fn a_new_commit_is_not_installed_when_prior_accepted_history_becomes_held() {
+async fn a_pending_parent_delete_cannot_replace_an_accepted_child() {
     let author_dir = test_store_dir();
     let author_db = open_test_db(author_dir.clone());
     let signer = user_keypair_from_seed([41; 32]);
@@ -737,63 +737,11 @@ async fn a_new_commit_is_not_installed_when_prior_accepted_history_becomes_held(
         .expect("activate peer");
     author.pull_store().await.expect("pull activation");
 
-    store_database(&author_db)
-        .run_host_store_write_for_test(None, None, |tx| {
-            tx.execute_batch(
-                "INSERT INTO notes VALUES \
-                 ('author-probe-atomic', 'Author', NULL, 1, \
-                  '0000000002000-0000-author', '2026-01-01');",
-            )?;
-            Ok::<_, DbError>(())
-        })
-        .await
-        .expect("capture author probe");
-    store_database(&peer_db)
-        .run_host_store_write_for_test(None, None, |tx| {
-            tx.execute_batch(
-                "INSERT INTO notes VALUES \
-                 ('peer-probe-atomic', 'Peer', NULL, 1, \
-                  '0000000002000-0000-peer', '2026-01-01');",
-            )?;
-            Ok::<_, DbError>(())
-        })
-        .await
-        .expect("capture peer probe");
-    drain(&author).await;
-    drain(&peer).await;
-    let author_stream = author
-        .latest_local_store_position()
-        .await
-        .expect("read author position")
-        .expect("author published a probe")
-        .coord
-        .stream_id;
-    let peer_stream = peer
-        .latest_local_store_position()
-        .await
-        .expect("read peer position")
-        .expect("peer published a probe")
-        .coord
-        .stream_id;
-    author.pull_store().await.expect("author pulls common base");
-    peer.pull_store().await.expect("peer pulls common base");
-
-    let (deleter, deleter_database, child_device, child_database) = if author_stream < peer_stream {
-        (
-            &author,
-            store_database(&author_db),
-            &peer,
-            store_database(&peer_db),
-        )
-    } else {
-        (
-            &peer,
-            store_database(&peer_db),
-            &author,
-            store_database(&author_db),
-        )
-    };
-    deleter_database
+    let deleter = &author;
+    let deleter_database = store_database(&author_db);
+    let child_device = &peer;
+    let child_database = store_database(&peer_db);
+    let deletion = deleter_database
         .run_host_store_write_for_test(None, None, |tx| {
             tx.execute("DELETE FROM notes WHERE id = 'parent'", [])?;
             Ok::<_, DbError>(())
@@ -817,27 +765,124 @@ async fn a_new_commit_is_not_installed_when_prior_accepted_history_becomes_held(
         .await
         .expect("read child position")
         .expect("child write was published");
-    drain(deleter).await;
-
-    assert!(child_device
-        .retained_merge_replay_inputs_for_test()
+    let dependent = deleter_database
+        .run_host_store_write_for_test(None, None, |tx| {
+            tx.execute_batch(
+                "INSERT INTO notes VALUES \
+                 ('after-delete', 'Private suffix', NULL, 0, \
+                  '0000000004000-0000-deleter', '2026-01-01');",
+            )?;
+            Ok::<_, DbError>(())
+        })
         .await
-        .expect("read retained child input")
-        .iter()
-        .any(|input| input.commit_ref() == &child_commit));
+        .expect("capture the local suffix after deletion");
+    let pending_before = deleter_database
+        .pending_writes()
+        .await
+        .expect("pending writes");
+    let deleter_frontier = deleter
+        .materialized_frontier()
+        .await
+        .expect("deleter frontier");
+    let accepted_before = child_database
+        .store_current_publication()
+        .await
+        .expect("accepted child boundary");
     let frontier_before = child_device
         .materialized_frontier()
         .await
-        .expect("read frontier before conflicting pull");
+        .expect("child frontier");
+
+    let error = deleter
+        .publish_pending_store_database()
+        .await
+        .expect_err("the accepted child prevents publication of the stale parent deletion");
+    let mut source: &(dyn std::error::Error + 'static) = &error;
+    let conflict = loop {
+        if let Some(database) = source.downcast_ref::<DbError>() {
+            break database
+                .write_rebase_conflict()
+                .expect("typed recorded-write conflict");
+        }
+        source = source
+            .source()
+            .expect("publication preserves the database conflict");
+    };
+    assert_eq!(conflict.write_id, deletion.write_id);
+    assert!(matches!(
+        conflict.reason,
+        coven_protocol::write::WriteRebaseConflictReason::Constraint { .. }
+    ));
+    assert_eq!(
+        conflict.affected_rows,
+        vec![coven_protocol::write::AffectedRow {
+            table: "note_tags".into(),
+            primary_key: "child".into(),
+        }]
+    );
+    assert_eq!(
+        deleter
+            .materialized_frontier()
+            .await
+            .expect("unchanged deleter frontier"),
+        deleter_frontier
+    );
+    let mut expected_pending = pending_before.clone();
+    expected_pending
+        .iter_mut()
+        .find(|write| write.write_id == deletion.write_id)
+        .expect("the deleted parent has a pending write")
+        .status = coven_protocol::write::WriteStatus::Blocked(
+        coven_protocol::write::WriteBlock::RebaseConflict(conflict.clone()),
+    );
+    assert_eq!(
+        deleter_database
+            .pending_writes()
+            .await
+            .expect("retained unresolved writes with the attributed conflict"),
+        expected_pending
+    );
+    assert!(pending_before
+        .iter()
+        .any(|write| write.write_id == deletion.write_id));
+    assert!(
+        deleter
+            .test_row_exists(&format!(
+                "SELECT 1 FROM store_writes WHERE write_id = '{}'",
+                dependent.write_id
+            ))
+            .await
+    );
+    assert!(
+        !deleter
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'parent'")
+            .await
+    );
+    assert_eq!(
+        deleter
+            .query_test_text("SELECT title FROM notes WHERE id = 'after-delete'")
+            .await,
+        "Private suffix"
+    );
+
     let (_, pull) = child_device
         .pull_store()
         .await
-        .expect("pull earlier canonical deletion");
-
-    assert!(pull
-        .held_positions
+        .expect("observe the unchanged accepted boundary");
+    assert!(pull.held_positions.is_empty(), "{pull:?}");
+    assert_eq!(
+        child_database
+            .store_current_publication()
+            .await
+            .expect("unchanged accepted boundary"),
+        accepted_before
+    );
+    assert!(child_device
+        .retained_merge_replay_inputs_for_test()
+        .await
+        .expect("retained accepted child")
         .iter()
-        .any(|held| held.reason == HeldStorePositionReason::ForeignKeyDependency));
+        .any(|input| input.commit_ref() == &child_commit));
     assert!(
         child_device
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'parent'")
@@ -852,9 +897,8 @@ async fn a_new_commit_is_not_installed_when_prior_accepted_history_becomes_held(
         child_device
             .materialized_frontier()
             .await
-            .expect("read frontier after held pull"),
-        frontier_before,
-        "a held canonical replay cannot install a partial frontier",
+            .expect("unchanged child frontier"),
+        frontier_before
     );
 }
 
@@ -1039,21 +1083,19 @@ async fn same_cut_baseline_retains_a_private_write_that_observed_later_history()
         .expect("read retained private write");
 
     let outcome = device
-        .stand_on_acknowledged_snapshot()
+        .stand_on_accepted_snapshot()
         .await
         .expect("evaluate same-cut retirement");
 
-    assert!(matches!(
-        outcome,
-        crate::sync::store::ReplayBaselineAdvance::Declined(
-            crate::sync::store::ReplayBaselineDecline::BaselineAtCoverage { .. }
-        )
-    ));
+    let crate::sync::store::ReplayBaselineAdvance::Advanced(advanced) = outcome else {
+        panic!("the accepted snapshot replaces genesis at equal coverage: {outcome:?}");
+    };
+    assert_eq!(advanced.folded_writes, 0);
     assert_eq!(
         database
             .store_write_journal_counts_for_test()
             .await
-            .expect("read retained private write after decline"),
+            .expect("read retained private write after snapshot adoption"),
         journal_before,
         "a write that observed a post-cut commit cannot be folded into the older cut",
     );
@@ -1064,6 +1106,23 @@ async fn same_cut_baseline_retains_a_private_write_that_observed_later_history()
             .expect("replay retained private write"),
         1,
     );
+    assert_eq!(
+        device
+            .query_test_text(
+                "SELECT title || ':shared=' || shared FROM notes WHERE id = 'post-ack-private'"
+            )
+            .await,
+        "Private:shared=0",
+    );
+    assert!(matches!(
+        device
+            .stand_on_accepted_snapshot()
+            .await
+            .expect("repeat snapshot adoption"),
+        crate::sync::store::ReplayBaselineAdvance::Declined(
+            crate::sync::store::ReplayBaselineDecline::BaselineAtCoverage { .. }
+        )
+    ));
 }
 
 #[tokio::test]
@@ -1226,7 +1285,7 @@ async fn replay_baseline_owns_private_blob_bytes_until_a_later_cut_removes_them(
         .expect("capture private blob deletion after acknowledgement");
 
     device
-        .stand_on_acknowledged_snapshot()
+        .stand_on_accepted_snapshot()
         .await
         .expect("advance baseline over private blob creation");
     assert!(
@@ -1264,14 +1323,14 @@ async fn replay_baseline_owns_private_blob_bytes_until_a_later_cut_removes_them(
 }
 
 #[tokio::test]
-async fn retirement_declines_when_current_replay_crosses_the_snapshot_cut() {
+async fn retirement_preserves_accepted_and_private_work_after_the_snapshot_prefix() {
     let author_dir = test_store_dir();
     let author_db = open_test_db(author_dir.clone());
     let signer = user_keypair_from_seed([38; 32]);
     let (store, _) = TestStore::create_with_connection(
         &author_db,
         author_dir.clone(),
-        "non-prefix-retirement",
+        "snapshot-prefix-retirement",
         signer.clone(),
         test_cloud_home(),
     )
@@ -1280,7 +1339,7 @@ async fn retirement_declines_when_current_replay_crosses_the_snapshot_cut() {
     let author = store
         .bind_device_in(&author_db, author_dir.clone(), &signer)
         .await
-        .expect("bind author device");
+        .expect("bind author");
     let peer_dir = test_store_dir();
     let peer_db = open_test_db(peer_dir.clone());
     let peer = store
@@ -1295,118 +1354,115 @@ async fn retirement_declines_when_current_replay_crosses_the_snapshot_cut() {
         .await
         .expect("activate peer");
     author.pull_store().await.expect("pull activation");
-    let author_before = author
-        .materialized_frontier()
-        .await
-        .expect("author frontier");
-    let peer_before = peer.materialized_frontier().await.expect("peer frontier");
-
-    store_database(&author_db)
-        .run_host_store_write_for_test(None, None, |tx| {
-            tx.execute_batch(
-                "INSERT INTO notes VALUES \
-                 ('author-concurrent', 'Author', NULL, 1, \
-                  '0000000001000-0000-author', '2026-01-01');",
-            )?;
-            Ok::<_, DbError>(())
-        })
-        .await
-        .expect("capture author commit");
-    store_database(&peer_db)
-        .run_host_store_write_for_test(None, None, |tx| {
-            tx.execute_batch(
-                "INSERT INTO notes VALUES \
-                 ('peer-concurrent', 'Peer', NULL, 1, \
-                  '0000000001000-0000-peer', '2026-01-01');",
-            )?;
-            Ok::<_, DbError>(())
-        })
-        .await
-        .expect("capture peer commit");
+    let database = store_database(&author_db);
+    database.run_host_store_write_for_test(None, None, |tx| {
+        tx.execute_batch("INSERT INTO notes VALUES ('before-snapshot', 'Covered', NULL, 1, '0000000001000-0000-author', '2026-01-01');")?;
+        Ok::<_, DbError>(())
+    }).await.expect("capture the snapshot prefix");
     drain(&author).await;
-    drain(&peer).await;
-
-    let author_frontier = author.materialized_frontier().await.expect("author commit");
-    let peer_frontier = peer.materialized_frontier().await.expect("peer commit");
-    let advanced_reference = |before: &std::collections::BTreeMap<
-        String,
-        coven_protocol::store_commit::StoreBatchCommitRef,
-    >,
-                              after: &std::collections::BTreeMap<
-        String,
-        coven_protocol::store_commit::StoreBatchCommitRef,
-    >| {
-        after
-            .iter()
-            .find(|(stream, reference)| {
-                before
-                    .get(*stream)
-                    .is_none_or(|prior| prior.coord.sequence() < reference.coord.sequence())
-            })
-            .map(|(_, reference)| reference.clone())
-            .expect("one local stream advanced")
-    };
-    let author_commit = advanced_reference(&author_before, &author_frontier);
-    let peer_commit = advanced_reference(&peer_before, &peer_frontier);
-    let (snapshot_device, snapshot_database, other_device, snapshot_frontier) =
-        if author_commit.coord.stream_id > peer_commit.coord.stream_id {
-            (&author, store_database(&author_db), &peer, author_frontier)
-        } else {
-            (&peer, store_database(&peer_db), &author, peer_frontier)
-        };
-    let snapshot_cut = CommitFrontier::from_refs(snapshot_frontier)
-        .expect("snapshot frontier has exact stream references");
-    let image_dir = tempfile::tempdir().expect("snapshot image directory");
-    let image = snapshot_database
+    let cut = CommitFrontier::from_refs(
+        author
+            .materialized_frontier()
+            .await
+            .expect("accepted prefix"),
+    )
+    .expect("exact prefix");
+    let image_dir = tempfile::tempdir().expect("snapshot directory");
+    let image = database
         .capture_snapshot_image_for_test(store.root().clone(), image_dir.path().to_path_buf(), None)
         .await
-        .expect("capture one side of concurrent history");
-    snapshot_device
-        .publish_snapshot(image, snapshot_cut.clone())
+        .expect("capture accepted prefix");
+    author
+        .publish_snapshot(image, cut.clone())
         .await
-        .expect("publish non-prefix snapshot");
-
-    snapshot_device
-        .pull_store()
+        .expect("publish prefix snapshot");
+    peer.pull_store().await.expect("peer observes the snapshot");
+    store_database(&peer_db).run_host_store_write_for_test(None, None, |tx| {
+        tx.execute_batch("INSERT INTO notes VALUES ('after-snapshot', 'Accepted suffix', NULL, 1, '0000000002000-0000-peer', '2026-01-01');")?;
+        Ok::<_, DbError>(())
+    }).await.expect("capture peer suffix");
+    drain(&peer).await;
+    let peer_commit = peer
+        .latest_local_store_position()
         .await
-        .expect("pull lower stream");
-    other_device.pull_store().await.expect("pull higher stream");
-    let snapshot_current = CommitFrontier::from_refs(
-        snapshot_device
+        .expect("peer position")
+        .expect("accepted suffix");
+    assert!(!cut.covers_commit(&peer_commit));
+    author.pull_store().await.expect("install accepted suffix");
+    let private = database.run_host_store_write_for_test(None, None, |tx| {
+        tx.execute_batch("INSERT INTO notes VALUES ('private-suffix', 'Private suffix', NULL, 0, '0000000003000-0000-author', '2026-01-01');")?;
+        Ok::<_, DbError>(())
+    }).await.expect("capture private work observing the suffix");
+    let journal_before = database
+        .store_write_journal_counts_for_test()
+        .await
+        .expect("journal before retirement");
+    let frontier_before = author
+        .materialized_frontier()
+        .await
+        .expect("frontier before retirement");
+    let accepted_before = database
+        .store_current_publication()
+        .await
+        .expect("accepted boundary");
+    author
+        .stand_on_accepted_snapshot()
+        .await
+        .expect("stand on the accepted prefix");
+    let baseline = database
+        .installed_replay_baseline()
+        .await
+        .expect("installed prefix");
+    assert_eq!(baseline.coverage(), &cut);
+    assert!(!baseline.coverage().covers_commit(&peer_commit));
+    assert_eq!(
+        database
+            .store_write_journal_counts_for_test()
+            .await
+            .expect("retained journal"),
+        journal_before
+    );
+    assert!(
+        author
+            .test_row_exists(&format!(
+                "SELECT 1 FROM store_writes WHERE write_id = '{}'",
+                private.write_id
+            ))
+            .await
+    );
+    assert_eq!(
+        author
             .materialized_frontier()
             .await
-            .expect("snapshot device current frontier"),
-    )
-    .expect("snapshot device current cut");
-    let other_current = CommitFrontier::from_refs(
-        other_device
-            .materialized_frontier()
+            .expect("unchanged frontier"),
+        frontier_before
+    );
+    assert_eq!(
+        database
+            .store_current_publication()
             .await
-            .expect("other device current frontier"),
-    )
-    .expect("other device current cut");
-    snapshot_device
-        .publish_acknowledgement_without_advancing(snapshot_current)
-        .await
-        .expect("snapshot device crosses the snapshot cut");
-    other_device
-        .publish_acknowledgement_without_advancing(other_current)
-        .await
-        .expect("other device crosses the snapshot cut");
-    snapshot_device
-        .pull_store()
-        .await
-        .expect("materialize both crossing acknowledgements");
-
-    let outcome = snapshot_device
-        .stand_on_acknowledged_snapshot()
-        .await
-        .expect("evaluate non-prefix snapshot");
-
-    assert!(matches!(
-        outcome,
-        crate::sync::store::ReplayBaselineAdvance::Declined(
-            crate::sync::store::ReplayBaselineDecline::NonPrefixCut { .. }
-        )
-    ));
+            .expect("unchanged accepted boundary"),
+        accepted_before
+    );
+    for (id, expected) in [
+        ("before-snapshot", "Covered:1"),
+        ("after-snapshot", "Accepted suffix:1"),
+        ("private-suffix", "Private suffix:0"),
+    ] {
+        assert_eq!(
+            author
+                .query_test_text(&format!(
+                    "SELECT title || ':' || shared FROM notes WHERE id = '{id}'"
+                ))
+                .await,
+            expected
+        );
+    }
+    assert_eq!(
+        author
+            .replay_row_count_for_test("notes")
+            .await
+            .expect("replay baseline and suffix"),
+        3
+    );
 }

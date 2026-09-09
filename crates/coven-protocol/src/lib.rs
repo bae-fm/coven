@@ -9,7 +9,8 @@
 //!
 //! `write` lives here because a write's identity and publication status are
 //! stated in protocol terms — a `WriteId` names a host transaction, and a
-//! `PublishedPosition` names the commit that made it visible to peers.
+//! `PublishedWrite` records its exact accepted commit or the snapshot covering
+//! its reserved author position.
 
 pub mod audience_package;
 pub mod blob;

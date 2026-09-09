@@ -108,7 +108,8 @@ impl PreparedAudiencePackage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreparedAudienceBlob {
     remote_object_id: ObjectHash,
     audience: RemoteAudience,

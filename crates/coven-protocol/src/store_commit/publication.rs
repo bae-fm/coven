@@ -9,11 +9,11 @@ pub fn store_current_publication_logical_key() -> &'static str {
 }
 
 pub fn store_publication_entry_semantic_prefix(entry: &StorePublicationEntry) -> String {
-    format!(
-        "store-v1/publications/entries/{}/{}",
-        entry.position.get(),
-        entry.entry_hash()
-    )
+    publication_entry_prefix(entry.position, entry.entry_hash())
+}
+
+fn publication_entry_prefix(position: StorePublicationPosition, hash: ObjectHash) -> String {
+    format!("store-v1/publications/entries/{}/{hash}", position.get())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -52,6 +52,20 @@ pub struct StorePublicationRef {
 }
 
 impl StorePublicationRef {
+    pub fn validate_slot(&self) -> Result<(), StoreProtocolError> {
+        let expected = format!(
+            "{}.json",
+            publication_entry_prefix(self.position, self.entry_hash)
+        );
+        if self.object.slot().logical_key() != expected {
+            return Err(StoreProtocolError::RelocatedSlot {
+                expected,
+                actual: self.object.slot().logical_key().into(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn from_entry(
         entry: &StorePublicationEntry,
         object: ExactObjectRef,
@@ -129,7 +143,7 @@ pub struct StorePublicationEntryBody {
     pub store_root_hash: ObjectHash,
     pub position: StorePublicationPosition,
     pub predecessor: Option<StorePublicationRef>,
-    pub previous_record_hash: ObjectHash,
+    pub previous_state_hash: ObjectHash,
     pub author_registration: StoreDeviceRegistrationRef,
     pub payload: StorePublicationPayload,
 }
@@ -162,11 +176,6 @@ impl StorePublicationEntry {
         snapshot: StoreSnapshotRef,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        current.accepted().ok_or_else(|| {
-            StoreProtocolError::Malformed(
-                "Store snapshot cannot cover an empty publication history".to_string(),
-            )
-        })?;
         Self::signed_payload(
             current,
             author_registration,
@@ -187,13 +196,13 @@ impl StorePublicationEntry {
                 store_root_hash: current.store_root_hash,
                 position,
                 predecessor: current.accepted().cloned(),
-                previous_record_hash: current.record_hash(),
+                previous_state_hash: current.state_hash(),
                 author_registration,
                 payload,
             },
             signer,
         );
-        entry.validate_against(current)?;
+        entry.validate_against(current.body())?;
         Ok(entry)
     }
 
@@ -223,13 +232,13 @@ impl StorePublicationEntry {
 
     fn validate_against(
         &self,
-        current: &StoreCurrentPublicationRecord,
+        current: &StoreCurrentPublicationRecordBody,
     ) -> Result<(), StoreProtocolError> {
         self.validate_shape()?;
         if self.store_root_hash != current.store_root_hash
             || self.predecessor.as_ref() != current.accepted()
             || self.position != current.next_position()?
-            || self.previous_record_hash != current.record_hash()
+            || self.previous_state_hash != current.state_hash()
         {
             return Err(StoreProtocolError::Malformed(
                 "Store publication entry does not extend the current accepted boundary".to_string(),
@@ -244,7 +253,7 @@ impl StorePublicationEntry {
         commit: &VerifiedStoreBatchCommit,
         publisher_signing_pubkey: &str,
     ) -> Result<(), StoreProtocolError> {
-        self.validate_against(current)?;
+        self.validate_against(current.body())?;
         let StorePublicationPayload::Commit(reference) = &self.payload else {
             return Err(StoreProtocolError::Malformed(
                 "Store publication entry is not a commit".to_string(),
@@ -322,6 +331,297 @@ impl StorePublicationEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreCommitPublication {
+    entry: StorePublicationEntry,
+    reference: StorePublicationRef,
+}
+
+impl StoreCommitPublication {
+    pub fn verified(
+        entry: StorePublicationEntry,
+        reference: StorePublicationRef,
+        commit: &VerifiedStoreBatchCommit,
+        publisher_signing_pubkey: &str,
+    ) -> Result<Self, StoreProtocolError> {
+        reference.verify_entry(&entry)?;
+        entry.verify_published_commit(commit, publisher_signing_pubkey)?;
+        Ok(Self { entry, reference })
+    }
+
+    pub fn entry(&self) -> &StorePublicationEntry {
+        &self.entry
+    }
+
+    pub fn reference(&self) -> &StorePublicationRef {
+        &self.reference
+    }
+
+    pub fn into_parts(self) -> (StorePublicationEntry, StorePublicationRef) {
+        (self.entry, self.reference)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorePublicationIntervalEntry {
+    entry: StorePublicationEntry,
+    reference: StorePublicationRef,
+    author: ReferencedStoreDeviceRegistration,
+}
+
+impl StorePublicationIntervalEntry {
+    pub fn new(
+        entry: StorePublicationEntry,
+        reference: StorePublicationRef,
+        author: ReferencedStoreDeviceRegistration,
+    ) -> Self {
+        Self {
+            entry,
+            reference,
+            author,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedStorePublicationEntry {
+    entry: StorePublicationEntry,
+    reference: StorePublicationRef,
+    author: ReferencedStoreDeviceRegistration,
+}
+
+impl AcceptedStorePublicationEntry {
+    pub fn entry(&self) -> &StorePublicationEntry {
+        &self.entry
+    }
+
+    pub fn reference(&self) -> &StorePublicationRef {
+        &self.reference
+    }
+
+    pub fn author(&self) -> &ReferencedStoreDeviceRegistration {
+        &self.author
+    }
+
+    fn accepted_commit(
+        &self,
+        commit: &VerifiedStoreBatchCommit,
+    ) -> Result<AcceptedStoreCommitPublication, StoreProtocolError> {
+        let publication = StoreCommitPublication::verified(
+            self.entry.clone(),
+            self.reference.clone(),
+            commit,
+            &self.author.value().device_signing_pubkey,
+        )?;
+        Ok(AcceptedStoreCommitPublication { publication })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedStoreCommitPublication {
+    publication: StoreCommitPublication,
+}
+
+impl AcceptedStoreCommitPublication {
+    pub fn entry(&self) -> &StorePublicationEntry {
+        self.publication.entry()
+    }
+
+    pub fn reference(&self) -> &StorePublicationRef {
+        self.publication.reference()
+    }
+
+    pub fn into_publication(self) -> StoreCommitPublication {
+        self.publication
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedStorePublicationInterval {
+    previous: StoreCurrentPublicationRecordBody,
+    current: StoreCurrentPublicationRecord,
+    entries: Vec<AcceptedStorePublicationEntry>,
+}
+
+impl VerifiedStorePublicationInterval {
+    /// Continue from an already authenticated record. An empty interval must
+    /// preserve that exact record, including its signature.
+    pub fn verified(
+        previous: StoreCurrentPublicationRecord,
+        current: StoreCurrentPublicationRecord,
+        entries: Vec<StorePublicationIntervalEntry>,
+    ) -> Result<Self, StoreProtocolError> {
+        if entries.is_empty() {
+            if current != previous {
+                return Err(StoreProtocolError::Malformed(
+                    "empty Store publication interval changes the accepted boundary".to_string(),
+                ));
+            }
+            return Ok(Self {
+                previous: previous.body().clone(),
+                current,
+                entries: Vec::new(),
+            });
+        }
+
+        Self::from_nonempty_history(previous.body().clone(), current, entries)
+    }
+
+    /// A carried historical interval authenticates its starting state through
+    /// the first entry's state hash and its terminal signed record. It carries
+    /// no provider observation or conditional publication authority.
+    pub fn from_nonempty_history(
+        previous: StoreCurrentPublicationRecordBody,
+        current: StoreCurrentPublicationRecord,
+        entries: Vec<StorePublicationIntervalEntry>,
+    ) -> Result<Self, StoreProtocolError> {
+        if entries.is_empty() {
+            return Err(StoreProtocolError::Malformed(
+                "carried Store publication history has no entries".into(),
+            ));
+        }
+        Self::fold(previous, current, entries)
+    }
+
+    /// Start from the pinned Store root without requiring its founder's private
+    /// key. An empty Store still authenticates the actual remote genesis record.
+    pub fn from_genesis(
+        store_root_hash: ObjectHash,
+        founder_pubkey: &str,
+        current: StoreCurrentPublicationRecord,
+        entries: Vec<StorePublicationIntervalEntry>,
+    ) -> Result<Self, StoreProtocolError> {
+        let previous = StoreCurrentPublicationRecordBody::genesis(store_root_hash);
+        if entries.is_empty() {
+            current.verify_genesis(store_root_hash, founder_pubkey)?;
+            return Ok(Self {
+                previous,
+                current,
+                entries: Vec::new(),
+            });
+        }
+        Self::fold(previous, current, entries)
+    }
+
+    fn fold(
+        previous: StoreCurrentPublicationRecordBody,
+        current: StoreCurrentPublicationRecord,
+        entries: Vec<StorePublicationIntervalEntry>,
+    ) -> Result<Self, StoreProtocolError> {
+        let mut folded = previous.clone();
+        let mut accepted = Vec::with_capacity(entries.len());
+        let mut commit_coordinates = std::collections::BTreeSet::new();
+        let mut final_publisher = None;
+        for candidate in entries {
+            let registration_bytes = candidate.author.value().to_bytes();
+            candidate
+                .author
+                .reference()
+                .object
+                .verify(&registration_bytes)?;
+            let parsed_registration = StoreDeviceRegistration::parse_at(
+                &registration_bytes,
+                &candidate.author.value().store_root,
+                candidate.author.reference().device_id,
+            )?;
+            candidate
+                .author
+                .reference()
+                .verify_registration(&parsed_registration)?;
+            if parsed_registration != *candidate.author.value()
+                || candidate.author.value().store_root.store_root_hash != folded.store_root_hash
+                || candidate.entry.author_registration != *candidate.author.reference()
+            {
+                return Err(StoreProtocolError::Malformed(
+                    "Store publication entry differs from its exact author registration"
+                        .to_string(),
+                ));
+            }
+            let parsed_entry = StorePublicationEntry::parse_at(
+                &candidate.entry.to_bytes(),
+                folded.store_root_hash,
+                &candidate.reference,
+                &candidate.author.value().device_signing_pubkey,
+            )?;
+            if parsed_entry != candidate.entry {
+                return Err(StoreProtocolError::Malformed(
+                    "Store publication entry differs from its canonical bytes".to_string(),
+                ));
+            }
+            if let StorePublicationPayload::Commit(commit) = &candidate.entry.payload {
+                if !commit_coordinates.insert(commit.coord.clone()) {
+                    return Err(StoreProtocolError::Malformed(
+                        "Store publication interval repeats an author sequence".to_string(),
+                    ));
+                }
+            }
+            folded = folded.advance(&candidate.entry, candidate.reference.clone())?;
+            final_publisher = Some(candidate.author.value().device_signing_pubkey.clone());
+            accepted.push(AcceptedStorePublicationEntry {
+                entry: candidate.entry,
+                reference: candidate.reference,
+                author: candidate.author,
+            });
+        }
+
+        let final_publisher = final_publisher.expect("a non-empty interval has a publisher");
+        current.verify_by(&final_publisher)?;
+        if current.body() != &folded {
+            return Err(StoreProtocolError::Malformed(
+                "Store current publication record differs from its verified interval".to_string(),
+            ));
+        }
+        Ok(Self {
+            previous,
+            current,
+            entries: accepted,
+        })
+    }
+
+    /// The authenticated starting state, derived from the prior record or root.
+    pub fn previous(&self) -> &StoreCurrentPublicationRecordBody {
+        &self.previous
+    }
+
+    pub fn current(&self) -> &StoreCurrentPublicationRecord {
+        &self.current
+    }
+
+    pub fn entries(&self) -> &[AcceptedStorePublicationEntry] {
+        &self.entries
+    }
+
+    pub fn accepted_commit(
+        &self,
+        commit: &VerifiedStoreBatchCommit,
+    ) -> Result<AcceptedStoreCommitPublication, StoreProtocolError> {
+        let mut base = self.previous.publication_base();
+        for entry in &self.entries {
+            match &entry.entry.payload {
+                StorePublicationPayload::Snapshot(snapshot) => {
+                    base = StorePublicationBase::Snapshot(AcceptedStoreSnapshotRef {
+                        snapshot: snapshot.clone(),
+                        publication: entry.reference.clone(),
+                    });
+                }
+                StorePublicationPayload::Commit(reference) if reference == commit.reference() => {
+                    if commit.publication_base() != &base {
+                        return Err(StoreProtocolError::Malformed(
+                            "Store commit differs from the snapshot base at its accepted publication"
+                                .to_string(),
+                        ));
+                    }
+                    return entry.accepted_commit(commit);
+                }
+                StorePublicationPayload::Commit(_) => {}
+            }
+        }
+        Err(StoreProtocolError::Malformed(
+            "Store commit is absent from the accepted publication interval".to_string(),
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StorePublicationState {
@@ -339,6 +639,72 @@ pub struct StoreCurrentPublicationRecordBody {
     pub state: StorePublicationState,
 }
 
+impl StoreCurrentPublicationRecordBody {
+    pub fn genesis(store_root_hash: ObjectHash) -> Self {
+        Self {
+            store_root_hash,
+            state: StorePublicationState::Genesis,
+        }
+    }
+
+    pub fn state_hash(&self) -> ObjectHash {
+        super::signed::signed_body_hash(STORE_PROTOCOL_VERSION, self)
+    }
+
+    pub fn accepted(&self) -> Option<&StorePublicationRef> {
+        match &self.state {
+            StorePublicationState::Genesis => None,
+            StorePublicationState::Accepted { entry, .. } => Some(entry),
+        }
+    }
+
+    pub fn latest_snapshot(&self) -> Option<&AcceptedStoreSnapshotRef> {
+        match &self.state {
+            StorePublicationState::Genesis => None,
+            StorePublicationState::Accepted {
+                latest_snapshot, ..
+            } => latest_snapshot.as_ref(),
+        }
+    }
+
+    pub fn publication_base(&self) -> StorePublicationBase {
+        match self.latest_snapshot() {
+            Some(snapshot) => StorePublicationBase::Snapshot(snapshot.clone()),
+            None => StorePublicationBase::Genesis,
+        }
+    }
+
+    pub fn next_position(&self) -> Result<StorePublicationPosition, StoreProtocolError> {
+        match self.accepted() {
+            Some(reference) => reference.position.successor(),
+            None => StorePublicationPosition::new(1),
+        }
+    }
+
+    fn advance(
+        &self,
+        entry: &StorePublicationEntry,
+        reference: StorePublicationRef,
+    ) -> Result<Self, StoreProtocolError> {
+        entry.validate_against(self)?;
+        reference.verify_entry(entry)?;
+        let latest_snapshot = match &entry.payload {
+            StorePublicationPayload::Commit(_) => self.latest_snapshot().cloned(),
+            StorePublicationPayload::Snapshot(snapshot) => Some(AcceptedStoreSnapshotRef {
+                snapshot: snapshot.clone(),
+                publication: reference.clone(),
+            }),
+        };
+        Ok(Self {
+            store_root_hash: self.store_root_hash,
+            state: StorePublicationState::Accepted {
+                entry: reference,
+                latest_snapshot,
+            },
+        })
+    }
+}
+
 impl SignedBody for StoreCurrentPublicationRecordBody {
     const DOMAIN: &'static [u8] = STORE_CURRENT_PUBLICATION_DOMAIN;
 }
@@ -346,12 +712,13 @@ impl SignedBody for StoreCurrentPublicationRecordBody {
 pub type StoreCurrentPublicationRecord = Signed<StoreCurrentPublicationRecordBody>;
 
 impl StoreCurrentPublicationRecord {
+    pub fn state_hash(&self) -> ObjectHash {
+        self.body().state_hash()
+    }
+
     pub fn genesis(store_root_hash: ObjectHash, founder: &UserKeypair) -> Self {
         Signed::sign(
-            StoreCurrentPublicationRecordBody {
-                store_root_hash,
-                state: StorePublicationState::Genesis,
-            },
+            StoreCurrentPublicationRecordBody::genesis(store_root_hash),
             founder,
         )
     }
@@ -387,23 +754,8 @@ impl StoreCurrentPublicationRecord {
         reference: StorePublicationRef,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        entry.validate_against(previous)?;
-        reference.verify_entry(entry)?;
-        let latest_snapshot = match &entry.payload {
-            StorePublicationPayload::Commit(_) => previous.latest_snapshot().cloned(),
-            StorePublicationPayload::Snapshot(snapshot) => Some(AcceptedStoreSnapshotRef {
-                snapshot: snapshot.clone(),
-                publication: reference.clone(),
-            }),
-        };
         Ok(Signed::sign(
-            StoreCurrentPublicationRecordBody {
-                store_root_hash: previous.store_root_hash,
-                state: StorePublicationState::Accepted {
-                    entry: reference,
-                    latest_snapshot,
-                },
-            },
+            previous.body().advance(entry, reference)?,
             signer,
         ))
     }
@@ -413,33 +765,19 @@ impl StoreCurrentPublicationRecord {
     }
 
     pub fn accepted(&self) -> Option<&StorePublicationRef> {
-        match &self.state {
-            StorePublicationState::Genesis => None,
-            StorePublicationState::Accepted { entry, .. } => Some(entry),
-        }
+        self.body().accepted()
     }
 
     pub fn latest_snapshot(&self) -> Option<&AcceptedStoreSnapshotRef> {
-        match &self.state {
-            StorePublicationState::Genesis => None,
-            StorePublicationState::Accepted {
-                latest_snapshot, ..
-            } => latest_snapshot.as_ref(),
-        }
+        self.body().latest_snapshot()
     }
 
     pub fn publication_base(&self) -> StorePublicationBase {
-        match self.latest_snapshot() {
-            Some(snapshot) => StorePublicationBase::Snapshot(snapshot.clone()),
-            None => StorePublicationBase::Genesis,
-        }
+        self.body().publication_base()
     }
 
     pub fn next_position(&self) -> Result<StorePublicationPosition, StoreProtocolError> {
-        match self.accepted() {
-            Some(reference) => reference.position.successor(),
-            None => StorePublicationPosition::new(1),
-        }
+        self.body().next_position()
     }
 
     pub fn verify_genesis(
@@ -476,7 +814,7 @@ impl StoreCurrentPublicationRecord {
         reference: &StorePublicationRef,
         publisher_signing_pubkey: &str,
     ) -> Result<(), StoreProtocolError> {
-        entry.validate_against(previous)?;
+        entry.validate_against(previous.body())?;
         reference.verify_entry(entry)?;
         self.verify_by(publisher_signing_pubkey)?;
         let expected_latest = match &entry.payload {

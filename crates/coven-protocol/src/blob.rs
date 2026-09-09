@@ -1,11 +1,12 @@
 //! The blob engine: coven's single owner of a blob's whole durability lifecycle.
 //!
-//! coven syncs opaque encrypted blobs referenced by DB rows. By default it owns
-//! the cloud layout (the content-addressed `{namespace}/{ab}/{cd}/{id}`) and
-//! encryption; the host decides which rows carry blobs, where their plaintext
-//! lives locally, and how each is scoped for encryption. A home configured for
-//! the unobfuscated blob-path scheme instead stores each blob at the consumer's
-//! readable [`BlobRef::cloud_path`] so the bucket is browsable.
+//! coven syncs blobs referenced by database rows. It owns the cloud layout and
+//! encryption; the host declares which rows carry blobs, their local plaintext
+//! source, and encryption scope. An opaque home uses
+//! `{namespace}/opaque/{locator_hash}`. A browsable home uses the consumer's
+//! [`BlobRef::cloud_path`] within
+//! `{namespace}/readable/{cloud_path}/.coven-versions/{locator_hash}`.
+//! Both layouts name immutable versions through [`locator::BlobLocator`].
 //!
 //! # The coven concept tree
 //!
@@ -254,73 +255,44 @@ pub enum CacheFill {
     CacheLazy,
 }
 
-/// A blob's **replacement story**: whether the row carrying it may ever be repointed at
-/// a different blob. Orthogonal to [`Provenance`] and [`CacheFill`]; a blob declares all
-/// three.
+/// Whether a blob-bearing row may be repointed, and the readable-name policy
+/// enforced when the database resolves that row's blob declaration.
+/// Orthogonal to [`Provenance`] and [`CacheFill`].
 ///
-/// It exists because a cloud object must never be rewritten with different bytes. The
-/// pull verifies an object against its row's content hash and a position advances only over
-/// a fully-realized changeset, so a key whose content can change leaves a device that
-/// pulls an older changeset unable to satisfy it — wedged there for good, not merely
-/// missing a blob. Two declarations reach that guarantee by different routes, and coven
-/// enforces whichever one the blob declares:
-///
-/// - [`Replaceable`](Self::Replaceable) — the row may be repointed, so the *key* must
-///   move with the blob: a readable `cloud_path` has to name its blob
-///   (`cloud_path_names_blob`), and a replacement then writes a new
-///   object beside the one it replaces instead of over it.
-/// - [`WriteOnce`](Self::WriteOnce) — the row is never repointed, so the object at its
-///   key is written once and there is nothing to protect it from. Its path is free to be
-///   a stable, fully readable name. coven refuses the repointing.
-///
-/// `Replaceable` is the default: its guarantee is the airtight one (the key itself
-/// carries the blob id, so no path can ever be reused), while `WriteOnce` is a weaker
-/// contract a consumer opts into knowingly — see its docs.
+/// Both variants use [`locator::BlobLocator`] to identify immutable cloud
+/// versions. The replacement policy constrains rows and readable names; it
+/// does not determine the exact object's identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlobReplacement {
-    /// The row may be repointed at a new blob id — replacing a cover, swapping an
-    /// attachment. Requires a readable `cloud_path` that names its blob, so that the
-    /// replacement's fresh blob id yields a fresh key.
+    /// The row may be repointed at another blob id. When a readable
+    /// `cloud_path` is supplied, its file-name stem must name the blob id;
+    /// see [`cloud_path_names_blob`]. This is the default declaration.
     Replaceable,
-    /// The row is never repointed: the blob it names when it is inserted is the blob it
-    /// names for life. Repointing one is refused.
+    /// Changeset updates may not change this row's blob-id column. A readable
+    /// `cloud_path` need not include that id, so a name such as
+    /// `Live at Leeds/01 Sonata.flac` is accepted.
     ///
-    /// This buys a stable, fully readable cloud path — `Live at Leeds/01 Sonata.flac`
-    /// rather than `01 Sonata-0ef7a1c9.flac` — for content that is written once and never
-    /// rewritten: an imported file, whose bytes are what they are.
-    ///
-    /// **What coven enforces, and what it does not.** coven refuses to repoint the row,
-    /// which is the reuse it can see. It cannot see a consumer *deleting* a row and
-    /// inserting a different blob at the same `cloud_path` — the deleted row is gone, and
-    /// coven keeps no history of the paths it has used. Declaring `WriteOnce` is therefore
-    /// also a promise that the path is never reused by a different blob. Derive it from
-    /// data that never repeats and it holds by construction: a path carrying a freshly
-    /// minted id for the thing being imported can never be handed out twice.
+    /// The path is still followed by `.coven-versions/{locator_hash}` in the
+    /// cloud. Reusing a readable name for a different locator does not reuse
+    /// the earlier locator's exact object.
     WriteOnce,
 }
 
-/// Whether the readable `cloud_path` a consumer supplied names the blob `blob_id` — what
-/// coven requires of a [`Replaceable`](BlobReplacement::Replaceable) blob's key on a
-/// browsable home, and what a hashed key gets for free by carrying the id itself.
+/// Whether a readable path satisfies the [`Replaceable`](BlobReplacement::Replaceable)
+/// declaration's naming policy. This checks the readable name, not cloud-object
+/// identity; [`locator::BlobLocator`] appends the immutable version.
 ///
-/// The path's file name (its last `/`-segment), with any extension stripped, must be the
-/// blob id or end with `-{blob_id}`:
+/// The path's file name (its last `/`-segment), with any extension stripped,
+/// must equal the blob id or end with `-{blob_id}`:
 ///
 /// ```text
-/// covers/Live at Leeds/cover-0ef7a1c9.jpg   ✓   stem `cover-0ef7a1c9` ends with -0ef7a1c9
-/// covers/Live at Leeds/0ef7a1c9.jpg         ✓   stem is the blob id
-/// covers/Live at Leeds/cover.jpg            ✗   names no blob
+/// covers/Live at Leeds/cover-0ef7a1c9.jpg   ✓   stem ends with -0ef7a1c9
+/// covers/Live at Leeds/0ef7a1c9.jpg         ✓   stem equals the blob id
+/// covers/Live at Leeds/cover.jpg            ✗   stem does not name the blob id
 /// ```
 ///
-/// A blob id names one immutable byte-string and is minted fresh for every stored blob, so
-/// a path carrying it moves whenever the bytes do — which is what leaves a replaced blob's
-/// object standing at its own key instead of overwritten.
-///
-/// The `-` delimiter is what makes this a near-injective mapping where a bare substring
-/// test would not be: without it, blob `1` would satisfy blob `11`'s path and the two could
-/// be keyed at one object. Two ids can still collide if one is a `-`-suffix of the other
-/// AND the consumer builds paths that land on the same file name — which ids drawn from any
-/// of the usual generators do not do.
+/// The `-` delimiter distinguishes a named id from a suffix embedded in
+/// another id: `cover-11` does not satisfy id `1`.
 pub fn cloud_path_names_blob(cloud_path: &str, blob_id: &str) -> bool {
     let file_name = cloud_path.rsplit('/').next().unwrap_or(cloud_path);
     let stem = file_name
@@ -332,30 +304,29 @@ pub fn cloud_path_names_blob(cloud_path: &str, blob_id: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('-'))
 }
 
-/// A blob a row references: its cloud identity, encryption scope, and the two
+/// A blob a row references: its logical identity, encryption scope, and the two
 /// declared properties ([`provenance`](BlobRef::provenance) +
 /// [`fill`](BlobRef::fill)). coven derives it from the row's declared columns
 /// ([`crate::synced_schema::BlobDecl`]) via the database's `BlobDecls`. Where its bytes
 /// live depends on its locality and provenance: a user-provided Local blob is the
 /// user's file at its path; a host-provided Local blob is in coven's local store
 /// (`storage/local/<namespace>/<id>`); a Remote blob's device-local copy is a cache
-/// copy (`storage/pinned/<namespace>/<locator-hash>` /
-/// `storage/cache/<namespace>/<locator-hash>`, built
-/// from the validated namespace + exact locator hash — see `blob::cache`).
+/// copy (`storage/pinned/<namespace>/<ab>/<cd>/<locator-hash>` or
+/// `storage/cache/<namespace>/<ab>/<cd>/<locator-hash>`). The shard's `ab` and
+/// `cd` are the first two byte-pairs of the locator hash.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BlobRef {
-    /// Cloud namespace, e.g. `"images"`. Becomes `{namespace}/{ab}/{cd}/{id}`
-    /// under the hashed scheme, or `{namespace}/{cloud_path}` under the plain one.
+    /// Cloud namespace, e.g. `"images"`. Prefixes the opaque or readable
+    /// version path generated by [`locator::BlobLocator::semantic_key`].
     pub namespace: String,
     /// Blob id (typically the id of the blob-bearing row).
     pub id: String,
     /// Encryption scope for this blob.
     pub scope: BlobScope,
     /// The consumer's readable cloud-relative path for this blob, e.g.
-    /// `"Artist - Album/cover.jpg"`. Used as the object key under `namespace` when
-    /// the home's storage `BlobPathScheme` is `Plain`;
-    /// ignored when `Hashed`. `None` is only valid for a `Hashed` home — a `Plain`
-    /// home with no `cloud_path` is a surfaced error, never a silent fallback.
+    /// `"Artist - Album/cover-blob-id.jpg"`. A browsable locator includes it
+    /// beneath `{namespace}/readable/` and appends `.coven-versions/{locator_hash}`.
+    /// An opaque locator does not use it. A browsable home requires a path.
     pub cloud_path: Option<String>,
     /// The blob's **Local story**: where its bytes live while Local, and whether
     /// `make_local` needs a destination path. See [`Provenance`].
@@ -834,10 +805,8 @@ pub trait BlobTransitionObserver: Send + Sync {
 mod cloud_path_tests {
     use super::cloud_path_names_blob;
 
-    /// A replaceable blob's readable path must name the blob standing at it, so that
-    /// repointing the row moves its cloud key instead of overwriting the object it
-    /// replaced. A path naming no blob — the natural-looking `cover.jpg` — is what makes a
-    /// replacement rewrite the object its predecessor holds.
+    /// Replaceable declarations require the blob id at the end of the readable
+    /// file-name stem; an id in a parent directory does not satisfy that policy.
     #[test]
     fn a_cloud_path_names_the_blob_whose_id_ends_its_file_name() {
         assert!(cloud_path_names_blob(
@@ -855,12 +824,11 @@ mod cloud_path_tests {
 
         assert!(
             !cloud_path_names_blob("Live at Leeds/cover.jpg", "0ef7a1c9"),
-            "names no blob — the next cover would take this same name",
+            "the file-name stem does not name the blob id",
         );
         assert!(
             !cloud_path_names_blob("0ef7a1c9/cover.jpg", "0ef7a1c9"),
-            "the id must name the OBJECT, not a directory above it — two blobs under one \
-             directory would still collide on the file",
+            "the id must name the file, not a directory above it",
         );
         assert!(
             !cloud_path_names_blob("Live at Leeds/cover-0ef7a1c9-thumb.jpg", "0ef7a1c9"),
@@ -868,15 +836,14 @@ mod cloud_path_tests {
         );
     }
 
-    /// The `-` delimiter is what makes the path→blob mapping unambiguous. A bare substring
-    /// test would let one blob satisfy another's path, and the two would be keyed at one
-    /// cloud object — the exact collision the rule exists to prevent.
+    /// A suffix embedded in another id does not satisfy the naming policy;
+    /// a distinct `-` delimiter is required.
     #[test]
     fn one_blob_id_cannot_satisfy_another_s_path_by_being_a_tail_of_it() {
         assert!(cloud_path_names_blob("cover-10ef7a1c9.jpg", "10ef7a1c9"));
         assert!(
             !cloud_path_names_blob("cover-10ef7a1c9.jpg", "0ef7a1c9"),
-            "blob 0ef7a1c9 must not claim blob 10ef7a1c9's object",
+            "0ef7a1c9 is embedded in the named id, not preceded by a delimiter",
         );
     }
 }

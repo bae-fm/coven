@@ -23,37 +23,6 @@ pub(super) fn uploaded_retained_nonactivation_disposition(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedCandidateHeadNonactivation {
-    pub(super) candidate: StoreBatchCommitRef,
-    pub(super) head: VerifiedCandidateHead,
-}
-
-impl VerifiedCandidateHeadNonactivation {
-    pub fn head(&self) -> &VerifiedCandidateHead {
-        &self.head
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VerifiedCandidateHead {
-    ExactCandidateAbsent { object: ExactObjectRef },
-    ExactLateCandidate { object: ExactObjectRef },
-}
-
-impl VerifiedCandidateHead {
-    pub fn object(&self) -> &ExactObjectRef {
-        match self {
-            Self::ExactCandidateAbsent { object } | Self::ExactLateCandidate { object } => object,
-        }
-    }
-}
-
-pub(super) enum CandidateHeadEvidence<'a> {
-    OccupiedByProof,
-    Verified(&'a VerifiedCandidateHeadNonactivation),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateNonactivation {
@@ -70,8 +39,8 @@ impl CandidateNonactivation {
         &self.proof
     }
 
-    /// Checks the shape of a receipt already admitted through
-    /// `VerifiedCandidateNonactivation`; it does not recreate the live observation.
+    /// Checks a durable receipt shape; its caller owns the accepted boundary
+    /// or competing publication that established nonactivation.
     pub fn validate_durable_shape(
         candidate: &StoreBatchCommitRef,
         commit: &crate::store_commit::StoreBatchCommit,
@@ -146,339 +115,54 @@ impl CandidateNonactivation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedCandidateNonactivation {
-    evidence: Box<VerifiedCandidateNonactivationEvidence>,
-}
-
-#[derive(Debug, Clone)]
-pub struct VerifiedDependencyRetractionAuthority {
-    durable: CandidateNonactivation,
-}
-
-impl VerifiedDependencyRetractionAuthority {
-    pub fn after_live_authority_check(
-        durable: CandidateNonactivation,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        durable.validate()?;
-        if !matches!(
-            durable.proof(),
-            CandidateNonactivationProof::MergeDependencyRetraction { .. }
-        ) {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "dependent retraction authority carries another proof family".to_string(),
-            ));
-        }
-        Ok(Self { durable })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum VerifiedCandidateNonactivationEvidence {
-    Merge {
-        durable: CandidateNonactivation,
-        winner_commit: StoreBatchCommitRef,
-    },
-    AuthorExclusion {
-        durable: CandidateNonactivation,
-        head_nonactivation: VerifiedCandidateHeadNonactivation,
-    },
-    MembershipGrantRevocation {
-        durable: CandidateNonactivation,
-        head_nonactivation: VerifiedCandidateHeadNonactivation,
-    },
-    DependencyRetraction {
-        durable: CandidateNonactivation,
-        head_nonactivation: VerifiedCandidateHeadNonactivation,
-    },
-}
-
-impl VerifiedCandidateNonactivation {
-    pub fn from_verified_merge_winner(
-        candidate: StoreBatchCommitDeletionTarget,
-        winner_head: crate::store_commit::StoreDeviceHeadRef,
-        winner_commit: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        let value = Self {
-            evidence: Box::new(VerifiedCandidateNonactivationEvidence::Merge {
-                durable: CandidateNonactivation {
-                    candidate,
-                    proof: CandidateNonactivationProof::MergeWinner { winner_head },
-                },
-                winner_commit,
-            }),
-        };
-        value.durable().validate()?;
-        Ok(value)
-    }
-
-    pub fn from_verified_author_exclusion(
-        durable: CandidateNonactivation,
-        candidate: StoreBatchCommitRef,
-        head: VerifiedCandidateHead,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        durable.validate()?;
-        if !matches!(
-            durable.proof(),
-            CandidateNonactivationProof::AuthorExclusion { .. }
-        ) || durable.reference()? != candidate
-        {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "verified author-exclusion nonactivation parts disagree".to_string(),
-            ));
-        }
-        let value = Self {
-            evidence: Box::new(VerifiedCandidateNonactivationEvidence::AuthorExclusion {
-                durable,
-                head_nonactivation: VerifiedCandidateHeadNonactivation { candidate, head },
-            }),
-        };
-        Ok(value)
-    }
-
-    pub fn from_verified_membership_grant_revocation(
-        durable: CandidateNonactivation,
-        candidate: StoreBatchCommitRef,
-        head: VerifiedCandidateHead,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        durable.validate()?;
-        if !matches!(
-            durable.proof(),
-            CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
-        ) || durable.reference()? != candidate
-        {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "verified membership-revocation nonactivation parts disagree".to_string(),
-            ));
-        }
-        let value = Self {
-            evidence: Box::new(
-                VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
-                    durable,
-                    head_nonactivation: VerifiedCandidateHeadNonactivation { candidate, head },
-                },
-            ),
-        };
-        Ok(value)
-    }
-
-    pub fn dependency_retraction(
-        dependency: &Self,
-        candidate: StoreBatchCommitDeletionTarget,
-        author: &crate::store_commit::StoreDeviceRegistration,
-        activation_head_object: ExactObjectRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        if !matches!(
-            dependency.evidence.as_ref(),
-            VerifiedCandidateNonactivationEvidence::AuthorExclusion { .. }
-                | VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation { .. }
-                | VerifiedCandidateNonactivationEvidence::DependencyRetraction { .. }
-        ) {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "dependent retraction does not descend from terminal evidence".to_string(),
-            ));
-        }
-        let commit =
-            candidate.verify_nonactivation_candidate(author.store_root.store_root_hash, author)?;
-        let candidate_reference = commit.reference().clone();
-        let dependency_reference = dependency.candidate_reference()?;
-        let value = Self {
-            evidence: Box::new(
-                VerifiedCandidateNonactivationEvidence::DependencyRetraction {
-                    durable: CandidateNonactivation {
-                        candidate,
-                        proof: CandidateNonactivationProof::MergeDependencyRetraction {
-                            dependency: dependency_reference,
-                            dependency_nonactivation: Box::new(dependency.durable().clone()),
-                        },
-                    },
-                    head_nonactivation: VerifiedCandidateHeadNonactivation {
-                        candidate: candidate_reference,
-                        head: VerifiedCandidateHead::ExactLateCandidate {
-                            object: activation_head_object,
-                        },
-                    },
-                },
-            ),
-        };
-        value.durable().validate()?;
-        Ok(value)
-    }
-
-    pub fn from_verified_dependency_retraction_authority(
-        authority: VerifiedDependencyRetractionAuthority,
-        candidate: StoreBatchCommitDeletionTarget,
-        author: &crate::store_commit::StoreDeviceRegistration,
-        activation_head_object: ExactObjectRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        let commit =
-            candidate.verify_nonactivation_candidate(author.store_root.store_root_hash, author)?;
-        let candidate_reference = commit.reference().clone();
-        if authority.durable.candidate != candidate {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "verified dependent retraction authority names another candidate".to_string(),
-            ));
-        }
-        let value = Self {
-            evidence: Box::new(
-                VerifiedCandidateNonactivationEvidence::DependencyRetraction {
-                    durable: authority.durable,
-                    head_nonactivation: VerifiedCandidateHeadNonactivation {
-                        candidate: candidate_reference,
-                        head: VerifiedCandidateHead::ExactLateCandidate {
-                            object: activation_head_object,
-                        },
-                    },
-                },
-            ),
-        };
-        value.durable().validate()?;
-        Ok(value)
-    }
-
-    pub fn candidate_reference(&self) -> Result<StoreBatchCommitRef, RemoteObjectRecordError> {
-        self.durable().reference()
-    }
-
-    pub fn proof(&self) -> &CandidateNonactivationProof {
-        &self.durable().proof
-    }
-
-    pub fn merge_winner_commit(&self) -> Result<&StoreBatchCommitRef, RemoteObjectRecordError> {
-        match self.evidence.as_ref() {
-            VerifiedCandidateNonactivationEvidence::Merge { winner_commit, .. } => {
-                Ok(winner_commit)
-            }
-            VerifiedCandidateNonactivationEvidence::AuthorExclusion { .. } => {
-                Err(RemoteObjectRecordError::InvalidProof(
-                    "author-exclusion nonactivation has no Merge slot winner".to_string(),
-                ))
-            }
-            VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation { .. } => {
-                Err(RemoteObjectRecordError::InvalidProof(
-                    "membership-grant revocation has no Merge slot winner".to_string(),
-                ))
-            }
-            VerifiedCandidateNonactivationEvidence::DependencyRetraction { .. } => {
-                Err(RemoteObjectRecordError::InvalidProof(
-                    "dependent retraction has no Merge slot winner".to_string(),
-                ))
-            }
-        }
-    }
-
-    pub fn into_durable(self) -> CandidateNonactivation {
-        match *self.evidence {
-            VerifiedCandidateNonactivationEvidence::Merge { durable, .. }
-            | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. }
-            | VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
-                durable, ..
-            }
-            | VerifiedCandidateNonactivationEvidence::DependencyRetraction { durable, .. } => {
-                durable
-            }
-        }
-    }
-
-    pub fn into_terminal_head_nonactivation(
-        self,
-    ) -> Result<(CandidateNonactivation, VerifiedCandidateHeadNonactivation), RemoteObjectRecordError>
-    {
-        match *self.evidence {
-            VerifiedCandidateNonactivationEvidence::AuthorExclusion {
-                durable,
-                head_nonactivation,
-            } => Ok((durable, head_nonactivation)),
-            VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
-                durable,
-                head_nonactivation,
-            } => Ok((durable, head_nonactivation)),
-            VerifiedCandidateNonactivationEvidence::DependencyRetraction {
-                durable,
-                head_nonactivation,
-            } => Ok((durable, head_nonactivation)),
-            VerifiedCandidateNonactivationEvidence::Merge { .. } => {
-                Err(RemoteObjectRecordError::InvalidProof(
-                    "candidate nonactivation is not verified by an excluded-author head observation"
-                        .to_string(),
-                ))
-            }
-        }
-    }
-
-    fn durable(&self) -> &CandidateNonactivation {
-        match self.evidence.as_ref() {
-            VerifiedCandidateNonactivationEvidence::Merge { durable, .. }
-            | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. }
-            | VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
-                durable, ..
-            }
-            | VerifiedCandidateNonactivationEvidence::DependencyRetraction { durable, .. } => {
-                durable
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CandidateNonactivationProof {
-    MergeWinner {
-        winner_head: crate::store_commit::StoreDeviceHeadRef,
+    AcceptedAbandonment {
+        abandonment: StoreBatchCommitDeletionTarget,
     },
-    AuthorExclusion {
-        exclusion: crate::store_commit::StoreDeviceExclusionRef,
-        accepted_cut: BTreeMap<crate::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
-        activation_head: crate::store_commit::StoreDeviceHeadRef,
+    AuthorityRetirement {
+        publication: crate::store_commit::StorePublicationRef,
+        coverage: crate::store_commit::CommitFrontier,
+        creation: crate::membership::MembershipGrantCreationAuthority,
+        retirement: crate::membership::MembershipGrantRetirement,
     },
-    MergeMembershipGrantRevocation {
-        grant_id: crate::membership::MembershipGrantId,
-        membership: crate::circle_control::StoreMembershipStateRef,
-        activation_commit: StoreBatchCommitRef,
-        activation_head: crate::store_commit::StoreDeviceHeadRef,
-    },
-    MergeDependencyRetraction {
-        dependency: StoreBatchCommitRef,
-        dependency_nonactivation: Box<CandidateNonactivation>,
+    SnapshotRetirement {
+        snapshot: crate::store_commit::AcceptedStoreSnapshotRef,
+        coverage: crate::store_commit::CommitFrontier,
     },
 }
 
 impl CandidateNonactivationProof {
     pub fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         match self {
-            Self::MergeWinner { .. } => Ok(()),
-            Self::AuthorExclusion { accepted_cut, .. } => {
-                crate::store_commit::validate_store_history_cut(
-                    &crate::store_commit::StoreHistoryCut::from_commits(accepted_cut.clone()),
-                )
-                .map_err(Into::into)
-            }
-            Self::MergeMembershipGrantRevocation {
-                membership,
-                activation_commit: _,
-                ..
-            } => {
-                if !membership.heads.windows(2).all(|pair| pair[0] < pair[1])
-                    || !membership
-                        .resolutions
-                        .windows(2)
-                        .all(|pair| pair[0] < pair[1])
-                {
-                    return Err(RemoteObjectRecordError::InvalidProof(
-                        "membership-grant revocation names a noncanonical membership state"
-                            .to_string(),
-                    ));
-                }
+            Self::SnapshotRetirement { coverage, .. }
+            | Self::AuthorityRetirement { coverage, .. } => {
+                crate::store_commit::CommitFrontier::from_refs(
+                    coverage
+                        .commits()
+                        .iter()
+                        .map(|(stream, commit)| (stream.to_string(), commit.clone()))
+                        .collect(),
+                )?;
                 Ok(())
             }
-            Self::MergeDependencyRetraction {
-                dependency,
-                dependency_nonactivation,
-            } => {
-                dependency_nonactivation.validate()?;
-                if dependency_nonactivation.reference()? != *dependency {
+            Self::AcceptedAbandonment { abandonment } => {
+                let value: crate::store_commit::StoreBatchCommit =
+                    serde_json::from_slice(&abandonment.canonical_signed_bytes)?;
+                abandonment
+                    .object
+                    .verify(&abandonment.canonical_signed_bytes)?;
+                StoreBatchCommitRef::from_commit(
+                    &value,
+                    abandonment.coord.clone(),
+                    abandonment.object.clone(),
+                )?;
+                if value.to_bytes() != abandonment.canonical_signed_bytes
+                    || value.abandoned_candidates().is_empty()
+                {
                     return Err(RemoteObjectRecordError::InvalidProof(
-                        "dependent retraction names another exact dependency".to_string(),
+                        "accepted abandonment does not carry canonical candidate manifests".into(),
                     ));
                 }
                 Ok(())
@@ -493,51 +177,68 @@ impl CandidateNonactivationProof {
     ) -> Result<(), RemoteObjectRecordError> {
         self.validate()?;
         match self {
-            Self::MergeWinner { .. } => Ok(()),
-            Self::AuthorExclusion {
-                exclusion,
-                accepted_cut,
-                ..
-            } => {
-                if commit.author_registration != exclusion.proposal.target {
-                    return Err(RemoteObjectRecordError::InvalidProof(
-                        "author exclusion names another candidate author or policy".to_string(),
-                    ));
-                }
-                let expected_stream =
-                    crate::store_commit::StreamActivation::device_authorized_stream_id(
-                        commit.store_root_hash,
-                        &commit.author_registration,
-                        crate::store_commit::StreamAnchorDomain::StoreAnnouncements,
-                    );
-                let crate::store_commit::StoreCommitCoord {
-                    stream_id,
-                    sequence,
-                } = candidate.coord;
-                let beyond_cutoff = match accepted_cut.get(&expected_stream) {
-                    Some(reference) => sequence > reference.coord.sequence(),
-                    None => true,
+            Self::AcceptedAbandonment { abandonment } => {
+                let value: crate::store_commit::StoreBatchCommit =
+                    serde_json::from_slice(&abandonment.canonical_signed_bytes)?;
+                let target = StoreBatchCommitDeletionTarget {
+                    coord: candidate.coord.clone(),
+                    object: candidate.object.clone(),
+                    canonical_signed_bytes: commit.to_bytes(),
                 };
-                if stream_id != expected_stream || !beyond_cutoff {
+                if abandonment.coord != candidate.coord
+                    || value.store_root_hash != commit.store_root_hash
+                    || value.author_registration != commit.author_registration
+                    || value.order.predecessor != commit.order.predecessor
+                    || !value
+                        .abandoned_candidates()
+                        .iter()
+                        .any(|manifest| manifest.candidate == target)
+                {
                     return Err(RemoteObjectRecordError::InvalidProof(
-                        "candidate is not strictly beyond its excluded author cutoff".to_string(),
+                        "accepted abandonment does not exclude the exact candidate".into(),
                     ));
                 }
                 Ok(())
             }
-            Self::MergeMembershipGrantRevocation { .. } => Ok(()),
-            Self::MergeDependencyRetraction { dependency, .. } => {
-                let mut direct = commit
-                    .order
-                    .dependencies()
-                    .values()
-                    .collect::<BTreeSet<_>>();
-                if let Some(predecessor) = commit.order.predecessor() {
-                    direct.insert(predecessor);
-                }
-                if !direct.contains(dependency) {
+            Self::SnapshotRetirement { snapshot, coverage } => {
+                let base = crate::store_commit::StorePublicationBase::Snapshot(snapshot.clone());
+                base.validate_for_store(commit.store_root_hash)?;
+                let later_base = match &commit.publication_base {
+                    crate::store_commit::StorePublicationBase::Genesis => true,
+                    crate::store_commit::StorePublicationBase::Snapshot(previous) => {
+                        previous.publication.position < snapshot.publication.position
+                    }
+                };
+                if !later_base
+                    || coverage
+                        .commits()
+                        .get(&candidate.coord.stream_id)
+                        .is_some_and(|covered| {
+                            covered.coord.sequence() >= candidate.coord.sequence()
+                        })
+                {
                     return Err(RemoteObjectRecordError::InvalidProof(
-                        "dependent retraction proof is not an exact direct dependency".to_string(),
+                        "snapshot does not retire an unaccepted candidate base".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            Self::AuthorityRetirement {
+                publication,
+                coverage,
+                creation,
+                ..
+            } => {
+                publication.validate_slot()?;
+                if publication.store_root_hash != commit.store_root_hash
+                    || commit.membership_authority.as_ref() != Some(creation)
+                    || coverage
+                        .commits()
+                        .get(&candidate.coord.stream_id)
+                        .is_some_and(|tip| tip.coord.sequence() >= candidate.coord.sequence())
+                {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "authority retirement does not bound an unaccepted candidate".into(),
                     ));
                 }
                 Ok(())
@@ -572,18 +273,6 @@ pub(super) fn ensure_candidate_nonactivation(
         }
     }
     Err(RemoteObjectRecordError::CandidateNonactivationMissing)
-}
-
-pub(super) fn find_nonactivation_proof<'a>(
-    former_candidates: &'a [CandidateNonactivation],
-    expected: &StoreBatchCommitRef,
-) -> Result<Option<&'a CandidateNonactivationProof>, RemoteObjectRecordError> {
-    for candidate in former_candidates {
-        if candidate.reference()? == *expected {
-            return Ok(Some(&candidate.proof));
-        }
-    }
-    Ok(None)
 }
 
 pub(super) fn validate_owner_partition<'a>(

@@ -291,6 +291,7 @@ impl LocalStoreWriter {
         )
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign_circle_commit(
         &self,
@@ -298,6 +299,7 @@ impl LocalStoreWriter {
         write_id: coven_protocol::write::WriteId,
         coord: coven_protocol::store_commit::StoreCommitCoord,
         order: coven_protocol::store_commit::StoreCommitOrder,
+        publication_base: coven_protocol::store_commit::StorePublicationBase,
         membership_state: coven_protocol::circle_control::StoreMembershipStateRef,
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
         membership_authority: coven_protocol::store_commit::StoreOperationMembershipAuthority,
@@ -312,6 +314,7 @@ impl LocalStoreWriter {
             write_id,
             coord,
             order,
+            publication_base,
             membership_state,
             device_state,
             membership_authority,
@@ -324,6 +327,7 @@ impl LocalStoreWriter {
         .map_err(crate::sync::store::circles::CircleOperationError::from)
     }
 
+    #[cfg(test)]
     pub(crate) fn verify_prepared_circle_commit(
         &self,
         bytes: &[u8],
@@ -335,19 +339,6 @@ impl LocalStoreWriter {
         crate::sync::store::circles::CircleOperationError,
     > {
         self.verify_prepared_commit(bytes, store_root_hash, coord, object)
-            .map_err(crate::sync::store::circles::CircleOperationError::from)
-    }
-
-    pub(crate) fn sign_circle_store_head(
-        &self,
-        root_hash: coven_protocol::store_commit::ObjectHash,
-        commit: coven_protocol::store_commit::StoreBatchCommitRef,
-        successor: coven_protocol::store_commit::SuccessorLink,
-    ) -> Result<
-        coven_protocol::store_commit::StoreDeviceHead,
-        crate::sync::store::circles::CircleOperationError,
-    > {
-        self.sign_device_head(root_hash, commit, successor)
             .map_err(crate::sync::store::circles::CircleOperationError::from)
     }
 

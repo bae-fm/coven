@@ -10,6 +10,7 @@ struct CircleSnapshotFixture {
     database_store_dir: coven_foundation::store_dir::StoreDir,
     store_database: StoreDatabase,
     store: std::sync::Arc<TestStore>,
+    signer: UserKeypair,
 }
 
 impl CircleSnapshotFixture {
@@ -19,20 +20,29 @@ impl CircleSnapshotFixture {
         let database = Database::open_synthetic_for_test(
             &directory.path().join("store.sqlite3"),
             database_store_dir.clone(),
-            crate::sync::test_helpers::test_synced_tables(),
+            vec![coven_protocol::synced_schema::SyncedTable::new(
+                "documents",
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
+            )
+            .scoped_by("audience")],
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             local_device_id.to_string(),
             Arc::new(coven_foundation::clock::SystemClock),
-            &crate::sync::test_helpers::test_migrations(),
+            &[coven_database::Migration::sql(
+                1,
+                "Circle documents",
+                "CREATE TABLE documents (id TEXT PRIMARY KEY, audience TEXT, _updated_at TEXT NOT NULL) STRICT;",
+            )],
         )
         .expect("open Circle snapshot test database");
         let store_database = StoreDatabase::new(&database);
-        let store = TestStore::create_browsable(
+        let signer = UserKeypair::generate();
+        let (store, _) = TestStore::create_with_connection(
             &database,
             database_store_dir.clone(),
             "circle-snapshot-store",
-            coven_keys::keys::UserKeypair::generate(),
+            signer.clone(),
             crate::sync::test_helpers::test_cloud_home(),
         )
         .await
@@ -43,14 +53,8 @@ impl CircleSnapshotFixture {
             database_store_dir,
             store_database,
             store,
+            signer,
         }
-    }
-
-    async fn apply_routing_schema(&self) {
-        self.database
-            .apply_coven_routing_schema_for_test()
-            .await
-            .expect("apply routing schema");
     }
 
     async fn install_active_circle(
@@ -59,10 +63,26 @@ impl CircleSnapshotFixture {
         coven_protocol::circle::CircleId,
         coven_protocol::circle::CircleControlCoord,
     ) {
-        self.store_database
-            .install_test_active_circle_with_control("snap".to_string())
+        let owner = self
+            .store
+            .bind_device_in(
+                &self.database,
+                self.database_store_dir.clone(),
+                &self.signer,
+            )
             .await
-            .expect("install active Circle")
+            .expect("bind Circle owner");
+        let circle = owner
+            .create_circle("0000000001000-0000-owner", "Household")
+            .await
+            .expect("publish Circle creation");
+        let control = self
+            .store_database
+            .current_circle_control(circle)
+            .await
+            .expect("read accepted Circle control")
+            .expect("Circle creation is accepted");
+        (circle, control)
     }
 
     async fn push_snapshots(&self) {
@@ -135,7 +155,6 @@ impl CircleSnapshotFixture {
 #[tokio::test]
 async fn circle_snapshot_authors_and_installs_as_a_bootstrap_image() {
     let fixture = CircleSnapshotFixture::initialize("circle-snapshot-device").await;
-    fixture.apply_routing_schema().await;
     let (circle_id, control) = fixture.install_active_circle().await;
     let access = fixture
         .publication_context(circle_id, control.clone())
@@ -173,7 +192,6 @@ async fn circle_snapshot_authors_and_installs_as_a_bootstrap_image() {
 #[tokio::test]
 async fn non_member_cannot_decrypt_circle_snapshot() {
     let fixture = CircleSnapshotFixture::initialize("circle-snapshot-outsider").await;
-    fixture.apply_routing_schema().await;
     let (circle_id, _control) = fixture.install_active_circle().await;
     fixture.push_snapshots().await;
 

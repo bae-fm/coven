@@ -21,6 +21,7 @@ pub struct MembershipRollupHead {
     pub head_value: AuthorHead,
     pub entry: MembershipEntryRef,
     pub entry_value: MembershipEntry,
+    pub predecessor_acceptance: Option<crate::membership::MembershipHeadAcceptance>,
 }
 
 /// One conflict resolution the carried heads depend on.
@@ -200,6 +201,29 @@ impl MembershipRollupHead {
                 "membership rollup head {}/{}/{sequence} does not match its own reference",
                 stream.author_pubkey, stream.stream_id
             )));
+        }
+        match (
+            self.head_value
+                .body
+                .predecessor
+                .as_ref()
+                .and_then(|previous| previous.acceptance()),
+            &self.predecessor_acceptance,
+        ) {
+            (Some(object), Some(result)) => {
+                object.verify(&result.to_bytes())?;
+                if Some(&result.head) != self.head_value.body.predecessor_head() {
+                    return Err(StoreProtocolError::Malformed(
+                        "membership rollup carries another predecessor's acceptance".into(),
+                    ));
+                }
+            }
+            (None, None) => {}
+            _ => {
+                return Err(StoreProtocolError::Malformed(
+                    "membership rollup omits or adds a predecessor acceptance".into(),
+                ))
+            }
         }
         self.head
             .object

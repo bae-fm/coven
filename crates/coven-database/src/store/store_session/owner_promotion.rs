@@ -1,6 +1,10 @@
+mod retirement;
+
 use std::collections::BTreeSet;
 
-use crate::{persist_exact_remote_object_on, DbError};
+use crate::{
+    persist_exact_remote_object_on, ActiveStorePublication, ActiveStorePublicationOwner, DbError,
+};
 
 use super::{StoreDatabase, StoreSession};
 
@@ -59,55 +63,22 @@ impl StoreSession<'_> {
     fn advance_owner_promotion_journal(
         &self,
         transition: coven_protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
+        accepted_request: Option<crate::AcceptedStoreCommitEvidence>,
     ) -> Result<(), DbError> {
         let (journal_key, target_key, previous_value, next_value, remote_objects) =
             transition.into_values();
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
-            .advance_owner_promotion_journal(
-                journal_key,
-                target_key,
-                previous_value,
-                next_value,
-                remote_objects,
-            )?;
-        tx.commit().map_err(DbError::from)
-    }
-
-    fn end_nonactivated_owner_promotion_candidate(
-        &self,
-        transition: coven_protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
-        candidate: coven_protocol::store_commit::StoreBatchCommitRef,
-        objects: Vec<coven_protocol::objects::ExactObjectRef>,
-        nonactivation: coven_protocol::remote_object::CandidateNonactivation,
-    ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
-        let (journal_key, target_key, previous_value, next_value, remote_objects) =
-            transition.into_values();
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let cleanup = super::candidate_records::begin_candidate_nonactivation_targets_on(
+        advance_owner_promotion_journal_on(
             &tx,
-            &candidate,
-            &objects,
-            &nonactivation,
+            self.store_dir,
+            journal_key,
+            target_key,
+            previous_value,
+            next_value,
+            remote_objects,
+            accepted_request.as_ref(),
         )?;
-        crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
-            .advance_owner_promotion_journal(
-                journal_key,
-                target_key,
-                previous_value,
-                next_value,
-                remote_objects,
-            )?;
-        tx.commit().map_err(DbError::from)?;
-        Ok(cleanup)
-    }
-
-    fn owner_promotion_candidate_cleanup_targets(
-        &self,
-        candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
-        objects: &[coven_protocol::objects::ExactObjectRef],
-    ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
-        super::candidate_records::candidate_cleanup_targets_on(self.conn, candidate, objects)
+        tx.commit().map_err(DbError::from)
     }
 
     fn replace_failed_owner_promotion_journal(
@@ -119,6 +90,19 @@ impl StoreSession<'_> {
         replacement_value: String,
     ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let previous: coven_protocol::owner_promotion_journal::OwnerPromotionJournal =
+            serde_json::from_str(&previous_value)
+                .map_err(|error| DbError::context("parse failed promotion", error))?;
+        if super::active_store_publication::load_active_store_publication_on(&tx)?.is_some_and(
+            |active| {
+                active.owner()
+                    == &ActiveStorePublicationOwner::OwnerPromotion(previous.promotion_id)
+            },
+        ) {
+            return Err(DbError::Message(
+                "failed promotion still owns candidate cleanup".into(),
+            ));
+        }
         let inserted = tx
             .execute(
                 "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
@@ -235,52 +219,19 @@ impl StoreDatabase {
         &self,
         transition: coven_protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
     ) -> Result<(), DbError> {
-        self.call_store(move |session| session.advance_owner_promotion_journal(transition))
+        self.call_store(move |session| session.advance_owner_promotion_journal(transition, None))
             .await
     }
 
-    /// End a promotion whose Store candidate lost its stream position: record the
-    /// nonactivation against every object that candidate published and advance the
-    /// journal onto its stale successor in one transaction, returning the objects
-    /// to delete. The candidate publishes its membership entry and head before the
-    /// Store head that decides the position, so those sit in create-once slots the
-    /// promoter's next attempt composes into; leaving them there would refuse every
-    /// later membership publication on that stream.
-    pub async fn end_nonactivated_owner_promotion_candidate(
+    /// Record the winning request publication through the exact accepted
+    /// capability returned by its publisher, including a replaced envelope.
+    pub async fn advance_accepted_owner_promotion_request(
         &self,
         transition: coven_protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
-        candidate: coven_protocol::store_commit::StoreBatchCommitRef,
-        objects: Vec<coven_protocol::objects::ExactObjectRef>,
-        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
-    ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
-        if nonactivation.candidate_reference().map_err(DbError::from)? != candidate {
-            return Err(DbError::Message(
-                "verified nonactivation names another Owner-promotion candidate".to_string(),
-            ));
-        }
-        let nonactivation = nonactivation.into_durable();
+        acceptance: crate::AcceptedStoreCommitEvidence,
+    ) -> Result<(), DbError> {
         self.call_store(move |session| {
-            session.end_nonactivated_owner_promotion_candidate(
-                transition,
-                candidate,
-                objects,
-                nonactivation,
-            )
-        })
-        .await
-    }
-
-    /// The published objects of a promotion candidate that already lost, still
-    /// awaiting deletion. An interrupted cleanup resumes through this: the stale
-    /// journal names the candidate, and each object's durable state says whether it
-    /// is still there.
-    pub async fn owner_promotion_candidate_cleanup_targets(
-        &self,
-        candidate: coven_protocol::store_commit::StoreBatchCommitRef,
-        objects: Vec<coven_protocol::objects::ExactObjectRef>,
-    ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
-        self.call_store(move |session| {
-            session.owner_promotion_candidate_cleanup_targets(&candidate, &objects)
+            session.advance_owner_promotion_journal(transition, Some(acceptance))
         })
         .await
     }
@@ -327,7 +278,110 @@ pub(super) fn advance_owner_promotion_journal_on(
     previous_value: String,
     next_value: String,
     remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
+    accepted_request: Option<&crate::AcceptedStoreCommitEvidence>,
 ) -> Result<(), DbError> {
+    use coven_protocol::owner_promotion_journal::{
+        OwnerPromotionJournal, OwnerPromotionJournalState,
+    };
+
+    let previous: OwnerPromotionJournal = serde_json::from_str(&previous_value)
+        .map_err(|error| DbError::context("parse prior Owner-promotion journal", error))?;
+    let next: OwnerPromotionJournal = serde_json::from_str(&next_value)
+        .map_err(|error| DbError::context("parse successor Owner-promotion journal", error))?;
+    if previous.promotion_id() != next.promotion_id() {
+        return Err(DbError::Message(
+            "Owner-promotion journal advance changes promotion identity".to_string(),
+        ));
+    }
+    if matches!(&next.state, OwnerPromotionJournalState::Nonactivated { .. })
+        || matches!(&next.state, OwnerPromotionJournalState::Stale { evidence, .. }
+            if matches!(evidence.as_ref(), coven_protocol::owner_promotion_journal::OwnerPromotionStaleEvidence::Candidate { .. }))
+    {
+        return Err(DbError::Message(
+            "promotion nonactivation requires accepted authority and owned cleanup".into(),
+        ));
+    }
+    match (&previous.state, &next.state, accepted_request) {
+        (
+            OwnerPromotionJournalState::RequestPrepared { candidate, .. },
+            OwnerPromotionJournalState::RequestAccepted { publication, .. },
+            Some(accepted),
+        ) => {
+            let exact = accepted.exact_publication().ok_or_else(|| {
+                DbError::Message(
+                    "Owner-promotion request lacks its exact accepted publication receipt".into(),
+                )
+            })?;
+            if accepted.commit_ref() != &candidate.reference
+                || accepted.commit_ref() != &publication.value.commit
+                || exact.reference() != &publication.value.publication
+            {
+                return Err(DbError::Message(
+                    "Owner-promotion request differs from its accepted publication evidence".into(),
+                ));
+            }
+        }
+        (
+            OwnerPromotionJournalState::RequestPrepared { .. },
+            OwnerPromotionJournalState::RequestAccepted { .. },
+            None,
+        ) => {
+            return Err(DbError::Message(
+                "Owner-promotion request advancement requires accepted publication evidence".into(),
+            ));
+        }
+        (_, _, Some(_)) => {
+            return Err(DbError::Message(
+                "accepted request evidence cannot authorize another promotion transition".into(),
+            ));
+        }
+        (_, _, None) => {}
+    }
+    let previous_candidate = match &previous.state {
+        OwnerPromotionJournalState::RequestPrepared { candidate, .. }
+        | OwnerPromotionJournalState::RequestAccepted { candidate, .. }
+        | OwnerPromotionJournalState::MergeHeadPrepared { candidate, .. } => {
+            Some(candidate.as_ref())
+        }
+        _ => None,
+    };
+    let next_candidate = match &next.state {
+        OwnerPromotionJournalState::RequestPrepared { candidate, .. }
+        | OwnerPromotionJournalState::RequestAccepted { candidate, .. }
+        | OwnerPromotionJournalState::MergeHeadPrepared { candidate, .. } => {
+            Some(candidate.as_ref())
+        }
+        _ => None,
+    };
+    let owner = ActiveStorePublicationOwner::OwnerPromotion(next.promotion_id());
+    if let Some(candidate) = next_candidate {
+        let active = ActiveStorePublication::for_commit(owner.clone(), candidate)?;
+        match super::active_store_publication::load_active_store_publication_on(tx)? {
+            Some(existing)
+                if previous_candidate.is_some() && existing.same_commit_reservation(&active) => {}
+            Some(existing) => {
+                return Err(DbError::Message(format!(
+                    "Owner-promotion publication is occupied by {:?}",
+                    existing.owner()
+                )));
+            }
+            None if previous_candidate.is_none() => {
+                let claim = super::active_store_publication::claim_active_store_publication_on(
+                    tx, &active,
+                )?;
+                if claim != super::active_store_publication::ActiveStorePublicationClaim::Acquired {
+                    return Err(DbError::Message(
+                        "Owner-promotion publication changed during journal advance".to_string(),
+                    ));
+                }
+            }
+            None => {
+                return Err(DbError::Message(
+                    "prepared Owner-promotion journal lost its active publication".to_string(),
+                ));
+            }
+        }
+    }
     let mut object_ids = BTreeSet::new();
     for remote in &remote_objects {
         if !object_ids.insert(remote.object_id()) {
@@ -337,6 +391,53 @@ pub(super) fn advance_owner_promotion_journal_on(
         }
         persist_exact_remote_object_on(tx, store_dir, remote, "Owner-promotion candidate object")?;
     }
+    if let (
+        OwnerPromotionJournalState::RequestAccepted {
+            candidate,
+            publication,
+            ..
+        },
+        OwnerPromotionJournalState::AwaitingAcceptance { .. },
+    ) = (&previous.state, &next.state)
+    {
+        let object_id = coven_protocol::remote_object::remote_object_id(&publication.object);
+        let remote = crate::load_remote_object_on(tx, object_id)?;
+        let expected = coven_protocol::remote_object::RemoteObjectRecord::prepared_owner_promotion_request_publication(
+            publication,
+            &candidate.commit,
+        )?;
+        if remote.object() != expected.object() || !remote.records_verified_upload() {
+            return Err(DbError::Message(
+                "Owner-promotion request result has not completed its exact upload".into(),
+            ));
+        }
+        let remote = remote.into_activated(&candidate.reference)?;
+        crate::update_remote_object_on(tx, object_id, &remote)?;
+    }
+    replace_owner_promotion_journal_on(
+        tx,
+        &journal_key,
+        &target_key,
+        &previous_value,
+        &next_value,
+    )?;
+    if let Some(candidate) = previous_candidate.filter(|_| next_candidate.is_none()) {
+        super::active_store_publication::clear_active_store_commit_for_owner_on(
+            tx,
+            &owner,
+            &candidate.reference,
+        )?;
+    }
+    Ok(())
+}
+
+fn replace_owner_promotion_journal_on(
+    tx: &rusqlite::Transaction<'_>,
+    journal_key: &str,
+    target_key: &str,
+    previous_value: &str,
+    next_value: &str,
+) -> Result<(), DbError> {
     let by_id = tx
         .execute(
             "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",

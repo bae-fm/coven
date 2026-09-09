@@ -8,19 +8,19 @@ use super::snapshots as snapshot;
 use super::{AuthorizedWriterOperation, StoreError};
 use crate::sync::cycle::SyncCycleFailure;
 use crate::sync::store::commit_publication::LocalStoreWriter;
-use crate::sync::store::commit_verification::merge_history::SelectedReplayBaselineRetirement;
+use crate::sync::store::commit_verification::merge_history::SelectedStoreSnapshot;
 use coven_database::StoreDatabase;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-use coven_protocol::store_commit::{
-    ack_slot_prefix, CommitFrontier, StoreAck, StoreSnapshotLocator, SuccessorLink,
-};
+use coven_protocol::store_commit::{ack_slot_prefix, CommitFrontier, StoreAck, SuccessorLink};
 use coven_storage::CloudSyncObjectStorage;
 use std::sync::Arc;
 use tracing::debug;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreAckError {
+    #[error("Store acknowledgement membership: {0}")]
+    Membership(#[from] coven_protocol::membership::MembershipError),
     #[error("database: {0}")]
     Database(#[from] coven_database::DbError),
     #[error("Store protocol: {0}")]
@@ -59,8 +59,7 @@ pub struct StagedStoreAcknowledgement {
     pub acknowledgement: Option<StoreAck>,
 }
 
-/// What standing on this device's acknowledged snapshot did, or why it did
-/// nothing.
+/// What standing on the latest accepted snapshot did, or why it did nothing.
 ///
 /// A decline is a value rather than a swallowed nothing for the same reason the
 /// reclaim report's is: a stage that speaks only when it acts is
@@ -74,75 +73,37 @@ pub enum ReplayBaselineAdvance {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayBaselineDecline {
-    /// This device has published no acknowledgement naming a snapshot, so it
-    /// has never said it holds one.
-    NoAcknowledgedSnapshot,
-    /// The device that authored the acknowledged snapshot is no longer an
-    /// activated registration, so its stream is not this device's to read.
-    SnapshotAuthorInactive { generation: u64 },
-    /// The acknowledged snapshot is gone from its author's stream.
-    SnapshotUnavailable { generation: u64 },
-    /// The acknowledged snapshot did not verify as installable now.
-    SnapshotRejected { generation: u64 },
-    /// A current writer has not published an acknowledgement whose Store cut
-    /// covers this snapshot.
-    MissingWriterAcknowledgement {
-        generation: u64,
-        member: String,
-        device_id: String,
-    },
-    /// Current membership has not been named by accepted Store history, so its
-    /// writer set cannot yet license retirement.
-    MembershipNotAccepted { generation: u64 },
-    /// A published Owner recovery registration has not yet activated its
-    /// replacement writer, so retiring its predecessor history would strand it.
-    PendingOwnerRecovery {
-        generation: u64,
-        member: String,
-        device_id: String,
-    },
+    /// Accepted Store history contains no snapshot boundary.
+    NoAcceptedSnapshot,
     /// Current accepted history applies a commit outside the snapshot cut
     /// before a commit inside it, so the cut cannot become a replay baseline.
-    NonPrefixCut { generation: u64 },
+    NonPrefixCut {
+        snapshot: coven_protocol::store_commit::StoreSnapshotRef,
+    },
     /// The steady state: the baseline already restates everything the
-    /// acknowledged snapshot does.
-    BaselineAtCoverage { generation: u64 },
+    /// accepted snapshot does.
+    BaselineAtCoverage {
+        snapshot: coven_protocol::store_commit::StoreSnapshotRef,
+    },
 }
 
 impl ReplayBaselineDecline {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::NoAcknowledgedSnapshot => "this device has acknowledged no snapshot",
-            Self::SnapshotAuthorInactive { .. } => "the acknowledged snapshot's author is inactive",
-            Self::SnapshotUnavailable { .. } => "the acknowledged snapshot is gone from its stream",
-            Self::SnapshotRejected { .. } => "the acknowledged snapshot did not verify",
-            Self::MissingWriterAcknowledgement { .. } => {
-                "a current writer has not crossed the acknowledged snapshot"
-            }
-            Self::MembershipNotAccepted { .. } => {
-                "current membership is not yet in accepted Store history"
-            }
-            Self::PendingOwnerRecovery { .. } => {
-                "an Owner recovery is waiting to activate its replacement writer"
-            }
+            Self::NoAcceptedSnapshot => "accepted Store history contains no snapshot",
             Self::NonPrefixCut { .. } => {
-                "the acknowledged snapshot is not a prefix of accepted replay order"
+                "the accepted snapshot is not a prefix of accepted replay order"
             }
             Self::BaselineAtCoverage { .. } => "the baseline already covers it",
         }
     }
 
-    pub fn generation(&self) -> Option<u64> {
+    pub fn snapshot(&self) -> Option<&coven_protocol::store_commit::StoreSnapshotRef> {
         match self {
-            Self::NoAcknowledgedSnapshot => None,
-            Self::SnapshotAuthorInactive { generation }
-            | Self::SnapshotUnavailable { generation }
-            | Self::SnapshotRejected { generation }
-            | Self::MissingWriterAcknowledgement { generation, .. }
-            | Self::MembershipNotAccepted { generation }
-            | Self::PendingOwnerRecovery { generation, .. }
-            | Self::NonPrefixCut { generation }
-            | Self::BaselineAtCoverage { generation } => Some(*generation),
+            Self::NoAcceptedSnapshot => None,
+            Self::NonPrefixCut { snapshot } | Self::BaselineAtCoverage { snapshot } => {
+                Some(snapshot)
+            }
         }
     }
 }
@@ -171,17 +132,14 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
 
     /// Publish anything queued, then acknowledge where this device now stands.
     /// Local replay retirement runs independently after acknowledgement
-    /// publication, once every current writer has crossed the selected cut.
+    /// publication, from the installed accepted snapshot boundary.
     pub(crate) async fn stage_and_publish(
         &mut self,
         sync_time: &str,
-        settled: &crate::sync::store::SettledCycle,
     ) -> Result<(), SyncCycleFailure> {
-        Box::pin(self.drain_acknowledgements())
-            .await
-            .map_err(|error| {
-                SyncCycleFailure::operation("publish queued Store acknowledgement", error)
-            })?;
+        self.drain_acknowledgements().await.map_err(|error| {
+            SyncCycleFailure::operation("publish queued Store acknowledgement", error)
+        })?;
         let frontier =
             CommitFrontier::from_refs(self.database.materialized_frontier().await.map_err(
                 |error| SyncCycleFailure::operation("read Store acknowledgement frontier", error),
@@ -200,63 +158,44 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         .await
         .map_err(|error| SyncCycleFailure::operation("stage Circle acknowledgements", error))?;
         let StagedStoreAcknowledgement { acknowledgement } =
-            Box::pin(self.stage_acknowledgement_against(
-                frontier.clone(),
-                sync_time.to_owned(),
-                Some(settled),
-            ))
-            .await
-            .map_err(|error| SyncCycleFailure::operation("stage Store acknowledgement", error))?;
+            Box::pin(self.stage_acknowledgement(frontier.clone(), sync_time.to_owned()))
+                .await
+                .map_err(|error| {
+                    SyncCycleFailure::operation("stage Store acknowledgement", error)
+                })?;
         if let Some(acknowledgement) = &acknowledgement {
             debug!(
                 sequence = acknowledgement.sequence,
-                snapshot = acknowledgement
-                    .snapshot
-                    .as_ref()
-                    .map(|locator| locator.snapshot.generation),
                 "Staged a Store acknowledgement"
             );
         }
-        Box::pin(self.drain_acknowledgements())
+        self.drain_acknowledgements()
             .await
             .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
         Ok(())
     }
 
-    /// Stand on the snapshot this device has already acknowledged.
-    ///
-    /// Its own cycle stage, not a step of publishing an acknowledgement,
-    /// because the licence is the statement the device has already made and not
-    /// the act of making another. A device with nothing new to say never stages
-    /// one; a device whose store has moved past every published snapshot can no
-    /// longer name one to stage; and both of those describe a device with a full
-    /// retained history to retire. Reading the licence out of what a device is
-    /// about to say finds nothing in exactly those cases.
+    /// Stand on the latest installed accepted snapshot.
     ///
     /// Idempotent: adopting a cut the baseline already holds retires nothing,
     /// and the ordinary answer once a device has caught up is
     /// [`ReplayBaselineDecline::BaselineAtCoverage`], reached without reading
     /// anything from the provider.
-    pub(crate) async fn stand_on_acknowledged_snapshot(
+    pub(crate) async fn stand_on_accepted_snapshot(
         &mut self,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<ReplayBaselineAdvance, StoreAckError> {
-        let registration = self.writer.local_registration_ref().clone();
-        let members = self.writer.membership().clone();
-        let resolved = self
-            .writer
-            .resolve_acknowledged_snapshot(&registration, &members)
-            .await?;
+        let resolved = self.writer.resolve_accepted_snapshot().await?;
         let selected = match resolved {
             Ok(selected) => selected,
             Err(decline) => return Ok(ReplayBaselineAdvance::Declined(decline)),
         };
-        let generation = selected.snapshot.reference.generation;
-        let advanced = match self.advance_over(Some(selected), routing_encryption).await {
+        let snapshot = selected.snapshot.reference.clone();
+        let advanced = match self.advance_over(selected, routing_encryption).await {
             Ok(advanced) => advanced,
             Err(StoreAckError::Database(coven_database::DbError::ReplayRetirementCutNotPrefix)) => {
                 return Ok(ReplayBaselineAdvance::Declined(
-                    ReplayBaselineDecline::NonPrefixCut { generation },
+                    ReplayBaselineDecline::NonPrefixCut { snapshot },
                 ));
             }
             Err(error) => return Err(error),
@@ -267,72 +206,24 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             // which the coverage check above did not catch: the baseline is at
             // or past it by a route the coverage comparison did not see.
             None => Ok(ReplayBaselineAdvance::Declined(
-                ReplayBaselineDecline::BaselineAtCoverage { generation },
+                ReplayBaselineDecline::BaselineAtCoverage { snapshot },
             )),
         }
     }
 
-    async fn snapshot_it_will_name(
-        &mut self,
-        frontier: &CommitFrontier,
-        device_state: &coven_protocol::store_commit::StoreDeviceStateRef,
-        settled: Option<&crate::sync::store::SettledCycle>,
-    ) -> Result<Option<StoreSnapshotLocator>, StoreAckError> {
-        // Which snapshot a device could acknowledge next is settled by the same
-        // local facts reclaim's answer is, and reaching it means reading every
-        // activated device's snapshot stream. A device with nothing new to say
-        // asks that question every cycle and gets the same answer, so the
-        // answer is remembered against the facts it was reached from and the
-        // read is skipped until one of them moves.
-        let inputs = match settled {
-            Some(settled) => {
-                let inputs =
-                    crate::sync::store::CycleInputs::read(&self.database, self.writer.membership())
-                        .await?;
-                if let Some(remembered) = settled.acknowledgeable_snapshot(&inputs) {
-                    return Ok(remembered);
-                }
-                Some((settled, inputs))
-            }
-            None => None,
-        };
-        let selected = self
-            .writer
-            .select_acknowledgement_snapshot(frontier, device_state)
-            .await?;
-        if let Some((settled, inputs)) = &inputs {
-            settled.record_acknowledgeable_snapshot(
-                inputs.clone(),
-                selected.as_ref().map(|selected| StoreSnapshotLocator {
-                    author_registration: selected.snapshot.meta.author_registration.clone(),
-                    snapshot: selected.snapshot.reference.clone(),
-                }),
-            );
-        }
-        let Some(selected) = selected else {
-            return Ok(None);
-        };
-        let locator = StoreSnapshotLocator {
-            author_registration: selected.snapshot.meta.author_registration.clone(),
-            snapshot: selected.snapshot.reference.clone(),
-        };
-        Ok(Some(locator))
-    }
-
     async fn advance_over(
         &mut self,
-        snapshot: Option<SelectedReplayBaselineRetirement>,
+        snapshot: SelectedStoreSnapshot,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<Option<coven_database::AdvancedReplayBaseline>, StoreAckError> {
-        let Some(snapshot) = snapshot else {
-            return Ok(None);
-        };
         Ok(self
             .database
             .advance_snapshot_replay_baseline(
                 self.writer.store_root().clone(),
                 snapshot.verified,
                 routing_encryption.cloned(),
+                self.local_writer
+                    .local_membership(self.writer.membership())?,
             )
             .await?)
     }
@@ -346,30 +237,20 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
     /// device acknowledges its own acknowledgement and a Store where nothing is
     /// happening grows one commit per device per sync cycle, without end.
     ///
-    /// [`StoreAckAssertion`] is what an acknowledgement claims; the rest of it —
+    /// [`coven_protocol::store_commit::StoreAckAssertion`] is what an acknowledgement claims; the rest of it —
     /// the sequence, the wall clock, the links to its neighbours — differs by
     /// construction and says nothing. The one subtlety is the frontier: an
     /// acknowledgement cannot cover the commit that carries it, so the standing
     /// state records that commit and the comparison treats it as covered.
-    /// Anything else in the frontier having moved is new material to acknowledge.
+    /// For other advances, verified history distinguishes new work from peer
+    /// acknowledgements so idle devices do not acknowledge each other forever.
     ///
     /// Returns the acknowledgement it staged, or `None` when the standing one
-    /// still holds, alongside what advancing the baseline retired.
-    #[cfg(any(test, feature = "test-utils"))]
+    /// still holds. Baseline retirement runs independently.
     pub(crate) async fn stage_acknowledgement(
         &mut self,
         frontier: CommitFrontier,
         sync_time: String,
-    ) -> Result<StagedStoreAcknowledgement, StoreAckError> {
-        self.stage_acknowledgement_against(frontier, sync_time, None)
-            .await
-    }
-
-    async fn stage_acknowledgement_against(
-        &mut self,
-        frontier: CommitFrontier,
-        sync_time: String,
-        settled: Option<&crate::sync::store::SettledCycle>,
     ) -> Result<StagedStoreAcknowledgement, StoreAckError> {
         let history_cut =
             coven_protocol::store_commit::StoreHistoryCut::from_commits(frontier.commits().clone());
@@ -378,62 +259,50 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             .store_device_state_for_history_cut(&history_cut)
             .await?;
         let previous = self.database.latest_local_store_ack().await?;
-        let snapshot = self
-            .snapshot_it_will_name(&frontier, &device_state, settled)
-            .await?;
         let acknowledgement = self
-            .say_acknowledgement(history_cut, device_state, previous, snapshot, sync_time)
+            .say_acknowledgement(history_cut, device_state, previous, sync_time)
             .await?;
         Ok(StagedStoreAcknowledgement { acknowledgement })
     }
 
-    /// Stage the acknowledgement itself after selecting the snapshot it names.
-    /// Publishing the durable promise does not retire local replay inputs;
-    /// retirement later requires every current writer to have crossed the cut.
+    /// Stage the observation without retiring local replay inputs.
+    /// A separate stage adopts the accepted snapshot boundary.
     async fn say_acknowledgement(
         &mut self,
         history_cut: coven_protocol::store_commit::StoreHistoryCut,
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
         previous: Option<coven_database::PublishedStoreAck>,
-        snapshot: Option<StoreSnapshotLocator>,
         sync_time: String,
     ) -> Result<Option<StoreAck>, StoreAckError> {
         let device_id = self.writer.local_device_id().to_string();
         let root = self.writer.store_root().clone();
-        let exclusions = coven_protocol::store_commit::StoreAckExclusionState {
-            proposal_freezes: self.database.store_device_exclusion_freezes().await?,
-        };
         if self.database.oldest_outbound_store_ack().await?.is_some() {
             return Err(StoreAckError::InvalidOutbound(
                 "a prior acknowledgement remains queued".to_string(),
             ));
         }
-        let assertion = self.local_writer.device_acknowledgement_assertion(
-            history_cut,
-            device_state.clone(),
-            snapshot,
-            exclusions,
-        );
-        let membership_state =
-            coven_protocol::circle_control::StoreMembershipStateRef::from_membership(
-                self.writer.membership(),
-                device_state.recovery().to_vec(),
-            )?;
+        let assertion = self
+            .local_writer
+            .device_acknowledgement_assertion(history_cut, device_state);
         // A queued Circle acknowledgement travels to the cloud inside the Store
         // acknowledgement's commit, so one waiting is reason enough to publish
         // even when this device has nothing of its own left to say.
         let carries_circle_acknowledgements = self.database.outbound_circle_acks_pending().await?;
-        let standing_still_holds = previous
+        let standing_still_holds = match previous
             .as_ref()
             .and_then(|previous| previous.standing.as_ref())
-            .is_some_and(|standing| {
-                standing.still_holds(&assertion)
-                    && standing
-                        .activating_commit
-                        .as_ref()
-                        .and_then(|commit| self.writer.accepted_commit_membership_state(commit))
-                        == Some(&membership_state)
-            });
+        {
+            Some(standing) if standing.still_holds(&assertion) => true,
+            Some(standing) if standing.assertion.same_state_as(&assertion) => self
+                .writer
+                .history_has_only_acknowledgements(
+                    &standing.assertion.store_cut,
+                    &assertion.store_cut,
+                )
+                .await
+                .map_err(StoreError::from)?,
+            Some(_) | None => false,
+        };
         if !carries_circle_acknowledgements && standing_still_holds {
             debug!("skip Store acknowledgement: the standing one still holds");
             return Ok(None);
@@ -505,9 +374,22 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
     }
 
     pub(crate) async fn drain_acknowledgements(&mut self) -> Result<u64, StoreAckError> {
+        let mut authorship = self.database.author_own_stream().await;
         let device_id = self.writer.local_device_id().to_string();
         let mut published = 0_u64;
         while let Some(outbound) = self.database.oldest_outbound_store_ack().await? {
+            if let Some(active) = self.database.active_store_publication().await? {
+                if active.owner()
+                    == &coven_database::ActiveStorePublicationOwner::StoreAcknowledgement
+                {
+                    crate::sync::store::authorization::retire_store_write_candidates(
+                        &self.database,
+                        self.storage.as_ref(),
+                        active,
+                    )
+                    .await?;
+                }
+            }
             if let Some(activated) = self
                 .database
                 .activated_store_ack(&outbound.reference.registration)
@@ -525,7 +407,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                         .ok_or(StoreAckError::PublishCountExhausted)?;
                     continue;
                 }
-                if activated.reference.sequence >= outbound.reference.sequence {
+                if activated.reference.sequence > outbound.reference.sequence {
                     return Err(StoreAckError::InvalidOutbound(
                         "queued Store acknowledgement differs from the activated exact ref"
                             .to_string(),
@@ -533,33 +415,80 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                 }
             }
             let candidate = match outbound.activation.clone() {
-                coven_database::OutboundStoreAckActivation::AwaitingCandidate => {
-                    let plan = self.writer.prepare_plan().await?;
-                    plan.validate_acknowledgement(&outbound.ack.value)?;
-                    let candidate = Box::pin(self.writer.prepare_candidate(
-                        plan,
-                        crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Acknowledgement {
-                            reference: outbound.reference.clone(),
-                            value: outbound.ack.value.clone(),
-                            circle_acknowledgements: outbound.circle_acknowledgements.clone(),
-                        },
-                    ))
-                    .await?;
-                    self.database
-                        .prepare_acknowledgement_activation(outbound.reference.clone(), candidate)
+                coven_database::OutboundStoreAckActivation::AwaitingCandidate
+                | coven_database::OutboundStoreAckActivation::Created => {
+                    let plan = self.writer.prepare_plan_with_authorship(authorship).await?;
+                    let created = matches!(
+                        outbound.activation,
+                        coven_database::OutboundStoreAckActivation::Created
+                    );
+                    if created
+                        && self
+                            .database
+                            .activated_store_ack(&outbound.reference.registration)
+                            .await?
+                            .is_some_and(|activated| activated.reference == outbound.reference)
+                    {
+                        authorship = plan.into_authorship();
+                        continue;
+                    }
+                    let (reference, acknowledgement) = if created {
+                        if outbound.ack.value.store_cut != plan.predecessor_cut()?
+                            || &outbound.ack.value.device_state != plan.device_state()
+                        {
+                            self.prepare_acknowledgement_successor(&outbound, &plan)
+                                .await?
+                        } else {
+                            (outbound.reference.clone(), outbound.ack.clone())
+                        }
+                    } else {
+                        self.prepare_acknowledgement_object(
+                            &outbound,
+                            &plan,
+                            outbound.reference.sequence,
+                            outbound.reference.object.slot().clone(),
+                            outbound.ack.value.successor.clone(),
+                        )?
+                    };
+                    plan.validate_acknowledgement(&acknowledgement.value)?;
+                    let mut candidate = Box::pin(self.writer.prepare_candidate(
+                    &plan,
+                    crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Acknowledgement {
+                        reference: reference.clone(),
+                        value: acknowledgement.value.clone(),
+                        circle_acknowledgements: outbound.circle_acknowledgements.clone(),
+                    },
+                ))
+                .await?;
+                    if created && reference != outbound.reference {
+                        candidate
+                            .history_evidence
+                            .acknowledgement
+                            .as_mut()
+                            .ok_or_else(|| {
+                                StoreAckError::InvalidOutbound(
+                                    "prepared acknowledgement omits its retained proof".into(),
+                                )
+                            })?
+                            .predecessors =
+                            vec![(outbound.reference.clone(), outbound.ack.value.clone())];
+                        candidate.validate_closed_shape()?;
+                    }
+                    let claimed = self
+                        .database
+                        .prepare_acknowledgement_activation(
+                            outbound.reference.clone(),
+                            acknowledgement,
+                            candidate,
+                        )
                         .await?;
+                    if !claimed {
+                        return Ok(published);
+                    }
+                    authorship = plan.into_authorship();
                     continue;
                 }
                 coven_database::OutboundStoreAckActivation::Prepared(candidate) => candidate,
-                coven_database::OutboundStoreAckActivation::Nonactivating(_) => {
-                    self.writer
-                        .finish_nonactivating_acknowledgement(outbound.reference)
-                        .await?;
-                    published = published
-                        .checked_add(1)
-                        .ok_or(StoreAckError::PublishCountExhausted)?;
-                    continue;
-                }
             };
             let context = ProtocolObjectContext::signed_plaintext(
                 outbound.ack.value.store_root_hash,
@@ -616,39 +545,188 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                 .circles()
                 .publish_acknowledgement_objects(&outbound, &candidate)
                 .await?;
-            let _authorship = self.database.author_own_stream().await;
-            let publication = Box::pin(self.writer.publish_prepared(
-                Box::new(candidate),
+            let outcome = Box::pin(self.writer.publish_prepared_attempt(
+                Box::new(candidate.clone()),
                 None,
                 None,
             ))
             .await?;
-            match publication
-            {
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Activated(activating_commit) => {
-                    self.database
-                        .complete_outbound_store_ack(outbound.reference, activating_commit)
-                        .await?;
-                }
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Nonactivated(_) => {}
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Reprepared => {
-                    continue;
-                }
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(_)
-                | crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
-                    return Err(StoreAckError::InvalidOutbound(
-                        "acknowledgement publication returned non-acknowledgement conflict state"
-                            .to_string(),
-                    ));
-                }
+            let accepted = match outcome {
+            crate::sync::store::commit_publication::operation::StoreOperationPublicationOutcome::Accepted(accepted) => accepted,
+            crate::sync::store::commit_publication::operation::StoreOperationPublicationOutcome::SnapshotRetired(snapshot) => {
+                authorship = self.replace_snapshot_acknowledgement(&outbound, &candidate, snapshot, authorship).await?;
+                continue;
             }
+        };
+            self.database
+                .complete_outbound_store_ack(outbound.reference, accepted.commit_ref().clone())
+                .await?;
             published = published
                 .checked_add(1)
                 .ok_or(StoreAckError::PublishCountExhausted)?;
         }
         Ok(published)
     }
+
+    async fn prepare_acknowledgement_successor(
+        &self,
+        outbound: &coven_database::OutboundStoreAck,
+        plan: &crate::sync::store::commit_publication::operation::commit_plan::StoreOperationCommitPlan,
+    ) -> Result<
+        (
+            coven_protocol::store_commit::StoreAckRef,
+            coven_protocol::objects::ExactProtocolObject<StoreAck>,
+        ),
+        StoreAckError,
+    > {
+        let sequence = outbound.reference.sequence.checked_add(1).ok_or_else(|| {
+            StoreAckError::InvalidOutbound("Store acknowledgement sequence overflow".into())
+        })?;
+        let following = sequence.checked_add(1).ok_or_else(|| {
+            StoreAckError::InvalidOutbound("Store acknowledgement sequence overflow".into())
+        })?;
+        let context = ProtocolObjectContext::signed_plaintext(
+            plan.root().store_root_hash,
+            ProtocolObjectDomain::StoreAck,
+        );
+        let next_slot = self
+            .storage
+            .allocate_protocol_slot(
+                &context,
+                &ack_slot_prefix(&self.writer.local_device_id().to_string(), following),
+                ".json",
+            )
+            .await
+            .map_err(StoreObjectError::from)?;
+        self.prepare_acknowledgement_object(
+            outbound,
+            plan,
+            sequence,
+            outbound.ack.value.successor.next_slot.clone(),
+            SuccessorLink {
+                activation: outbound.ack.value.successor.activation,
+                predecessor: Some(outbound.reference.object.clone()),
+                next_slot,
+            },
+        )
+    }
+
+    fn prepare_acknowledgement_object(
+        &self,
+        outbound: &coven_database::OutboundStoreAck,
+        plan: &crate::sync::store::commit_publication::operation::commit_plan::StoreOperationCommitPlan,
+        sequence: u64,
+        slot: coven_protocol::objects::ObjectSlot,
+        successor: SuccessorLink,
+    ) -> Result<
+        (
+            coven_protocol::store_commit::StoreAckRef,
+            coven_protocol::objects::ExactProtocolObject<StoreAck>,
+        ),
+        StoreAckError,
+    > {
+        let value = self.local_writer.sign_device_acknowledgement(
+            plan.root().store_root_hash,
+            sequence,
+            self.local_writer.device_acknowledgement_assertion(
+                plan.predecessor_cut()?,
+                plan.device_state().clone(),
+            ),
+            outbound.ack.value.last_sync.clone(),
+            successor,
+        )?;
+        let bytes = value.to_bytes();
+        let prepared = self
+            .storage
+            .prepare_protocol_object(
+                &ProtocolObjectContext::signed_plaintext(
+                    plan.root().store_root_hash,
+                    ProtocolObjectDomain::StoreAck,
+                ),
+                slot,
+                &ack_slot_prefix(&self.writer.local_device_id().to_string(), sequence),
+                bytes.clone(),
+            )
+            .map_err(StoreObjectError::from)?;
+        let reference = coven_protocol::store_commit::StoreAckRef {
+            registration: value.registration.clone(),
+            sequence,
+            ack_hash: value.ack_hash(),
+            object: prepared.reference().clone(),
+        };
+        Ok((
+            reference,
+            coven_protocol::objects::ExactProtocolObject {
+                value,
+                bytes,
+                prepared,
+            },
+        ))
+    }
+
+    async fn replace_snapshot_acknowledgement(
+        &mut self,
+        outbound: &coven_database::OutboundStoreAck,
+        previous: &coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        snapshot: coven_protocol::store_commit::AcceptedStoreSnapshotRef,
+        authorship: coven_database::OwnStreamAuthorship,
+    ) -> Result<coven_database::OwnStreamAuthorship, StoreAckError> {
+        let plan = self.writer.prepare_plan_with_authorship(authorship).await?;
+        let (reference, acknowledgement) = self
+            .prepare_acknowledgement_successor(outbound, &plan)
+            .await?;
+        let coven_protocol::objects::ExactProtocolObject {
+            value,
+            bytes,
+            prepared,
+        } = acknowledgement;
+        plan.validate_acknowledgement(&value)?;
+        let mut candidate = self.writer.prepare_replacement_candidate(
+            &plan,
+            crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Acknowledgement {
+                reference, value: value.clone(),
+                circle_acknowledgements: outbound.circle_acknowledgements.clone(),
+            },
+            previous,
+        ).await?;
+        let previous_proof = previous
+            .history_evidence
+            .acknowledgement
+            .as_ref()
+            .ok_or_else(|| {
+                StoreAckError::InvalidOutbound(
+                    "queued acknowledgement omits its retained proof".into(),
+                )
+            })?;
+        let retained = candidate
+            .history_evidence
+            .acknowledgement
+            .as_mut()
+            .ok_or_else(|| {
+                StoreAckError::InvalidOutbound(
+                    "replacement acknowledgement omits its retained proof".into(),
+                )
+            })?;
+        retained.predecessors = previous_proof.proof_objects().cloned().collect();
+        candidate.validate_closed_shape()?;
+        self.database
+            .replace_acknowledgement_activation(
+                outbound.reference.clone(),
+                snapshot,
+                coven_protocol::objects::ExactProtocolObject {
+                    value,
+                    bytes,
+                    prepared,
+                },
+                candidate,
+            )
+            .await?;
+        Ok(plan.into_authorship())
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod idle_tests;

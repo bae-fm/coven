@@ -2,7 +2,7 @@ use super::*;
 use coven_keys::keys::MasterKeyCustody;
 
 #[tokio::test]
-async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations() {
+async fn a_revoked_circle_reservation_must_be_discarded_before_a_new_grant_can_publish() {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let founder = UserKeypair::generate();
@@ -93,19 +93,26 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .open_into(&successor_db, successor_db_store_dir.clone())
         .await
         .expect("load successor's replacement membership grant");
-    let later = store
+    let device = store
         .bind_device_in(&successor_db, successor_db_store_dir.clone(), &successor)
         .await
-        .expect("bind Circle preparation Store")
-        .prepare_circle_operation("0000000001004-0000-successor", "Later Circle")
+        .expect("bind Circle preparation Store");
+    let database = StoreDatabase::new(&successor_db);
+    let reserved = database.active_store_publication().await.unwrap().unwrap();
+    let refused = device
+        .create_circle("0000000001004-0000-successor", "Later Circle")
         .await
-        .expect("prepare still-authorized operation");
-    let later_operation_id = later.journal.operation_id.clone();
-    let later_circle_id = later.journal.circle_id();
-    StoreDatabase::new(&successor_db)
-        .insert_circle_operation(later.journal, later.prepared_objects)
-        .await
-        .expect("persist still-authorized operation");
+        .expect_err("a replacement grant cannot take the unresolved author's reserved position");
+    assert!(
+        refused
+            .to_string()
+            .contains("another local Store operation owns publication"),
+        "{refused}"
+    );
+    assert_eq!(
+        database.active_store_publication().await.unwrap(),
+        Some(reserved)
+    );
 
     store
         .bind_device_in(&successor_db, successor_db_store_dir.clone(), &successor)
@@ -124,11 +131,21 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         blocked.state(),
         CircleOperationState::Blocked { .. }
     ));
-    assert!(StoreDatabase::new(&successor_db)
-        .circle_operation(&later_operation_id)
+    device
+        .pull_store()
         .await
-        .expect("read later journal")
-        .is_none());
+        .expect("install the accepted retirement before consuming it as discard authority");
+    device
+        .circles()
+        .discard_circle_operation(&journal_operation_id)
+        .await
+        .expect("the retired exact grant permits discarding its unaccepted candidate");
+    assert!(database.active_store_publication().await.unwrap().is_none());
+    let later_circle_id = device
+        .create_circle("0000000001005-0000-successor", "Later Circle")
+        .await
+        .expect("the new grant publishes after the old reservation is released");
+    assert!(database.get_circle_operations().await.unwrap().is_empty());
     assert_eq!(
         StoreDatabase::new(&successor_db)
             .get_circles(
@@ -214,7 +231,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
     }
     let journal = prepared.journal;
     let commit = journal.commit().expect("parse retained Circle commit");
-    let commit_ref = &journal.operation().commit_ref;
+    let commit_ref = journal.operation().commit_ref();
     let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(commit.author_registration.clone())
         .await

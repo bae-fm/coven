@@ -1,52 +1,45 @@
 # Sync
 
 coven syncs SQLite row changes between devices that share a store. It has one
-protocol: each device appends its changesets to its own immutable commit stream,
-peers pull those streams, and concurrent edits merge column by column with
+protocol: devices capture writes locally, publish them through one accepted
+Store history, and pull that history. Concurrent edits merge column by column with
 deletes winning over concurrent edits. The unit of exchange is one host
 transaction: its SQLite changeset becomes a Store package named by an exact
 signed commit.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
-<svg class="flow" viewBox="0 0 660 224" role="img" aria-label="A write is captured and sealed, appends to the device's own stream, and peers pull it, advancing one exact materialized position per stream">
-<text class="hdr" x="120" y="22" text-anchor="middle">ALICE'S DEVICE</text>
-<text class="hdr" x="395" y="22" text-anchor="middle">CLOUD</text>
-<text class="hdr" x="590" y="22" text-anchor="middle">BOB PULLS</text>
-<rect class="lane" x="10" y="32" width="220" height="152" rx="10"/>
-<rect class="lanec" x="260" y="32" width="270" height="152" rx="10"/>
-<rect class="lane" x="550" y="32" width="100" height="152" rx="10"/>
-<rect class="chip" x="30" y="58" width="180" height="26" rx="7"/>
-<text class="lbl s11" x="120" y="75" text-anchor="middle">write → changeset</text>
-<line class="arr" x1="234" y1="71" x2="272" y2="71" marker-end="url(#fa)"/>
-<text class="sub" x="330" y="52" text-anchor="middle">append-only</text>
-<rect class="chipo" x="280" y="58" width="70" height="24" rx="6"/>
-<text class="lbl s11" x="315" y="74" text-anchor="middle">a/1</text>
-<rect class="chipo" x="358" y="58" width="70" height="24" rx="6"/>
-<text class="lbl s11" x="393" y="74" text-anchor="middle">a/2</text>
-<rect class="chipo" x="436" y="58" width="70" height="24" rx="6"/>
-<text class="lbl s11" x="471" y="74" text-anchor="middle">a/3</text>
-<rect class="chipo" x="280" y="128" width="70" height="24" rx="6"/>
-<text class="lbl s11" x="315" y="144" text-anchor="middle">b/1</text>
-<rect class="chipo" x="358" y="128" width="70" height="24" rx="6"/>
-<text class="lbl s11" x="393" y="144" text-anchor="middle">b/2</text>
-<text class="sub" x="330" y="110" text-anchor="middle">one stream per device</text>
-<line class="arr" x1="512" y1="71" x2="544" y2="71" marker-end="url(#fa)"/>
-<text class="lbl s11" x="600" y="75" text-anchor="middle">materialized a=3</text>
-<text class="lbl s11" x="600" y="144" text-anchor="middle">materialized b=2</text>
-<circle class="numc" cx="24" cy="71" r="8"/>
-<text class="num" x="24" y="74.5" text-anchor="middle">1</text>
-<circle class="numc" cx="268" cy="71" r="8"/>
-<text class="num" x="268" y="74.5" text-anchor="middle">2</text>
-<circle class="numc" cx="600" cy="48" r="8"/>
-<text class="num" x="600" y="51.5" text-anchor="middle">3</text>
-<text class="sub" x="330" y="212" text-anchor="middle">1 a write is captured and sealed · 2 it appends to this device's own stream · 3 peers pull, one exact position per stream</text>
+<svg class="flow" viewBox="0 0 660 238" role="img" aria-label="Local writes become immutable candidates. Conditional replacement of the current record accepts one publication order, which peers verify and replay.">
+<text class="hdr" x="100" y="22" text-anchor="middle">LOCAL DEVICE</text>
+<text class="hdr" x="350" y="22" text-anchor="middle">CLOUD</text>
+<text class="hdr" x="580" y="22" text-anchor="middle">PEER</text>
+<rect class="lane" x="10" y="32" width="180" height="170" rx="10"/>
+<rect class="lanec" x="210" y="32" width="280" height="170" rx="10"/>
+<rect class="lane" x="510" y="32" width="140" height="170" rx="10"/>
+<rect class="chip" x="25" y="56" width="150" height="30" rx="7"/>
+<text class="lbl s11" x="100" y="75" text-anchor="middle">durable write journal</text>
+<text class="sub" x="100" y="111" text-anchor="middle">works offline</text>
+<text class="sub" x="100" y="148" text-anchor="middle">prepare exact candidate</text>
+<line class="arr" x1="194" y1="71" x2="223" y2="71" marker-end="url(#fa)"/>
+<rect class="chipo" x="230" y="56" width="240" height="30" rx="7"/>
+<text class="lbl s11" x="350" y="75" text-anchor="middle">immutable package + commit + entry</text>
+<line class="arr" x1="350" y1="90" x2="350" y2="114" marker-end="url(#fa)"/>
+<rect class="chip" x="230" y="120" width="240" height="30" rx="7"/>
+<text class="lbl s11" x="350" y="139" text-anchor="middle">conditionally replace current record</text>
+<text class="sub" x="350" y="181" text-anchor="middle">one accepted publication order</text>
+<line class="arr" x1="494" y1="135" x2="523" y2="135" marker-end="url(#fa)"/>
+<text class="lbl s11" x="580" y="75" text-anchor="middle">verify accepted history</text>
+<text class="lbl s11" x="580" y="135" text-anchor="middle">replay causal changes</text>
+<text class="sub" x="580" y="181" text-anchor="middle">commit rows + position</text>
+<text class="sub" x="330" y="228" text-anchor="middle">Uploading a candidate does not publish it. Acceptance is the conditional record update.</text>
 </svg>
 
-Nothing in storage is overwritten. Publication creates exact immutable objects
-for a package, commit, and head, then reads each object back before advancing durable
-state. A puller records the exact hash at every materialized device sequence,
-not a sequence number that could disagree with the accepted commit.
+Packages, commits, and publication entries occupy exact immutable slots. One
+mutable current record, at the location bound by the signed Store root, names
+the accepted history. Replacing that record requires the provider revision read
+with its previous value. A competing publisher must observe and verify the
+accepted change before retrying; uploaded candidates outside that history have
+no effect. A puller records exact commit hashes with its materialized positions.
 
 Examples use the todos app (workspaces hold lists, lists hold todos, todos
 carry attachments and labels); Alice and Bob share the store.
@@ -58,13 +51,17 @@ fresh-device bootstrap from a snapshot has its own page,
 
 ## One protocol
 
-There is one protocol and no mode to select. Each device keeps one append-only
-commit stream. A commit names its exact predecessor and its materialized
-dependency frontier, so devices publish while offline and pull merges the
-independent streams. Nothing anywhere holds a mutable global head, and no
-provider coordinates a global transaction order. Storage must provide
-create-once exact object slots so concurrent publishers cannot replace one
-another's protocol objects.
+There is one protocol and no mode to select. A commit keeps its author's
+sequence, exact predecessor, and causal dependencies. The accepted publication
+order answers whether a candidate became shared and which snapshot boundary it
+belongs to; causal dependencies still govern replay of row changes. A snapshot
+closes the complete accepted prefix before it, so a later publication cannot
+extend retired history.
+
+Offline writes remain in the local journal. Publishing requires storage with
+both create-once exact slots and provider-enforced conditional replacement.
+The provider compares revisions; Coven constructs and verifies the signed
+history and its authorization.
 
 The signed Store protocol root binds the store id, founder, schema version, and
 the immutable schema-routing contract; open, join, and restore verify it before
@@ -179,17 +176,17 @@ still a write even though its rows do not enter a synced changeset.
 
 One background loop runs one cycle at a time. Each cycle loads durable state and:
 
-1. Resolves authorization from causal membership heads, then refreshes
+1. Resolves authorization from accepted history, then refreshes
    encryption-key and device-registration state.
 1. Drains blob uploads and retries the oldest prepared Store write using its
    persisted exact bytes.
 1. Completes ready row-gate transitions and pulls verified remote Store commits.
 1. Prepares pending writes in order, uploads and verifies their referenced
-   blobs, then appends and verifies their packages and commits, activating each
-   with its device head.
+   blobs, then creates their exact packages, commits, and publication entries.
+   Conditional replacement of the current record accepts each publication.
 1. Applies remote commits whose predecessors and exact dependencies are fully
-   materialized; each commit's rows, authorization state, and exact position
-   advance atomically.
+   materialized. Installation commits rows, authorization state, and exact
+   positions together with replay of retained local writes.
 1. Flushes the register clock, durable file cleanup, acknowledgements, and blob
    deletion work.
 1. Evaluates snapshot publication and reclamation against exact commit coverage.
@@ -202,9 +199,10 @@ and therefore never enter the local write ledger.
 When Alice edits a todo title, that call already leaves a durable pending write.
 Her loop creates encrypted exact objects at
 `store-v1/candidates/<family>/packages/<alice-device>/<seq>/<hash>.pkg`,
-`store-v1/candidates/<family>/commits/<alice-device>/<seq>/<hash>.json`, and
-`store-v1/heads/<alice-device>/<seq>.json`. Bob verifies Alice's head and commit,
-waits until the named dependencies are materialized, then atomically applies the
+`store-v1/candidates/<family>/commits/<alice-device>/<seq>/<hash>.json`.
+The publication entry names that exact commit; the conditional record update
+makes it part of accepted history. Bob verifies that acceptance and Alice's
+commit, waits until the named dependencies are materialized, then applies the
 package and records Alice's exact sequence and commit hash. The signed commit
 derives `<family>` from its Store, author registration, write identity,
 sequence, and predecessor. Its candidate-object manifest must exactly equal the
@@ -212,20 +210,29 @@ package and other candidate-exclusive objects reached by its closed body.
 
 ### Push
 
-A commit stream is only trustworthy if its sequence numbers never skip and
-never change meaning, even across a crash. The durable write record owns the
-changeset and dependency frontier from the host commit onward. Preparation
-assigns each write its device-stream sequence and predecessor, constructs the
-exact signed commit and activation bytes, and persists them before any protocol
-append. A retry creates and reads back the same journaled exact objects.
+A commit stream is only trustworthy if an accepted sequence never changes
+meaning, even across a crash. The durable write record owns the original write
+and its stable `WriteId`. Preparation reserves the author's sequence, constructs
+the exact signed candidate and publication attempt, and persists them before
+upload. Retrying an unchanged attempt uses those same exact objects.
+
+If another publisher wins, Coven verifies and installs that accepted history.
+Within the same snapshot boundary it can prepare a new publication entry for
+the existing commit. Crossing a snapshot boundary requires rebuilding the
+unaccepted candidate against the new baseline while retaining the write identity
+and author reservation. A lost response is settled by reading accepted history;
+the presence of an uploaded package alone never proves publication.
 
 Before an append, the write is `Publishing`. A storage or readback failure puts
 it back in `Pending`; the loop's reconnect and backoff policy owns the retry. A
 missing blob, a still-local user blob, invalid package data, or invalid Store
 protocol state becomes typed durable `Blocked` and holds later writes behind it.
-After the head is read back, one SQLite transaction records the exact
-`PublishedPosition`, advances the local materialized position, applies owned
-cleanup metadata, and clears the prepared bytes from that same write record.
+After acceptance is verified, local completion records `PublishedWrite::Commit`
+with the exact commit, or `PublishedWrite::Snapshot` when accepted snapshot
+coverage proves completion after the commit's history has retired. The latter
+names the reserved author position and accepted snapshot without inventing an
+exact candidate hash. Publication evidence, replay state, owned cleanup metadata,
+and the write's completion are recorded atomically.
 
 The host lists blocked records with `handle.blocked_writes()`. After repairing
 the named prerequisite, `handle.retry_blocked_write(&write_id)` requeues the
@@ -234,6 +241,14 @@ blocked records and wakes sync. If the write must be abandoned,
 unpublished write whose working rows depend on it. Discarded records remain
 queryable with terminal `Resolved(Discarded)` status and no longer participate
 in preparation.
+
+A retained private-only write that conflicts with accepted shared history becomes
+`LocalOnlyBlocked(RebaseConflict)`. The conflict identifies its `WriteId`, affected
+rows, and reason. The failed apply preserves the private write and its dependent
+suffix. `retry_blocked_write` returns that write to `LocalOnly`, so it remains
+private; explicit discard reverses the dependent unpublished suffix as above.
+Private rows already folded into the baseline have no remaining write receipt;
+their conflicts report the row and accepted commit without inventing a `WriteId`.
 
 A peer must never learn of a row whose file is not yet in the cloud. That
 ordering rides the [gate](/docs/local-data), per root, not a global hold: the
@@ -249,30 +264,30 @@ publish.
 
 ### Pull
 
-Pull lists signed device heads and makes a commit ready only after its
-predecessor and every exact dependency are materialized. When a semantic hash
-has more than one visible copy, every copy must open to identical bytes, and
-multiple valid hashes at one identity are rejected as a fork. Unreachable
-immutable commits are inert, and provider listing order never chooses a winner.
+Pull reads the current publication record at its root-bound location and
+verifies the immutable accepted entries back to its installed boundary. If
+history has been retired, it prepares the accepted snapshot and retained
+evidence needed to replace that baseline. A commit becomes ready only after its
+predecessor and every exact dependency are materialized. Unaccepted immutable
+candidates are inert, and provider listing order never chooses a winner.
 For each ready commit, pull:
 
 - parses the signed commit and checks its `schema_version` against the local
   `Database::schema_version`;
-- verifies the commit, its device-stream activation head, package hash, and
+- verifies the commit's publication acceptance, package hash, and
   Ed25519 signatures;
 - checks the author against the membership state through the exact causal
   membership grant the commit names;
 - validates every row id under the table's declared identity mode; an invalid id
-  holds that exact Store commit without changing rows or its materialized
-  position, while other device chains continue;
-- applies the package and exact materialized position in one SQLite transaction,
-  advancing the clock past its stamps;
-- downloads any `CacheEager` blobs it references into the [cache](/docs/cache).
+  holds that exact Store commit without advancing its materialized position;
+- prepares the package for atomic installation with exact materialized
+  positions, advancing the clock past its stamps.
 
-The materialized ledger advances only after the package, bookkeeping, and
-required blob work succeed. A failed blob download leaves the exact position
-unmaterialized, so the commit is retried; the pull reports this through
-`PullResult::asset_downloads_failed`.
+The materialized ledger advances only after package installation and its
+bookkeeping succeed. Background eager-cache filling has its own progress and
+failure state; it does not make a committed row apply wait for a cache download.
+Join and restore have their own required blob work before returning a store;
+see [Bootstrap](/docs/bootstrap).
 
 A provider or network failure while reading a candidate or blob is a transport
 failure and drives `SyncLoopStatus::Offline`. A verified blob whose plaintext
@@ -281,41 +296,41 @@ write its local cache destination is a local filesystem failure. Those two
 categories hold or fail the affected work without changing the loop to
 `Offline`.
 
-### Failure isolation
+### Failure boundaries
 
-No single cloud object may stop more than its own device stream. A malformed or
-missing object holds that one stream's materialized position and its successors;
-every other device's stream keeps flowing.
+Publication acceptance and local materialization are different facts. A commit
+can be accepted but held locally because its schema, package, dependencies, or
+required files cannot be applied. Pull reports the exact held coordinate and
+reason. It never advances that commit's materialized position to hide the error.
 
-<svg class="flow" viewBox="0 0 660 176" role="img" aria-label="A malformed commit holds only its own device's materialized position; other streams keep flowing">
-<text class="hdr" x="330" y="22" text-anchor="middle">ONE PULL, TWO STREAMS</text>
-<rect class="lanec" x="10" y="32" width="640" height="132" rx="10"/>
-<rect class="chipo" x="40" y="52" width="120" height="26" rx="6"/>
-<text class="lbl s11" x="100" y="69" text-anchor="middle">a/4 · applied</text>
-<rect class="chipo" x="180" y="52" width="120" height="26" rx="6"/>
-<text class="lbl s11" x="240" y="69" text-anchor="middle">a/5 · applied</text>
-<rect class="chipo" x="320" y="52" width="120" height="26" rx="6"/>
-<text class="lbl s11" x="380" y="69" text-anchor="middle">a/6 · applied</text>
-<text class="sub" x="540" y="69">materialized a=6 ✓</text>
-<rect class="chipo" x="40" y="112" width="120" height="26" rx="6"/>
-<text class="lbl s11" x="100" y="129" text-anchor="middle">b/7 · applied</text>
-<rect class="chipd" x="180" y="112" width="120" height="26" rx="6"/>
-<text class="lbl s11" x="240" y="129" text-anchor="middle">b/8 · malformed</text>
-<rect class="chipd ghost" x="320" y="112" width="120" height="26" rx="6"/>
-<text class="lbl s11 ghost" x="380" y="129" text-anchor="middle">b/9 · not fetched</text>
-<text class="sub" x="540" y="129">materialized b=7 · held</text>
+<svg class="flow" viewBox="0 0 660 194" role="img" aria-label="Accepted publications are prepared for one database transaction. Successful installation commits rows and positions together; a held installation preserves the previous state.">
+<text class="hdr" x="330" y="22" text-anchor="middle">ACCEPTANCE AND LOCAL INSTALLATION</text>
+<rect class="lanec" x="10" y="36" width="190" height="118" rx="10"/>
+<text class="lbl s11" x="105" y="69" text-anchor="middle">accepted publications</text>
+<text class="sub" x="105" y="96" text-anchor="middle">verify + prepare packages</text>
+<line class="arr" x1="204" y1="94" x2="238" y2="94" marker-end="url(#fa)"/>
+<rect class="chip" x="245" y="62" width="165" height="64" rx="8"/>
+<text class="lbl s11" x="327" y="87" text-anchor="middle">database transaction</text>
+<text class="sub" x="327" y="108" text-anchor="middle">rows + positions + local replay</text>
+<line class="arr" x1="414" y1="77" x2="449" y2="65" marker-end="url(#fa)"/>
+<line class="arr" x1="414" y1="111" x2="449" y2="135" marker-end="url(#fa)"/>
+<rect class="chipo" x="455" y="46" width="195" height="38" rx="7"/>
+<text class="lbl s11" x="552" y="70" text-anchor="middle">applied → commit together</text>
+<rect class="chipd" x="455" y="116" width="195" height="38" rx="7"/>
+<text class="lbl s11" x="552" y="140" text-anchor="middle">held → preserve prior state</text>
+<text class="sub" x="330" y="181" text-anchor="middle">A failed installation does not leave some of its rows or positions committed.</text>
 </svg>
 
-- A **malformed package or commit** holds that device's position and stops pulling that
-  device for the cycle; every other stream proceeds.
-- An **invalid signature** (forged or corrupt) does the same, and is surfaced
-  as a held Store position so the host can warn.
-- A commit whose verified author is **not a write-capable member** under the
-  entry it is signed against (revoked, or a read-only Follower) is skipped and
-  the materialized position advances past it, surfaced as unauthorized:
-  the client must not stay stuck behind an author who will never become valid.
-- An **unparseable or forked head** is reported against that device and cannot
-  select an alternate candidate by listing order.
+Invalid accepted-history evidence can fail the pull before package preparation.
+Package preparation can hold individual commits and their dependents. Once
+prepared work reaches database installation, a constraint or private/shared
+replay conflict rolls that transaction back; earlier rows in that transaction
+are not reported as applied. Snapshot adoption also preserves the previous
+installed state if its replacement cannot be committed.
+
+There is no promise that a malformed accepted object affects only one author's
+stream: dependencies and snapshot boundaries connect the accepted history.
+Authorization failure is not permission to skip a commit and advance past it.
 
 ## How edits merge
 
@@ -342,11 +357,10 @@ Pull enforces it two ways:
   app to keep syncing. This is permanent until the user upgrades. The floor
   object is untrusted input, so it is honored only when signed by a current
   Owner; anything else is a freeze or downgrade attempt and is ignored.
-- **Per-changeset skip.** A single changeset whose `schema_version` is above the
-  local one is skipped (counted in `PullResult::skipped_schema`); the device
-  leaves its materialized position where it is and stops pulling that device for
-  the cycle. The position is deliberately *not* advanced, so once the app
-  upgrades the next cycle re-fetches from that sequence and applies it.
+- **Per-package hold.** A Store package whose `schema_version` is above the
+  local one produces `HeldStorePositionReason::NewerSchema` in the pull's
+  `held_positions`. Its materialized position does not advance, and dependent
+  work waits. After an app upgrade, pull can prepare and apply the package.
 
 How migrations, this version number, the `min_schema_version` floor, and
 snapshots fit together, with worked examples for additive vs. structural changes,
@@ -389,18 +403,18 @@ pub enum SyncLoopStatus {
     CheckingStorage,
     Publishing,
     Synchronized(SyncLoopSuccess),
-    Blocked { success: SyncLoopSuccess, writes: Vec<PendingWrite> },
-    Failed { error: String },
+    Blocked { success: SyncLoopSuccess, operations: Vec<BlockedOperation> },
+    Failed { error: SyncLoopFailure },
 }
 ```
 
 The receiver immediately contains the current value and survives loop restarts.
 Intermediate values may be coalesced, so `Synchronized.row_changes` is a refresh
-hint rather than a complete event stream. `Failed` carries a user-facing
-message for a whole-cycle failure. `Synchronized` and `Blocked` carry
+hint rather than a complete event stream. `Failed` preserves the typed cause
+of a whole-cycle failure and its display message. `Synchronized` and `Blocked` carry
 [`SyncLoopSuccess`](rustdoc:struct:coven::SyncLoopSuccess), including alerts,
-device activity, and applied row changes. `Blocked` names writes whose typed
-prerequisite prevents publication.
+device activity, and applied row changes. `Blocked` names host writes, Circle
+operations, and reclaim operations whose typed prerequisites prevent progress.
 
 ## Backoff
 

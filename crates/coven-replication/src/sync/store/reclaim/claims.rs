@@ -28,12 +28,8 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             ReclaimTarget::CircleSnapshotImage(target) => Ok(database
                 .circle_image_is_retained_for_replay(target.circle_id, target.image.clone())
                 .await?),
-            // A rollup states membership, which no replay input needs: replay
-            // rebuilds rows from commits, and the membership a device stands on
-            // comes from its own chain. Nothing retains one.
-            ReclaimTarget::StoreMembershipRollup(_) => Ok(false),
             ReclaimTarget::AudienceBlob(target) => Ok(database
-                .audience_blob_is_retained_for_replay(target.blob.clone())
+                .audience_blob_is_retained_for_replay(target.blob().clone())
                 .await?),
         }
     }
@@ -41,7 +37,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
     pub(super) async fn verify_authorized(
         &mut self,
         authorization_ref: &ReclaimAuthorizationRef,
-        activation: &ReclaimCommitActivation,
+        activation: &StoreBatchCommitRef,
     ) -> Result<ReclaimTarget, StoreReclaimError> {
         let opened = self
             .history()
@@ -55,45 +51,29 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
     pub(super) async fn verify_authorization_activation(
         &mut self,
         authorization: &ReclaimAuthorizationRef,
-        activation: &ReclaimCommitActivation,
+        activation: &StoreBatchCommitRef,
     ) -> Result<(), StoreReclaimError> {
-        activation.validate().map_err(StoreReclaimError::from)?;
-        let commit_ref = activation.commit();
+        if self
+            .history()
+            .snapshot_authenticates_reclaim_authorization(authorization, activation)
+        {
+            return Ok(());
+        }
+        let commit_ref = activation;
         let verified_commit = self
             .history()
             .load_ref(commit_ref)
             .await
             .map_err(StoreReclaimError::from)?;
         let commit_value = verified_commit.value();
-        let author = verified_commit.author();
         if commit_value.reclaim_authorization() != Some(authorization) {
             return Err(StoreReclaimError::Authorization(
                 "reclaim activation commit names another authorization".to_string(),
             ));
         }
-        let commit = &activation.commit;
-        let head = &activation.head;
-        let opened = self.history().load_head(head, author, commit).await?;
-        if opened.value.commit != *commit {
-            return Err(StoreReclaimError::Authorization(
-                "reclaim head activates another commit".to_string(),
-            ));
-        }
-        let (_, accepted_head) = self
-            .history()
-            .exact_next_announcement_slot(
-                &commit_value.author_registration,
-                author,
-                Some(&verified_commit),
-            )
-            .await?;
-        if accepted_head.as_ref() != Some(head) {
-            return Err(StoreReclaimError::Authorization(
-                "reclaim activation head is not the exact accepted stream position".to_string(),
-            ));
-        }
+        self.history().verify_commit_acceptance(commit_ref)?;
         self.history()
-            .verify_currently_materialized(commit)
+            .verify_currently_materialized(commit_ref)
             .await
             .map_err(StoreReclaimError::from)
     }
@@ -110,17 +90,9 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             ));
         }
         match &evidence.claim {
-            ReclaimClaim::StorePackage(claim) => {
-                let activation = self
-                    .history()
-                    .load_ref(&claim.target.activation)
-                    .await
-                    .map_err(StoreReclaimError::from)?;
-                Ok(ReclaimTarget::StorePackage(
-                    self.verify_store_package_reclaim_claim(&activation, claim)
-                        .await?,
-                ))
-            }
+            ReclaimClaim::StorePackage(claim) => Ok(ReclaimTarget::StorePackage(
+                self.verify_store_package_reclaim_claim(claim).await?,
+            )),
             ReclaimClaim::CirclePackage(claim) => {
                 let activation = self
                     .history()
@@ -140,56 +112,52 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 self.verify_circle_snapshot_image_reclaim_claim(claim)
                     .await?,
             )),
-            ReclaimClaim::StoreMembershipRollup(claim) => Ok(ReclaimTarget::StoreMembershipRollup(
-                self.verify_store_membership_rollup_reclaim_claim(claim)
-                    .await?,
+            ReclaimClaim::AudienceBlob(claim) => Ok(ReclaimTarget::AudienceBlob(
+                self.verify_audience_blob_reclaim_claim(claim).await?,
             )),
-            ReclaimClaim::AudienceBlob(claim) => {
-                let activation = self
-                    .history()
-                    .load_ref(&claim.target.activation)
-                    .await
-                    .map_err(StoreReclaimError::from)?;
-                Ok(ReclaimTarget::AudienceBlob(
-                    self.verify_audience_blob_reclaim_claim(&activation, claim)
-                        .await?,
-                ))
-            }
         }
     }
 
-    /// Re-verify that a row blob is free. The package the claim names is re-read
-    /// from storage and must itself bind this exact blob — the signed statement
-    /// that published it — and the orphan test is re-run against this device's
-    /// own materialized rows rather than taken from the claim.
+    /// Verify the exact Store snapshot inventory or Circle package binding,
+    /// then require this device's own materialized rows to have released it.
     pub(super) async fn verify_audience_blob_reclaim_claim(
-        &self,
-        activation: &VerifiedStoreBatchCommit,
+        &mut self,
         claim: &AudienceBlobReclaimClaim,
     ) -> Result<AudienceBlobReclaimTarget, StoreReclaimError> {
-        if audience_blob_binding_package(activation.value(), claim.target.blob.locator().audience())
-            .as_ref()
-            != Some(&claim.target.package)
-        {
-            return Err(StoreReclaimError::Authorization(
-                "audience blob reclaim activation names another package".to_string(),
-            ));
-        }
-        let package = self
-            .read_audience_blob_binding_package(&claim.target.package, &claim.target.activation)
-            .await?;
-        if !package
-            .blob_bindings()
-            .iter()
-            .any(|binding| binding.blob() == &claim.target.blob)
-        {
-            return Err(StoreReclaimError::Authorization(
-                "audience blob reclaim package does not bind the target blob".to_string(),
-            ));
+        match &claim.target {
+            AudienceBlobReclaimTarget::Store { blob } => {
+                if !self.history().store_blob_is_reclaimable(blob).await? {
+                    return Err(StoreReclaimError::Authorization(
+                        "accepted Store snapshot inventory does not permit reclaiming this exact blob".into(),
+                    ));
+                }
+            }
+            AudienceBlobReclaimTarget::Circle { blob, source } => {
+                let activation = self.history().load_ref(&source.activation).await?;
+                if !activation
+                    .value()
+                    .circle_packages()
+                    .contains(&source.package)
+                {
+                    return Err(StoreReclaimError::Authorization(
+                        "audience blob reclaim activation names another package".into(),
+                    ));
+                }
+                let package = self.read_circle_blob_binding_package(source).await?;
+                if !package
+                    .blob_bindings()
+                    .iter()
+                    .any(|binding| binding.blob() == blob)
+                {
+                    return Err(StoreReclaimError::Authorization(
+                        "audience blob reclaim package does not bind the target blob".into(),
+                    ));
+                }
+            }
         }
         if !self
             .database
-            .stored_blob_is_row_orphaned(claim.target.blob.clone())
+            .stored_blob_is_row_orphaned(claim.target.blob().clone())
             .await?
         {
             return Err(StoreReclaimError::Authorization(
@@ -199,61 +167,38 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         Ok(claim.target.clone())
     }
 
-    /// Read back the exact package body that published a blob. A Store package
-    /// is sealed to the Store and a Circle package to its epoch, so the audience
-    /// selects both the read context and the semantic prefix.
-    pub(super) async fn read_audience_blob_binding_package(
+    async fn read_circle_blob_binding_package(
         &self,
-        package: &AudienceBlobBindingPackage,
-        activation: &StoreBatchCommitRef,
+        source: &CirclePackageReclaimTarget,
     ) -> Result<coven_protocol::audience_package::AudiencePackage, StoreReclaimError> {
-        let (context, prefix, object) = match package {
-            AudienceBlobBindingPackage::Store(package) => (
-                ProtocolObjectContext::store_encrypted(
-                    self.root.store_root_hash,
-                    ProtocolObjectDomain::StorePackage,
-                ),
-                coven_protocol::store_commit::package_semantic_prefix(
-                    package.candidate_family,
-                    &activation.coord.stream_id.to_string(),
-                    activation.coord.sequence(),
-                    package.content_hash,
-                ),
-                &package.object,
-            ),
-            AudienceBlobBindingPackage::Circle(package) => {
-                let access = self
-                    .database
-                    .circle_epoch_access(
-                        self.root.clone(),
-                        package.circle_id,
-                        package.control.clone(),
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        StoreReclaimError::Authorization(
-                            "audience blob reclaim package key is not resolvable".to_string(),
-                        )
-                    })?;
-                (
-                    access.protocol_context(
-                        self.root.store_root_hash,
-                        ProtocolObjectDomain::CirclePackage,
-                    ),
-                    coven_protocol::store_commit::circle_package_semantic_prefix(
-                        package.circle_id,
-                        package.package.candidate_family,
-                        &activation.coord.stream_id.to_string(),
-                        activation.coord.sequence(),
-                        package.package.content_hash,
-                    ),
-                    &package.package.object,
+        let package = &source.package;
+        let access = self
+            .database
+            .circle_epoch_access(
+                self.root.clone(),
+                package.circle_id,
+                package.control.clone(),
+            )
+            .await?
+            .ok_or_else(|| {
+                StoreReclaimError::Authorization(
+                    "audience blob reclaim package key is not resolvable".to_string(),
                 )
-            }
-        };
+            })?;
+        let context = access.protocol_context(
+            self.root.store_root_hash,
+            ProtocolObjectDomain::CirclePackage,
+        );
+        let prefix = coven_protocol::store_commit::circle_package_semantic_prefix(
+            package.circle_id,
+            package.package.candidate_family,
+            &source.activation.coord.stream_id.to_string(),
+            source.activation.coord.sequence(),
+            package.package.content_hash,
+        );
         let bytes = self
             .storage
-            .read_protocol_object(&context, object, &prefix)
+            .read_protocol_object(&context, &package.package.object, &prefix)
             .await?;
         coven_protocol::audience_package::AudiencePackage::parse(&bytes)
             .map_err(StoreReclaimError::from)
@@ -447,96 +392,6 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         Ok(claim.target.clone())
     }
 
-    /// Re-verify that a later generation of the reclaimed rollup's own Store
-    /// snapshot stream supersedes it.
-    ///
-    /// The stream is re-read from the author's own signed metadata, so both the
-    /// reclaimed generation and the named superseding one are taken from what
-    /// they say about themselves rather than from the claim. The superseding
-    /// generation must carry a cut that strictly dominates the reclaimed one and
-    /// must be acknowledged by every device that could still install it — the
-    /// same discipline the package leg deletes behind — and it must not name the
-    /// rollup being reclaimed, which a generation published over an unchanged
-    /// membership frontier would.
-    pub(super) async fn verify_store_membership_rollup_reclaim_claim(
-        &mut self,
-        claim: &StoreMembershipRollupReclaimClaim,
-    ) -> Result<StoreMembershipRollupReclaimTarget, StoreReclaimError> {
-        let database = self.database.clone();
-        let members = self.membership.clone();
-        let author = database
-            .activated_store_device_registration(claim.target.snapshot_author.clone())
-            .await?;
-        if author
-            .value()
-            .store_snapshot_activation(author.reference())
-            .map_err(StoreReclaimError::from)?
-            .activation_id()
-            != claim.target.activation
-        {
-            return Err(StoreReclaimError::Authorization(
-                "Store membership rollup reclaim names another snapshot stream activation"
-                    .to_string(),
-            ));
-        }
-        let mut history = self.history();
-        let stream = history
-            .load_store_snapshot_stream(author.reference(), author.value())
-            .await
-            .map_err(StoreReclaimError::from)?;
-        let generation = stream
-            .iter()
-            .find(|snapshot| snapshot.reference == claim.target.snapshot)
-            .ok_or_else(|| {
-                StoreReclaimError::Authorization(
-                    "Store membership rollup reclaim target is absent from its author's stream"
-                        .to_string(),
-                )
-            })?;
-        if generation.meta.membership_rollup != claim.target.rollup {
-            return Err(StoreReclaimError::Authorization(
-                "Store membership rollup reclaim target differs from its own signed generation"
-                    .to_string(),
-            ));
-        }
-        let superseding = stream
-            .iter()
-            .find(|snapshot| snapshot.reference == claim.superseding)
-            .ok_or_else(|| {
-                StoreReclaimError::Authorization(
-                    "Store membership rollup reclaim superseding generation is absent from the \
-                     same stream"
-                        .to_string(),
-                )
-            })?;
-        if !snapshot_supersedes_seed(&superseding.meta.coverage, &generation.meta.coverage) {
-            return Err(StoreReclaimError::Authorization(
-                "Store membership rollup reclaim superseding generation does not strictly \
-                 dominate the reclaimed cut"
-                    .to_string(),
-            ));
-        }
-        if superseding.meta.membership_rollup.object == claim.target.rollup.object {
-            return Err(StoreReclaimError::Authorization(
-                "Store membership rollup reclaim superseding generation names the same rollup"
-                    .to_string(),
-            ));
-        }
-        if history
-            .select_maximal_acknowledged_store_snapshot(vec![superseding.clone()], &members)
-            .await
-            .map_err(StoreReclaimError::from)?
-            .is_none()
-        {
-            return Err(StoreReclaimError::Authorization(
-                "Store membership rollup reclaim superseding generation is not \
-                 acknowledgement-stable"
-                    .to_string(),
-            ));
-        }
-        Ok(claim.target.clone())
-    }
-
     /// Re-verify that a later generation of the reclaimed image's own stream
     /// supersedes it. The stream is re-walked from generation zero, so both the
     /// reclaimed generation and the named superseding one are re-read from their own
@@ -623,72 +478,27 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
 
     pub(super) async fn verify_store_package_reclaim_claim(
         &mut self,
-        activation: &VerifiedStoreBatchCommit,
         claim: &StorePackageReclaimClaim,
     ) -> Result<StorePackageReclaimTarget, StoreReclaimError> {
-        let members = self.membership.clone();
-        let mut history = self.history();
-        let author = history
-            .load_registration(&claim.covering_snapshot.author_registration)
-            .await?;
-        let (reference, metadata) = history
-            .load_store_snapshot(
-                &claim.covering_snapshot.author_registration,
-                &author.value,
-                &claim.covering_snapshot.snapshot,
-            )
-            .await
-            .map_err(StoreReclaimError::from)?;
-        let snapshot = coven_database::PublishedStoreSnapshot {
-            reference,
-            successor_slot: metadata.successor.next_slot.clone(),
-            meta: metadata,
-        };
-        let acknowledged = match history.verify_snapshot_stability(&snapshot, &members).await {
-            Ok(acknowledged) => acknowledged,
-            Err(crate::sync::store::pull::StorePullError::SnapshotNotStable {
-                member,
-                device_id,
-            }) => {
-                return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
-            }
-            Err(
-                crate::sync::store::pull::StorePullError::SnapshotAuthorInactive
-                | crate::sync::store::pull::StorePullError::SnapshotAuthorNotOwner,
-            ) => return Err(StoreReclaimError::NoSnapshot),
-            Err(error) => return Err(StoreReclaimError::from(error)),
-        };
-        // The claim has to carry every acknowledgement the stability proof
-        // requires *now*, and may carry more. It is checked twice — once when
-        // this device signs the evidence and once before it deletes, which can
-        // be a later cycle — and between those the required set can only
-        // shrink, because a device leaves it by being excluded and a device
-        // that joins after the coverage was never in it. Demanding the two
-        // lists match exactly would mean an exclusion landing in that window
-        // left a signed authorization that could never be executed and, since
-        // an existing operation blocks re-authorizing its target, never be
-        // replaced either. A claim proving more than is now required is still
-        // a claim that proves what is required.
-        let required_acknowledgements = acknowledged
-            .acknowledgement_refs()
-            .map_err(StoreReclaimError::from)?;
-        if let Some(missing) = required_acknowledgements
-            .iter()
-            .find(|required| !claim.acknowledgements.contains(required))
-        {
-            return Err(StoreReclaimError::Authorization(format!(
-                "reclaim evidence omits the acknowledgement the snapshot stability proof \
-                 requires from device {:?}",
-                missing.registration.device_id.to_string()
-            )));
-        }
-        if activation.value().store_package() != Some(&claim.target.package)
-            || !history
-                .snapshot_covers_target(&snapshot.meta.coverage, &claim.target.activation)
-                .await?
+        let selected = self
+            .history()
+            .current_accepted_snapshot()
+            .await?
+            .ok_or(StoreReclaimError::NoSnapshot)?;
+        let id = coven_protocol::remote_object::remote_object_id(&claim.target.package.object);
+        let package = AudienceBlobBindingPackage::Store(claim.target.package.clone());
+        if !selected
+            .snapshot()
+            .meta
+            .history_summary
+            .reclaim
+            .packages
+            .get(&id)
+            .is_some_and(|retained| retained.matches_package(&package, &claim.target.activation))
         {
             return Err(StoreReclaimError::Authorization(
-                "reclaim target is not the exact Store package covered by its snapshot".to_string(),
+                "reclaim target is not an exact live Store package in accepted snapshot history"
+                    .to_string(),
             ));
         }
         Ok(claim.target.clone())

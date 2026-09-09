@@ -83,7 +83,7 @@ pub struct BlobRef {
 ```
 
 A pulled blob is Remote: its bytes land in coven's own [cache](/docs/cache)
-(`storage/cache/<namespace>/<id>`, built from the validated namespace + id); the
+(`storage/cache/<namespace>/<ab>/<cd>/<locator_hash>`); the
 host never names where a blob file lives.
 
 `cloud_path` is consulted only by a [browsable home](#browsable-home-blob-paths);
@@ -267,7 +267,8 @@ natural cycle.
 Pull derives the blobs an incoming Store package references from the declarations
 and downloads required eager bytes before materializing the commit, so a row is
 never accepted before its required blobs are durable. A downloaded blob lands in
-the [cache](/docs/cache), at `storage/cache/<namespace>/<id>` under the store
+the [cache](/docs/cache), at
+`storage/cache/<namespace>/<ab>/<cd>/<locator_hash>` under the store
 directory, decrypted under its scope. A download is skipped when the exact file is
 already present.
 
@@ -335,81 +336,81 @@ GC never reclaims a blob that has just been re-uploaded.
 
 ## Cloud layout
 
-Under an opaque home (the default) a blob is stored at a content-addressed key:
+A cloud blob is identified by its `BlobLocator`. The locator records the namespace,
+blob id, uploader registration, plaintext length and hash, and protection facts.
+Its hash names an immutable version. An opaque home's semantic object key is:
 
 ```
-{namespace}/{ab}/{cd}/{id}
+{namespace}/opaque/{locator_hash}
 ```
 
-`ab` and `cd` are the first two byte-pairs of the dash-stripped `id`, built by
-[`StoreDir::hashed_path`](rustdoc:method:coven::StoreDir::hashed_path).
-The two levels of fan-out keep a store with many blobs off a single flat prefix
-the storage layer would have to list in one call. The provider sees this key and
-the encrypted bytes, never the plaintext file or its name.
+The locator also names the audience, encryption scope, and key fingerprint. A
+change to these facts produces a different locator hash. The provider sees the
+namespace and hash in the key, plus encrypted bytes; the key contains no readable
+file name.
+
+A `StoredBlobRef` binds that locator to the exact provider object, including its
+stored length and hash. The host obtains the row's installed reference through
+[`CovenHandle::row_blob_ref`](rustdoc:method:coven::CovenHandle::row_blob_ref).
+The returned `RowBlobRef` exposes its committed object through `stored()`; a row
+whose blob has no committed object returns `None`. Diagnostics use that retained
+reference rather than reconstructing an object key from a blob id.
+
+On disk, remote copies use the locator hash as well:
+`storage/cache/{namespace}/{ab}/{cd}/{locator_hash}` or
+`storage/pinned/{namespace}/{ab}/{cd}/{locator_hash}`. Here `ab` and `cd` are the
+first two byte-pairs of the locator hash. Local host-provided sources remain keyed
+by their logical blob id.
 
 ## Browsable-home blob paths
 
-A [browsable home](/docs/encryption#opaque-and-browsable-homes) stores each blob
-verbatim at a readable path the consumer supplies, instead of by id:
+A [browsable home](/docs/encryption#opaque-and-browsable-homes) stores a blob's
+plaintext bytes under a readable path with an immutable version:
 
 ```
-{namespace}/{cloud_path}
+{namespace}/readable/{cloud_path}/.coven-versions/{locator_hash}
 ```
 
-where `cloud_path` is the value coven reads from the declaration's
-`cloud_path_column` for that row, e.g. `attachments/Project Plan/diagram.png` rather
-than `attachments/0e/f7/0ef7…`. Anyone with bucket access then sees the names the
-consumer chose. This is one half of what a browsable home selects; the other half
-is that it stores its objects in the clear (see
-[encryption](/docs/encryption#opaque-and-browsable-homes)). The two are one choice,
-not two.
-
-coven never invents these names. The consumer owns them: it declares a
-`cloud_path_column` and stores a readable key in it on every blob-bearing row. A
-browsable home with a blob whose `cloud_path` is absent is a surfaced error, never a
-silent fall back to the hashed layout.
-
-The two schemes at a glance:
+`cloud_path` is the value read from the declaration's `cloud_path_column`, such as
+`Project Plan/diagram.png`. The host supplies this path on every blob-bearing row;
+a missing path is an error. The readable prefix is part of the locator, so changing
+it produces a different version key. Anyone with provider access can see the names
+and read these blob bytes.
 
 | | Opaque home (default) | Browsable home |
 | --- | --- | --- |
 | Config `cloud_home.storage` | `opaque` | `browsable` |
 | Runtime scheme | `BlobPathScheme::Hashed` | `BlobPathScheme::Plain` |
-| `cloud_path_column` | ignored (leave unset) | required |
-| Cloud key | `{namespace}/{ab}/{cd}/{id}` | `{namespace}/{cloud_path}` |
-| Blob with no `cloud_path` | keyed by id | surfaced error |
-| Key names its blob | by the `{id}` in the key | [depends on the blob](#a-cloud-object-is-never-rewritten) |
+| `cloud_path_column` | ignored | required |
+| Cloud key | `{namespace}/opaque/{locator_hash}` | `{namespace}/readable/{cloud_path}/.coven-versions/{locator_hash}` |
+| Blob bytes | encrypted | plaintext |
 
 ### A cloud object is never rewritten
 
-A cloud object is never rewritten with different bytes. Pull verifies an object
-against its row's content hash, and a Store position materializes only after every
-required blob arrives. Replacing bytes at one blob key would make an earlier valid
-commit impossible to materialize.
+The locator hash separates immutable versions in both path schemes. The stored
+reference records the exact object's length and hash, and downloads are checked
+against that reference and the locator's plaintext facts. An object existing at a
+path alone is not proof that it contains the expected bytes.
 
-A hashed key gets this for free: it carries the blob id, and a blob id names one immutable
-byte-string, minted fresh for every stored blob. A readable path is the consumer's own, so
-coven asks the consumer one question about each blob-bearing table — **can this row ever be
-repointed at a different blob?** — and enforces whichever guarantee follows.
+The blob declaration also states whether its row can be repointed. These are row
+and readable-name constraints; version addressing supplies the cloud object
+identity for both cases.
 
 #### Replaceable (the default)
 
-The row may be repointed: a cover is changed, an attachment is swapped. Then the **key must
-move with the blob**, so the path has to name it. Its file name — the last `/`-segment,
-extension stripped — must be the blob id, or end with `-{blob_id}`:
+A row may point to a replacement blob. If it supplies a readable path, the path's
+file name, before its extension, must be the blob id or end in `-{blob_id}`:
 
 ```
-covers/Live at Leeds/cover-0ef7a1c9.jpg     ✓ names its blob
-covers/Live at Leeds/0ef7a1c9.jpg           ✓ names its blob
-covers/Live at Leeds/cover.jpg              ✗ surfaced error — names no blob
-covers/Live at Leeds/0ef7a1c9/cover.jpg     ✗ surfaced error — the id must name the object,
-                                              not a directory above it
+covers/Live at Leeds/cover-0ef7a1c9.jpg     ✓
+covers/Live at Leeds/0ef7a1c9.jpg           ✓
+covers/Live at Leeds/cover.jpg              ✗
+covers/Live at Leeds/0ef7a1c9/cover.jpg     ✗
 ```
 
-The id must *end* the file name's stem, so that blob `1` cannot satisfy blob `11`'s path and
-the two be keyed at one object. Replacing the blob then writes a *new* object beside the one
-it replaced, which stands at its own key until its [tombstone](#deleting-a-blob) is
-collected.
+The declaration resolver rejects a readable name that does not meet this rule.
+The final cloud key appends `.coven-versions/{locator_hash}` after that readable
+path.
 
 #### Write-once
 
@@ -421,44 +422,18 @@ SyncedTable::new("release_files", RowIdentity::IndependentUuid).carries_blob(
 )
 ```
 
-The row is never repointed: the blob it names when it is inserted is the blob it names for
-life. Nothing ever rewrites the object at its key, so there is nothing to protect it from —
-and the path is free to be a **stable, fully readable name**, which is what a browsable home
-is for:
-
-```
-audio/Live at Leeds/01 Sonata No. 3.flac    ✓ the consumer's own name, no blob id
-```
-
-coven holds the consumer to the declaration: **repointing a write-once row is a surfaced
-error.** A changeset UPDATE reports only the columns whose values changed, so a blob-id
-column appearing in one *is* the repointing, and coven refuses it there rather than
-discovering a rewritten object later.
-
-Write-once is the weaker of the two guarantees, and it is opt-in for that reason. coven
-refuses the reuse it can see — the repointing. It cannot see a consumer *deleting* a row and
-inserting a different blob at the same `cloud_path`: the deleted row is gone, and coven keeps
-no history of the paths it has handed out. **Declaring `write_once()` is therefore also a
-promise that a path is never reused by a different blob.** Derive the path from data that
-never repeats and it holds by construction — a path carrying a freshly minted id for the
-thing being imported can never be handed out twice, even though no blob id appears in the
-name a human reads.
+A write-once row cannot change its blob-id column. Its readable path need not
+include the blob id; `Live at Leeds/01 Sonata No. 3.flac` is valid. The final object
+still has a locator-hash version beneath that path. coven's declaration resolver
+rejects a changeset update that repoints a write-once row.
 
 #### What either guarantee buys
 
-Because no two blobs ever share a key, an object standing at a blob's key *is* that blob's
-bytes. A sealed cloud object never has to be asked what it holds, and coven keeps no record
-of what it wrote where — the push simply skips an upload when the object is already there.
-And two failures that no retry can repair become unrepresentable:
-
-- **Two devices replacing the same blob at once** would otherwise write one key, leaving the
-  object holding whichever device the bucket saw last while the row holds whichever device
-  last-write-wins picked. With the key moving with the blob, they are two objects, and the
-  row's winner names one of them.
-- **A changeset written before a replacement** would otherwise name bytes that were
-  overwritten, and the device that pulls it late could never satisfy its hash. The
-  superseded object instead stands at its own key for the whole tombstone grace — the same
-  convergence window coven already promises a device that has been away.
+Different locators occupy different version keys, including when two devices
+choose the same readable path. The installed row's stored reference identifies
+which exact object it reads. Replacing a blob cannot overwrite the object named by
+an earlier reference; reclaiming the earlier object is a separate deletion
+operation.
 
 ## Where a blob's bytes come from
 

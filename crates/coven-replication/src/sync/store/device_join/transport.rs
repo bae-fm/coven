@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::OwnerJoinPublication;
 use crate::sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinError,
     DeviceJoinOffer, DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus,
@@ -838,11 +839,13 @@ impl<'store> StoreDeviceJoinTransport<'store> {
             Some(
                 DeviceJoinStatus::AwaitingAccessRequest { .. }
                 | DeviceJoinStatus::AwaitingProviderAdmission { .. }
-                | DeviceJoinStatus::ProviderAccessGrantCreatePending { .. }
+                | DeviceJoinStatus::ProviderAccessGrantPublished { .. }
                 | DeviceJoinStatus::AwaitingRegistrationRequest { .. }
                 | DeviceJoinStatus::AwaitingBootstrap { .. }
-                | DeviceJoinStatus::AbandonmentCreatePending { .. }
-                | DeviceJoinStatus::Abandoned { .. },
+                | DeviceJoinStatus::Abandoned { .. }
+                | DeviceJoinStatus::StorePublicationPending {
+                    operation: OwnerJoinPublication::Abandonment { .. },
+                },
             ) => {
                 self.abandon(bundle).await?;
                 Ok(())
@@ -909,11 +912,15 @@ impl<'attempt> AttemptTransport<'attempt> {
 
     /// Time one step of the driven exchange under the shared owner-step line.
     ///
-    /// The work is boxed: `drive_once` holds a dozen of these, and leaving each
-    /// one inline grows its already-large state machine past the stack a test
-    /// runner gives it.
-    async fn step<T>(&self, step: &'static str, work: impl std::future::Future<Output = T>) -> T {
-        timed_owner_join_step(step, self.store.provider_requests(), Box::pin(work)).await
+    /// Construct the boxed work before polling it. An async wrapper would keep
+    /// its construction storage on the stack while the join's nested work runs.
+    #[inline(never)]
+    fn step<T>(
+        &self,
+        step: &'static str,
+        work: impl std::future::Future<Output = T>,
+    ) -> impl std::future::Future<Output = T> {
+        timed_owner_join_step(step, self.store.provider_requests(), Box::pin(work))
     }
 
     /// Read the artifact the other side owes this step, waiting for it to appear.
@@ -1003,7 +1010,7 @@ impl<'attempt> AttemptTransport<'attempt> {
                 }
                 Some(
                     DeviceJoinStatus::AwaitingProviderAdmission { request }
-                    | DeviceJoinStatus::ProviderAccessGrantCreatePending { request, .. },
+                    | DeviceJoinStatus::ProviderAccessGrantPublished { request, .. },
                 ) => {
                     on_progress(AdmittingDeviceJoinProgress::GrantingProviderAccess);
                     let approval = self
@@ -1059,7 +1066,7 @@ impl<'attempt> AttemptTransport<'attempt> {
                     }
                     self.accept_registration(request).await?;
                 }
-                Some(DeviceJoinStatus::SamePrincipalActivationCreatePending { request }) => {
+                Some(DeviceJoinStatus::SamePrincipalActivationPublished { request }) => {
                     on_progress(AdmittingDeviceJoinProgress::RegisteringDevice);
                     let join = self
                         .step(
@@ -1070,6 +1077,64 @@ impl<'attempt> AttemptTransport<'attempt> {
                     self.publish(DeviceJoinAction::TransferSamePrincipalJoin(join.clone()))
                         .await?;
                     return Ok(DeviceJoinDriveOutcome::Activated(join.activation));
+                }
+                Some(DeviceJoinStatus::StorePublicationPending {
+                    operation: OwnerJoinPublication::ProviderAccessGrant { request, .. },
+                }) => {
+                    on_progress(AdmittingDeviceJoinProgress::GrantingProviderAccess);
+                    let approval = self
+                        .step(
+                            "authorize provider access",
+                            self.store
+                                .authorize_device_provider_access(request, access_administrator),
+                        )
+                        .await?;
+                    self.publish(DeviceJoinAction::TransferProviderAdmissionApproval(
+                        approval,
+                    ))
+                    .await?;
+                }
+                Some(DeviceJoinStatus::StorePublicationPending {
+                    operation:
+                        OwnerJoinPublication::Attempt { request }
+                        | OwnerJoinPublication::SamePrincipalActivation { request },
+                }) => {
+                    on_progress(AdmittingDeviceJoinProgress::RegisteringDevice);
+                    if matches!(request, DeviceRegistrationRequest::SamePrincipal { .. }) {
+                        let join = self
+                            .step(
+                                "activate same-provider device",
+                                self.store.resume_same_principal_device_join(request),
+                            )
+                            .await?;
+                        self.publish(DeviceJoinAction::TransferSamePrincipalJoin(join.clone()))
+                            .await?;
+                        return Ok(DeviceJoinDriveOutcome::Activated(join.activation));
+                    }
+                    self.accept_registration(request).await?;
+                }
+                Some(DeviceJoinStatus::StorePublicationPending {
+                    operation: OwnerJoinPublication::JoinActivation { completion },
+                }) => {
+                    on_progress(AdmittingDeviceJoinProgress::ActivatingDevice);
+                    let activation = self
+                        .step(
+                            "publish activation",
+                            self.store.finalize_device_join(completion),
+                        )
+                        .await?;
+                    self.publish(DeviceJoinAction::TransferActivation(activation.clone()))
+                        .await?;
+                    return Ok(DeviceJoinDriveOutcome::Activated(activation));
+                }
+                Some(DeviceJoinStatus::StorePublicationPending {
+                    operation: OwnerJoinPublication::Abandonment { .. },
+                }) => {
+                    return Err(DeviceJoinError::Store(format!(
+                        "device join {} is being abandoned",
+                        self.attempt_id
+                    ))
+                    .into());
                 }
                 Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
                     on_progress(AdmittingDeviceJoinProgress::PreparingLibrary);
@@ -1127,13 +1192,6 @@ impl<'attempt> AttemptTransport<'attempt> {
                     self.publish(DeviceJoinAction::TransferActivation(activation.clone()))
                         .await?;
                     return Ok(DeviceJoinDriveOutcome::Activated(activation));
-                }
-                status => {
-                    return Err(DeviceJoinError::Store(format!(
-                        "device join {} has no admitting step from {status:?}",
-                        self.attempt_id
-                    ))
-                    .into());
                 }
             }
         }

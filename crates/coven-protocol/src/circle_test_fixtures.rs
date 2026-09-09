@@ -247,14 +247,8 @@ pub fn merge_device_authority(
                 access_key_id_hash: ObjectHash::digest(label.as_bytes()),
             },
         },
-        store_commit::DeviceStreamAnchor::StoreAnnouncements {
-            first_slot: slot("announcements"),
-        },
         store_commit::DeviceStreamAnchor::StoreAcknowledgements {
             first_slot: slot("acknowledgements"),
-        },
-        store_commit::DeviceStreamAnchor::StoreSnapshots {
-            first_slot: slot("snapshots"),
         },
         identity,
     )

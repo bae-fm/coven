@@ -1,12 +1,22 @@
 use super::*;
 
 pub(crate) fn seed_from(hlc: &Hlc, value: Option<String>, context: &str) -> Result<(), DbError> {
-    if let Some(stamp) = value {
-        let floor = Timestamp::parse(&stamp)
-            .ok_or_else(|| DbError::Message(format!("corrupt {context}: {stamp:?}")))?;
+    if let Some(floor) = parse_seed(value, context)? {
         hlc.seed(&floor);
     }
     Ok(())
+}
+
+pub(crate) fn parse_seed(
+    value: Option<String>,
+    context: &str,
+) -> Result<Option<Timestamp>, DbError> {
+    value
+        .map(|stamp| {
+            Timestamp::parse(&stamp)
+                .ok_or_else(|| DbError::Message(format!("corrupt {context}: {stamp:?}")))
+        })
+        .transpose()
 }
 
 /// Greatest `_updated_at` within the restart seed's honest future bound, scanned
@@ -103,14 +113,27 @@ pub(crate) fn configure_connection_durability(
     connection: &Connection,
     durability: ConnectionDurability,
 ) -> Result<(), DbError> {
-    let (journal_mode, synchronous) = match durability {
-        ConnectionDurability::Full => ("WAL", "FULL"),
+    let journal_mode = match durability {
+        ConnectionDurability::Full => "WAL",
         #[cfg(any(test, feature = "test-utils"))]
-        ConnectionDurability::Disabled => ("MEMORY", "OFF"),
+        ConnectionDurability::Disabled => "MEMORY",
     };
     connection
         .pragma_update_and_check(None, "journal_mode", journal_mode, |_| Ok(()))
         .map_err(DbError::from)?;
+    configure_connection_synchronous(connection, durability)
+}
+
+/// Set commit durability without rewriting an image's authenticated journal header.
+pub(crate) fn configure_connection_synchronous(
+    connection: &Connection,
+    durability: ConnectionDurability,
+) -> Result<(), DbError> {
+    let synchronous = match durability {
+        ConnectionDurability::Full => "FULL",
+        #[cfg(any(test, feature = "test-utils"))]
+        ConnectionDurability::Disabled => "OFF",
+    };
     connection
         .pragma_update(None, "synchronous", synchronous)
         .map_err(DbError::from)

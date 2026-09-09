@@ -7,8 +7,26 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
     let fixture = PreparedWriteFixture::prepare().await;
 
     assert!(
-        fixture.remote_object_exists(&fixture.head_object()).await,
-        "the prepared Merge head must have durable candidate ownership before publication",
+        !fixture
+            .remote_object_exists(&fixture.publication_object())
+            .await,
+        "publication entries belong to the active attempt, not the candidate graph",
+    );
+    let active = fixture
+        .active_publication()
+        .await
+        .expect("prepared attempt is durable");
+    assert_eq!(
+        active.attempt().expect("prepared publication").entry_object,
+        fixture.publication_object()
+    );
+    assert_eq!(
+        active
+            .attempt()
+            .expect("prepared publication")
+            .entry
+            .payload,
+        coven_protocol::store_commit::StorePublicationPayload::Commit(fixture.commit_ref()),
     );
 
     assert_eq!(
@@ -79,25 +97,29 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
                         == std::collections::BTreeSet::from([fixture.commit_ref().clone()])
             )
     ));
-    let head = fixture.stored_remote_object(&fixture.head_object()).await;
-    assert!(matches!(
-        head,
-        coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
-            if matches!(
-                &record.identity.domain,
-                coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
-                    reference,
-                    ..
-                } if reference.object == fixture.head_object()
-            ) && matches!(
-                &record.state,
-                coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
-                    ownership
-                } if ownership.pending.is_empty()
-                    && ownership.activated
-                        == std::collections::BTreeSet::from([fixture.commit_ref().clone()])
-            )
-    ));
+    assert!(fixture.active_publication().await.is_none());
+    assert!(
+        !fixture
+            .remote_object_exists(&fixture.publication_object())
+            .await
+    );
+    let publication = fixture.accepted_publication().await;
+    assert_eq!(
+        publication.value,
+        active.attempt().expect("prepared publication").entry
+    );
+    assert_eq!(
+        publication.prepared.reference(),
+        &fixture.publication_object()
+    );
+    assert_eq!(
+        publication.prepared.stored_bytes(),
+        active
+            .attempt()
+            .expect("prepared publication")
+            .entry
+            .to_bytes()
+    );
 }
 
 #[tokio::test]
@@ -121,7 +143,7 @@ async fn local_publication_extends_connection_owned_verified_history() {
 }
 
 #[tokio::test]
-async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_retryable() {
+async fn failures_before_package_commit_and_publication_keep_the_exact_prepared_write_retryable() {
     for failed_call in 1..=3 {
         let fixture = PreparedWriteFixture::prepare().await;
         fixture.fail_exact_create_before_call(failed_call);
@@ -139,7 +161,7 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
         assert_eq!(
             fixture.exact_materialized_ref().await,
             None,
-            "local position cannot advance before a verified head",
+            "local position cannot advance before the shared publication is accepted",
         );
         assert_eq!(
             fixture.contains_exact_object(&fixture.package_object()),
@@ -149,7 +171,7 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
             fixture.contains_exact_object(&fixture.commit_ref().object),
             failed_call > 2,
         );
-        assert!(!fixture.contains_exact_object(&fixture.head_object()),);
+        assert!(!fixture.contains_exact_object(&fixture.publication_object()),);
 
         assert_eq!(
             fixture
@@ -168,464 +190,13 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
             coven_protocol::write::WriteStatus::Published(position)
                 if matches!(
                     position.as_ref(),
-                    coven_protocol::write::PublishedPosition { device_id, commit }
+                    coven_protocol::write::PublishedWrite::Commit(coven_protocol::write::PublishedPosition { device_id, commit })
                         if device_id == &fixture.device_id()
                             && commit.coord.sequence() == 1
                             && commit.commit_hash == fixture.commit_ref().commit_hash
                 )
         ));
     }
-}
-
-#[tokio::test]
-async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence() {
-    let fixture = PreparedWriteFixture::prepare().await;
-    let winner = fixture.publish_competing_merge_head().await;
-
-    assert_eq!(
-        fixture
-            .drain_store_writes()
-            .await
-            .expect("classify the occupied Merge successor slot"),
-        0,
-    );
-    assert!(matches!(
-        fixture.write_status().await,
-        coven_protocol::write::WriteStatus::Blocked(coven_protocol::write::WriteBlock::InvalidProtocolState { ref reason })
-            if reason.contains(&winner.head_hash.to_string())
-    ));
-    let retains_prepared = fixture.write_retains_prepared().await;
-    assert!(retains_prepared);
-    let package = fixture
-        .stored_remote_object(&fixture.package_object())
-        .await;
-    assert!(matches!(
-        package,
-        coven_protocol::remote_object::RemoteObjectRecord::CandidateExclusive(record)
-            if matches!(
-                &record.state,
-                coven_protocol::remote_object::CandidateObjectState::CleanupPending {
-                    former_candidates
-                } if former_candidates.len() == 1
-                    && matches!(
-                        former_candidates[0].proof(),
-                        coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
-                            winner_head
-                        } if winner_head == &winner
-                    )
-            )
-    ));
-    let commit = fixture
-        .stored_remote_object(&fixture.commit_ref().object)
-        .await;
-    assert!(matches!(
-        commit,
-        coven_protocol::remote_object::RemoteObjectRecord::CandidateCommit(record)
-            if matches!(
-                &record.state,
-                coven_protocol::remote_object::CandidateCommitState::CleanupPending {
-                    proof: coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
-                        winner_head
-                    }
-                } if winner_head == &winner
-            )
-    ));
-    let head = fixture.stored_remote_object(&fixture.head_object()).await;
-    assert!(matches!(
-        head,
-        coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
-            if matches!(
-                &record.state,
-                coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
-                    former_candidates
-                } if former_candidates.len() == 1
-                    && matches!(
-                        former_candidates[0].proof(),
-                        coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
-                            winner_head
-                        } if winner_head == &winner
-                    )
-            )
-    ));
-    assert_eq!(
-        fixture.discard_blocked_write().await,
-        coven_database::BlockedWriteDiscard::RemoteResolutionRequired,
-    );
-    assert!(fixture.merge_candidate_cleanup_pending().await);
-    let retry_error = fixture
-        .retry_blocked_write()
-        .await
-        .expect_err("an occupied immutable Merge slot cannot be retried");
-    assert!(
-        retry_error.to_string().contains("winner"),
-        "unexpected retry error: {retry_error}"
-    );
-    fixture.fail_exact_delete_on_call(2);
-    assert!(fixture.cleanup_merge_candidate().await.is_err());
-    assert!(!fixture.contains_exact_object(&fixture.package_object()));
-    assert!(fixture.contains_exact_object(&fixture.commit_ref().object));
-    fixture
-        .cleanup_merge_candidate()
-        .await
-        .expect("resume exact losing Merge cleanup");
-    assert!(!fixture.merge_candidate_cleanup_pending().await);
-    assert_eq!(
-        fixture.discard_blocked_write().await,
-        coven_database::BlockedWriteDiscard::Discarded(vec![fixture.write_id().clone()]),
-    );
-    assert!(!fixture.contains_exact_object(&fixture.package_object()));
-    assert!(!fixture.contains_exact_object(&fixture.commit_ref().object));
-    assert!(fixture.contains_exact_object(&winner.object));
-}
-
-#[tokio::test]
-async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
-    let fixture = PreparedWriteFixture::prepare().await;
-    fixture
-        .set_write_status(coven_protocol::write::WriteStatus::Blocked(
-            coven_protocol::write::WriteBlock::InvalidProtocolState {
-                reason: "host chose discard".to_string(),
-            },
-        ))
-        .await;
-
-    let discarded = fixture
-        .discard_blocked_candidate()
-        .await
-        .expect("abandon and discard the blocked candidate");
-    assert_eq!(discarded, vec![fixture.write_id().clone()]);
-    assert!(!fixture.merge_candidate_cleanup_pending().await);
-    let authority = fixture
-        .latest_local_store_position()
-        .await
-        .expect("read local Merge position")
-        .expect("abandonment advances the local stream");
-    assert_ne!(authority, fixture.commit_ref());
-    let authority_remote = fixture.stored_remote_object(&authority.object).await;
-    assert!(matches!(
-        authority_remote,
-        coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
-            if matches!(
-                &record.identity.domain,
-                coven_protocol::remote_object::RetainedAuthorityObjectDomain::Commit {
-                    reference
-                } if reference == &authority
-            )
-    ));
-    assert!(!fixture.contains_exact_object(&fixture.package_object()));
-    assert!(!fixture.contains_exact_object(&fixture.commit_ref().object));
-    assert!(matches!(
-        fixture.write_status().await,
-        coven_protocol::write::WriteStatus::Resolved(
-            coven_protocol::write::WriteResolution::Discarded
-        )
-    ));
-    assert!(fixture.remote_object_exists(&authority.object).await);
-}
-
-#[tokio::test]
-async fn prepared_merge_abandonment_resumes_after_restart() {
-    let fixture = PreparedWriteFixture::prepare().await;
-    fixture
-        .set_write_status(coven_protocol::write::WriteStatus::Blocked(
-            coven_protocol::write::WriteBlock::InvalidProtocolState {
-                reason: "host chose discard".to_string(),
-            },
-        ))
-        .await;
-    assert!(fixture
-        .prepare_merge_candidate_abandonment()
-        .await
-        .expect("persist Merge abandonment"));
-
-    assert_eq!(
-        fixture
-            .abandon_merge_candidate()
-            .await
-            .expect("resume Merge abandonment"),
-        MergeCandidateAbandonment::Abandoned,
-    );
-}
-
-#[tokio::test]
-async fn merge_abandonment_retries_commit_and_head_publication_failures() {
-    for failed_call in 1..=2 {
-        let fixture = PreparedWriteFixture::prepare().await;
-        fixture
-            .set_write_status(coven_protocol::write::WriteStatus::Blocked(
-                coven_protocol::write::WriteBlock::InvalidProtocolState {
-                    reason: "host chose discard".to_string(),
-                },
-            ))
-            .await;
-        assert!(fixture
-            .prepare_merge_candidate_abandonment()
-            .await
-            .expect("persist Merge abandonment"));
-        fixture.fail_exact_create_before_call(failed_call);
-
-        assert!(
-            fixture.abandon_merge_candidate().await.is_err(),
-            "exact create call {failed_call} fails",
-        );
-        assert_eq!(
-            fixture
-                .abandon_merge_candidate()
-                .await
-                .expect("retry Merge abandonment publication"),
-            MergeCandidateAbandonment::Abandoned,
-        );
-    }
-}
-
-#[tokio::test]
-async fn accepted_merge_abandonment_retries_losing_object_deletion() {
-    let fixture = PreparedWriteFixture::prepare().await;
-    let batch = fixture.prepared_write().await;
-    fixture
-        .publish_prepared_remote_objects()
-        .await
-        .expect("publish original candidate objects");
-    fixture
-        .publish_prepared_object(&batch.commit.prepared)
-        .await;
-    fixture.mark_candidate_commit_uploaded().await;
-    fixture
-        .set_write_status(coven_protocol::write::WriteStatus::Blocked(
-            coven_protocol::write::WriteBlock::InvalidProtocolState {
-                reason: "host chose discard".to_string(),
-            },
-        ))
-        .await;
-    fixture.fail_exact_delete_on_call(1);
-
-    assert!(
-        fixture.abandon_merge_candidate().await.is_err(),
-        "losing object deletion fails",
-    );
-    assert!(fixture.merge_candidate_cleanup_pending().await);
-    assert_eq!(
-        fixture
-            .abandon_merge_candidate()
-            .await
-            .expect("retry losing object deletion"),
-        MergeCandidateAbandonment::Abandoned,
-    );
-}
-
-#[tokio::test]
-async fn original_candidate_activation_wins_abandonment_race() {
-    let fixture = PreparedWriteFixture::prepare().await;
-    let batch = fixture.prepared_write().await;
-    fixture
-        .publish_prepared_remote_objects()
-        .await
-        .expect("publish original candidate objects");
-    fixture
-        .publish_prepared_object(&batch.commit.prepared)
-        .await;
-    fixture.publish_prepared_object(&batch.head.prepared).await;
-    fixture
-        .set_write_status(coven_protocol::write::WriteStatus::Blocked(
-            coven_protocol::write::WriteBlock::InvalidProtocolState {
-                reason: "host chose discard".to_string(),
-            },
-        ))
-        .await;
-
-    assert_eq!(
-        fixture
-            .abandon_merge_candidate()
-            .await
-            .expect("settle activation that won abandonment race"),
-        MergeCandidateAbandonment::CandidateActivated,
-    );
-    assert!(matches!(
-        fixture.write_status().await,
-        coven_protocol::write::WriteStatus::Published(position)
-            if position.commit() == &fixture.commit_ref()
-    ));
-    assert!(fixture.contains_exact_object(&fixture.package_object()));
-    assert!(fixture.contains_exact_object(&fixture.commit_ref().object));
-    assert!(fixture.contains_exact_object(&fixture.head_object()));
-}
-
-#[tokio::test]
-async fn third_candidate_wins_after_abandonment_preparation() {
-    let fixture = PreparedWriteFixture::prepare().await;
-    fixture
-        .set_write_status(coven_protocol::write::WriteStatus::Blocked(
-            coven_protocol::write::WriteBlock::InvalidProtocolState {
-                reason: "host chose discard".to_string(),
-            },
-        ))
-        .await;
-    assert!(fixture
-        .prepare_merge_candidate_abandonment()
-        .await
-        .expect("persist Merge abandonment"));
-    let authority = fixture.prepared_write().await;
-    let authority_commit = authority.commit.prepared.reference().clone();
-    let authority_head = authority.head.prepared.reference().clone();
-    let winner = fixture.publish_competing_merge_head().await;
-
-    assert_eq!(
-        fixture
-            .abandon_merge_candidate()
-            .await
-            .expect("settle third-candidate winner"),
-        MergeCandidateAbandonment::Abandoned,
-    );
-    assert!(!fixture.merge_candidate_cleanup_pending().await);
-    assert!(!fixture.contains_exact_object(&fixture.package_object()));
-    assert!(!fixture.contains_exact_object(&fixture.commit_ref().object));
-    assert!(fixture.contains_exact_object(&winner.object));
-    assert!(!fixture.remote_object_exists(&authority_commit).await);
-    assert!(!fixture.remote_object_exists(&authority_head).await);
-    assert_eq!(
-        fixture.discard_blocked_write().await,
-        coven_database::BlockedWriteDiscard::Discarded(vec![fixture.write_id().clone()]),
-    );
-}
-
-#[tokio::test]
-async fn alternate_head_for_abandonment_authority_is_accepted() {
-    let fixture = PreparedWriteFixture::prepare().await;
-    fixture
-        .set_write_status(coven_protocol::write::WriteStatus::Blocked(
-            coven_protocol::write::WriteBlock::InvalidProtocolState {
-                reason: "host chose discard".to_string(),
-            },
-        ))
-        .await;
-    assert!(fixture
-        .prepare_merge_candidate_abandonment()
-        .await
-        .expect("persist Merge abandonment"));
-    let accepted_head = fixture.publish_alternate_head_for_prepared_commit().await;
-
-    assert_eq!(
-        fixture
-            .abandon_merge_candidate()
-            .await
-            .expect("accept alternate abandonment head"),
-        MergeCandidateAbandonment::Abandoned,
-    );
-    assert!(!fixture.contains_exact_object(&fixture.package_object()));
-    assert!(!fixture.contains_exact_object(&fixture.commit_ref().object));
-    assert!(fixture.contains_exact_object(&accepted_head.object));
-}
-
-#[tokio::test]
-async fn alternate_merge_head_for_the_exact_commit_completes_as_accepted() {
-    let fixture = PreparedWriteFixture::prepare().await;
-    let accepted_head = fixture.publish_alternate_head_for_prepared_commit().await;
-
-    assert_eq!(
-        fixture
-            .drain_store_writes()
-            .await
-            .expect("accept the exact commit through the occupied Merge head"),
-        1,
-    );
-    assert!(matches!(
-        fixture.write_status().await,
-        coven_protocol::write::WriteStatus::Published(position)
-            if position.commit() == &fixture.commit_ref()
-    ));
-    let head = fixture.stored_remote_object(&accepted_head.object).await;
-    assert!(matches!(
-        head,
-        coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
-            if matches!(
-                &record.identity.domain,
-                coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
-                    reference,
-                    ..
-                } if reference == &accepted_head
-            )
-    ));
-}
-
-#[tokio::test]
-async fn lost_exact_head_response_is_settled_by_provider_verification_and_completion_is_idempotent()
-{
-    let fixture = PreparedWriteFixture::prepare().await;
-    fixture.fail_exact_create_after_call(3);
-    assert_eq!(
-        fixture
-            .drain_store_writes()
-            .await
-            .expect("settle lost head response through exact-upload verification"),
-        1
-    );
-    assert!(fixture.contains_exact_object(&fixture.package_object()));
-    assert!(fixture.contains_exact_object(&fixture.commit_ref().object));
-    assert!(fixture.contains_exact_object(&fixture.head_object()));
-    assert_eq!(
-        fixture.exact_materialized_ref().await,
-        Some(fixture.commit_ref().clone())
-    );
-
-    assert_eq!(
-        fixture
-            .drain_store_writes()
-            .await
-            .expect("already-completed exact batch is idempotent"),
-        0
-    );
-    assert!(matches!(
-        fixture.write_status().await,
-        coven_protocol::write::WriteStatus::Published(position)
-            if matches!(
-                position.as_ref(),
-                coven_protocol::write::PublishedPosition { commit, .. }
-                    if commit.coord.sequence() == 1
-                        && commit.commit_hash == fixture.commit_ref().commit_hash
-            )
-    ));
-}
-
-#[tokio::test]
-async fn local_completion_failure_rolls_back_position_and_retries_after_visible_head() {
-    let fixture = PreparedWriteFixture::prepare().await;
-    fixture.install_outbound_completion_failure().await;
-    let first = fixture.drain_store_writes().await;
-    assert!(matches!(first, Err(StoreError::Database(_))));
-    assert_eq!(
-        fixture.write_status().await,
-        coven_protocol::write::WriteStatus::Publishing,
-    );
-    assert!(fixture.contains_exact_object(&fixture.head_object()));
-    assert!(fixture.prepared_write_exists().await);
-    assert_eq!(
-        fixture.exact_materialized_ref().await,
-        None,
-        "position and prepared-state clearing share the failed transaction",
-    );
-
-    fixture.remove_outbound_completion_failure().await;
-    assert_eq!(
-        fixture
-            .drain_store_writes()
-            .await
-            .expect("retry local completion"),
-        1
-    );
-    assert_eq!(
-        fixture.exact_materialized_ref().await,
-        Some(fixture.commit_ref().clone()),
-    );
-    assert!(matches!(
-        fixture.write_status().await,
-        coven_protocol::write::WriteStatus::Published(position)
-            if matches!(
-                position.as_ref(),
-                coven_protocol::write::PublishedPosition { commit, .. }
-                    if commit.coord.sequence() == 1
-                        && commit.commit_hash == fixture.commit_ref().commit_hash
-            )
-    ));
 }
 
 #[tokio::test]

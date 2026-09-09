@@ -386,7 +386,6 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 },
                 &winning_rows,
             )?;
-            self.record_accepted_rows(gates, &mut next_private_rows, &winning_rows, commit_ref)?;
         }
         let private_row_keys = next_private_rows
             .private
@@ -505,7 +504,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 write_status_notifications: Vec::new(),
             });
         }
-        Self::record_adopted_rows(&mut next_private_rows, &adopted_private_rows, commit_ref);
+        Self::record_adopted_rows(&mut next_private_rows, &adopted_private_rows);
         self.retain_prepared_merge_materialization(registrations_lookup, &materialization)?;
         *private_rows = next_private_rows;
         Ok(AppliedMergeMaterialization {

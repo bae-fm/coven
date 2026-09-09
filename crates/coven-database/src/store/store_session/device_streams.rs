@@ -1,50 +1,67 @@
 use crate::*;
-use coven_protocol::store_commit::{SnapshotMeta, StoreAck, StoreAckRef, StoreSnapshotRef};
+use coven_protocol::store_commit::{
+    StoreAck, StoreAckRef, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
+};
 
+use super::device_registration_journal::LocalRegistrationRecord;
 use super::*;
 
 impl StoreDatabase {
-    /// Record where the local device's published streams stand on the
-    /// provider: the acknowledgement head the pulled history activated for it
-    /// and the snapshot its stream ends on. A restore that adopts a
-    /// registration the device registered in an earlier life finds the
-    /// registration's own first slots already written, so its streams resume
-    /// from these heads rather than restarting there.
-    ///
-    /// The acknowledgement only ever advances the recorded head; the snapshot
-    /// is recorded when the local stream is empty and must match when it is
-    /// not.
-    pub async fn resume_local_device_streams(
+    /// Install an already activated recovery together with its current exact
+    /// acknowledgement. Preparation performs every remote read before this call.
+    pub async fn install_adopted_owner_recovery(
         &self,
+        registration: ExactProtocolObject<StoreDeviceRegistration>,
+        initial_ack_ref: StoreAckRef,
+        initial_ack: ExactProtocolObject<StoreAck>,
+        activation: StoreDeviceRegistrationActivation,
         latest_ack: (StoreAckRef, StoreAck),
-        latest_snapshot: Option<(StoreSnapshotRef, SnapshotMeta)>,
     ) -> Result<(), DbError> {
+        const SUBJECT: &str = "adopted Owner recovery registration graph";
+        let record = LocalRegistrationRecord::checked_owner_recovery(
+            registration,
+            initial_ack_ref,
+            initial_ack,
+            &activation,
+            SUBJECT,
+        )?;
         self.call_store(move |session| {
-            session.resume_local_device_streams(latest_ack, latest_snapshot)
+            session.install_adopted_owner_recovery(record, activation, latest_ack, SUBJECT)
         })
         .await
     }
 }
 
 impl StoreSession<'_> {
-    fn resume_local_device_streams(
+    fn install_adopted_owner_recovery(
         &mut self,
+        record: LocalRegistrationRecord,
+        activation: StoreDeviceRegistrationActivation,
         (latest_ack_ref, latest_ack): (StoreAckRef, StoreAck),
-        latest_snapshot: Option<(StoreSnapshotRef, SnapshotMeta)>,
+        subject: &str,
     ) -> Result<(), DbError> {
+        let conn = self.conn;
+        let tx = conn.unchecked_transaction()?;
         let root = self.required_root_authority()?;
-        let Some(registration_ref) = local_activated_registration_ref_on(self.conn)? else {
+        record.require_installed_store_root(&root, subject)?;
+        let activated = self.activated_store_device_registration_with_authority(
+            root.clone(),
+            record.reference().clone(),
+        )?;
+        if activated.value() != record.registration() || activated.activation() != &activation {
             return Err(DbError::Message(
-                "resuming device streams requires a local activated registration".into(),
+                "adopted recovery differs from its installed registration authority".into(),
             ));
+        }
+        let accepted = self.activated_store_ack(record.reference())?;
+        let expected = match &accepted {
+            Some(accepted) => &accepted.reference,
+            None => record.initial_ack_ref(),
         };
-        let activated = self.activated_registration(&registration_ref)?;
-        if latest_ack_ref.registration != registration_ref
-            || latest_ack.registration != registration_ref
-            || latest_ack.sequence != latest_ack_ref.sequence
-        {
+        if &latest_ack_ref != expected {
             return Err(DbError::Message(
-                "resumed acknowledgement head belongs to another registration".into(),
+                "adopted recovery acknowledgement changed while its exact object was prepared"
+                    .into(),
             ));
         }
         let verified = StoreAck::parse_at(
@@ -59,76 +76,46 @@ impl StoreSession<'_> {
                 "resumed acknowledgement head changed during exact verification".into(),
             ));
         }
-        let conn = self.conn;
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let recorded = load_published_store_ack_on(&tx)?;
-        if recorded
-            .as_ref()
-            .is_none_or(|recorded| recorded.reference.sequence < latest_ack_ref.sequence)
-        {
-            let ack_ref = serde_json::to_string(&latest_ack_ref)
-                .map_err(|error| DbError::context("resumed acknowledgement head", error))?;
-            let successor = serde_json::to_string(&latest_ack.successor.next_slot)
-                .map_err(|error| DbError::context("resumed acknowledgement successor", error))?;
-            tx.execute(
-                "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
-                     VALUES (1, ?1, ?2) \
-                 ON CONFLICT (singleton) DO UPDATE SET \
-                     ack_ref = excluded.ack_ref, successor_slot = excluded.successor_slot, \
-                     standing = NULL",
-                (&ack_ref, &successor),
-            )
-            .map_err(DbError::from)?;
-        }
-        let existing_snapshot = load_published_store_snapshot_on(&tx, &activated)?;
-        match (existing_snapshot, latest_snapshot) {
-            (None, None) => {}
-            (None, Some((reference, meta))) => {
-                let verified = SnapshotMeta::parse_stream_entry_at(
-                    &meta.to_bytes(),
-                    &root,
-                    &registration_ref,
-                    activated.value(),
-                    &reference,
-                )
-                .map_err(DbError::from)?;
-                if verified != meta {
-                    return Err(DbError::Message(
-                        "resumed snapshot head changed during exact verification".into(),
-                    ));
-                }
-                let generation = i64::try_from(reference.generation).map_err(|_| {
-                    DbError::Message("resumed snapshot generation exceeds SQLite INTEGER".into())
-                })?;
-                tx.execute(
-                    "INSERT INTO published_store_snapshot \
-                         (generation, snapshot_ref, successor_slot, meta_bytes) \
-                         VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![
-                        generation,
-                        serde_json::to_string(&reference)
-                            .map_err(|error| DbError::context("resumed snapshot ref", error))?,
-                        serde_json::to_string(&meta.successor.next_slot).map_err(|error| {
-                            DbError::context("resumed snapshot successor", error)
-                        })?,
-                        meta.to_bytes(),
-                    ],
-                )
-                .map_err(DbError::from)?;
-            }
-            (Some(existing), Some((reference, meta))) => {
-                if existing.reference != reference || existing.meta != meta {
-                    return Err(DbError::Message(
-                        "local snapshot stream differs from the provider's head".into(),
-                    ));
-                }
-            }
-            (Some(_), None) => {
+        if let Some(recorded) = &recorded {
+            if recorded.reference.registration == *record.reference()
+                && (recorded.reference.sequence > latest_ack_ref.sequence
+                    || (recorded.reference.sequence == latest_ack_ref.sequence
+                        && (recorded.reference != latest_ack_ref
+                            || recorded.successor_slot != latest_ack.successor.next_slot)))
+            {
                 return Err(DbError::Message(
-                    "local snapshot stream names a snapshot the provider does not hold".into(),
+                    "adopted recovery acknowledgement conflicts with its existing local stream"
+                        .into(),
                 ));
             }
         }
+        let standing = coven_protocol::store_commit::StandingStoreAck {
+            assertion: latest_ack.assertion(),
+            activating_commit: accepted.map(|accepted| accepted.activating_commit),
+        };
+        let ack_ref = serde_json::to_string(&latest_ack_ref)
+            .map_err(|error| DbError::context("adopted acknowledgement head", error))?;
+        let successor = serde_json::to_string(&latest_ack.successor.next_slot)
+            .map_err(|error| DbError::context("adopted acknowledgement successor", error))?;
+        let standing = serde_json::to_string(&standing)
+            .map_err(|error| DbError::context("adopted standing acknowledgement", error))?;
+        record.replace_journal_on(
+            &tx,
+            LocalDeviceRegistrationState::Activated {
+                authority: activation,
+            },
+            subject,
+        )?;
+        tx.execute(
+            "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot, standing) \
+             VALUES (1, ?1, ?2, ?3) \
+             ON CONFLICT (singleton) DO UPDATE SET \
+                 ack_ref = excluded.ack_ref, successor_slot = excluded.successor_slot, \
+                 standing = excluded.standing",
+            (&ack_ref, &successor, &standing),
+        )?;
+        crate::set_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY, &record.device_id())?;
         tx.commit().map_err(DbError::from)
     }
 }

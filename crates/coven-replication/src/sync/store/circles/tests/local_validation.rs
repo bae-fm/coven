@@ -28,13 +28,19 @@ async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
         .substitute_circle_operation_for_test(journal.clone())
         .await
         .expect("persist substituted journal plaintext");
-    store
+    let error = store
         .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect_err("local activation must reject substituted journal plaintext");
+    assert!(
+        error.to_string().contains(
+            "prepared Circle access bytes, plaintext hash, ciphertext hash, or envelope differ"
+        ),
+        "{error}"
+    );
     assert_eq!(
         StoreDatabase::new(&db)
             .circle_control_activation_count_for_test(journal.circle_id())
@@ -80,13 +86,19 @@ async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() 
         .await
         .expect("persist substituted journal object");
 
-    store
+    let error = store
         .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect_err("local publication must reject objects outside the signed graph");
+    assert!(
+        error
+            .to_string()
+            .contains("outside its signed Store commit graph"),
+        "{error}"
+    );
 
     assert_eq!(
         StoreDatabase::new(&db)
@@ -149,12 +161,12 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
         .resign_merge_journal_with_reference_for_test(&mut journal, reference, |_| {})
         .await
         .expect("re-sign Circle commit with substituted exact graph");
-    let store_commit = journal.operation().commit_ref.object.clone();
-    let store_head = journal
+    let store_commit = journal.operation().commit_ref().object.clone();
+    let publication = journal
         .operation()
-        .prepared_objects
-        .get("store-head")
-        .expect("Merge operation carries a Store head")
+        .store_commit
+        .publication
+        .entry_object
         .clone();
     coven_database::StoreDatabase::new(&db)
         .substitute_circle_operation_for_test(journal.clone())
@@ -177,7 +189,7 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
         0
     );
     assert!(!_home.contains_exact_object(&store_commit));
-    assert!(!_home.contains_exact_object(&store_head));
+    assert!(!_home.contains_exact_object(&publication));
 }
 
 #[tokio::test]
@@ -249,17 +261,17 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
             )
             .await
             .expect("re-sign Circle commit with substituted stream authority");
-        let store_commit = journal.operation().commit_ref.object.clone();
-        let store_head = journal
+        let store_commit = journal.operation().commit_ref().object.clone();
+        let publication = journal
             .operation()
-            .prepared_objects
-            .get("store-head")
-            .expect("Merge operation carries a Store head")
+            .store_commit
+            .publication
+            .entry_object
             .clone();
         let StoreCommitCoord {
             stream_id,
             sequence,
-        } = journal.operation().commit_ref.coord;
+        } = journal.operation().commit_ref().coord;
         coven_database::StoreDatabase::new(&db)
             .substitute_circle_operation_for_test(journal.clone())
             .await
@@ -285,7 +297,7 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
             .expect("read rejected Circle Store position")
             .is_none());
         assert!(!_home.contains_exact_object(&store_commit));
-        assert!(!_home.contains_exact_object(&store_head));
+        assert!(!_home.contains_exact_object(&publication));
     }
 }
 
@@ -346,17 +358,17 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         )
         .await
         .expect("re-sign Circle commit with unexpected acknowledgement");
-    let store_commit = journal.operation().commit_ref.object.clone();
-    let store_head = journal
+    let store_commit = journal.operation().commit_ref().object.clone();
+    let publication = journal
         .operation()
-        .prepared_objects
-        .get("store-head")
-        .expect("Merge operation carries a Store head")
+        .store_commit
+        .publication
+        .entry_object
         .clone();
     let StoreCommitCoord {
         stream_id,
         sequence,
-    } = journal.operation().commit_ref.coord;
+    } = journal.operation().commit_ref().coord;
     coven_database::StoreDatabase::new(&db)
         .substitute_circle_operation_for_test(journal.clone())
         .await
@@ -383,11 +395,11 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         .expect("read rejected Circle Store position")
         .is_none());
     assert!(!_home.contains_exact_object(&store_commit));
-    assert!(!_home.contains_exact_object(&store_head));
+    assert!(!_home.contains_exact_object(&publication));
 }
 
 #[tokio::test]
-async fn local_successor_rejects_an_unreserved_circle_predecessor() {
+async fn local_successor_rejects_an_unreserved_circle_head_slot() {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (store, _home, signer, founder) =
@@ -422,14 +434,6 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .expect("read interrupted rename")
         .expect("interrupted rename journal remains durable");
     let commit = journal.commit().expect("parse rename commit");
-    let author = coven_database::StoreDatabase::new(&db)
-        .activated_store_device_registration(commit.author_registration.clone())
-        .await
-        .expect("load rename author");
-    let device_signer = author
-        .value()
-        .device_signer(&signer)
-        .expect("derive rename device signer");
     let original_slot = journal
         .operation()
         .prepared_objects
@@ -437,18 +441,15 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .expect("rename carries a control head")
         .slot()
         .clone();
-    let creation = &mut journal.operation_mut().creation;
-    let CircleTransitionPolicyObjects { control_head, .. } = &mut creation.policy_objects;
-    control_head.body_mut().successor.predecessor =
-        Some(coven_protocol::objects::ExactObjectRef::new(
-            coven_protocol::objects::ObjectSlot::logical(
-                "store-v1/test-circle-controls/unreserved-predecessor.json".to_string(),
-            )
-            .expect("construct arbitrary predecessor slot"),
-            1,
-            ObjectHash::digest(b"unreserved Circle predecessor"),
-        ));
-    control_head.resign(&device_signer);
+    let substituted_slot = coven_protocol::objects::ObjectSlot::opaque(
+        original_slot.logical_key().to_string(),
+        "unreserved-circle-successor".to_string(),
+    )
+    .expect("construct an unreserved successor slot with the same semantic path");
+    // Keep the real, readable predecessor and signed head bytes. Only the
+    // successor's physical slot differs from the predecessor's reservation.
+    let creation = &journal.operation().creation;
+    let CircleTransitionPolicyObjects { control_head, .. } = &creation.policy_objects;
     let head_prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
         circle_id,
         control: &control_head.control,
@@ -463,12 +464,12 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
                 commit.store_root_hash,
                 ProtocolObjectDomain::CircleControl,
             ),
-            original_slot,
+            substituted_slot,
             &head_prefix,
-            serde_json::to_vec(&control_head).expect("serialize forged control head"),
+            serde_json::to_vec(&control_head).expect("serialize the signed control head"),
         )
         .await
-        .expect("prepare forged control head");
+        .expect("prepare the signed head at the unreserved slot");
     install_substituted_object(&db, &prepared_head).await;
     journal.operation_mut().prepared_objects.insert(
         "control-head".to_string(),
@@ -493,26 +494,32 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .circles()
         .resign_merge_journal_with_reference_for_test(&mut journal, reference, |_| {})
         .await
-        .expect("re-sign Circle commit with unreserved predecessor");
-    let store_commit = journal.operation().commit_ref.object.clone();
-    let store_head = journal
+        .expect("re-sign Circle commit with an unreserved successor slot");
+    let store_commit = journal.operation().commit_ref().object.clone();
+    let publication = journal
         .operation()
-        .prepared_objects
-        .get("store-head")
-        .expect("Merge operation carries a Store head")
+        .store_commit
+        .publication
+        .entry_object
         .clone();
     coven_database::StoreDatabase::new(&db)
         .substitute_circle_operation_for_test(journal)
         .await
         .expect("persist forged successor journal");
 
-    store
+    let error = store
         .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
-        .expect_err("common verifier must reject an unreserved Circle predecessor");
+        .expect_err("common verifier must reject an unreserved Circle successor slot");
+    assert!(
+        error
+            .to_string()
+            .contains("Circle head does not occupy its predecessor-reserved successor slot"),
+        "{error}"
+    );
     assert_eq!(
         StoreDatabase::new(&db)
             .circle_control_activation_count_for_test(circle_id)
@@ -521,30 +528,26 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         1
     );
     assert!(!_home.contains_exact_object(&store_commit));
-    assert!(!_home.contains_exact_object(&store_head));
+    assert!(!_home.contains_exact_object(&publication));
 }
 
 #[tokio::test]
-async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
+async fn local_publication_rejects_a_substituted_publication_entry_slot() {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (store, _home, signer, mut journal) = persist_merge_operation(
         &db,
         db_store_dir.clone(),
-        "circle-substituted-local-head-slot",
+        "circle-substituted-publication-entry-slot",
     )
     .await;
-    let original = journal
-        .operation()
-        .prepared_objects
-        .get("store-head")
-        .expect("Merge operation carries an exact Store head");
+    let original = &journal.operation().store_commit.publication.entry_object;
     let substituted_slot = coven_protocol::objects::ObjectSlot::opaque(
         original.slot().logical_key().to_string(),
-        "substituted-store-head".to_string(),
+        "substituted-publication-entry".to_string(),
     )
-    .expect("construct alternate Store head slot");
-    // The head's own bytes, under a slot the Store never reserved for it.
+    .expect("construct alternate publication entry slot");
+    // The same entry bytes at a slot its signed current-record replacement does not name.
     let substituted = coven_protocol::objects::ExactObjectRef::new(
         substituted_slot,
         original.stored_size(),
@@ -552,20 +555,29 @@ async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
     );
     journal
         .operation_mut()
-        .prepared_objects
-        .insert("store-head".to_string(), substituted);
+        .store_commit
+        .publication
+        .entry_object = substituted;
     coven_database::StoreDatabase::new(&db)
         .substitute_circle_operation_for_test(journal.clone())
         .await
-        .expect("persist substituted Store head slot");
+        .expect("persist substituted publication entry slot");
 
-    store
+    let error = store
         .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
-        .expect_err("local publication must reject an unreserved Store head slot");
+        .expect_err(
+            "local publication must reject an entry slot different from its signed replacement",
+        );
+    assert!(
+        error
+            .to_string()
+            .contains("prepared Store publication differs from its commit or predecessor"),
+        "{error}"
+    );
 
     assert_eq!(
         StoreDatabase::new(&db)

@@ -156,11 +156,11 @@ fn child_gate_follows_the_foreign_keys_named_parent_column() {
     let gates = Gates::from_tables(&c, &tables).expect("build gate model");
 
     assert!(
-            !gates
-                .row_kept(&c, "children", "child-b")
-                .expect("resolve child gate"),
-            "the child belongs to the gated-false row whose code the FK names, not the unrelated row whose id happens to equal that code",
-        );
+        !gates
+            .row_kept(&c, "children", "child-b")
+            .expect("resolve child gate"),
+        "the child belongs to the gated-false row whose code the FK names, not the unrelated row whose id happens to equal that code",
+    );
 }
 
 /// Capture a changeset over `tables` while running `stmts`. Returns the
@@ -365,13 +365,13 @@ fn ungated_table_always_passes() {
         ),
     ];
     let out = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO notes (id, shared, _updated_at) VALUES ('n1', 0, '0000000001000-0000-dev1')",
-                "INSERT INTO settings (id, val, _updated_at) VALUES ('s1', 'x', '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO notes (id, shared, _updated_at) VALUES ('n1', 0, '0000000001000-0000-dev1')",
+            "INSERT INTO settings (id, val, _updated_at) VALUES ('s1', 'x', '0000000001000-0000-dev1')",
+        ],
+    );
     let changes = walk(&out).expect("walk");
     assert!(!has_row(&changes, "notes", "n1"), "gated-false note is cut");
     assert!(
@@ -661,10 +661,12 @@ fn post_promotion_edit_is_single_update_not_reemit() {
     // Cycle 2: an ordinary edit to the already-shared note. Not a flip, so it
     // must emit exactly one UPDATE for the note and nothing else.
     let out = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE notes SET title = 'Renamed', _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE notes SET title = 'Renamed', _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'",
+        ],
+    );
     let changes = walk(&out).expect("walk");
     assert_eq!(changes.len(), 1, "exactly one change");
     assert_eq!(changes[0].table, "notes");
@@ -708,14 +710,14 @@ fn multi_hop_fk_inheritance() {
 
     // Private album with a 2-level subtree: all cut.
     let out = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO albums (id, shared, _updated_at) VALUES ('a1', 0, '0000000001000-0000-dev1')",
-                "INSERT INTO photos (id, album_id, _updated_at) VALUES ('p1', 'a1', '0000000001000-0000-dev1')",
-                "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('c1', 'p1', '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO albums (id, shared, _updated_at) VALUES ('a1', 0, '0000000001000-0000-dev1')",
+            "INSERT INTO photos (id, album_id, _updated_at) VALUES ('p1', 'a1', '0000000001000-0000-dev1')",
+            "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('c1', 'p1', '0000000001000-0000-dev1')",
+        ],
+    );
     assert!(
         walk(&out).expect("walk").is_empty(),
         "private 2-level subtree fully cut"
@@ -1107,14 +1109,14 @@ fn changeset_cut_drops_orphan_ancestor() {
     let c = conn();
     create_album_schema(&c);
     let out = capture_and_gate(
-            &c,
-            &album_tables(),
-            &[
-                "INSERT INTO albums (id, _updated_at) VALUES ('AL', '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R', 'AL', 0, '0000000001000-0000-dev1')",
-                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T', 'R', '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &album_tables(),
+        &[
+            "INSERT INTO albums (id, _updated_at) VALUES ('AL', '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R', 'AL', 0, '0000000001000-0000-dev1')",
+            "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T', 'R', '0000000001000-0000-dev1')",
+        ],
+    );
     let changes = walk(&out).expect("walk");
     assert!(
         !has_row(&changes, "albums", "AL"),
@@ -1263,16 +1265,16 @@ fn flip_reemits_whole_connected_component_to_peer() {
 
     // Cycle 1: build the private graph. Nothing should escape.
     let out1 = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R', 'AL', 0, '0000000001000-0000-dev1')",
-                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T', 'R', '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R', 'AL', 0, '0000000001000-0000-dev1')",
+            "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T', 'R', '0000000001000-0000-dev1')",
+        ],
+    );
     assert!(
         walk(&out1).expect("walk").is_empty(),
         "private graph emits nothing"
@@ -1280,10 +1282,12 @@ fn flip_reemits_whole_connected_component_to_peer() {
 
     // Cycle 2: flip the release managed. Re-emit the whole component.
     let out2 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'",
+        ],
+    );
     let changes = walk(&out2).expect("walk");
     assert!(
         has_row(&changes, "releases", "R"),
@@ -1345,10 +1349,12 @@ fn flip_reverted_before_gate_emits_no_insert() {
 
     // The journal batch captures the release flipping managed false→true.
     let bytes = capture(
-            &c,
-            &tables,
-            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'",
+        ],
+    );
 
     // A host write lands between the batch load and the gate run, flipping the
     // gate back false. The live db now reads managed=0 for R, so nothing in its
@@ -1386,15 +1392,15 @@ fn reparent_onto_a_cut_ancestor_reemits_it_to_peer() {
     // AL1. AL2 has no managed release, so the gate cuts it — the peer never
     // receives it.
     let out1 = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL1', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL2', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL1', 1, '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL1', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL2', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL1', 1, '0000000001000-0000-dev1')",
+        ],
+    );
     let peer = conn();
     create_album_schema(&peer);
     peer.apply_test_changeset(&out1, &tables);
@@ -1411,10 +1417,12 @@ fn reparent_onto_a_cut_ancestor_reemits_it_to_peer() {
     // gate must re-emit AL2 (and its component), or the peer applies the bare
     // FK change against a missing album and is left with a dangling release.
     let out2 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE releases SET album_id = 'AL2', _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET album_id = 'AL2', _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'",
+        ],
+    );
     let changes = walk(&out2).expect("walk");
     assert!(
         has_row(&changes, "albums", "AL2"),
@@ -1448,16 +1456,16 @@ fn flip_reemits_sideways_featured_artist() {
 
     // AR1 owns AL1; AR2 is featured via AA; release R1 unmanaged.
     let out1 = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR1', 'Owner', '0000000001000-0000-dev1')",
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR2', 'Featured', '0000000001000-0000-dev1')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL1', 'AR1', '0000000001000-0000-dev1')",
-                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL1', 'AR2', '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL1', 0, '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR1', 'Owner', '0000000001000-0000-dev1')",
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR2', 'Featured', '0000000001000-0000-dev1')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL1', 'AR1', '0000000001000-0000-dev1')",
+            "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL1', 'AR2', '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL1', 0, '0000000001000-0000-dev1')",
+        ],
+    );
     assert!(
         walk(&out1).expect("walk").is_empty(),
         "private graph emits nothing"
@@ -1465,10 +1473,12 @@ fn flip_reemits_sideways_featured_artist() {
 
     // Flip R1 managed.
     let out2 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'",
+        ],
+    );
     let changes = walk(&out2).expect("walk");
     assert!(
         has_row(&changes, "album_artists", "AA"),
@@ -1500,14 +1510,14 @@ fn second_flip_is_idempotent_under_lww() {
 
     // Cycle 1: an album with one managed release, synced to the peer.
     let out1 = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
+        ],
+    );
 
     let peer = conn();
     create_album_schema(&peer);
@@ -1519,17 +1529,21 @@ fn second_flip_is_idempotent_under_lww() {
 
     // Cycle 2a: insert a second release unmanaged (stays private, cut).
     let _ = capture_and_gate(
-            &c,
-            &tables,
-            &["INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R2', 'AL', 0, '0000000002000-0000-dev1')"],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R2', 'AL', 0, '0000000002000-0000-dev1')",
+        ],
+    );
 
     // Cycle 2b: flip the second release managed. Re-emit re-sends the album.
     let out2 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE releases SET managed = 1, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R2'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 1, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R2'",
+        ],
+    );
     let changes = walk(&out2).expect("walk");
     assert!(
         has_row(&changes, "albums", "AL"),
@@ -1681,28 +1695,30 @@ fn retract_one_of_two_managed_roots_spares_sibling_and_ancestor() {
 
     // Two managed releases under one album/artist, with a track each.
     let out1 = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R2', 'AL', 1, '0000000001000-0000-dev1')",
-                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-dev1')",
-                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T2', 'R2', '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R2', 'AL', 1, '0000000001000-0000-dev1')",
+            "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-dev1')",
+            "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T2', 'R2', '0000000001000-0000-dev1')",
+        ],
+    );
     let peer = conn();
     create_album_schema(&peer);
     peer.apply_test_changeset(&out1, &tables);
 
     // Retract only R1.
     let out2 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'",
+        ],
+    );
     let changes = walk(&out2).expect("walk");
     assert!(
         has_op(&changes, "releases", "R1", ChangeOp::Delete),
@@ -1769,16 +1785,16 @@ fn retract_last_root_under_ancestor_deletes_ancestor() {
 
     // A single managed release under an album/artist.
     let out1 = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
-                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
+            "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-dev1')",
+        ],
+    );
     let peer = conn();
     create_album_schema(&peer);
     peer.apply_test_changeset(&out1, &tables);
@@ -1786,10 +1802,12 @@ fn retract_last_root_under_ancestor_deletes_ancestor() {
     // Retract the last managed release: the now-childless album AND artist are
     // deleted too.
     let out2 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'",
+        ],
+    );
     let changes = walk(&out2).expect("walk");
     for (table, pk) in [
         ("releases", "R1"),
@@ -1841,14 +1859,16 @@ fn gated_false_root_from_start_emits_no_deletes() {
     // Cycle 2: edit the still-private note (no gate transition). The update is
     // cut as before; no retract fires (there was never a true→false flip).
     let out2 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE notes SET body = 'edited', _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE notes SET body = 'edited', _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'",
+        ],
+    );
     assert!(
-            walk(&out2).expect("walk").is_empty(),
-            "editing a never-shared gated-false root emits nothing — retract only fires on a true→false transition"
-        );
+        walk(&out2).expect("walk").is_empty(),
+        "editing a never-shared gated-false root emits nothing — retract only fires on a true→false transition"
+    );
 }
 
 #[test]
@@ -1859,25 +1879,27 @@ fn reshare_after_retract_reemits_inserts() {
 
     // Cycle 1: a private subtree (release unmanaged). Nothing escapes.
     let _ = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-dev1')",
-                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-dev1')",
+            "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-dev1')",
+        ],
+    );
     let peer = conn();
     create_album_schema(&peer);
 
     // Cycle 2: share (false→true). Peer gets the whole component.
     let out2 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'",
+        ],
+    );
     peer.apply_test_changeset(&out2, &tables);
     assert!(
         peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
@@ -1886,10 +1908,12 @@ fn reshare_after_retract_reemits_inserts() {
 
     // Cycle 3: retract (true→false). Peer loses the component.
     let out3 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R1'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R1'",
+        ],
+    );
     peer.apply_test_changeset(&out3, &tables);
     assert!(
         !peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
@@ -1902,10 +1926,12 @@ fn reshare_after_retract_reemits_inserts() {
 
     // Cycle 4: re-share (false→true) re-emits full INSERTs — round-trip.
     let out4 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE releases SET managed = 1, _updated_at = '0000000004000-0000-dev1' WHERE id = 'R1'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 1, _updated_at = '0000000004000-0000-dev1' WHERE id = 'R1'",
+        ],
+    );
     let changes = walk(&out4).expect("walk");
     for (table, pk) in [
         ("releases", "R1"),
@@ -1954,20 +1980,22 @@ fn multi_device_share_then_retract() {
 
     // A builds a private subtree, then flips it shared.
     let _ = capture_and_gate(
-            &a,
-            &tables,
-            &[
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-devA')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-devA')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-devA')",
-                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-devA')",
-            ],
-        );
+        &a,
+        &tables,
+        &[
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-devA')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-devA')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-devA')",
+            "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-devA')",
+        ],
+    );
     let share = capture_and_gate(
-            &a,
-            &tables,
-            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-devA' WHERE id = 'R1'"],
-        );
+        &a,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-devA' WHERE id = 'R1'",
+        ],
+    );
     b.apply_test_changeset(&share, &tables);
     assert!(
         b.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
@@ -1984,10 +2012,12 @@ fn multi_device_share_then_retract() {
 
     // A retracts; B applies; the subtree is gone on B while A keeps it locally.
     let retract = capture_and_gate(
-            &a,
-            &tables,
-            &["UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-devA' WHERE id = 'R1'"],
-        );
+        &a,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-devA' WHERE id = 'R1'",
+        ],
+    );
     b.apply_test_changeset(&retract, &tables);
     assert!(
         !b.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
@@ -2083,17 +2113,17 @@ fn remote_release_keeps_artist_and_its_image() {
     let tables = album_asset_tables();
 
     let out = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
-                "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
-                "INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
+            "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
+            "INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')",
+        ],
+    );
     let changes = walk(&out).expect("walk");
     assert!(
         has_row(&changes, "artists", "AR"),
@@ -2129,21 +2159,21 @@ fn image_alone_without_a_remote_release_is_not_kept() {
     let tables = album_asset_tables();
 
     let out = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
-                "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-dev1')",
-                "INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
+            "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-dev1')",
+            "INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')",
+        ],
+    );
     assert!(
-            walk(&out).expect("walk").is_empty(),
-            "an artist with only an image and a local release leaks nothing — the image is not a keep-reason"
-        );
+        walk(&out).expect("walk").is_empty(),
+        "an artist with only an image and a local release leaks nothing — the image is not a keep-reason"
+    );
 }
 
 /// make-Remote (gate false→true) re-emits the artist and its image as INSERTs;
@@ -2157,17 +2187,17 @@ fn make_remote_reemits_image_then_make_local_retracts_it() {
 
     // A local release shares nothing.
     let out1 = capture_and_gate(
-            &c,
-            &tables,
-            &[
-                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
-                "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
-                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-dev1')",
-                "INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')",
-            ],
-        );
+        &c,
+        &tables,
+        &[
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
+            "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+            "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-dev1')",
+            "INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')",
+        ],
+    );
     assert!(
         walk(&out1).expect("walk").is_empty(),
         "a local release shares nothing"
@@ -2178,10 +2208,12 @@ fn make_remote_reemits_image_then_make_local_retracts_it() {
 
     // make-Remote: the artist + its image re-emit as INSERTs.
     let out2 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'",
+        ],
+    );
     let c2 = walk(&out2).expect("walk");
     assert!(has_row(&c2, "artists", "AR"), "the artist is promoted");
     assert!(
@@ -2204,10 +2236,12 @@ fn make_remote_reemits_image_then_make_local_retracts_it() {
 
     // make-Local: the artist + image retract as DELETEs.
     let out3 = capture_and_gate(
-            &c,
-            &tables,
-            &["UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R1'"],
-        );
+        &c,
+        &tables,
+        &[
+            "UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R1'",
+        ],
+    );
     let c3 = walk(&out3).expect("walk");
     assert!(
         has_op(&c3, "artists", "AR", ChangeOp::Delete),
@@ -2345,11 +2379,11 @@ fn asset_marker_excludes_a_child_the_back_edge_would_keep() {
 
     let without = Gates::from_tables(&c, &base(false)).expect("gates without asset marker");
     assert!(
-            inferred_children(&without, "artists")
-                .iter()
-                .any(|(child, _)| child == "artist_images"),
-            "without .asset(), the image is a keep-child of artists (the back-edge does not exclude it)"
-        );
+        inferred_children(&without, "artists")
+            .iter()
+            .any(|(child, _)| child == "artist_images"),
+        "without .asset(), the image is a keep-child of artists (the back-edge does not exclude it)"
+    );
 
     let with = Gates::from_tables(&c, &base(true)).expect("gates with asset marker");
     assert!(
@@ -2477,7 +2511,9 @@ fn sharing_a_work_part_shares_the_container_work_nothing_keeps() {
     let bytes = capture_and_gate(
         &c,
         &tables,
-        &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'"],
+        &[
+            "UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'",
+        ],
     );
     let changes = walk(&bytes).expect("walk gated changeset");
 
@@ -2565,7 +2601,9 @@ fn retracting_the_release_retracts_the_container_work_with_it() {
     let bytes = capture_and_gate(
         &c,
         &tables,
-        &["UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'"],
+        &[
+            "UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'",
+        ],
     );
     let changes = walk(&bytes).expect("walk gated changeset");
 
@@ -2608,7 +2646,9 @@ fn retracting_one_release_spares_a_container_work_another_still_names() {
     let bytes = capture_and_gate(
         &c,
         &tables,
-        &["UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
+        &[
+            "UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'",
+        ],
     );
     let changes = walk(&bytes).expect("walk gated changeset");
     let deleted = |table: &str, pk: &str| {
@@ -2690,7 +2730,9 @@ fn a_shared_row_naming_a_gate_false_root_is_refused_at_the_write() {
     let captured = capture(
         &c,
         &tables,
-        &["UPDATE playlists SET published = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'P'"],
+        &[
+            "UPDATE playlists SET published = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'P'",
+        ],
     );
 
     let error = match partition_outbound(&c, &captured, &RoutingChanges::empty(), &gates) {

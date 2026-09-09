@@ -136,7 +136,47 @@ async fn opened_store_pulls_a_production_commit_through_exact_refs() {
 
     let destination_store_dir = crate::sync::test_helpers::test_store_dir();
     let destination = crate::sync::test_helpers::open_test_db(destination_store_dir.clone());
-    let (_, result) = store.pull_into(&destination, &destination_store_dir).await;
+    let opened = store
+        .open_into(&destination, destination_store_dir.clone())
+        .await
+        .expect("open founder database before observing publication");
+    destination.fail_next_merge_materialization_at(
+        coven_database::MergeMaterializationFailurePoint::ProjectionReplacement,
+    );
+    let error = opened
+        .pull_store()
+        .await
+        .expect_err("first publication observation rolls back with its row projection");
+    assert!(error.to_string().contains("injected"), "{error}");
+    assert_eq!(
+        destination
+            .table_row_count_for_test(coven_database::DatabaseTestTable::named(
+                "store_publication_current",
+            ))
+            .await
+            .expect("count observed publication boundaries"),
+        0,
+    );
+    assert_eq!(
+        destination
+            .query_test_text("SELECT CAST(COUNT(*) AS TEXT) FROM notes")
+            .await,
+        "0",
+    );
+    let (_, result) = opened
+        .pull_store()
+        .await
+        .expect("retry first publication interval");
+    assert_eq!(
+        coven_database::StoreDatabase::new(&destination)
+            .store_current_publication()
+            .await
+            .expect("read observed publication"),
+        coven_database::StoreDatabase::new(&source)
+            .store_current_publication()
+            .await
+            .expect("read published boundary"),
+    );
 
     assert_eq!(result.changesets_applied, 1);
     assert_eq!(
@@ -164,6 +204,166 @@ async fn opened_store_pulls_a_production_commit_through_exact_refs() {
             .await,
         "exact successor"
     );
+}
+
+#[tokio::test]
+async fn opened_store_observes_genesis_without_publishing_objects() {
+    let source_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(source_dir.clone());
+    let home = test_cloud_home();
+    let store = TestStore::create(
+        &source,
+        source_dir,
+        "opened-genesis-observation",
+        UserKeypair::generate(),
+        home.clone(),
+    )
+    .await
+    .expect("create Store");
+    let target_dir = crate::sync::test_helpers::test_store_dir();
+    let target = crate::sync::test_helpers::open_test_db(target_dir.clone());
+    let opened = store
+        .open_into(&target, target_dir)
+        .await
+        .expect("open founder database");
+    let database = coven_database::StoreDatabase::new(&target);
+    assert!(database
+        .store_publication_boundary()
+        .await
+        .expect("read unobserved boundary")
+        .is_none());
+    let creates = home.exact_create_count();
+    let (_, result) = opened.pull_store().await.expect("observe empty Store");
+    assert!(result.held_positions.is_empty(), "{result:?}");
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(home.exact_create_count(), creates);
+    assert_eq!(
+        database
+            .store_current_publication()
+            .await
+            .expect("read observed genesis"),
+        coven_database::StoreDatabase::new(&source)
+            .store_current_publication()
+            .await
+            .expect("read created genesis"),
+    );
+}
+
+#[tokio::test]
+async fn accepted_store_history_cannot_be_reopened_as_unobserved_genesis() {
+    let source_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(source_dir.clone());
+    let store = TestStore::create(
+        &source,
+        source_dir.clone(),
+        "missing-accepted-publication-boundary",
+        UserKeypair::generate(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    source
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+         VALUES ('accepted', 'Keep accepted work', 1, '0000000001000-0000-source', '2026-01-01')",
+        )
+        .await;
+    assert!(store
+        .publish_pending(&source, &source_dir)
+        .await
+        .expect("publish row"));
+    source
+        .remove_store_publication_boundary_for_test()
+        .await
+        .expect("remove the accepted publication boundary");
+    let error = coven_database::StoreDatabase::new(&source)
+        .store_publication_boundary()
+        .await
+        .expect_err("missing accepted publication is corruption, not a first observation");
+    assert!(
+        error
+            .to_string()
+            .contains("accepted Store history has no publication boundary"),
+        "{error}"
+    );
+    assert_eq!(
+        source
+            .query_test_text("SELECT title FROM notes WHERE id = 'accepted'")
+            .await,
+        "Keep accepted work"
+    );
+}
+
+#[tokio::test]
+async fn empty_publication_interval_cannot_replace_the_authenticated_current_signature() {
+    let source_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(source_dir.clone());
+    let store = TestStore::create(
+        &source,
+        source_dir,
+        "authenticated-empty-publication",
+        UserKeypair::generate(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create authenticated Store");
+    let observed = coven_database::StoreDatabase::new(&source)
+        .store_current_publication()
+        .await
+        .expect("read actual provider observation");
+    let mut forged = observed.record().clone();
+    forged.resign(&UserKeypair::generate());
+    let interval = coven_protocol::store_commit::VerifiedStorePublicationInterval::verified(
+        forged.clone(),
+        forged,
+        Vec::new(),
+    )
+    .expect("an unchanged interval relies on its caller's authenticated prior record");
+    for observe_first in [false, true] {
+        let target_dir = crate::sync::test_helpers::test_store_dir();
+        let target = crate::sync::test_helpers::open_test_db(target_dir.clone());
+        let opened = store
+            .open_into(&target, target_dir)
+            .await
+            .expect("open founder database");
+        if observe_first {
+            opened
+                .pull_store()
+                .await
+                .expect("observe authenticated genesis");
+        }
+        let database = coven_database::StoreDatabase::new(&target);
+        let before = database
+            .store_publication_boundary()
+            .await
+            .expect("read prior boundary");
+        let result = database
+            .apply_received_store_publication_interval(
+                Vec::new(),
+                coven_database::AcceptedStorePublicationInterval::from_verified(
+                    interval.clone(),
+                    observed.observed_version().cloned(),
+                ),
+                interval.clone(),
+                Vec::new(),
+                coven_protocol::membership::LocalStoreMembership::Current,
+                None,
+                None,
+                database.receive_wall_ms(),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "an empty interval cannot replace the authenticated signature"
+        );
+        assert_eq!(
+            database
+                .store_publication_boundary()
+                .await
+                .expect("read unchanged boundary"),
+            before
+        );
+    }
 }
 
 #[tokio::test]
@@ -320,6 +520,9 @@ async fn writer_migrates_the_retained_replay_image_with_the_host_schema() {
         db_store_dir,
         &root,
         &founder,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("open Store after migrating its host schema");

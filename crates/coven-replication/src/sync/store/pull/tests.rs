@@ -7,8 +7,14 @@ use coven_database::Database;
 use coven_keys::keys::MasterKeyCustody;
 use coven_protocol::store_commit::OpenedRetainedMergeHistorySummary;
 
+#[path = "tests/deletion.rs"]
+mod deletion;
+
 #[path = "tests/effective_access_failure.rs"]
 mod effective_access_failure;
+
+#[path = "tests/effective_membership.rs"]
+mod effective_membership;
 
 async fn one_retained_checkpoint() -> (
     Database,
@@ -99,7 +105,6 @@ async fn one_retained_checkpoint() -> (
         .expect("resolve checkpoint state")
         .1;
     let checkpoint = OpenedRetainedMergeHistorySummary {
-        announcement_frontier: summary.announcement_frontier.clone(),
         summary,
         post_state,
     };
@@ -107,7 +112,7 @@ async fn one_retained_checkpoint() -> (
 }
 
 #[tokio::test]
-async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
+async fn retained_checkpoint_merge_rejects_same_coordinate_competing_commits() {
     let (_db, _db_store_dir, store, _signer, membership, checkpoint) =
         Box::pin(one_retained_checkpoint()).await;
 
@@ -128,20 +133,6 @@ async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
         &store.root(),
         &membership,
         vec![checkpoint.clone(), conflicting_commit],
-    )
-    .is_err());
-
-    let mut conflicting_head = checkpoint.clone();
-    let announcement = conflicting_head
-        .announcement_frontier
-        .values_mut()
-        .next()
-        .expect("opened checkpoint has an announcement frontier");
-    announcement.reference.head_hash = ObjectHash::digest(b"same-stream competing head");
-    assert!(merge_retained_merge_history(
-        &store.root(),
-        &membership,
-        vec![checkpoint, conflicting_head],
     )
     .is_err());
 }
@@ -344,6 +335,7 @@ fn open_scoped_replay_database(store_dir: coven_foundation::store_dir::StoreDir)
 
 fn open_scoped_replay_database_at(
     path: &std::path::Path,
+    device_id: &str,
 ) -> (Database, coven_foundation::store_dir::StoreDir) {
     let (tables, migrations) = scoped_replay_schema();
     let store_dir = crate::sync::test_helpers::store_dir_for_test_database(path);
@@ -353,7 +345,7 @@ fn open_scoped_replay_database_at(
         tables,
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
-        "scoped-replay-device".to_string(),
+        device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
     )
@@ -576,442 +568,6 @@ impl EffectiveAccessFixture {
 
 const EFFECTIVE_ACCESS_ROW_ID: &str = "01890a5d-ac96-774b-bcce-b302099c3f75";
 const READD_EFFECTIVE_ACCESS_ROW_ID: &str = "01890a5d-ac96-774b-bcce-b302099c3f76";
-
-#[test]
-fn later_removal_blocks_historical_circle_access() {
-    assert_eq!(
-        super::materialization::historical_local_store_membership(
-            LocalStoreMembership::Removed,
-            LocalStoreMembership::Current,
-        ),
-        LocalStoreMembership::Removed
-    );
-}
-
-#[test]
-fn later_admission_does_not_grant_pre_admission_circle_access() {
-    assert_eq!(
-        super::materialization::historical_local_store_membership(
-            LocalStoreMembership::Current,
-            LocalStoreMembership::NotYetMember,
-        ),
-        LocalStoreMembership::NotYetMember
-    );
-}
-
-#[test]
-fn later_readd_does_not_grant_removed_interval_circle_access() {
-    assert_eq!(
-        super::materialization::historical_local_store_membership(
-            LocalStoreMembership::Current,
-            LocalStoreMembership::Removed,
-        ),
-        LocalStoreMembership::Removed
-    );
-}
-
-#[tokio::test]
-async fn newly_discovered_store_admission_activates_circle_access() {
-    let member_database_store_dir = crate::sync::test_helpers::test_store_dir();
-    let member_database = open_scoped_replay_database(member_database_store_dir.clone());
-    let fixture = EffectiveAccessFixture::create(
-        "newly-admitted-member-effective-access",
-        &member_database,
-        member_database_store_dir.clone(),
-    )
-    .await;
-
-    assert_eq!(
-        StoreDatabase::new(&member_database)
-            .get_circles(
-                &coven_keys::keys::public_key_hex(&fixture.member),
-                std::collections::BTreeSet::from([
-                    coven_keys::keys::public_key_hex(&fixture.owner),
-                    coven_keys::keys::public_key_hex(&fixture.member),
-                ]),
-            )
-            .await
-            .expect("list Circles after newly discovered Store admission")
-            .into_iter()
-            .map(|circle| circle.name().expect("listed Circle is active").to_string())
-            .collect::<Vec<_>>(),
-        vec!["Effective Access".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_rows() {
-    let member_temp = tempfile::tempdir().expect("create effective-access database directory");
-    let member_path = member_temp.path().join("member.sqlite3");
-    let (member_database, member_database_store_dir) = open_scoped_replay_database_at(&member_path);
-    let fixture = EffectiveAccessFixture::create(
-        "removed-member-effective-access",
-        &member_database,
-        member_database_store_dir.clone(),
-    )
-    .await;
-
-    let first = fixture
-        .publish_row(
-            EFFECTIVE_ACCESS_ROW_ID,
-            "visible before removal",
-            "0000000002000-0000-owner",
-        )
-        .await;
-    let first_pull = fixture
-        .pull_member()
-        .await
-        .expect("pull pre-removal Circle row");
-    assert!(first_pull.held_positions.is_empty(), "{first_pull:?}");
-    assert_eq!(
-        member_database
-            .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
-            .await
-            .row
-            .as_ref()
-            .map(|row| row.1.as_str()),
-        Some("visible before removal")
-    );
-    let hidden_before_removal = fixture
-        .publish_row(
-            EFFECTIVE_ACCESS_ROW_ID,
-            "private immediately before removal",
-            "0000000002500-0000-owner",
-        )
-        .await;
-    let hidden_before_removal_commit = fixture.load_commit(&hidden_before_removal).await;
-    let hidden_before_removal_package_slot =
-        exact_circle_package_slot(&hidden_before_removal_commit);
-
-    // The last Circle package the owner authors before the removal. Once the
-    // removal is materialized the owner may no longer publish new Circle content
-    // (the Circle is rotation-required), so this models the newest package the
-    // removed member must still be pruned from.
-    let late = fixture
-        .publish_row(
-            EFFECTIVE_ACCESS_ROW_ID,
-            "private just before removal",
-            "0000000002800-0000-owner",
-        )
-        .await;
-    let late_commit = fixture.load_commit(&late).await;
-    let late_package_slot = exact_circle_package_slot(&late_commit);
-
-    let custody = crate::sync::test_helpers::TestCustody::default();
-    custody.set_initial_key([42; 32]);
-    fixture
-        .store
-        .remove_member(
-            &fixture.owner_database,
-            fixture.owner_database_store_dir.clone(),
-            &fixture.owner,
-            &coven_keys::keys::public_key_hex(&fixture.member),
-            &coven_keys::encryption::EncryptionService::from_key([42; 32]),
-            &custody,
-        )
-        .await
-        .expect("remove effective-access Store member");
-    let removal = fixture
-        .owner_device
-        .latest_local_store_position()
-        .await
-        .expect("load Store removal position")
-        .expect("Store removal has a position");
-    let latest_membership = fixture
-        .member_device
-        .membership()
-        .await
-        .expect("load current removed-member Store membership");
-    assert!(!latest_membership
-        .current_members()
-        .iter()
-        .any(|(member, _)| member == &coven_keys::keys::public_key_hex(&fixture.member)));
-
-    fixture.home.clear_exact_reads();
-    member_database.fail_next_merge_materialization_at(
-        coven_database::MergeMaterializationFailurePoint::SummaryMaterialization,
-    );
-    fixture
-        .pull_member()
-        .await
-        .expect_err("injected transaction failure interrupts removed-member materialization");
-    assert_eq!(
-        member_database
-            .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
-            .await
-            .row
-            .as_ref()
-            .map(|row| row.1.as_str()),
-        Some("visible before removal")
-    );
-    assert!(StoreDatabase::new(&member_database)
-        .exact_materialized_ref(&commit_stream_id(&late.coord), late.coord.sequence(),)
-        .await
-        .expect("check rolled-back late position")
-        .is_none());
-
-    fixture
-        .home
-        .remove_exact_object(&hidden_before_removal_package_slot);
-    fixture.home.remove_exact_object(&late_package_slot);
-    fixture.home.clear_exact_reads();
-    let pull = fixture
-        .pull_member()
-        .await
-        .expect("pull Store state after membership removal");
-    assert!(pull.held_positions.is_empty(), "{pull:?}");
-    assert!(!fixture
-        .home
-        .exact_reads()
-        .contains(&hidden_before_removal_package_slot));
-    assert!(!fixture.home.exact_reads().contains(&late_package_slot));
-    let state = member_database
-        .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
-        .await;
-    assert_eq!(state.row, None);
-    assert_eq!(state.route, None);
-    assert!(StoreDatabase::new(&member_database)
-        .get_circles(
-            &coven_keys::keys::public_key_hex(&fixture.member),
-            std::collections::BTreeSet::from([coven_keys::keys::public_key_hex(&fixture.owner)]),
-        )
-        .await
-        .expect("list Circles after Store membership removal")
-        .is_empty());
-    assert!(StoreDatabase::new(&member_database)
-        .circle_authoring_context(
-            fixture.circle_id,
-            &coven_keys::keys::public_key_hex(&fixture.member),
-        )
-        .await
-        .is_err());
-    let (public_circle_state, private_circle_state): (i64, i64) = member_database
-        .circle_state_table_counts_for_test()
-        .await
-        .expect("count Circle state after Store membership removal");
-    assert_eq!(public_circle_state, 1);
-    assert_eq!(private_circle_state, 0);
-    assert_eq!(
-        state.mirror,
-        Some((
-            Some(fixture.circle_id.to_string()),
-            "0000000002000-0000-owner".to_string(),
-        ))
-    );
-    for reference in [&first, &hidden_before_removal, &late, &removal] {
-        assert_eq!(
-            StoreDatabase::new(&member_database)
-                .exact_materialized_ref(
-                    &commit_stream_id(&reference.coord),
-                    reference.coord.sequence(),
-                )
-                .await
-                .expect("load effective-access materialized position"),
-            Some(reference.clone())
-        );
-    }
-
-    let circle_id = fixture.circle_id;
-    let member_pubkey = coven_keys::keys::public_key_hex(&fixture.member);
-    let owner_pubkey = coven_keys::keys::public_key_hex(&fixture.owner);
-    drop(fixture);
-    std::thread::spawn(move || drop(member_database))
-        .join()
-        .expect("close effective-access member database");
-    let (reopened, _reopened_store_dir) = open_scoped_replay_database_at(&member_path);
-    let reopened_state = reopened
-        .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
-        .await;
-    assert_eq!(reopened_state.row, None);
-    assert_eq!(reopened_state.route, None);
-    assert_eq!(
-        reopened_state.mirror,
-        Some((
-            Some(circle_id.to_string()),
-            "0000000002000-0000-owner".to_string(),
-        ))
-    );
-    assert_eq!(
-        StoreDatabase::new(&reopened)
-            .exact_materialized_ref(&commit_stream_id(&removal.coord), removal.coord.sequence(),)
-            .await
-            .expect("load reopened removal position"),
-        Some(removal)
-    );
-    assert!(StoreDatabase::new(&reopened)
-        .get_circles(
-            &member_pubkey,
-            std::collections::BTreeSet::from([owner_pubkey]),
-        )
-        .await
-        .expect("list reopened Circles after Store membership removal")
-        .is_empty());
-    let reopened_public_circle_state: i64 = reopened
-        .table_row_count_for_test(coven_database::DatabaseTestTable::named(
-            "circle_current_state",
-        ))
-        .await
-        .expect("count reopened public Circle state");
-    assert_eq!(reopened_public_circle_state, 1);
-}
-
-#[tokio::test]
-async fn readded_store_member_restores_circle_access_from_a_stale_removed_membership() {
-    let member_database_store_dir = crate::sync::test_helpers::test_store_dir();
-    let member_database = open_scoped_replay_database(member_database_store_dir.clone());
-    let fixture = EffectiveAccessFixture::create(
-        "readded-member-effective-access",
-        &member_database,
-        member_database_store_dir.clone(),
-    )
-    .await;
-
-    fixture
-        .publish_row(
-            EFFECTIVE_ACCESS_ROW_ID,
-            "visible before removal",
-            "0000000002000-0000-owner",
-        )
-        .await;
-    let initial_pull = fixture
-        .pull_member()
-        .await
-        .expect("pull Circle row before Store removal");
-    assert!(initial_pull.held_positions.is_empty(), "{initial_pull:?}");
-
-    // A Circle package the owner authors before the removal that the member has
-    // not yet pulled. The removal pull applies it under the removed membership,
-    // exercising the prune of the member's Circle rows.
-    let pre_removal = fixture
-        .publish_row(
-            EFFECTIVE_ACCESS_ROW_ID,
-            "private just before removal",
-            "0000000002500-0000-owner",
-        )
-        .await;
-    let pre_removal_commit = fixture.load_commit(&pre_removal).await;
-    let pre_removal_package_slot = exact_circle_package_slot(&pre_removal_commit);
-
-    let custody = crate::sync::test_helpers::TestCustody::default();
-    custody.set_initial_key([42; 32]);
-    fixture
-        .store
-        .remove_member(
-            &fixture.owner_database,
-            fixture.owner_database_store_dir.clone(),
-            &fixture.owner,
-            &coven_keys::keys::public_key_hex(&fixture.member),
-            &coven_keys::encryption::EncryptionService::from_key([42; 32]),
-            &custody,
-        )
-        .await
-        .expect("remove Store member before re-add");
-    // Once the removal is materialized the owner can no longer publish new
-    // Circle content (the Circle is rotation-required until it is closed and
-    // rotated), so no package is authored during the removed interval; the
-    // re-add restores access to the Circle's current state alone.
-    fixture.home.clear_exact_reads();
-    let removal_pull = fixture
-        .pull_member()
-        .await
-        .expect("pull Store membership removal");
-    assert!(removal_pull.held_positions.is_empty(), "{removal_pull:?}");
-    assert!(
-        !fixture
-            .home
-            .exact_reads()
-            .contains(&pre_removal_package_slot),
-        "a removed member does not fetch the unpulled pre-removal Circle package"
-    );
-    assert_eq!(
-        member_database
-            .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
-            .await
-            .row,
-        None
-    );
-
-    fixture
-        .store
-        .admit_member(
-            &fixture.owner_database,
-            fixture.owner_database_store_dir.clone(),
-            &fixture.owner,
-            &coven_keys::keys::public_key_hex(&fixture.member),
-            None,
-            coven_protocol::membership::MemberRole::Member,
-            &coven_keys::encryption::EncryptionService::from_key([42; 32]),
-            "Effective Access Store",
-        )
-        .await
-        .expect("re-add effective-access Store member");
-    let rotated_store_encryption = coven_keys::encryption::EncryptionService::from(
-        custody
-            .unlock()
-            .expect("load rotated Store keyring")
-            .expect("scoped Store has an established keyring"),
-    );
-    fixture
-        .member_device
-        .adopt_key_rotation(&rotated_store_encryption, &custody)
-        .expect("adopt the Store key wrapped by the re-add");
-    let owner_store = fixture
-        .store
-        .bind_device(
-            &fixture.owner_database,
-            fixture.owner_database_store_dir.clone(),
-            &fixture.owner,
-        )
-        .await
-        .expect("load owner Store for Circle successor");
-    owner_store
-        .rename_circle(
-            "0000000004000-0000-owner",
-            fixture.circle_id,
-            "Effective Access Restored",
-        )
-        .await
-        .expect("publish Circle successor after Store re-add");
-    fixture
-        .publish_row(
-            READD_EFFECTIVE_ACCESS_ROW_ID,
-            "visible after re-add",
-            "0000000005000-0000-owner",
-        )
-        .await;
-
-    fixture.home.clear_exact_reads();
-    let readd_pull = fixture
-        .pull_member()
-        .await
-        .expect("pull Store re-add and Circle successor");
-    assert!(readd_pull.held_positions.is_empty(), "{readd_pull:?}");
-    assert_eq!(
-        member_database
-            .scoped_routing_state_for_test(READD_EFFECTIVE_ACCESS_ROW_ID)
-            .await
-            .row
-            .as_ref()
-            .map(|row| row.1.as_str()),
-        Some("visible after re-add")
-    );
-    assert_eq!(
-        StoreDatabase::new(&member_database)
-            .get_circles(
-                &coven_keys::keys::public_key_hex(&fixture.member),
-                std::collections::BTreeSet::from([
-                    coven_keys::keys::public_key_hex(&fixture.owner),
-                    coven_keys::keys::public_key_hex(&fixture.member),
-                ]),
-            )
-            .await
-            .expect("list restored Circles")
-            .into_iter()
-            .map(|circle| circle.name().expect("listed Circle is active").to_string())
-            .collect::<Vec<_>>(),
-        vec!["Effective Access Restored".to_string()]
-    );
-}
 
 #[derive(Clone, Copy, Debug)]
 enum RoutingConflict {
@@ -1376,7 +932,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .authorize_writer()
         .await
         .expect("authorize earlier Owner device");
-    let _rotated = earlier_writer
+    earlier_writer
         .revoke_member_without_local_adoption_for_test(
             &crate::sync::test_helpers::pubkey_hex(&candidate),
             "0000000003000-0000-causal-proof",
@@ -1528,12 +1084,6 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
     let stream_id = commit_stream_id(&first.coord);
     let frontier = BTreeMap::from([(stream_id.clone(), first.clone())]);
     let coverage = CommitFrontier::from_refs(frontier.clone()).expect("build exact frontier");
-    let device_cut = coverage.commits().clone();
-    let source_database = StoreDatabase::new(&source);
-    let (_, device_state) = source_database
-        .store_device_state_for_history_cut(&StoreHistoryCut(device_cut))
-        .await
-        .expect("load exact device state");
     let target_store_dir = crate::sync::test_helpers::test_store_dir();
     let target = crate::sync::test_helpers::open_test_db(target_store_dir.clone());
     let target_device = store
@@ -1542,14 +1092,7 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
         .expect("open target Store device");
 
     let readiness = target_device
-        .pull_readiness_for_test(
-            &coverage,
-            &frontier,
-            &device_state,
-            &[],
-            &third,
-            commit.value(),
-        )
+        .pull_readiness_for_test(&coverage, &frontier, &third, commit.value())
         .await
         .expect("evaluate exact predecessor gap");
 
@@ -1563,188 +1106,11 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
 }
 
 #[tokio::test]
-async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
-    let member_temp = tempfile::tempdir().expect("create effective-access database directory");
-    let member_path = member_temp.path().join("member.sqlite3");
-    let (member_database, member_database_store_dir) = open_scoped_replay_database_at(&member_path);
-    let fixture = EffectiveAccessFixture::create(
-        "delete-circle-prunes",
-        &member_database,
-        member_database_store_dir.clone(),
-    )
-    .await;
-
-    fixture
-        .publish_row(
-            EFFECTIVE_ACCESS_ROW_ID,
-            "before deletion",
-            "0000000002000-0000-owner",
-        )
-        .await;
-    fixture
-        .pull_member()
-        .await
-        .expect("member pulls the pre-deletion Circle row");
-    assert_eq!(
-        member_database
-            .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
-            .await
-            .row
-            .as_ref()
-            .map(|row| row.1.as_str()),
-        Some("before deletion")
-    );
-
-    // The Circle row carries a blob. Both the owner (host author) and the member
-    // (recipient) hold a `row_blob_locators` binding for it, which the deletion
-    // must prune along with the row.
-    fixture
-        .owner_database
-        .bind_circle_row_blob_for_test(EFFECTIVE_ACCESS_ROW_ID)
-        .await;
-    member_database
-        .bind_circle_row_blob_for_test(EFFECTIVE_ACCESS_ROW_ID)
-        .await;
-    assert_eq!(
-        fixture
-            .owner_database
-            .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
-            .await,
-        1,
-        "the owner holds the Circle row's blob binding before deletion"
-    );
-    assert_eq!(
-        member_database
-            .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
-            .await,
-        1,
-        "the member holds the Circle row's blob binding before deletion"
-    );
-
-    // A pre-deletion Circle package the member has not yet pulled.
-    fixture
-        .publish_row(
-            READD_EFFECTIVE_ACCESS_ROW_ID,
-            "private before deletion",
-            "0000000002500-0000-owner",
-        )
-        .await;
-
-    fixture.delete_circle().await;
-
-    // The owner converges to Deleted: rows pruned, control spine retained.
-    assert!(fixture
-        .owner_database
-        .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
-        .await
-        .row
-        .is_none());
-    assert!(
-        fixture
-            .owner_database
-            .circle_control_activation_count_for_test(fixture.circle_id)
-            .await
-            > 0,
-        "the owner retains the control authority spine after deletion"
-    );
-    assert_eq!(
-        fixture
-            .owner_database
-            .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
-            .await,
-        0,
-        "the owner's Circle row blob binding is pruned on deletion"
-    );
-    let owner_circles = StoreDatabase::new(&fixture.owner_database)
-        .get_circles(
-            &coven_keys::keys::public_key_hex(&fixture.owner),
-            fixture.effective_access_members(),
-        )
-        .await
-        .expect("list owner Circles after deletion");
-    assert!(
-        matches!(owner_circles.as_slice(),
-            [coven_protocol::circle::CircleInfo::Deleted { id }] if *id == fixture.circle_id),
-        "the owner reports the Circle as deleted: {owner_circles:?}"
-    );
-
-    // The member pulls the deletion (and the late pre-deletion package) and
-    // converges identically: rows, routes, and the late package are gone.
-    fixture
-        .pull_member()
-        .await
-        .expect("member pulls the deletion");
-    let pruned = member_database
-        .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
-        .await;
-    assert!(pruned.row.is_none(), "the member's Circle row is pruned");
-    assert!(
-        pruned.route.is_none(),
-        "the member's private route is pruned"
-    );
-    assert!(
-        member_database
-            .scoped_routing_state_for_test(READD_EFFECTIVE_ACCESS_ROW_ID)
-            .await
-            .row
-            .is_none(),
-        "the late pre-deletion package is omitted"
-    );
-    assert!(
-        member_database
-            .circle_control_activation_count_for_test(fixture.circle_id)
-            .await
-            > 0,
-        "the member retains the control authority spine after deletion"
-    );
-    assert_eq!(
-        member_database
-            .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
-            .await,
-        0,
-        "the member's Circle row blob binding is pruned on deletion"
-    );
-    let member_circles = StoreDatabase::new(&member_database)
-        .get_circles(
-            &coven_keys::keys::public_key_hex(&fixture.member),
-            fixture.effective_access_members(),
-        )
-        .await
-        .expect("list member Circles after deletion");
-    assert!(
-        matches!(member_circles.as_slice(),
-            [coven_protocol::circle::CircleInfo::Deleted { id }] if *id == fixture.circle_id),
-        "the member reports the Circle as deleted: {member_circles:?}"
-    );
-
-    // A new host write destined to the deleted Circle is refused at capture.
-    let circle_id = fixture.circle_id;
-    let error = StoreDatabase::new(&fixture.owner_database)
-        .run_host_store_write_for_test(
-            Some(coven_keys::encryption::EncryptionService::from_key(
-                [42; 32],
-            )),
-            None,
-            move |transaction| {
-                transaction
-                    .execute_batch(&format!(
-                        "INSERT INTO notes (id, audience, body, _updated_at)
-                             VALUES ('01890a5d-ac96-774b-bcce-b302099c3f99', '{circle_id}',
-                                     'after deletion', '0000000003000-0000-owner');"
-                    ))
-                    .map_err(DbError::from)
-            },
-        )
-        .await
-        .expect_err("a host write into a deleted Circle is refused");
-    assert!(error.to_string().contains("deleted"), "{error}");
-}
-
-#[tokio::test]
 async fn a_non_owner_is_refused_circle_deletion() {
     let member_temp = tempfile::tempdir().expect("create effective-access database directory");
     let member_path = member_temp.path().join("member.sqlite3");
-    let (member_database, member_database_store_dir) = open_scoped_replay_database_at(&member_path);
+    let (member_database, member_database_store_dir) =
+        open_scoped_replay_database_at(&member_path, "scoped-replay-device");
     let fixture = EffectiveAccessFixture::create(
         "delete-non-owner",
         &member_database,
@@ -1790,7 +1156,8 @@ async fn a_non_owner_is_refused_circle_deletion() {
 async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_order() {
     let member_temp = tempfile::tempdir().expect("create effective-access database directory");
     let member_path = member_temp.path().join("member.sqlite3");
-    let (member_database, member_database_store_dir) = open_scoped_replay_database_at(&member_path);
+    let (member_database, member_database_store_dir) =
+        open_scoped_replay_database_at(&member_path, "scoped-replay-device");
     let fixture = EffectiveAccessFixture::create(
         "delete-two-order",
         &member_database,
@@ -1852,7 +1219,8 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
 async fn a_deleted_circles_authority_spine_retains_historical_controls() {
     let member_temp = tempfile::tempdir().expect("create effective-access database directory");
     let member_path = member_temp.path().join("member.sqlite3");
-    let (member_database, member_database_store_dir) = open_scoped_replay_database_at(&member_path);
+    let (member_database, member_database_store_dir) =
+        open_scoped_replay_database_at(&member_path, "scoped-replay-device");
     let fixture = EffectiveAccessFixture::create(
         "delete-historical-spine",
         &member_database,

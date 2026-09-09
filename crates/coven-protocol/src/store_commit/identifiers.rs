@@ -101,14 +101,6 @@ impl StoreBatchCommitDeletionTarget {
         Ok(commit)
     }
 
-    pub fn verify_nonactivation_candidate(
-        &self,
-        expected_store_root_hash: ObjectHash,
-        author: &StoreDeviceRegistration,
-    ) -> Result<VerifiedStoreBatchCommit, StoreProtocolError> {
-        self.verify_exact_candidate(expected_store_root_hash, author)
-    }
-
     fn verify_exact_candidate(
         &self,
         expected_store_root_hash: ObjectHash,
@@ -264,14 +256,25 @@ impl RegisteredStreamActivation {
 pub enum StreamAnchorDomain {
     StoreMembership,
     OwnerRecovery,
-    CircleControl { circle_id: CircleId },
-    CircleRoster { circle_id: CircleId },
-    CircleMetadata { circle_id: CircleId },
-    CircleAcknowledgements { circle_id: CircleId },
-    CircleSnapshots { circle_id: CircleId },
+    CircleControl {
+        circle_id: CircleId,
+    },
+    CircleRoster {
+        circle_id: CircleId,
+    },
+    CircleMetadata {
+        circle_id: CircleId,
+    },
+    CircleAcknowledgements {
+        circle_id: CircleId,
+    },
+    CircleSnapshots {
+        circle_id: CircleId,
+    },
+    /// Derives Store commit author coordinates from the exact device registration.
+    /// Accepted publications locate commits; this domain has no successor-slot anchor.
     StoreAnnouncements,
     StoreAcknowledgements,
-    StoreSnapshots,
 }
 
 impl GrantStreamAnchor {
@@ -295,9 +298,7 @@ impl GrantStreamAnchor {
 impl DeviceStreamAnchor {
     fn domain(&self) -> StreamAnchorDomain {
         match self {
-            Self::StoreAnnouncements { .. } => StreamAnchorDomain::StoreAnnouncements,
             Self::StoreAcknowledgements { .. } => StreamAnchorDomain::StoreAcknowledgements,
-            Self::StoreSnapshots { .. } => StreamAnchorDomain::StoreSnapshots,
             Self::CircleAcknowledgements { circle_id, .. } => {
                 StreamAnchorDomain::CircleAcknowledgements {
                     circle_id: *circle_id,

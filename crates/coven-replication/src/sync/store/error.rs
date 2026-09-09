@@ -182,17 +182,26 @@ pub enum StoreError {
     },
     #[error("Store pull: {0}")]
     Pull(#[from] crate::sync::store::pull::StorePullError),
+    #[error("Store publication waits for accepted history: {0:?}")]
+    PublicationHeld(Vec<crate::sync::store::pull::HeldStorePosition>),
+    #[error("Store publication response was uncertain ({publication}); verifying its outcome failed: {verification}")]
+    PublicationSettlement {
+        publication: coven_protocol::objects::StorageError,
+        #[source]
+        verification: Box<StoreError>,
+    },
     #[error("Store sequence {current} has no representable successor")]
     SequenceExhausted { current: u64 },
     #[error("published Store write count has no representable successor")]
     PublishCountExhausted,
-    /// Preparation failed AND recording that write's blocked status failed, so
+    /// A write operation failed AND recording its blocked status failed, so
     /// the write is not marked blocked. Carries both failures rather than
     /// reporting one and describing the other.
-    #[error("write {write_id} was not marked blocked ({status}) after it failed to prepare ({preparation})")]
+    #[error("write {write_id} was not marked blocked ({status}) after its operation failed ({operation})")]
     WriteBlockNotRecorded {
         write_id: coven_protocol::write::WriteId,
-        preparation: Box<StoreError>,
+        #[source]
+        operation: Box<StoreError>,
         status: coven_database::DbError,
     },
     #[error("Store author {device_id} was excluded before candidate activation")]
@@ -220,8 +229,35 @@ impl StoreError {
         }
     }
 
-    pub(crate) fn write_block(&self) -> Option<coven_protocol::write::WriteBlock> {
-        match self {
+    pub(crate) fn write_block(
+        &self,
+        attempted_write: &coven_protocol::write::WriteId,
+    ) -> Option<(
+        coven_protocol::write::WriteId,
+        coven_protocol::write::WriteBlock,
+    )> {
+        let mut cause: &(dyn std::error::Error + 'static) = self;
+        loop {
+            if let Some(database) = cause.downcast_ref::<coven_database::DbError>() {
+                if let Some(conflict) = database.write_rebase_conflict() {
+                    return Some((
+                        conflict.write_id.clone(),
+                        coven_protocol::write::WriteBlock::RebaseConflict(conflict.clone()),
+                    ));
+                }
+                // The database owner distinguishes its operation failure from
+                // secondary cleanup failures; keep that decision at its owner.
+                break;
+            }
+            let Some(source) = cause.source() else {
+                break;
+            };
+            cause = source;
+        }
+        let block = match self {
+            Self::Preparation(StorePreparationError::Database(_)) => Some(
+                coven_protocol::write::WriteBlock::InvalidPackage { reason: self.to_string() },
+            ),
             Self::Database(_)
             | Self::File(_)
             | Self::InspectBlobSource { .. }
@@ -234,6 +270,8 @@ impl StoreError {
             // blocks no writer.
             | Self::ActivationConflict
             | Self::Pull(_)
+            | Self::PublicationHeld(_)
+            | Self::PublicationSettlement { .. }
             | Self::SyncCycle(_) => None,
             Self::MergeAnnouncementOccupied { .. }
             | Self::SequenceExhausted { .. }
@@ -300,15 +338,15 @@ impl StoreError {
             }
             Self::Preparation(StorePreparationError::Gate(_))
             | Self::Preparation(StorePreparationError::AssetScan(_))
-            | Self::Preparation(StorePreparationError::AssetScanFile(_))
-            | Self::Preparation(StorePreparationError::Database(_)) => {
+            | Self::Preparation(StorePreparationError::AssetScanFile(_)) => {
                 Some(coven_protocol::write::WriteBlock::InvalidPackage {
                     reason: self.to_string(),
                 })
             }
             Self::Preparation(StorePreparationError::AssetUpload(_))
             | Self::Preparation(StorePreparationError::Storage { .. }) => None,
-        }
+        };
+        block.map(|block| (attempted_write.clone(), block))
     }
 }
 
@@ -357,5 +395,137 @@ impl From<crate::sync::store::AnchoredChainError> for StoreError {
 impl From<crate::sync::store::protocol_root::StoreProtocolRootError> for StoreError {
     fn from(error: crate::sync::store::protocol_root::StoreProtocolRootError) -> Self {
         Self::ProtocolRoot(Box::new(error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coven_protocol::write::{
+        AffectedRow, WriteBlock, WriteId, WriteRebaseConflict, WriteRebaseConflictReason,
+    };
+
+    #[test]
+    fn write_rebase_conflicts_remain_typed_at_both_publication_boundaries() {
+        let conflict = WriteRebaseConflict {
+            write_id: WriteId::from_generated("pending-write".into()),
+            affected_rows: vec![AffectedRow {
+                table: "notes".into(),
+                primary_key: "deleted-note".into(),
+            }],
+            reason: WriteRebaseConflictReason::MissingTarget,
+        };
+        let wrapped = || {
+            coven_database::DbError::context(
+                "rebase pending writes",
+                coven_database::DbError::from(conflict.clone()),
+            )
+        };
+        let attempted = WriteId::from_generated("attempted-write".into());
+        for error in [
+            StoreError::Database(wrapped()),
+            StoreError::Preparation(StorePreparationError::Database(wrapped())),
+        ] {
+            assert_eq!(
+                error.write_block(&attempted),
+                Some((
+                    conflict.write_id.clone(),
+                    WriteBlock::RebaseConflict(conflict.clone())
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn write_rebase_conflicts_remain_typed_through_pull_and_cycle_causes() {
+        let conflict = WriteRebaseConflict {
+            write_id: WriteId::from_generated("dependent-write".into()),
+            affected_rows: vec![AffectedRow {
+                table: "notes".into(),
+                primary_key: "conflicting-note".into(),
+            }],
+            reason: WriteRebaseConflictReason::ChangedColumn {
+                column: "body".into(),
+            },
+        };
+        let pull = || {
+            crate::sync::store::StorePullError::context(
+                "install accepted snapshot",
+                coven_database::DbError::context(
+                    "rebase pending suffix",
+                    coven_database::DbError::from(conflict.clone()),
+                ),
+            )
+        };
+        let attempted = WriteId::from_generated("attempted-write".into());
+        for error in [
+            StoreError::Pull(pull()),
+            StoreError::from(crate::sync::cycle::SyncCycleFailure::operation(
+                "install publication winner",
+                pull(),
+            )),
+            StoreError::PublicationSettlement {
+                publication: coven_protocol::objects::StorageError::Storage(
+                    "publication response unavailable".into(),
+                ),
+                verification: Box::new(StoreError::Pull(pull())),
+            },
+        ] {
+            assert_eq!(
+                error.write_block(&attempted),
+                Some((
+                    conflict.write_id.clone(),
+                    WriteBlock::RebaseConflict(conflict.clone())
+                )),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_pull_and_cycle_causes_do_not_block_a_write() {
+        let attempted = WriteId::from_generated("attempted-write".into());
+        let pull = || {
+            crate::sync::store::StorePullError::context(
+                "load publication winner",
+                crate::sync::store::StorePullError::Storage(
+                    coven_protocol::objects::StorageError::Storage("provider unavailable".into()),
+                ),
+            )
+        };
+        for error in [
+            StoreError::Pull(pull()),
+            StoreError::from(crate::sync::cycle::SyncCycleFailure::operation(
+                "install publication winner",
+                pull(),
+            )),
+            StoreError::PublicationSettlement {
+                publication: coven_protocol::objects::StorageError::Storage(
+                    "publication response unavailable".into(),
+                ),
+                verification: Box::new(StoreError::Pull(pull())),
+            },
+        ] {
+            assert_eq!(error.write_block(&attempted), None, "{error}");
+        }
+    }
+
+    #[test]
+    fn unattributed_write_fault_blocks_the_attempted_write() {
+        let attempted = WriteId::from_generated("attempted-write".into());
+        let error = StoreError::MissingBlob {
+            namespace: "documents".into(),
+            id: "missing-content".into(),
+        };
+        assert_eq!(
+            error.write_block(&attempted),
+            Some((
+                attempted,
+                WriteBlock::MissingBlob {
+                    namespace: "documents".into(),
+                    id: "missing-content".into(),
+                }
+            ))
+        );
     }
 }

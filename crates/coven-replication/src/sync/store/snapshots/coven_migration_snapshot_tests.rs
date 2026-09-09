@@ -25,7 +25,11 @@ fn direct_open_fixture(
         None,
     )
     .expect("construct verified snapshot install")
-    .with_circle_installs(Vec::new());
+    .with_circle_installs(coven_database::StagedCircleRestore {
+        access: Vec::new(),
+        bases: Vec::new(),
+        packages: None,
+    });
     (database_image, install)
 }
 
@@ -41,6 +45,110 @@ fn assert_current_initialized(path: &std::path::Path) {
         .expect("open installed image")
         .validate_current_initialized_coven_schema(false)
         .expect("validate exact initialized current Coven schema");
+}
+
+#[tokio::test]
+async fn direct_snapshot_open_rejects_image_bytes_outside_its_verified_metadata() {
+    assert_direct_open_rejects_unaccepted_rows(false).await;
+}
+
+#[tokio::test]
+async fn direct_snapshot_open_rejects_unaccepted_rows_in_a_write_ahead_log() {
+    assert_direct_open_rejects_unaccepted_rows(true).await;
+}
+
+async fn assert_direct_open_rejects_unaccepted_rows(in_write_ahead_log: bool) {
+    let source_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(source_dir.clone());
+    let signer = coven_keys::keys::UserKeypair::generate();
+    let store = crate::sync::test_helpers::TestStore::create(
+        &source,
+        source_dir.clone(),
+        "snapshot-image-binding",
+        signer.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create the snapshot Store");
+    let device = store
+        .open_into(&source, source_dir)
+        .await
+        .expect("open the snapshot publisher");
+    device
+        .publish_snapshot_generation_for_test()
+        .await
+        .expect("publish the accepted snapshot");
+    let membership = device.membership_for_test().await.unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let path = destination.path().join("received.db");
+    let bootstrap = store
+        .prepare_snapshot_bootstrap(
+            &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+            1,
+            &path,
+            &signer,
+        )
+        .await
+        .expect("prepare the authenticated snapshot");
+    let (image, install) = direct_open_fixture(bootstrap);
+    let accepted_image = std::fs::read(image.path()).unwrap();
+    let changed = coven_database::DatabaseImageTest::open(image.path()).unwrap();
+    if in_write_ahead_log {
+        changed.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+    }
+    changed
+        .execute(
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+             VALUES ('unaccepted-row', 'Not in the accepted image', 1,
+                     '0000000001000-0000-owner', '2026-09-09')",
+            [],
+        )
+        .expect("replace the downloaded image with different valid SQLite bytes");
+    // Replacing the main image does not remove a prior writer's committed WAL.
+    // Keep that writer open to prevent its close from checkpointing those pages.
+    if in_write_ahead_log {
+        std::fs::write(image.path(), &accepted_image).unwrap();
+        let visible: i64 = coven_database::DatabaseImageTest::open(image.path())
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE id = 'unaccepted-row'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("a new SQLite reader sees the committed sidecar row");
+        assert_eq!(visible, 1);
+        assert_eq!(
+            coven_protocol::store_commit::ObjectHash::digest(&std::fs::read(image.path()).unwrap()),
+            coven_protocol::store_commit::ObjectHash::digest(&accepted_image),
+        );
+        let journal_path = std::path::PathBuf::from(format!("{}-wal", image.path().display()));
+        assert!(std::fs::metadata(journal_path).unwrap().len() > 0);
+    }
+    let changed_image = std::fs::read(image.path()).unwrap();
+    let error = match Database::open_initialized_store(
+        image.path(),
+        &install,
+        crate::sync::test_helpers::test_synced_tables(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
+        "snapshot-image-recipient".to_string(),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        coven_database::CovenMigrationPolicy::ApplyPending,
+        &crate::sync::test_helpers::test_migrations(),
+    ) {
+        Ok(_) => panic!("the direct database opener accepted an unauthenticated image"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        coven_database::OpenError::Db(coven_database::DbError::Message(message))
+            if message == "snapshot database image differs from its authenticated plaintext hash"
+    ));
+    assert_eq!(
+        std::fs::read(image.path()).unwrap(),
+        changed_image,
+        "image authentication must precede migrations and installation"
+    );
 }
 
 #[tokio::test]
@@ -77,6 +185,14 @@ async fn exact_v0_snapshot_obeys_writer_coven_migration_policy() {
             .expect("load snapshot migration coverage"),
     )
     .expect("parse snapshot migration coverage");
+    let image = coven_database::DatabaseImageTest::from_bytes(&image)
+        .expect("open the image before publication");
+    image
+        .downgrade_coven_schema_to_v0(false)
+        .expect("prepare the old schema before authenticating the snapshot");
+    let image = image
+        .into_bytes()
+        .expect("serialize the old snapshot schema");
     device
         .publish_snapshot(image, coverage)
         .await
@@ -96,14 +212,6 @@ async fn exact_v0_snapshot_obeys_writer_coven_migration_policy() {
         .expect("prepare refuse snapshot bootstrap");
     let (apply_image, apply_install) = direct_open_fixture(apply);
     let (refuse_image, refuse_install) = direct_open_fixture(refuse);
-    coven_database::DatabaseImageTest::open(apply_image.path())
-        .expect("open apply snapshot fixture")
-        .downgrade_coven_schema_to_v0(false)
-        .expect("downgrade apply snapshot fixture");
-    coven_database::DatabaseImageTest::open(refuse_image.path())
-        .expect("open refuse snapshot fixture")
-        .downgrade_coven_schema_to_v0(false)
-        .expect("downgrade refuse snapshot fixture");
     assert_v0_uninitialized(apply_image.path());
     assert_v0_uninitialized(refuse_image.path());
 

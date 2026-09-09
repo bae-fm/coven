@@ -22,6 +22,9 @@ async fn loaded_store_authorization_retains_its_verified_root() {
         storage,
         store_dir,
         signer,
+        Some(coven_keys::encryption::EncryptionService::from_key(
+            [42; 32],
+        )),
     )
     .await
     .expect("load Store");
@@ -253,22 +256,29 @@ async fn failed_owner_recovery_materialization_does_not_publish_registration_aut
         .await
         .expect("load staged Owner recovery publication")
         .expect("failed materialization retains the exact publication");
-    let head_slot = publication.head.prepared.reference().slot().clone();
-    home.replace_exact_object(&head_slot, b"competing Owner recovery head".to_vec());
+    let publication_slot = publication.publication.entry_object.slot().clone();
+    home.replace_exact_object(
+        &publication_slot,
+        b"competing Owner recovery publication".to_vec(),
+    );
     let collision = recovery
         .recover_owner_device(&authority, None)
         .await
         .expect_err("retry must refuse a different object in the staged head slot");
     assert!(
-        collision
-            .to_string()
-            .contains("slot contains different bytes"),
-        "unexpected Owner recovery collision: {collision}"
+        matches!(
+            &collision,
+            StoreRegistrationError::Outbound(StoreError::Pull(
+                crate::sync::store::StorePullError::Object(
+                    coven_protocol::objects::StoreObjectError::Storage(
+                        coven_protocol::objects::StorageError::InvalidContent(message)
+                    )
+                )
+            )) if message.contains(publication_slot.logical_key())
+        ),
+        "the accepted publication's exact bytes must be verified before retry: {collision}"
     );
-    home.replace_exact_object(
-        &head_slot,
-        publication.head.prepared.stored_bytes().to_vec(),
-    );
+    home.replace_exact_object(&publication_slot, publication.publication.entry.to_bytes());
 
     let recovered = recovery
         .recover_owner_device(&authority, None)

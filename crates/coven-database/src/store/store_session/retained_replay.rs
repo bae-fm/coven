@@ -230,9 +230,13 @@ enum ReplayTableDisposition {
 }
 
 const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
+    ("active_store_publication", ReplayTableDisposition::Preserve),
     ("activated_circle_acks", ReplayTableDisposition::Replace),
     ("activated_store_acks", ReplayTableDisposition::Replace),
-    ("blob_locators", ReplayTableDisposition::Replace),
+    // Blob provenance belongs to accepted object lifetime, including orphaned
+    // ciphertext whose row version a replay omits. Exact activation and reclaim
+    // transitions update this index alongside remote_objects.
+    ("blob_locators", ReplayTableDisposition::ExactTransition),
     ("blob_make_remote_intents", ReplayTableDisposition::Preserve),
     ("circle_access_cache", ReplayTableDisposition::Replace),
     (
@@ -266,18 +270,13 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         "local_store_protocol_root",
         ReplayTableDisposition::Preserve,
     ),
-    // A commit's position is a fact accepted at commit time, maintained
-    // incrementally by materialization and retraction — never rebuilt by a
+    // A commit's position is a fact accepted at commit time and is never rebuilt by a
     // projection replay. A filtered replay (one that omits covered or
     // beyond-cutoff Circle packages) would re-derive the commit's retained-input
     // hash from its filtered packages and drift from the preserved
     // `retained_merge_materializations` row, breaking the `materialized_commits`
-    // foreign key. Only explicit retraction removes these rows.
+    // foreign key.
     ("materialized_commits", ReplayTableDisposition::Preserve),
-    (
-        "merge_retraction_cleanups",
-        ReplayTableDisposition::Preserve,
-    ),
     (
         "outbound_membership_mutation",
         ReplayTableDisposition::Preserve,
@@ -325,18 +324,10 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
     ),
     ("retained_replay_objects", ReplayTableDisposition::Preserve),
     ("row_blob_locators", ReplayTableDisposition::Replace),
-    (
-        "snapshot_blob_spool_cleanup",
-        ReplayTableDisposition::Preserve,
-    ),
     ("snapshot_coverage", ReplayTableDisposition::Preserve),
     (
         "store_author_exclusion_activations",
         ReplayTableDisposition::Replace,
-    ),
-    (
-        "store_device_exclusion_freezes",
-        ReplayTableDisposition::ExactTransition,
     ),
     (
         "store_device_registration_activations",
@@ -356,6 +347,10 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
     ),
     (
         "store_publication_current",
+        ReplayTableDisposition::Preserve,
+    ),
+    (
+        "store_publication_entries",
         ReplayTableDisposition::Preserve,
     ),
     ("store_reclaim_operations", ReplayTableDisposition::Preserve),
@@ -569,11 +564,13 @@ impl RetainedReplayBaseline {
                         "snapshot replay baseline contains materialized_commits rows".to_string(),
                     ));
                 }
-                let mut verified_authority = super::VerifiedStoreAuthority::default();
+                let mut verified_authority =
+                    super::VerifiedStoreAuthority::for_replay_baseline(self.clone());
                 crate::StoreDatabase::validate_snapshot_retained_inputs_on(
                     StoreRecords::new(image, store_dir),
                     &mut verified_authority,
                     &authority.store_root,
+                    &self.exact_cut,
                 )?;
                 validate_replay_image_foreign_keys(image)?;
             }

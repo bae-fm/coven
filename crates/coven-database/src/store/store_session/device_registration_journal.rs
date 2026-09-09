@@ -74,6 +74,66 @@ impl LocalRegistrationRecord {
         &self.reference
     }
 
+    pub(super) fn checked_owner_recovery(
+        registration: ExactProtocolObject<StoreDeviceRegistration>,
+        initial_ack_ref: StoreAckRef,
+        initial_ack: ExactProtocolObject<StoreAck>,
+        activation: &coven_protocol::store_commit::StoreDeviceRegistrationActivation,
+        subject: &str,
+    ) -> Result<Self, DbError> {
+        let (
+            coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
+                recovery_id: origin_recovery_id,
+                recovery_slot,
+                owner_grant,
+                ..
+            },
+            coven_protocol::store_commit::StoreDeviceRegistrationActivation::Recovery {
+                recovery_id: activation_recovery_id,
+                node,
+            },
+        ) = (&registration.value.origin, activation)
+        else {
+            return Err(DbError::Message(
+                "Owner recovery journal requires one Recovery registration authority".into(),
+            ));
+        };
+        if origin_recovery_id != activation_recovery_id
+            || node.object.slot() != recovery_slot
+            || node.owner_grant != *owner_grant
+        {
+            return Err(DbError::Message(
+                "Owner recovery registration differs from its activation authority".into(),
+            ));
+        }
+        Self::checked_at_stream_start(registration, initial_ack_ref, initial_ack, subject)
+    }
+
+    pub(super) fn initial_ack_ref(&self) -> &StoreAckRef {
+        &self.initial_ack_ref
+    }
+
+    pub(super) fn replace_journal_on(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        state: LocalDeviceRegistrationState,
+        subject: &str,
+    ) -> Result<(), DbError> {
+        let objects = self.columns(subject)?;
+        let state = encode(&state, subject, "journal state")?;
+        tx.execute("DELETE FROM local_store_device_registration", [])?;
+        tx.execute(
+            "INSERT INTO local_store_device_registration \
+             (singleton, device_id, registration_hash, registration_bytes, \
+              prepared_object, initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state) \
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                objects.0, objects.1, objects.2, objects.3, objects.4, objects.5, objects.6, state,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn registration(&self) -> &StoreDeviceRegistration {
         &self.registration.value
     }
@@ -441,6 +501,12 @@ impl StoreSession<'_> {
                 ));
             }
         };
+        if activated {
+            // Adoption prepares the current acknowledgement before replacing
+            // local authority. Staging cannot rewind that stream to ACK 1.
+            tx.commit().map_err(DbError::from)?;
+            return Ok(true);
+        }
         let existing: Option<LocalDeviceRegistrationJournalRow> = tx
             .query_row(
                 "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
@@ -462,91 +528,50 @@ impl StoreSession<'_> {
             )
             .optional()
             .map_err(DbError::from)?;
-        if !activated {
-            if let Some(existing) = existing.as_ref() {
-                let same_objects = existing.0 == objects.0
-                    && existing.1 == objects.1
-                    && existing.2 == objects.2
-                    && existing.3 == objects.3
-                    && existing.4 == objects.4
-                    && existing.5 == objects.5
-                    && existing.6 == objects.6;
-                if same_objects {
-                    let state: LocalDeviceRegistrationState = serde_json::from_str(&existing.7)
-                        .map_err(|error| {
-                            DbError::context("parse Owner recovery journal state", error)
-                        })?;
-                    if !matches!(
-                        state,
-                        LocalDeviceRegistrationState::Prepared
-                            | LocalDeviceRegistrationState::Created
-                    ) {
-                        return Err(DbError::Message(
-                            "Owner recovery journal claims activation absent from Store authority"
-                                .into(),
-                        ));
-                    }
-                    let published_ack_count: i64 = tx
-                        .query_row("SELECT COUNT(*) FROM published_store_acks", [], |row| {
-                            row.get(0)
-                        })
-                        .map_err(DbError::from)?;
-                    if published_ack_count != 0
-                        || crate::get_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?.is_some()
-                    {
-                        return Err(DbError::Message(
-                            "unactivated Owner recovery journal has published local authority"
-                                .into(),
-                        ));
-                    }
-                    tx.commit().map_err(DbError::from)?;
-                    return Ok(false);
+        if let Some(existing) = existing.as_ref() {
+            let same_objects = existing.0 == objects.0
+                && existing.1 == objects.1
+                && existing.2 == objects.2
+                && existing.3 == objects.3
+                && existing.4 == objects.4
+                && existing.5 == objects.5
+                && existing.6 == objects.6;
+            if same_objects {
+                let state: LocalDeviceRegistrationState = serde_json::from_str(&existing.7)
+                    .map_err(|error| {
+                        DbError::context("parse Owner recovery journal state", error)
+                    })?;
+                if !matches!(
+                    state,
+                    LocalDeviceRegistrationState::Prepared | LocalDeviceRegistrationState::Created
+                ) {
+                    return Err(DbError::Message(
+                        "Owner recovery journal claims activation absent from Store authority"
+                            .into(),
+                    ));
                 }
+                let published_ack_count: i64 = tx
+                    .query_row("SELECT COUNT(*) FROM published_store_acks", [], |row| {
+                        row.get(0)
+                    })
+                    .map_err(DbError::from)?;
+                if published_ack_count != 0
+                    || crate::get_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?.is_some()
+                {
+                    return Err(DbError::Message(
+                        "unactivated Owner recovery journal has published local authority".into(),
+                    ));
+                }
+                tx.commit().map_err(DbError::from)?;
+                return Ok(false);
             }
         }
-        tx.execute("DELETE FROM local_store_device_registration", [])
-            .map_err(DbError::from)?;
         tx.execute("DELETE FROM published_store_acks", [])
             .map_err(DbError::from)?;
         crate::delete_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
-        let state = encode(
-            &if activated {
-                LocalDeviceRegistrationState::Activated {
-                    authority: activation,
-                }
-            } else {
-                LocalDeviceRegistrationState::Prepared
-            },
-            subject,
-            "journal state",
-        )?;
-        tx.execute(
-            "INSERT INTO local_store_device_registration \
-                 (singleton, device_id, registration_hash, registration_bytes, \
-                  prepared_object, initial_ack_ref, initial_ack_bytes, \
-                  initial_ack_prepared, state) \
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                objects.0, objects.1, objects.2, objects.3, objects.4, objects.5, objects.6, state,
-            ],
-        )
-        .map_err(DbError::from)?;
-        if activated {
-            tx.execute(
-                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
-                (LOCAL_DEVICE_ID_STATE_KEY, &objects.0),
-            )
-            .map_err(DbError::from)?;
-            let published_ack = record.published_ack_columns(subject)?;
-            tx.execute(
-                "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
-                     VALUES (1, ?1, ?2)",
-                (&published_ack.0, &published_ack.1),
-            )
-            .map_err(DbError::from)?;
-        }
+        record.replace_journal_on(&tx, LocalDeviceRegistrationState::Prepared, subject)?;
         tx.commit().map_err(DbError::from)?;
-        Ok(activated)
+        Ok(false)
     }
 
     fn read_local_store_device_registration(
@@ -844,36 +869,12 @@ impl StoreDatabase {
         initial_ack: ExactProtocolObject<StoreAck>,
         activation: coven_protocol::store_commit::StoreDeviceRegistrationActivation,
     ) -> Result<bool, DbError> {
-        let (
-            coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
-                recovery_id: origin_recovery_id,
-                recovery_slot,
-                owner_grant,
-                ..
-            },
-            coven_protocol::store_commit::StoreDeviceRegistrationActivation::Recovery {
-                recovery_id: activation_recovery_id,
-                node,
-            },
-        ) = (&registration.value.origin, &activation)
-        else {
-            return Err(DbError::Message(
-                "Owner recovery journal requires one Recovery registration authority".into(),
-            ));
-        };
-        if origin_recovery_id != activation_recovery_id
-            || node.object.slot() != recovery_slot
-            || node.owner_grant != *owner_grant
-        {
-            return Err(DbError::Message(
-                "Owner recovery registration differs from its activation authority".into(),
-            ));
-        }
         const SUBJECT: &str = "Owner recovery registration graph";
-        let record = LocalRegistrationRecord::checked_at_stream_start(
+        let record = LocalRegistrationRecord::checked_owner_recovery(
             registration,
             initial_ack_ref,
             initial_ack,
+            &activation,
             SUBJECT,
         )?;
         self.call_store(move |session| {

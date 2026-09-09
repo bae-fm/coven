@@ -20,15 +20,45 @@ fn no_join_progress() -> coven_replication::sync::JoiningDeviceJoinProgressObser
 }
 #[tokio::test]
 async fn device_join_client_four_transfer_retries_and_process_restarts_preserve_exact_state() {
-    tokio::spawn(run_device_join_client_four_transfer_retries_and_process_restarts())
+    tokio::spawn(run_device_join_client_four_transfer_retries_and_process_restarts(None))
         .await
         .expect("device join state-machine task");
 }
 
-async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
+#[tokio::test]
+async fn cross_principal_provider_approval_survives_peer_compaction_before_registration() {
+    tokio::spawn(
+        run_device_join_client_four_transfer_retries_and_process_restarts(Some(
+            JoinCompaction::ProviderApproval,
+        )),
+    )
+    .await
+    .expect("provider approval compaction task");
+}
+
+#[tokio::test]
+async fn cross_principal_accepted_attempt_survives_peer_compaction_before_bootstrap() {
+    tokio::spawn(
+        run_device_join_client_four_transfer_retries_and_process_restarts(Some(
+            JoinCompaction::AcceptedAttempt,
+        )),
+    )
+    .await
+    .expect("accepted attempt compaction task");
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JoinCompaction {
+    ProviderApproval,
+    AcceptedAttempt,
+}
+
+async fn run_device_join_client_four_transfer_retries_and_process_restarts(
+    compaction: Option<JoinCompaction>,
+) {
     coven_keys::keys::test_keyring::install();
-    let store_id = "device-join-client-state-machine";
     let owner = UserKeypair::generate();
+    let store_id = format!("device-join-client-{}", pubkey_hex(&owner));
     let owner_db_store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let owner_db = open_test_db(owner_db_store_dir.clone());
     let owner_database = coven_database::StoreDatabase::from_database(owner_db.clone());
@@ -43,6 +73,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             },
         },
     });
+    let create_store_id = store_id.clone();
     let create_store_db = owner_db.clone();
     let create_store_db_store_dir = owner_db_store_dir.clone();
     let create_store_owner = owner.clone();
@@ -51,7 +82,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         TestStore::create(
             &create_store_db,
             create_store_db_store_dir,
-            store_id,
+            &create_store_id,
             create_store_owner,
             create_store_home,
         )
@@ -91,6 +122,25 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         )
         .await
         .expect("admit joining identity");
+    let peer = if compaction.is_some() {
+        let peer_directory = test_store_dir();
+        let peer_database = open_test_db(peer_directory.clone());
+        Some(
+            store
+                .activate_joined_device(
+                    &owner_db,
+                    owner_db_store_dir.clone(),
+                    &peer_database,
+                    peer_directory,
+                    &owner,
+                    "2026-07-20T00:00:00Z",
+                )
+                .await
+                .expect("activate independent snapshot publisher"),
+        )
+    } else {
+        None
+    };
     let owner_device = store
         .open_into(&owner_db, owner_db_store_dir.clone())
         .await
@@ -157,6 +207,17 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .authorize_device_provider_access(access_request, Some(&access_administrator))
         .await
         .expect("authorize provider access");
+    if compaction == Some(JoinCompaction::ProviderApproval) {
+        compact_pending_join(
+            peer.as_ref().expect("compaction publisher"),
+            &owner_store,
+            &approval
+                .access_grant()
+                .expect("cross-principal access grant")
+                .activation,
+        )
+        .await;
+    }
     let registration_request = new_client()
         .prepare_registration_request(approval.clone())
         .await
@@ -172,6 +233,69 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .accept_device_registration_request(registration_request)
         .await
         .expect("accept registration request");
+    let retained_attempt = if compaction == Some(JoinCompaction::AcceptedAttempt) {
+        let activation = provisional
+            .publication_authorization
+            .attempt_activation
+            .clone();
+        let first = compact_pending_join(
+            peer.as_ref().expect("compaction publisher"),
+            &owner_store,
+            &activation,
+        )
+        .await;
+        let closure = first
+            .meta
+            .history_summary
+            .pending_device_joins
+            .get(&activation)
+            .expect("first covering snapshot retains the unresolved Attempt")
+            .clone();
+        let original = closure
+            .publication
+            .current
+            .latest_snapshot()
+            .expect("Attempt keeps its original accepted image");
+        let artifacts = first
+            .meta
+            .history_summary
+            .reclaim
+            .snapshots
+            .get(&original.snapshot.snapshot_hash)
+            .expect("original snapshot retains exact artifact ownership")
+            .objects()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for object in &artifacts {
+            home.read_at(object.slot())
+                .await
+                .expect("first compaction preserves pending image artifacts");
+        }
+        let successor = compact_pending_join(
+            peer.as_ref().expect("compaction publisher"),
+            &owner_store,
+            &activation,
+        )
+        .await;
+        assert_eq!(
+            successor
+                .meta
+                .history_summary
+                .pending_device_joins
+                .get(&activation),
+            Some(&closure),
+            "a successor preserves the original accepted bootstrap interval"
+        );
+        for object in &artifacts {
+            home.read_at(object.slot())
+                .await
+                .expect("successor compaction preserves pending image artifacts");
+        }
+        Some((activation, artifacts))
+    } else {
+        None
+    };
     let provider_ready = owner_store
         .publish_device_provider_challenge(provisional)
         .await
@@ -210,7 +334,9 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             )
         .await
         .expect("load interrupted owner finalization"),
-        Some(coven_replication::sync::DeviceJoinStatus::AwaitingActivation { completion: durable })
+        Some(coven_replication::sync::DeviceJoinStatus::StorePublicationPending {
+            operation: coven_protocol::store_commit::device_join_journal::OwnerJoinPublication::JoinActivation { completion: durable },
+        })
             if durable == completion
     ));
     assert!(owner_database
@@ -276,9 +402,62 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .await
         .expect("retry completed join after lost response");
     assert_eq!(retry.device_id, config.device_id);
-    assert!(layout.store_dir(store_id).config_path().exists());
+    assert!(layout.store_dir(&store_id).config_path().exists());
     assert!(new_client()
         .resume_device_joins()
         .expect("enumerate completed joins")
         .is_empty());
+    if let Some((opening, artifacts)) = retained_attempt {
+        let terminal = compact_pending_join(
+            peer.as_ref().expect("compaction publisher"),
+            &owner_store,
+            &opening,
+        )
+        .await;
+        assert!(
+            !terminal
+                .meta
+                .history_summary
+                .pending_device_joins
+                .contains_key(&opening),
+            "accepted separate registration ends the Attempt's bootstrap ownership"
+        );
+        for object in artifacts {
+            assert!(
+                matches!(
+                    home.read_at(object.slot()).await,
+                    Err(coven_storage::cloud::CloudHomeError::NotFound(_))
+                ),
+                "completed Attempt releases its original snapshot artifact: {:?}",
+                object.slot()
+            );
+        }
+    }
+}
+
+async fn compact_pending_join(
+    peer: &TestDevice,
+    administrator: &TestDevice,
+    pending_activation: &coven_protocol::store_commit::StoreBatchCommitRef,
+) -> coven_database::PublishedStoreSnapshot {
+    let (_, accepted) = peer
+        .pull_store()
+        .await
+        .expect("peer accepts pending join history");
+    assert!(accepted.held_positions.is_empty(), "{accepted:?}");
+    let snapshot = peer
+        .publish_snapshot_generation_for_test()
+        .await
+        .expect("peer compacts pending join history");
+    assert!(snapshot.meta.coverage.covers_commit(pending_activation));
+    let (_, accepted) = administrator
+        .pull_store()
+        .await
+        .expect("administrator installs peer snapshot");
+    assert!(accepted.held_positions.is_empty(), "{accepted:?}");
+    administrator
+        .reclaim_packages()
+        .await
+        .expect("retire covered history while the joining device is paused");
+    snapshot
 }

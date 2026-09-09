@@ -1,15 +1,129 @@
 use super::*;
 use crate::store_ack_records::{
-    load_expected_outbound_store_ack_on, set_outbound_store_ack_activation_on,
+    load_expected_outbound_store_ack_on, verify_next_local_store_ack_on,
 };
-use coven_protocol::remote_object::CandidateNonactivation;
+use crate::{
+    update_remote_object_on, ActiveStorePublication, ActiveStorePublicationOwner,
+    ExactProtocolObject, RemoteObjectRecord, StoreAck,
+};
 
 impl StoreSession<'_> {
+    fn replace_acknowledgement_activation(
+        &mut self,
+        expected: StoreAckRef,
+        snapshot: coven_protocol::store_commit::AcceptedStoreSnapshotRef,
+        acknowledgement: ExactProtocolObject<StoreAck>,
+        candidate: PreparedStoreOperationCommit,
+    ) -> Result<(), DbError> {
+        let authority = self.local_store_authority()?;
+        self.verified_store_transaction(move |transaction| {
+            let tx = transaction.store.transaction;
+            let outbound = load_expected_outbound_store_ack_on(
+                tx, &authority, &expected,
+                "acknowledgement replacement names another queued object",
+            )?;
+            let OutboundStoreAckActivation::Prepared(previous) = &outbound.activation else {
+                return Err(DbError::Message("acknowledgement replacement has no prepared candidate".into()));
+            };
+            previous.validate_closed_shape()?;
+            candidate.validate_closed_shape()?;
+            let old_commit = coven_protocol::store_commit::VerifiedStoreBatchCommit::parse_prepared(
+                &previous.commit.to_bytes(), authority.value().store_root.store_root_hash,
+                previous.reference.coord.clone(), previous.reference.object.clone(), authority.value(),
+            )?;
+            let new_commit = coven_protocol::store_commit::VerifiedStoreBatchCommit::parse_prepared(
+                &candidate.commit.to_bytes(), authority.value().store_root.store_root_hash,
+                candidate.reference.coord.clone(), candidate.reference.object.clone(), authority.value(),
+            )?;
+            let proof = transaction.snapshot_candidate_nonactivation(&snapshot, &old_commit)?;
+            let active = super::active_store_publication::load_active_store_publication_on(tx)?
+                .ok_or_else(|| DbError::Message("acknowledgement replacement has no reserved publication".into()))?;
+            let installed = super::observed_store_publication::load_store_current_publication_on(tx)?;
+            if installed.record() != &candidate.publication.previous
+                || installed.observed_version() != Some(&candidate.publication.previous_version)
+                || new_commit.publication_base != coven_protocol::store_commit::StorePublicationBase::Snapshot(snapshot)
+            {
+                return Err(DbError::Message("replacement acknowledgement extends another installed boundary".into()));
+            }
+            candidate.publication.verify_commit(&new_commit)?;
+            let retained = candidate.history_evidence.acknowledgement.as_ref()
+                .ok_or_else(|| DbError::Message("replacement acknowledgement omits its proof".into()))?;
+            let previous_proof = previous.history_evidence.acknowledgement.as_ref()
+                .ok_or_else(|| DbError::Message("queued acknowledgement omits its proof".into()))?;
+            if previous_proof.acknowledgement != (outbound.reference.clone(), outbound.ack.value.clone())
+                || retained.predecessors != previous_proof.proof_objects().cloned().collect::<Vec<_>>()
+                || retained.acknowledgement.1 != acknowledgement.value
+                || retained.acknowledgement.0.object != *acknowledgement.prepared.reference()
+                || acknowledgement.value.to_bytes() != acknowledgement.bytes
+                || acknowledgement.value.store_cut != new_commit.order.predecessor_cut()?
+                || acknowledgement.value.device_state != new_commit.device_state
+                || candidate.commit.circle_acknowledgements() != previous.commit.circle_acknowledgements()
+            {
+                return Err(DbError::Message("replacement acknowledgement changes its queued proof or Circle statements".into()));
+            }
+            for (reference, value) in retained.proof_objects() {
+                StoreAck::parse_at(&value.to_bytes(), &authority.value().store_root, reference, authority.value())?;
+            }
+            let mut publications = vec![active.attempt()?.reference()?];
+            if let Some(prior) = active.superseded_entry() {
+                publications.push(prior.clone());
+            }
+            let cleanup = crate::RetiredStoreCandidate {
+                nonactivation: proof,
+                inputs: crate::RetiredStoreCandidateInputs::Acknowledgement((**previous_proof).clone()),
+                publications,
+            };
+            let replacement = active.replace_acknowledgement_candidate(&candidate, cleanup.clone())?;
+            let old_objects = cleanup.objects()?.into_iter().collect::<std::collections::BTreeSet<_>>();
+            let mut objects = candidate.acknowledgement_remote_objects(&acknowledgement)?;
+            for circle in &outbound.circle_acknowledgements {
+                objects.extend(candidate.circle_acknowledgement_remote_objects(&circle.ack)?);
+            }
+            let mut persisted = std::collections::BTreeSet::new();
+            for proposed in objects {
+                if !persisted.insert(proposed.object_id()) {
+                    continue;
+                }
+                if old_objects.contains(proposed.object()) {
+                    let mut current = load_remote_object_on(tx, proposed.object_id())?;
+                    match (&current, proposed.record()) {
+                        (RemoteObjectRecord::RetainedAuthority(current), RemoteObjectRecord::RetainedAuthority(proposed))
+                            if current.identity == proposed.identity && current.payloads == proposed.payloads => {}
+                        _ => return Err(DbError::Message("replacement changed a retained acknowledgement object".into())),
+                    }
+                    current.add_retained_authority_candidate(candidate.reference.clone())?;
+                    update_remote_object_on(tx, proposed.object_id(), &current)?;
+                } else {
+                    persist_exact_remote_object_on(tx, transaction.store.store_dir, &proposed, "replacement acknowledgement candidate")?;
+                }
+            }
+            super::candidate_records::begin_candidate_nonactivation_targets_on(
+                tx, &previous.reference, &cleanup.objects()?, &cleanup.nonactivation,
+            )?;
+            let changed = tx.execute(
+                "UPDATE outbound_store_acks SET ack_ref = ?2, ack_bytes = ?3, prepared_object = ?4, activation = ?5 WHERE singleton = 1 AND ack_ref = ?1",
+                rusqlite::params![
+                    serde_json::to_string(&expected)?,
+                    serde_json::to_string(&retained.acknowledgement.0)?,
+                    acknowledgement.bytes,
+                    serde_json::to_string(&acknowledgement.prepared)?,
+                    serde_json::to_string(&OutboundStoreAckActivation::Prepared(candidate))?,
+                ],
+            )?;
+            if changed != 1 {
+                return Err(DbError::Message("outbound acknowledgement changed during candidate replacement".into()));
+            }
+            super::active_store_publication::update_active_store_publication_on(tx, &active, &replacement)?;
+            Ok(StoreTransactionOutcome::Commit(()))
+        })
+    }
+
     fn prepare_acknowledgement_activation(
         &mut self,
         expected: &StoreAckRef,
+        acknowledgement: ExactProtocolObject<StoreAck>,
         candidate: PreparedStoreOperationCommit,
-    ) -> Result<(), DbError> {
+    ) -> Result<bool, DbError> {
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let outbound = load_expected_outbound_store_ack_on(
@@ -18,23 +132,125 @@ impl StoreSession<'_> {
             expected,
             "prepared activation names a different Store acknowledgement",
         )?;
-        match outbound.activation {
-            OutboundStoreAckActivation::AwaitingCandidate => {}
-            OutboundStoreAckActivation::Prepared(existing)
-                if existing.reference == candidate.reference =>
-            {
-                return Ok(());
+        match &outbound.activation {
+            OutboundStoreAckActivation::AwaitingCandidate | OutboundStoreAckActivation::Created => {
             }
-            OutboundStoreAckActivation::Prepared(_)
-            | OutboundStoreAckActivation::Nonactivating(_) => {
+            OutboundStoreAckActivation::Prepared(existing)
+                if *existing == candidate
+                    && outbound.ack.bytes == acknowledgement.bytes
+                    && outbound.ack.prepared == acknowledgement.prepared
+                    && outbound.ack.value == acknowledgement.value =>
+            {
+                return Ok(true);
+            }
+            OutboundStoreAckActivation::Prepared(_) => {
                 return Err(DbError::Message(
                     "Store acknowledgement already has a different activation candidate"
                         .to_string(),
                 ));
             }
         }
+        candidate.validate_closed_shape()?;
+        let reference = candidate.commit.acknowledgement().ok_or_else(|| {
+            DbError::Message("prepared acknowledgement has no exact statement".into())
+        })?;
+        let value = StoreAck::parse_at(
+            &acknowledgement.bytes,
+            &authority.value().store_root,
+            reference,
+            authority.value(),
+        )?;
+        let retained = candidate
+            .history_evidence
+            .acknowledgement
+            .as_ref()
+            .ok_or_else(|| {
+                DbError::Message("prepared acknowledgement omits its retained statement".into())
+            })?;
+        if value != acknowledgement.value
+            || reference.object != *acknowledgement.prepared.reference()
+            || retained.acknowledgement != (reference.clone(), value.clone())
+            || value.store_cut != candidate.commit.order.predecessor_cut()?
+            || value.device_state != candidate.commit.device_state
+            || value.last_sync != outbound.ack.value.last_sync
+            || candidate.commit.circle_acknowledgements()
+                != outbound
+                    .circle_acknowledgements
+                    .iter()
+                    .map(|circle| circle.reference.clone())
+                    .collect::<Vec<_>>()
+        {
+            return Err(DbError::Message("prepared acknowledgement differs from its queued statement or accepted predecessor".into()));
+        }
+        let created = match &outbound.activation {
+            OutboundStoreAckActivation::AwaitingCandidate => {
+                let (verified, _) = verify_next_local_store_ack_on(
+                    &tx,
+                    &authority,
+                    &acknowledgement.bytes,
+                    &acknowledgement.prepared,
+                )?;
+                if verified != *reference
+                    || reference.object.slot() != expected.object.slot()
+                    || value.successor != outbound.ack.value.successor
+                    || !retained.predecessors.is_empty()
+                {
+                    return Err(DbError::Message(
+                        "uncreated acknowledgement changed its reserved stream position".into(),
+                    ));
+                }
+                None
+            }
+            OutboundStoreAckActivation::Created => {
+                if reference == expected {
+                    if acknowledgement.bytes != outbound.ack.bytes
+                        || acknowledgement.prepared != outbound.ack.prepared
+                        || acknowledgement.value != outbound.ack.value
+                        || !retained.predecessors.is_empty()
+                    {
+                        return Err(DbError::Message(
+                            "created acknowledgement bytes cannot change".into(),
+                        ));
+                    }
+                } else if reference.sequence
+                    != expected.sequence.checked_add(1).ok_or_else(|| {
+                        DbError::Message("acknowledgement sequence overflow".into())
+                    })?
+                    || reference.object.slot() != &outbound.ack.value.successor.next_slot
+                    || value.successor.predecessor.as_ref() != Some(&expected.object)
+                    || retained.predecessors != vec![(expected.clone(), outbound.ack.value.clone())]
+                {
+                    return Err(DbError::Message(
+                        "created acknowledgement replacement omits its exact predecessor".into(),
+                    ));
+                }
+                Some(&expected.object)
+            }
+            OutboundStoreAckActivation::Prepared(_) => {
+                unreachable!("prepared candidates returned above")
+            }
+        };
+        let active_publication = ActiveStorePublication::for_commit(
+            ActiveStorePublicationOwner::StoreAcknowledgement,
+            &candidate,
+        )?;
+        match super::active_store_publication::claim_active_store_publication_on(
+            &tx,
+            &active_publication,
+        )? {
+            super::active_store_publication::ActiveStorePublicationClaim::Acquired => {}
+            super::active_store_publication::ActiveStorePublicationClaim::AlreadyOwned => {
+                return Err(DbError::Message(
+                    "Store acknowledgement candidate already owns publication before its journal"
+                        .to_string(),
+                ));
+            }
+            super::active_store_publication::ActiveStorePublicationClaim::Occupied(_) => {
+                return Ok(false);
+            }
+        }
         for remote in candidate
-            .acknowledgement_remote_objects(&outbound.ack)
+            .acknowledgement_remote_objects(&acknowledgement)
             .map_err(DbError::from)?
         {
             persist_exact_remote_object_on(
@@ -43,6 +259,12 @@ impl StoreSession<'_> {
                 &remote,
                 "Merge Store acknowledgement activation object",
             )?;
+            if created == Some(remote.object()) {
+                let object_id = remote.object_id();
+                let mut uploaded = remote.into_record();
+                uploaded.mark_uploaded_verified()?;
+                update_remote_object_on(&tx, object_id, &uploaded)?;
+            }
         }
         for circle in &outbound.circle_acknowledgements {
             for remote in candidate
@@ -57,357 +279,53 @@ impl StoreSession<'_> {
                 )?;
             }
         }
-        set_outbound_store_ack_activation_on(
-            &tx,
-            expected,
-            &OutboundStoreAckActivation::Prepared(candidate),
-            "outbound Store acknowledgement disappeared during activation preparation",
+        let changed = tx.execute(
+            "UPDATE outbound_store_acks SET ack_ref = ?2, ack_bytes = ?3, prepared_object = ?4, activation = ?5 WHERE singleton = 1 AND ack_ref = ?1",
+            rusqlite::params![
+                serde_json::to_string(expected)?,
+                serde_json::to_string(reference)?,
+                acknowledgement.bytes,
+                serde_json::to_string(&acknowledgement.prepared)?,
+                serde_json::to_string(&OutboundStoreAckActivation::Prepared(candidate))?,
+            ],
         )?;
-        tx.commit().map_err(DbError::from)
-    }
-
-    fn begin_acknowledgement_nonactivation(
-        &mut self,
-        expected: &StoreAckRef,
-        verified_candidate: &StoreBatchCommitRef,
-        nonactivation: CandidateNonactivation,
-    ) -> Result<(), DbError> {
-        let authority = self.local_store_authority()?;
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let outbound = load_expected_outbound_store_ack_on(
-            &tx,
-            &authority,
-            expected,
-            "nonactivation names another Store acknowledgement",
-        )?;
-        let (candidate, already_nonactivating) = match outbound.activation {
-            OutboundStoreAckActivation::Prepared(candidate) => (candidate, false),
-            OutboundStoreAckActivation::Nonactivating(candidate) => (candidate, true),
-            OutboundStoreAckActivation::AwaitingCandidate => {
-                return Err(DbError::Message(
-                    "Store acknowledgement has no prepared Merge activation candidate".to_string(),
-                ));
-            }
-        };
-        if &candidate.reference != verified_candidate {
+        if changed != 1 {
             return Err(DbError::Message(
-                "verified nonactivation names another Store acknowledgement candidate".to_string(),
+                "outbound acknowledgement changed during activation preparation".into(),
             ));
         }
-        if nonactivation.candidate().canonical_signed_bytes != candidate.commit.to_bytes() {
-            return Err(DbError::Message(
-                "verified nonactivation bytes differ from the Store acknowledgement candidate"
-                    .to_string(),
-            ));
-        }
-        let head = candidate.head_ref();
-        if already_nonactivating {
-            let commit = load_remote_object_on(&tx, remote_object_id(&candidate.reference.object))?;
-            if commit
-                .candidate_nonactivation_proof(&candidate.reference)
-                .map_err(DbError::from)?
-                != Some(nonactivation.proof())
-            {
-                return Err(DbError::Message(
-                    "nonactivating Merge acknowledgement commit carries a different durable proof"
-                        .to_string(),
-                ));
-            }
-            let inert =
-                load_protocol_inert_object_on(&tx, remote_object_id(&outbound.reference.object))?;
-            if inert
-                .candidate_nonactivation_proof(&candidate.reference)
-                .map_err(DbError::from)?
-                != Some(nonactivation.proof())
-            {
-                return Err(DbError::Message(
-                    "nonactivating Merge acknowledgement carries a different durable proof"
-                        .to_string(),
-                ));
-            }
-            let head_remote = load_remote_object_on(&tx, remote_object_id(&head.object))?;
-            if head_remote
-                .candidate_nonactivation_proof(&candidate.reference)
-                .map_err(DbError::from)?
-                != Some(nonactivation.proof())
-            {
-                return Err(DbError::Message(
-                    "nonactivating Merge acknowledgement head carries a different durable proof"
-                        .to_string(),
-                ));
-            }
-            return Ok(());
-        }
-        if begin_remote_candidate_nonactivation_on(
-            &tx,
-            remote_object_id(&outbound.reference.object),
-            nonactivation.clone(),
-        )?
-        .is_some()
-        {
-            return Err(DbError::Message(
-                "Store acknowledgement became an exact cleanup target".to_string(),
-            ));
-        }
-        if begin_remote_candidate_nonactivation_on(
-            &tx,
-            remote_object_id(&head.object),
-            nonactivation.clone(),
-        )?
-        .is_some()
-        {
-            return Err(DbError::Message(
-                "Store activation head became an exact cleanup target".to_string(),
-            ));
-        }
-        if begin_remote_candidate_nonactivation_on(
-            &tx,
-            remote_object_id(&candidate.reference.object),
-            nonactivation,
-        )?
-        .is_none()
-        {
-            return Err(DbError::Message(
-                "losing Store acknowledgement commit has no exact cleanup target".to_string(),
-            ));
-        }
-        set_outbound_store_ack_activation_on(
-            &tx,
-            expected,
-            &OutboundStoreAckActivation::Nonactivating(candidate),
-            "outbound Store acknowledgement disappeared during nonactivation",
-        )?;
-        tx.commit().map_err(DbError::from)
-    }
-
-    fn adopt_acknowledgement_head(
-        &mut self,
-        expected: &StoreAckRef,
-        winner: StoreDeviceHead,
-        winner_prepared: PreparedExactObject,
-    ) -> Result<(), DbError> {
-        let authority = self.local_store_authority()?;
-        let outbound = load_expected_outbound_store_ack_on(
-            self.conn,
-            &authority,
-            expected,
-            "alternate Merge head names another Store acknowledgement",
-        )?;
-        let OutboundStoreAckActivation::Prepared(candidate) = outbound.activation else {
-            return Err(DbError::Message(
-                "Store acknowledgement has no prepared Merge candidate".to_string(),
-            ));
-        };
-        let registration = self.activated_registration(&candidate.commit.author_registration)?;
-        let root = &registration.value().store_root;
-        let verified = StoreDeviceHead::parse_at(
-            &winner.to_bytes(),
-            root.store_root_hash,
-            registration.value(),
-            &candidate.reference,
-        )
-        .map_err(|error| DbError::context("verify alternate Merge head", error))?;
-        if verified != winner {
-            return Err(DbError::Message(
-                "alternate Merge head changed during exact verification".to_string(),
-            ));
-        }
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let current = candidate.head_ref();
-        replace_prepared_merge_head_remote_on(
-            &tx,
-            self.store_dir,
-            &current.object,
-            &winner,
-            winner_prepared.reference(),
-            &candidate.reference,
-        )?;
-        let mut candidate = candidate;
-        candidate
-            .adopt_merge_head(winner, winner_prepared.reference().clone())
-            .map_err(DbError::from)?;
-        set_outbound_store_ack_activation_on(
-            &tx,
-            expected,
-            &OutboundStoreAckActivation::Prepared(candidate),
-            "outbound Store acknowledgement disappeared during head adoption",
-        )?;
-        tx.commit().map_err(DbError::from)
-    }
-
-    fn acknowledgement_cleanup_target(
-        &mut self,
-        expected: &StoreAckRef,
-    ) -> Result<Option<CandidateCleanupObject>, DbError> {
-        let authority = self.local_store_authority()?;
-        let conn = self.conn;
-        let outbound = load_expected_outbound_store_ack_on(
-            conn,
-            &authority,
-            expected,
-            "Store acknowledgement cleanup names another exact object",
-        )?;
-        let OutboundStoreAckActivation::Nonactivating(candidate) = outbound.activation else {
-            return Err(DbError::Message(
-                "Store acknowledgement activation is not nonactivating Merge".to_string(),
-            ));
-        };
-        Ok(super::candidate_records::candidate_cleanup_targets_on(
-            conn,
-            &candidate.reference,
-            std::slice::from_ref(&candidate.reference.object),
-        )?
-        .into_iter()
-        .next())
-    }
-
-    fn complete_nonactivating_acknowledgement(
-        &mut self,
-        expected: &StoreAckRef,
-    ) -> Result<(), DbError> {
-        let authority = self.local_store_authority()?;
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let outbound = load_expected_outbound_store_ack_on(
-            &tx,
-            &authority,
-            expected,
-            "Store acknowledgement completion names another exact object",
-        )?;
-        let OutboundStoreAckActivation::Nonactivating(candidate) = &outbound.activation else {
-            return Err(DbError::Message(
-                "Store acknowledgement activation is not nonactivating Merge".to_string(),
-            ));
-        };
-        let head = candidate.head_ref();
-        if !super::candidate_records::candidate_cleanup_targets_on(
-            &tx,
-            &candidate.reference,
-            &[candidate.reference.object.clone(), head.object.clone()],
-        )?
-        .is_empty()
-        {
-            return Err(DbError::Message(
-                "losing Store acknowledgement cleanup is incomplete".to_string(),
-            ));
-        }
-        let commit_id = remote_object_id(&candidate.reference.object);
-        let commit = load_remote_object_on(&tx, commit_id)?;
-        let proof = commit
-            .candidate_nonactivation_proof(&candidate.reference)
-            .map_err(DbError::from)?
-            .ok_or_else(|| {
-                DbError::Message("losing Store acknowledgement commit lacks its proof".to_string())
-            })?;
-        if !matches!(proof, CandidateNonactivationProof::MergeWinner { .. }) {
-            return Err(DbError::Message(
-                "nonactivating Merge acknowledgement carries another proof".to_string(),
-            ));
-        }
-        let head_id = remote_object_id(&head.object);
-        let head_remote = load_remote_object_on(&tx, head_id)?;
-        if head_remote
-            .candidate_nonactivation_proof(&candidate.reference)
-            .map_err(DbError::from)?
-            != Some(proof)
-        {
-            return Err(DbError::Message(
-                "losing Store acknowledgement head carries a different proof".to_string(),
-            ));
-        }
-        let inert =
-            load_protocol_inert_object_on(&tx, remote_object_id(&outbound.reference.object))?;
-        if inert
-            .candidate_nonactivation_proof(&candidate.reference)
-            .map_err(DbError::from)?
-            != Some(proof)
-        {
-            return Err(DbError::Message(
-                "protocol-inert acknowledgement lacks its candidate proof".to_string(),
-            ));
-        }
-        super::candidate_records::delete_remote_objects_on(
-            &tx,
-            [commit_id, head_id],
-            "nonactivating acknowledgement",
-        )?;
-        // A losing acknowledgement activated no commit, so the standing state
-        // names none: the next cycle compares its assertion against a history
-        // this device added nothing to.
-        finish_outbound_store_ack_on(
-            &tx,
-            expected,
-            &outbound.ack.value.successor.next_slot,
-            &coven_protocol::store_commit::StandingStoreAck {
-                assertion: outbound.ack.value.assertion(),
-                activating_commit: None,
-            },
-        )?;
-        tx.commit().map_err(DbError::from)
+        tx.commit().map_err(DbError::from)?;
+        Ok(true)
     }
 }
-
 impl StoreDatabase {
-    pub async fn prepare_acknowledgement_activation(
+    pub async fn replace_acknowledgement_activation(
         &self,
         expected: StoreAckRef,
+        snapshot: coven_protocol::store_commit::AcceptedStoreSnapshotRef,
+        acknowledgement: ExactProtocolObject<StoreAck>,
         candidate: PreparedStoreOperationCommit,
     ) -> Result<(), DbError> {
         self.call_store(move |session| {
-            session.prepare_acknowledgement_activation(&expected, candidate)
-        })
-        .await
-    }
-
-    pub async fn begin_acknowledgement_nonactivation(
-        &self,
-        expected: StoreAckRef,
-        nonactivation: VerifiedCandidateNonactivation,
-    ) -> Result<(), DbError> {
-        let verified_candidate = nonactivation.candidate_reference().map_err(DbError::from)?;
-        if !matches!(
-            nonactivation.proof(),
-            CandidateNonactivationProof::MergeWinner { .. }
-        ) {
-            return Err(DbError::Message(
-                "Merge acknowledgement requires a Merge-winner nonactivation proof".to_string(),
-            ));
-        }
-        let nonactivation = nonactivation.into_durable();
-        self.call_store(move |session| {
-            session.begin_acknowledgement_nonactivation(
-                &expected,
-                &verified_candidate,
-                nonactivation,
+            session.replace_acknowledgement_activation(
+                expected,
+                snapshot,
+                acknowledgement,
+                candidate,
             )
         })
         .await
     }
 
-    pub async fn adopt_acknowledgement_head(
+    pub async fn prepare_acknowledgement_activation(
         &self,
         expected: StoreAckRef,
-        winner: StoreDeviceHead,
-        winner_prepared: PreparedExactObject,
-    ) -> Result<(), DbError> {
+        acknowledgement: ExactProtocolObject<StoreAck>,
+        candidate: PreparedStoreOperationCommit,
+    ) -> Result<bool, DbError> {
         self.call_store(move |session| {
-            session.adopt_acknowledgement_head(&expected, winner, winner_prepared)
+            session.prepare_acknowledgement_activation(&expected, acknowledgement, candidate)
         })
         .await
-    }
-
-    pub async fn acknowledgement_cleanup_target(
-        &self,
-        expected: StoreAckRef,
-    ) -> Result<Option<CandidateCleanupObject>, DbError> {
-        self.call_store(move |session| session.acknowledgement_cleanup_target(&expected))
-            .await
-    }
-
-    pub async fn complete_nonactivating_acknowledgement(
-        &self,
-        expected: StoreAckRef,
-    ) -> Result<(), DbError> {
-        self.call_store(move |session| session.complete_nonactivating_acknowledgement(&expected))
-            .await
     }
 }

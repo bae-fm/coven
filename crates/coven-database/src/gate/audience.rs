@@ -32,7 +32,7 @@ mod snapshot_pruning;
 pub use inbound::store_audience_transitions;
 pub(crate) use inbound::{
     align_inbound_scoped_root_audiences, filter_inbound_circle_changeset,
-    filter_inbound_store_rows, normalize_inbound_store_changeset,
+    filter_inbound_store_rows, filter_snapshot_circle_changeset, normalize_inbound_store_changeset,
 };
 pub(crate) use partitioning::{
     audience_moves, partition_outbound, validate_accepted_foreign_key_closure,
@@ -40,12 +40,27 @@ pub(crate) use partitioning::{
 };
 pub(crate) use routing::{active_circle_control, capture_routing_changes, live_row_audience};
 pub(crate) use snapshot_pruning::{
-    prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_snapshot_audience_rows,
-    validate_snapshot_routing_state,
+    prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_projection_rows,
+    retain_snapshot_audience_rows, validate_snapshot_routing_state,
 };
 
 pub fn is_routing_table(table: &str) -> bool {
     matches!(table, "_coven_audience" | "_coven_row_routes")
+}
+
+/// Remove capture-generated routing rows before reapplying the host's recorded
+/// edits. Routing is derived again from those edits on the accepted projection.
+pub(crate) fn recorded_host_changeset(changeset: &[u8]) -> Result<Vec<u8>, GateError> {
+    let group = Changegroup::new()?;
+    unsafe {
+        for_each_change(changeset, |iter, row| {
+            if !is_routing_table(&row.table) {
+                group.add_change(iter)?;
+            }
+            Ok(())
+        })?;
+    }
+    group.output()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

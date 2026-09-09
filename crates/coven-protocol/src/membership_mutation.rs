@@ -48,7 +48,7 @@ pub enum MembershipPreparationError {
 /// name the objects they serialize to, so nothing carries their bytes a second
 /// time: the upload rebuilds them from the value and the reference re-checks
 /// them on the way out.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedMembershipPublication {
     pub entry: MembershipEntry,
@@ -59,15 +59,7 @@ pub struct PreparedMembershipPublication {
 
 impl PreparedMembershipPublication {
     pub fn validate(&self) -> Result<(), MembershipPreparationError> {
-        PreparedMembershipTransition {
-            entry: self.entry.clone(),
-            entry_ref: self.entry_ref.clone(),
-            transition: membership::MergeMembershipHeadTransition {
-                body: self.head.body.clone(),
-                head_slot: self.head_ref.object.slot().clone(),
-            },
-        }
-        .validate()?;
+        self.transition().validate()?;
         let coord = self.entry.coord();
         if self.entry_ref.coord != coord
             || self.head.body.entry != self.entry_ref
@@ -82,6 +74,92 @@ impl PreparedMembershipPublication {
             ));
         }
         Ok(())
+    }
+
+    pub fn transition(&self) -> PreparedMembershipTransition {
+        PreparedMembershipTransition {
+            entry: self.entry.clone(),
+            entry_ref: self.entry_ref.clone(),
+            transition: membership::MergeMembershipHeadTransition {
+                body: self.head.body.clone(),
+                head_slot: self.head_ref.object.slot().clone(),
+            },
+        }
+    }
+
+    pub fn candidate_remote_objects(
+        &self,
+        commit: &crate::store_commit::StoreBatchCommit,
+        reference: &crate::store_commit::StoreBatchCommitRef,
+    ) -> Result<
+        Vec<crate::remote_object::ClosedRemoteObject>,
+        crate::prepared_commit::PreparedCommitError,
+    > {
+        self.validate()?;
+        reference.verify_commit(commit)?;
+        if !commit
+            .control()
+            .is_some_and(|control| control.transition.matches_head(&self.head, &self.head_ref))
+            || !matches!(&self.head.activation, membership::MembershipHeadActivation::StoreCommit { commit, .. } if commit == reference)
+        {
+            return Err(crate::prepared_commit::PreparedCommitError::Invariant(
+                "membership objects differ from their activating Store commit".into(),
+            ));
+        }
+        let entry = self.prepared_entry()?;
+        let head = self.prepared_head()?;
+        Ok(vec![
+            crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
+                commit.candidate_family(),
+                self.entry_ref.clone(),
+                entry.stored_bytes(),
+                entry.stored_bytes(),
+                reference.clone(),
+            )?,
+            crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
+                commit.candidate_family(),
+                self.head_ref.clone(),
+                head.stored_bytes(),
+                head.stored_bytes(),
+                reference.clone(),
+            )?,
+        ])
+    }
+
+    pub fn candidate_object_refs(
+        &self,
+        commit: &crate::store_commit::StoreBatchCommit,
+        reference: &crate::store_commit::StoreBatchCommitRef,
+    ) -> Result<Vec<ExactObjectRef>, crate::prepared_commit::PreparedCommitError> {
+        let mut objects = self
+            .candidate_remote_objects(commit, reference)?
+            .into_iter()
+            .map(|remote| remote.object().clone())
+            .collect::<Vec<_>>();
+        objects.push(reference.object.clone());
+        match &self.entry.change {
+            membership::StoreAuthorityChange::SetMember { wrapped_key, .. } => {
+                objects.push(wrapped_key.object.clone());
+            }
+            membership::StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => {
+                objects.extend(wrapped_keys.iter().map(|key| key.object.clone()));
+            }
+            membership::StoreAuthorityChange::ResolutionActivation { resolution } => {
+                objects.push(resolution.object.clone());
+            }
+            membership::StoreAuthorityChange::Founder { .. }
+            | membership::StoreAuthorityChange::DeviceRegistrationActivation { .. }
+            | membership::StoreAuthorityChange::DeviceExclusionProposal { .. }
+            | membership::StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | membership::StoreAuthorityChange::ProviderAdmin => {}
+        }
+        objects.sort();
+        if objects.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(crate::prepared_commit::PreparedCommitError::Invariant(
+                "membership candidate repeats an exact object".into(),
+            ));
+        }
+        Ok(objects)
     }
 
     /// The entry object this publication uploads.
@@ -159,6 +237,19 @@ impl PreparedMembershipTransition {
 }
 
 pub enum StoreMembershipJournalCompletion {
+    MembershipCandidateAbandoned {
+        intent_hash: ObjectHash,
+        original: Box<crate::prepared_commit::PreparedStoreOperationCommit>,
+        publication: Box<PreparedMembershipPublication>,
+        remote_objects: Vec<crate::remote_object::RemoteObjectRecord>,
+    },
+    DeviceJoin {
+        remote_objects: Vec<crate::remote_object::RemoteObjectRecord>,
+    },
+    DeviceExclusion {
+        operation: Box<crate::device_exclusion_journal::DurableStoreDeviceExclusionOperation>,
+        remote_objects: Vec<crate::remote_object::RemoteObjectRecord>,
+    },
     Mutation {
         intent_hash: ObjectHash,
         progress_bytes: Vec<u8>,
@@ -177,9 +268,24 @@ pub enum StoreMembershipJournalCompletion {
 }
 
 impl StoreMembershipJournalCompletion {
+    pub fn retain_acceptance_result(&mut self, remote: crate::remote_object::RemoteObjectRecord) {
+        let remote_objects = match self {
+            Self::MembershipCandidateAbandoned { remote_objects, .. }
+            | Self::DeviceJoin { remote_objects }
+            | Self::DeviceExclusion { remote_objects, .. }
+            | Self::Mutation { remote_objects, .. }
+            | Self::RotationMutation { remote_objects, .. }
+            | Self::OwnerPromotion { remote_objects, .. } => remote_objects,
+        };
+        remote_objects.push(remote);
+    }
+
     pub fn object_refs(&self) -> Vec<ExactObjectRef> {
         let remote_objects = match self {
-            Self::Mutation { remote_objects, .. }
+            Self::MembershipCandidateAbandoned { remote_objects, .. }
+            | Self::DeviceJoin { remote_objects }
+            | Self::DeviceExclusion { remote_objects, .. }
+            | Self::Mutation { remote_objects, .. }
             | Self::RotationMutation { remote_objects, .. }
             | Self::OwnerPromotion { remote_objects, .. } => remote_objects,
         };
@@ -194,7 +300,10 @@ impl StoreMembershipJournalCompletion {
         object: &ExactObjectRef,
     ) -> Result<crate::remote_object::RemoteObjectRecord, MembershipPreparationError> {
         let remote_objects = match self {
-            Self::Mutation { remote_objects, .. }
+            Self::MembershipCandidateAbandoned { remote_objects, .. }
+            | Self::DeviceJoin { remote_objects }
+            | Self::DeviceExclusion { remote_objects, .. }
+            | Self::Mutation { remote_objects, .. }
             | Self::RotationMutation { remote_objects, .. }
             | Self::OwnerPromotion { remote_objects, .. } => remote_objects,
         };

@@ -1,7 +1,7 @@
 //! coven's bookkeeping schema.
 //!
 //! coven owns its device-local bookkeeping tables — `protocol_state`,
-//! `materialized_commits`, `snapshot_coverage`, `store_writes`,
+//! `materialized_commits`, `snapshot_coverage`, `store_publication_entries`, `store_writes`,
 //! `outbound_membership_mutation`, `outbound_store_snapshot`,
 //! `local_blob_refs`, `local_cleanup_intents`, exact prepared Store objects, and
 //! row-bound blob locators — all
@@ -13,6 +13,7 @@ use crate::coven_schema_definitions::{
     BLOB_MAKE_REMOTE_INTENTS_COLUMNS, BLOB_MAKE_REMOTE_INTENTS_V0_COLUMNS, CLOUD_OUTBOX_COLUMNS,
     CLOUD_OUTBOX_V0_COLUMNS, OBJECT_OWNERSHIP_TRIGGERS,
 };
+use crate::schema_introspection::normalize_schema_sql;
 use crate::{query_mapped_rows, DbError};
 
 macro_rules! coven_tables {
@@ -78,18 +79,6 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
-            merge_retraction_cleanups,
-            "
-    device_id TEXT NOT NULL,
-    seq INTEGER NOT NULL CHECK (seq > 0),
-    commit_ref TEXT NOT NULL CHECK (json_valid(commit_ref)),
-    cleanup_hash TEXT NOT NULL CHECK (length(cleanup_hash) = 64),
-    canonical_cleanup BLOB NOT NULL CHECK (length(canonical_cleanup) > 0),
-    PRIMARY KEY (device_id, seq),
-    UNIQUE (commit_ref)
-"
-        );
-        $visit!(
             materialized_commits,
             "
     device_id TEXT NOT NULL,
@@ -126,7 +115,22 @@ macro_rules! coven_tables {
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     record_hash TEXT NOT NULL UNIQUE CHECK (length(record_hash) = 64),
     record_bytes BLOB NOT NULL CHECK (length(record_bytes) > 0),
-    provider_version TEXT NOT NULL CHECK (length(provider_version) > 0)
+    provider_version TEXT CHECK (provider_version IS NULL OR length(provider_version) > 0)
+"
+        );
+        $visit!(
+            store_publication_entries,
+            "
+    position INTEGER PRIMARY KEY CHECK (position > 0),
+    entry_ref TEXT NOT NULL UNIQUE CHECK (json_valid(entry_ref)),
+    entry_bytes BLOB NOT NULL CHECK (length(entry_bytes) > 0)
+"
+        );
+        $visit!(
+            active_store_publication,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    state TEXT NOT NULL CHECK (json_valid(state))
 "
         );
         $visit!(
@@ -178,6 +182,7 @@ macro_rules! coven_tables {
     changeset_hash TEXT CHECK (changeset_hash IS NULL OR length(changeset_hash) = 64),
     base TEXT CHECK (base IS NULL OR json_valid(base)),
     blob_facts TEXT CHECK (blob_facts IS NULL OR json_valid(blob_facts)),
+    rebased TEXT CHECK (rebased IS NULL OR json_valid(rebased)),
     prepared TEXT CHECK (prepared IS NULL OR json_valid(prepared))
 "
         );
@@ -313,16 +318,9 @@ macro_rules! coven_tables {
         $visit!(
             published_store_snapshot,
             "
-    generation INTEGER PRIMARY KEY CHECK (generation >= 0),
+    publication_position INTEGER PRIMARY KEY CHECK (publication_position > 0),
     snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
-    successor_slot TEXT NOT NULL CHECK (json_valid(successor_slot)),
     meta_bytes BLOB NOT NULL
-"
-        );
-        $visit!(
-            snapshot_blob_spool_cleanup,
-            "
-    path TEXT PRIMARY KEY
 "
         );
         // Content-addressed payload bytes owned by bookkeeping rows. Every
@@ -378,8 +376,7 @@ macro_rules! coven_tables {
     snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
     meta_prepared TEXT NOT NULL CHECK (json_valid(meta_prepared)),
     image_ref TEXT NOT NULL CHECK (json_valid(image_ref)),
-    meta_bytes BLOB NOT NULL,
-    blobs TEXT NOT NULL CHECK (json_valid(blobs))
+    meta_bytes BLOB NOT NULL
 "
         );
         $visit!(
@@ -453,14 +450,6 @@ macro_rules! coven_tables {
     device_id TEXT PRIMARY KEY,
     ack_ref TEXT NOT NULL CHECK (json_valid(ack_ref)),
     activating_commit TEXT NOT NULL CHECK (json_valid(activating_commit))
-"
-        );
-        $visit!(
-            store_device_exclusion_freezes,
-            "
-    proposal_id TEXT PRIMARY KEY CHECK (length(proposal_id) = 64),
-    proposal_ref TEXT NOT NULL CHECK (json_valid(proposal_ref)),
-    target_cut TEXT NOT NULL CHECK (json_valid(target_cut))
 "
         );
         $visit!(
@@ -561,9 +550,7 @@ macro_rules! coven_tables {
             store_author_exclusion_activations,
             "
     exclusion_ref TEXT PRIMARY KEY CHECK (json_valid(exclusion_ref)),
-    accepted_cut TEXT NOT NULL CHECK (json_valid(accepted_cut)),
-    activation_commit TEXT NOT NULL CHECK (json_valid(activation_commit)),
-    activation_head TEXT NOT NULL CHECK (json_valid(activation_head))
+    activation_commit TEXT NOT NULL CHECK (json_valid(activation_commit))
 "
         );
         $visit!(
@@ -678,74 +665,6 @@ struct CovenTableShape {
     strict: bool,
 }
 
-fn normalize_schema_sql(sql: &str) -> String {
-    let bytes = sql.as_bytes();
-    let mut normalized = String::with_capacity(sql.len());
-    let mut index = 0;
-    let mut pending_separator = false;
-    let mut quote = None;
-
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if let Some(delimiter) = quote {
-            normalized.push(char::from(byte));
-            if byte == delimiter {
-                if bytes.get(index + 1) == Some(&delimiter) {
-                    normalized.push(char::from(delimiter));
-                    index += 1;
-                } else {
-                    quote = None;
-                }
-            }
-            index += 1;
-            continue;
-        }
-
-        if byte == b'-' && bytes.get(index + 1) == Some(&b'-') {
-            index += 2;
-            while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
-                index += 1;
-            }
-            pending_separator = true;
-            continue;
-        }
-        if byte.is_ascii_whitespace() {
-            pending_separator = true;
-            index += 1;
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"' | b'`') {
-            if pending_separator
-                && normalized
-                    .as_bytes()
-                    .last()
-                    .is_some_and(u8::is_ascii_alphanumeric)
-            {
-                normalized.push(' ');
-            }
-            pending_separator = false;
-            quote = Some(byte);
-            normalized.push(char::from(byte));
-            index += 1;
-            continue;
-        }
-        if pending_separator
-            && byte.is_ascii_alphanumeric()
-            && normalized
-                .as_bytes()
-                .last()
-                .is_some_and(u8::is_ascii_alphanumeric)
-        {
-            normalized.push(' ');
-        }
-        pending_separator = false;
-        normalized.push(char::from(byte.to_ascii_lowercase()));
-        index += 1;
-    }
-
-    normalized
-}
-
 fn all_coven_table_names() -> std::collections::BTreeSet<&'static str> {
     let mut names = std::collections::BTreeSet::new();
     macro_rules! collect_name {
@@ -797,7 +716,8 @@ pub(crate) fn live_coven_schema_manifest(
                 table_name: row.get(2)?,
                 sql: row
                     .get::<_, Option<String>>(3)?
-                    .map(|sql| normalize_schema_sql(&sql)),
+                    .map(|sql| normalize_schema_sql(&sql))
+                    .transpose()?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

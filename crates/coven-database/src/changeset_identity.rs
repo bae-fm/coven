@@ -15,6 +15,18 @@ pub enum ChangesetIdentityError {
     Row(#[from] RowIdentityError),
 }
 
+/// Captured writes also retain Coven's derived routing rows. Validate host
+/// identities against the host declaration without treating those internal rows
+/// as host tables. Incoming changesets still use the strict validator below.
+pub(crate) fn validate_captured_row_identities(
+    bytes: &[u8],
+    tables: &[SyncedTable],
+) -> Result<(), crate::DbError> {
+    let host = crate::gate::recorded_host_changeset(bytes)?;
+    validate_changeset_row_identities(&host, tables)?;
+    Ok(())
+}
+
 pub(crate) fn validate_changeset_row_identities(
     bytes: &[u8],
     tables: &[SyncedTable],

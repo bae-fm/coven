@@ -1,6 +1,43 @@
 use super::*;
+use crate::sync::store::authorization::history::publication::StoreCommitPublicationAttemptOutcome;
 
 impl LocalStoreWriter {
+    pub(crate) async fn install_current_publication(
+        &self,
+        history: &mut crate::sync::store::authorization::history::AuthorizedStoreHistory<'_>,
+        membership: &mut coven_protocol::membership::MembershipChain,
+    ) -> Result<crate::sync::store::pull::StorePullResult, crate::sync::store::StoreError> {
+        history
+            .install_current_publication(membership, &self.identity)
+            .await
+    }
+
+    pub(crate) async fn publish_store_commit(
+        &self,
+        history: &mut crate::sync::store::authorization::history::AuthorizedStoreHistory<'_>,
+        membership: &mut coven_protocol::membership::MembershipChain,
+        commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+    ) -> Result<StoreCommitPublicationAttemptOutcome, crate::sync::store::StoreError> {
+        history
+            .publish_store_commit(membership, &self.identity, &self.device_signer, commit)
+            .await
+    }
+
+    pub(crate) async fn publish_store_snapshot(
+        &self,
+        history: &mut crate::sync::store::authorization::history::AuthorizedStoreHistory<'_>,
+        membership: &mut coven_protocol::membership::MembershipChain,
+        pending: &coven_database::DurableSnapshotPublication,
+        objects: &crate::sync::store::snapshots::AuthorizedSnapshotPublication<'_>,
+    ) -> Result<
+        crate::sync::store::authorization::history::publication::StoreSnapshotPublicationAttemptOutcome,
+        crate::sync::store::snapshots::SnapshotError,
+    >{
+        history
+            .publish_store_snapshot(membership, &self.identity, pending, objects)
+            .await
+    }
+
     pub(crate) async fn pull(
         &self,
         history: &mut crate::sync::store::authorization::history::AuthorizedStoreHistory<'_>,
@@ -22,15 +59,11 @@ impl LocalStoreWriter {
         &self,
         history_cut: coven_protocol::store_commit::StoreHistoryCut,
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
-        snapshot: Option<coven_protocol::store_commit::StoreSnapshotLocator>,
-        exclusions: coven_protocol::store_commit::StoreAckExclusionState,
     ) -> coven_protocol::store_commit::StoreAckAssertion {
         coven_protocol::store_commit::StoreAckAssertion {
             registration: self.registration.reference().clone(),
             store_cut: history_cut,
             device_state,
-            snapshot,
-            exclusions,
         }
     }
 
@@ -62,6 +95,7 @@ impl LocalStoreWriter {
         write_id: coven_protocol::write::WriteId,
         coord: coven_protocol::store_commit::StoreCommitCoord,
         order: coven_protocol::store_commit::StoreCommitOrder,
+        publication_base: coven_protocol::store_commit::StorePublicationBase,
         membership_state: coven_protocol::circle_control::StoreMembershipStateRef,
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
         membership_authority: coven_protocol::store_commit::StoreOperationMembershipAuthority,
@@ -77,7 +111,7 @@ impl LocalStoreWriter {
             self.registration.reference().clone(),
             self.registration.value(),
             order,
-            coven_protocol::store_commit::StorePublicationBase::Genesis,
+            publication_base,
             membership_state,
             device_state,
             membership_authority,
@@ -86,31 +120,77 @@ impl LocalStoreWriter {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn sign_candidate_abandonment(
+    pub(crate) fn sign_store_publication_entry(
         &self,
-        store_root_hash: coven_protocol::store_commit::ObjectHash,
-        write_id: coven_protocol::write::WriteId,
-        coord: coven_protocol::store_commit::StoreCommitCoord,
-        order: coven_protocol::store_commit::StoreCommitOrder,
-        membership_state: coven_protocol::circle_control::StoreMembershipStateRef,
-        device_state: coven_protocol::store_commit::StoreDeviceStateRef,
-        cleanup: Vec<coven_protocol::store_commit::CandidateCleanupManifest>,
+        previous: &coven_database::ObservedStorePublication,
+        commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
     ) -> Result<
-        coven_protocol::store_commit::StoreBatchCommit,
+        coven_protocol::store_commit::StorePublicationEntry,
         coven_protocol::store_commit::StoreProtocolError,
     > {
-        coven_protocol::store_commit::StoreBatchCommit::signed_with_candidate_abandonment(
-            store_root_hash,
-            write_id,
-            coord,
+        coven_protocol::store_commit::StorePublicationEntry::signed_commit(
+            previous.record(),
+            commit,
+            &self.device_signer,
+        )
+    }
+
+    pub(crate) fn advance_store_publication(
+        &self,
+        previous: &coven_database::ObservedStorePublication,
+        entry: &coven_protocol::store_commit::StorePublicationEntry,
+        prepared: &coven_protocol::objects::PreparedExactObject,
+        commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+    ) -> Result<
+        coven_protocol::store_commit::StoreCurrentPublicationRecord,
+        coven_protocol::store_commit::StoreProtocolError,
+    > {
+        let reference = coven_protocol::store_commit::StorePublicationRef::from_entry(
+            entry,
+            prepared.reference().clone(),
+        )?;
+        coven_protocol::store_commit::StoreCurrentPublicationRecord::advance_commit(
+            previous.record(),
+            entry,
+            reference,
+            commit,
+            &self.device_signer,
+        )
+    }
+
+    pub(crate) fn sign_store_snapshot_publication_entry(
+        &self,
+        previous: &coven_database::ObservedStorePublication,
+        snapshot: coven_protocol::store_commit::StoreSnapshotRef,
+    ) -> Result<
+        coven_protocol::store_commit::StorePublicationEntry,
+        coven_protocol::store_commit::StoreProtocolError,
+    > {
+        coven_protocol::store_commit::StorePublicationEntry::signed_snapshot(
+            previous.record(),
             self.registration.reference().clone(),
-            self.registration.value(),
-            order,
-            coven_protocol::store_commit::StorePublicationBase::Genesis,
-            membership_state,
-            device_state,
-            cleanup,
+            snapshot,
+            &self.device_signer,
+        )
+    }
+
+    pub(crate) fn advance_store_snapshot_publication(
+        &self,
+        previous: &coven_database::ObservedStorePublication,
+        entry: &coven_protocol::store_commit::StorePublicationEntry,
+        prepared: &coven_protocol::objects::PreparedExactObject,
+    ) -> Result<
+        coven_protocol::store_commit::StoreCurrentPublicationRecord,
+        coven_protocol::store_commit::StoreProtocolError,
+    > {
+        let reference = coven_protocol::store_commit::StorePublicationRef::from_entry(
+            entry,
+            prepared.reference().clone(),
+        )?;
+        coven_protocol::store_commit::StoreCurrentPublicationRecord::advance_snapshot(
+            previous.record(),
+            entry,
+            reference,
             &self.device_signer,
         )
     }
@@ -138,8 +218,7 @@ impl LocalStoreWriter {
     pub(crate) fn sign_snapshot(
         &self,
         store_root_hash: coven_protocol::store_commit::ObjectHash,
-        generation: u64,
-        predecessor: Option<coven_protocol::store_commit::StoreSnapshotRef>,
+        publication_predecessor: coven_protocol::store_commit::StoreCurrentPublicationRecord,
         image: coven_protocol::store_commit::SnapshotImageRef,
         membership_rollup: coven_protocol::store_commit::MembershipRollupRef,
         coverage: coven_protocol::store_commit::CommitFrontier,
@@ -147,7 +226,6 @@ impl LocalStoreWriter {
         history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         schema_version: u32,
         created_at: String,
-        successor: coven_protocol::store_commit::SnapshotSuccessorLink,
     ) -> Result<
         coven_protocol::store_commit::SnapshotMeta,
         coven_protocol::store_commit::StoreProtocolError,
@@ -155,8 +233,7 @@ impl LocalStoreWriter {
         coven_protocol::store_commit::SnapshotMeta::signed(
             store_root_hash,
             self.registration.reference().clone(),
-            generation,
-            predecessor,
+            publication_predecessor,
             image,
             membership_rollup,
             coverage,
@@ -164,7 +241,6 @@ impl LocalStoreWriter {
             history_summary,
             schema_version,
             created_at,
-            successor,
             &self.device_signer,
         )
     }
@@ -240,7 +316,7 @@ impl LocalStoreWriter {
                 registration_ref,
                 registration,
                 context.order,
-                coven_protocol::store_commit::StorePublicationBase::Genesis,
+                context.publication_base,
                 context.membership_state,
                 context.device_state,
                 context.membership_authority,
@@ -250,7 +326,7 @@ impl LocalStoreWriter {
         }
 
         let registration_activation = match &batch {
-            StoreOperationBatch::JoinActivation { registration } => Some(*registration.clone()),
+            StoreOperationBatch::JoinActivation { registration, .. } => Some(*registration.clone()),
             StoreOperationBatch::SamePrincipalDeviceJoin { registration, .. } => {
                 Some(*registration.clone())
             }
@@ -261,6 +337,37 @@ impl LocalStoreWriter {
         let signer = &self.device_signer;
         let root_hash = context.root.store_root_hash;
         let commit = match batch {
+            StoreOperationBatch::AbandonCandidates(manifests) => {
+                StoreBatchCommit::signed_with_candidate_abandonment(
+                    root_hash,
+                    write_id,
+                    context.coord,
+                    registration_ref,
+                    registration,
+                    context.order,
+                    context.publication_base,
+                    context.membership_state,
+                    context.device_state,
+                    manifests,
+                    signer,
+                )
+            }
+
+            StoreOperationBatch::Circle {
+                reference,
+                stream_activations,
+            } => sign_ops(
+                context,
+                write_id,
+                registration_ref,
+                registration,
+                signer,
+                StoreCommitOperationsInput {
+                    circle_controls: vec![reference],
+                    stream_activations,
+                    ..StoreCommitOperationsInput::empty()
+                },
+            ),
             StoreOperationBatch::Acknowledgement {
                 reference: acknowledgement,
                 value: _,
@@ -307,6 +414,7 @@ impl LocalStoreWriter {
             StoreOperationBatch::SamePrincipalDeviceJoin {
                 attempt_id,
                 registration: activated_registration,
+                transition,
             } => sign_ops(
                 context,
                 write_id,
@@ -317,6 +425,7 @@ impl LocalStoreWriter {
                     device_join_attempt_decisions: vec![DeviceJoinAttemptDecisionRef::Attempt(
                         attempt_id,
                     )],
+                    control: Some(StoreControl { transition }),
                     device_registrations: vec![activated_registration.activated_reference()?],
                     ..StoreCommitOperationsInput::empty()
                 },
@@ -336,6 +445,7 @@ impl LocalStoreWriter {
             ),
             StoreOperationBatch::JoinActivation {
                 registration: activation,
+                transition,
             } => sign_ops(
                 context,
                 write_id,
@@ -343,28 +453,37 @@ impl LocalStoreWriter {
                 registration,
                 signer,
                 StoreCommitOperationsInput {
+                    control: Some(StoreControl { transition }),
                     device_registrations: vec![activation.activated_reference()?],
                     ..StoreCommitOperationsInput::empty()
                 },
             ),
-            StoreOperationBatch::DeviceExclusionProposal(proposal) => sign_ops(
+            StoreOperationBatch::DeviceExclusionProposal {
+                proposal,
+                transition,
+            } => sign_ops(
                 context,
                 write_id,
                 registration_ref,
                 registration,
                 signer,
                 StoreCommitOperationsInput {
+                    control: Some(StoreControl { transition }),
                     device_exclusion_proposals: vec![proposal.reference().clone()],
                     ..StoreCommitOperationsInput::empty()
                 },
             ),
-            StoreOperationBatch::DeviceExclusionOutcome(outcome) => sign_ops(
+            StoreOperationBatch::DeviceExclusionOutcome {
+                outcome,
+                transition,
+            } => sign_ops(
                 context,
                 write_id,
                 registration_ref,
                 registration,
                 signer,
                 StoreCommitOperationsInput {
+                    control: Some(StoreControl { transition }),
                     device_exclusion_outcomes: vec![outcome.wire_reference()],
                     ..StoreCommitOperationsInput::empty()
                 },
@@ -392,7 +511,7 @@ impl LocalStoreWriter {
                     registration_ref,
                     registration,
                     context.order,
-                    coven_protocol::store_commit::StorePublicationBase::Genesis,
+                    context.publication_base,
                     context.membership_state,
                     context.device_state,
                     *authorization,
@@ -407,7 +526,7 @@ impl LocalStoreWriter {
                     registration_ref,
                     registration,
                     context.order,
-                    coven_protocol::store_commit::StorePublicationBase::Genesis,
+                    context.publication_base,
                     context.membership_state,
                     context.device_state,
                     *receipt,
@@ -422,7 +541,7 @@ impl LocalStoreWriter {
                     registration_ref,
                     registration,
                     context.order,
-                    coven_protocol::store_commit::StorePublicationBase::Genesis,
+                    context.publication_base,
                     context.membership_state,
                     context.device_state,
                     context.membership_authority,
