@@ -110,7 +110,8 @@ pub use coven_protocol::reclaim::ReclaimTarget;
 pub use coven_protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
 pub use coven_protocol::write::{
     AffectedRow, PendingWrite, PublishedPosition, PublishedWrite, SnapshotCoveredPosition,
-    WriteBlock, WriteId, WriteReceipt, WriteResolution, WriteStatus,
+    WriteBlock, WriteId, WriteRebaseConflict, WriteRebaseConflictReason, WriteReceipt,
+    WriteResolution, WriteStatus,
 };
 pub use coven_protocol::{
     Audience, Circle, CircleCloseParticipant, CircleCloseSettlement, CircleCloseStatus,
