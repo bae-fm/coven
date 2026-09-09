@@ -433,6 +433,7 @@ impl DeviceRegistrationRequest {
                     &request.approval.admission
                 {
                     slots.push(challenge.administrator_object.slot.clone());
+                    slots.push(challenge.conditional_slot.clone());
                 }
                 require_distinct_slots(&slots)
             }

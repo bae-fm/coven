@@ -61,7 +61,6 @@ pub enum ProbePayloadLabel {
     ConditionalSecond,
     LostResponse,
     CrossAdministrator,
-    CrossPeer,
 }
 
 impl ProbePayloadLabel {
@@ -74,7 +73,6 @@ impl ProbePayloadLabel {
             Self::ConditionalSecond => b"conditional-second",
             Self::LostResponse => b"lost-response",
             Self::CrossAdministrator => b"cross-administrator",
-            Self::CrossPeer => b"cross-peer",
         }
     }
 }
@@ -212,7 +210,7 @@ pub struct ConditionalUpdateProbeReceipt {
 }
 
 impl ConditionalUpdateProbeReceipt {
-    fn verify(&self, probe_id: &ProviderProbeId) -> Result<(), ProviderProbeError> {
+    pub(super) fn verify(&self, probe_id: &ProviderProbeId) -> Result<(), ProviderProbeError> {
         if self.logical_key != self.slot.logical_key() {
             return invalid("conditional-update transcript disagrees with its allocated slot");
         }
@@ -371,14 +369,15 @@ impl ProviderProbeJournalRecord {
                 {
                     return Err(ProviderProbeJournalError::ImmutableFactsChanged);
                 }
-                let expected_read_hash = ObjectHash::digest(&probe_payload(
-                    &previous.probe_id,
-                    ProbePayloadLabel::CrossPeer,
-                ));
-                if cross_progress_evidence_hash(&next.progress)
-                    .is_some_and(|hash| hash != expected_read_hash)
-                {
-                    return Err(ProviderProbeJournalError::EvidenceChanged);
+                if let Some((read_hash, conditional)) = cross_progress_evidence(&next.progress) {
+                    let transcript = CrossPrincipalProbeTranscript {
+                        challenge: next.challenge.clone(),
+                        response: next.response.clone(),
+                        administrator_read_peer_hash: read_hash,
+                        conditional: conditional.clone(),
+                    };
+                    validate_cross_transcript_payloads(&transcript, &next.context)
+                        .map_err(|_| ProviderProbeJournalError::EvidenceChanged)?;
                 }
                 validate_cross_progress_transition(&previous.progress, &next.progress)
             }
@@ -464,12 +463,15 @@ pub enum CrossPrincipalCompletionProgress {
     Prepared,
     ReadsVerified {
         administrator_read_peer_hash: ObjectHash,
+        conditional: ConditionalUpdateProbeReceipt,
     },
-    PeerAbsent {
+    ResponseObjectsAbsent {
         administrator_read_peer_hash: ObjectHash,
+        conditional: ConditionalUpdateProbeReceipt,
     },
     Absent {
         administrator_read_peer_hash: ObjectHash,
+        conditional: ConditionalUpdateProbeReceipt,
     },
     ReceiptReady {
         receipt: CrossPrincipalProbeReceipt,
@@ -557,58 +559,54 @@ pub(super) fn validate_cross_progress_transition(
     previous: &CrossPrincipalCompletionProgress,
     next: &CrossPrincipalCompletionProgress,
 ) -> Result<(), ProviderProbeJournalError> {
-    let evidence_matches = match (previous, next) {
+    let adjacent = matches!(
+        (previous, next),
         (
             CrossPrincipalCompletionProgress::Prepared,
+            CrossPrincipalCompletionProgress::ReadsVerified { .. }
+        ) | (
             CrossPrincipalCompletionProgress::ReadsVerified { .. },
-        ) => true,
-        (
-            CrossPrincipalCompletionProgress::ReadsVerified {
-                administrator_read_peer_hash: previous,
-            },
-            CrossPrincipalCompletionProgress::PeerAbsent {
-                administrator_read_peer_hash: next,
-            },
+            CrossPrincipalCompletionProgress::ResponseObjectsAbsent { .. }
+        ) | (
+            CrossPrincipalCompletionProgress::ResponseObjectsAbsent { .. },
+            CrossPrincipalCompletionProgress::Absent { .. }
+        ) | (
+            CrossPrincipalCompletionProgress::Absent { .. },
+            CrossPrincipalCompletionProgress::ReceiptReady { .. }
         )
-        | (
-            CrossPrincipalCompletionProgress::PeerAbsent {
-                administrator_read_peer_hash: previous,
-            },
-            CrossPrincipalCompletionProgress::Absent {
-                administrator_read_peer_hash: next,
-            },
-        ) => previous == next,
-        (
-            CrossPrincipalCompletionProgress::Absent {
-                administrator_read_peer_hash,
-            },
-            CrossPrincipalCompletionProgress::ReceiptReady { receipt },
-        ) => receipt.transcript.administrator_read_peer_hash == *administrator_read_peer_hash,
-        _ => return Err(ProviderProbeJournalError::NonAdjacentProgress),
-    };
-    if !evidence_matches {
-        return Err(ProviderProbeJournalError::EvidenceChanged);
+    );
+    if !adjacent {
+        return Err(ProviderProbeJournalError::NonAdjacentProgress);
+    }
+    if let Some(previous) = cross_progress_evidence(previous) {
+        if Some(previous) != cross_progress_evidence(next) {
+            return Err(ProviderProbeJournalError::EvidenceChanged);
+        }
     }
     Ok(())
 }
 
-pub(super) fn cross_progress_evidence_hash(
+pub(super) fn cross_progress_evidence(
     progress: &CrossPrincipalCompletionProgress,
-) -> Option<ObjectHash> {
+) -> Option<(ObjectHash, &ConditionalUpdateProbeReceipt)> {
     match progress {
         CrossPrincipalCompletionProgress::Prepared => None,
         CrossPrincipalCompletionProgress::ReadsVerified {
             administrator_read_peer_hash,
+            conditional,
         }
-        | CrossPrincipalCompletionProgress::PeerAbsent {
+        | CrossPrincipalCompletionProgress::ResponseObjectsAbsent {
             administrator_read_peer_hash,
+            conditional,
         }
         | CrossPrincipalCompletionProgress::Absent {
             administrator_read_peer_hash,
-        } => Some(*administrator_read_peer_hash),
-        CrossPrincipalCompletionProgress::ReceiptReady { receipt } => {
-            Some(receipt.transcript.administrator_read_peer_hash)
-        }
+            conditional,
+        } => Some((*administrator_read_peer_hash, conditional)),
+        CrossPrincipalCompletionProgress::ReceiptReady { receipt } => Some((
+            receipt.transcript.administrator_read_peer_hash,
+            &receipt.transcript.conditional,
+        )),
     }
 }
 

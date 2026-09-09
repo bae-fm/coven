@@ -26,6 +26,7 @@ pub struct CrossPrincipalProbeTranscript {
     pub challenge: CrossPrincipalProbeChallenge,
     pub response: CrossPrincipalProbeResponse,
     pub administrator_read_peer_hash: ObjectHash,
+    pub conditional: ConditionalUpdateProbeReceipt,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +34,7 @@ pub struct CrossPrincipalProbeTranscript {
 pub struct CrossPrincipalProbeChallenge {
     pub probe_id: ProviderProbeId,
     pub administrator_object: ProbeExactObjectReceipt,
+    pub conditional_slot: ObjectSlot,
     pub challenge_hash: ObjectHash,
     pub administrator_signature: String,
 }
@@ -40,12 +42,28 @@ pub struct CrossPrincipalProbeChallenge {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CrossPrincipalProbeResponse {
-    pub challenge_hash: ObjectHash,
+    pub conditional_start: CrossPrincipalConditionalStart,
     pub provider_evidence: CrossPrincipalProviderEvidence,
     pub peer_object: ProbeExactObjectReceipt,
     pub peer_read_administrator_hash: ObjectHash,
     pub response_hash: ObjectHash,
     pub peer_signature: String,
+}
+
+/// The peer stores this observation before attempting its conditional update.
+/// Keeping the original revision makes a lost update response retryable without
+/// substituting the newer revision the administrator must reject.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrossPrincipalConditionalStart {
+    pub challenge_hash: ObjectHash,
+    pub version: crate::objects::ExactObjectVersion,
+}
+
+impl CrossPrincipalConditionalStart {
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("conditional probe observation serializes")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,9 +270,24 @@ pub(crate) fn validate_cross_transcript_payloads(
 ) -> Result<(), ProviderProbeError> {
     validate_cross_challenge_payload(&transcript.challenge)?;
     validate_cross_response_payload(&transcript.response, &transcript.challenge, context)?;
-    let peer = probe_payload(&transcript.challenge.probe_id, ProbePayloadLabel::CrossPeer);
+    let peer = transcript.response.conditional_start.canonical_bytes();
     if transcript.administrator_read_peer_hash != ObjectHash::digest(&peer) {
         return invalid("cross-principal object, read, or deletion evidence is invalid");
+    }
+    transcript
+        .conditional
+        .verify(&transcript.challenge.probe_id)?;
+    let initial = probe_payload(
+        &transcript.challenge.probe_id,
+        ProbePayloadLabel::ConditionalInitial,
+    );
+    if transcript.conditional.slot != transcript.challenge.conditional_slot
+        || transcript.conditional.starting_payload_hash != ObjectHash::digest(&initial)
+        || transcript.conditional.contenders[0].outcome != ProbeConditionalOutcome::Replaced
+    {
+        return invalid(
+            "cross-principal conditional evidence does not establish the peer's replacement",
+        );
     }
     Ok(())
 }
@@ -271,6 +304,7 @@ pub fn cross_challenge_hash(
             context,
             challenge.probe_id,
             &challenge.administrator_object,
+            &challenge.conditional_slot,
         ),
     ))
 }
@@ -288,6 +322,7 @@ pub fn cross_response_hash(
             context,
             challenge.challenge_hash,
             &response.provider_evidence,
+            &response.conditional_start,
             &response.peer_object,
             response.peer_read_administrator_hash,
         ),
@@ -297,6 +332,10 @@ pub fn cross_response_hash(
 pub(crate) fn validate_cross_challenge_payload(
     challenge: &CrossPrincipalProbeChallenge,
 ) -> Result<(), ProviderProbeError> {
+    if challenge.conditional_slot.logical_key() != cross_conditional_logical_key(challenge.probe_id)
+    {
+        return invalid("cross-principal conditional slot uses the wrong logical key");
+    }
     let expected_key = cross_administrator_logical_key(challenge.probe_id);
     let payload = probe_payload(&challenge.probe_id, ProbePayloadLabel::CrossAdministrator);
     validate_probe_exact_object(
@@ -313,8 +352,8 @@ pub(crate) fn validate_cross_response_payload(
     context: &CrossPrincipalResponseContext,
 ) -> Result<(), ProviderProbeError> {
     let administrator = probe_payload(&challenge.probe_id, ProbePayloadLabel::CrossAdministrator);
-    let peer = probe_payload(&challenge.probe_id, ProbePayloadLabel::CrossPeer);
-    if response.challenge_hash != challenge.challenge_hash
+    let peer = response.conditional_start.canonical_bytes();
+    if response.conditional_start.challenge_hash != challenge.challenge_hash
         || response.peer_object.slot != context.response_slot
         || response.peer_read_administrator_hash != ObjectHash::digest(&administrator)
     {
@@ -340,6 +379,13 @@ pub(super) fn cross_administrator_logical_key(probe_id: ProviderProbeId) -> Stri
 pub fn cross_peer_logical_key(probe_id: ProviderProbeId) -> String {
     format!(
         "__coven_probe__/cross/{}/peer",
+        hex::encode(probe_id.as_bytes())
+    )
+}
+
+pub fn cross_conditional_logical_key(probe_id: ProviderProbeId) -> String {
+    format!(
+        "__coven_probe__/cross/{}/conditional",
         hex::encode(probe_id.as_bytes())
     )
 }
