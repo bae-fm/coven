@@ -380,3 +380,180 @@ async fn exercise_circle_snapshot(case: CircleSnapshotCase) {
         accepted
     );
 }
+
+#[tokio::test]
+async fn member_publication_overshoots_the_shared_threshold_while_the_owner_is_offline() {
+    let signer = UserKeypair::generate();
+    let owner_dir = test_store_dir();
+    let owner_db = open_test_db(owner_dir.clone());
+    let (store, _) = TestStore::create_with_connection(
+        &owner_db,
+        owner_dir.clone(),
+        "offline-owner-snapshot-cadence",
+        signer.clone(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let first_dir = test_store_dir();
+    let first_db = open_test_db(first_dir.clone());
+    let first_signer = UserKeypair::generate();
+    let first = store
+        .admit_and_activate_peer(
+            &owner_db,
+            owner_dir.clone(),
+            &first_db,
+            first_dir,
+            &first_signer,
+        )
+        .await
+        .expect("admit the first Member author");
+    let second_dir = test_store_dir();
+    let second_db = open_test_db(second_dir.clone());
+    let second_signer = UserKeypair::generate();
+    let second = store
+        .admit_and_activate_peer(
+            &owner_db,
+            owner_dir.clone(),
+            &second_db,
+            second_dir,
+            &second_signer,
+        )
+        .await
+        .expect("admit the second Member author");
+    let owner = store
+        .bind_device_in(&owner_db, owner_dir.clone(), &signer)
+        .await
+        .unwrap();
+    owner.pull_store().await.unwrap();
+    {
+        let mut writer = owner.authorize_writer().await.unwrap();
+        let cut = writer.snapshots().capture_snapshot_cut(None).await.unwrap();
+        writer
+            .snapshots()
+            .push_snapshot_cut(cut, "2026-09-08T00:00:01Z".into())
+            .await
+            .unwrap();
+    }
+    first.pull_store().await.unwrap();
+    second.pull_store().await.unwrap();
+    let database = StoreDatabase::new(&owner_db);
+    let baseline = database.store_current_publication().await.unwrap();
+    let baseline_snapshot = baseline.record().latest_snapshot().unwrap();
+    assert_eq!(
+        baseline.record().accepted().unwrap(),
+        &baseline_snapshot.publication
+    );
+    drop(owner);
+    let threshold = std::num::NonZeroU64::new(4).unwrap();
+    let mut author_streams = std::collections::BTreeSet::new();
+    for index in 0..6 {
+        let (member, member_db) = if index % 2 == 0 {
+            (&first, &first_db)
+        } else {
+            (&second, &second_db)
+        };
+        member
+            .pull_store()
+            .await
+            .expect("observe the preceding author's commit");
+        member_db
+            .execute_test_host_write(&format!(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) VALUES \
+             ('overshoot-{index}', 'Member edit', 1, '0000000003000-0000-member', '2026-09-08')"
+            ))
+            .await;
+        assert!(member.prepare_pending_store_write().await.unwrap());
+        assert_eq!(
+            member.drain_store_writes().await.unwrap(),
+            1,
+            "ordinary publication must continue without an available Owner"
+        );
+        author_streams.insert(
+            member
+                .latest_local_store_position()
+                .await
+                .unwrap()
+                .unwrap()
+                .coord
+                .stream_id,
+        );
+        let member_database = StoreDatabase::new(member_db);
+        let accepted = member_database.store_current_publication().await.unwrap();
+        assert_eq!(
+            accepted.record().accepted().unwrap().position.get()
+                - baseline_snapshot.publication.position.get(),
+            index + 1
+        );
+        member
+            .authorize_writer()
+            .await
+            .unwrap()
+            .snapshots()
+            .publish_due_snapshots("2026-09-08T00:00:02Z", None, false, threshold)
+            .await
+            .expect("an overdue snapshot must not reject Member publication");
+        assert_eq!(
+            member_database.store_current_publication().await.unwrap(),
+            accepted
+        );
+        assert_eq!(accepted.record().latest_snapshot(), Some(baseline_snapshot));
+    }
+    assert_eq!(author_streams.len(), 2);
+    assert_eq!(
+        database.store_current_publication().await.unwrap(),
+        baseline,
+        "the offline Owner has not observed or published during the overshoot"
+    );
+    let owner = store
+        .bind_device_in(&owner_db, owner_dir, &signer)
+        .await
+        .unwrap();
+    owner
+        .pull_store()
+        .await
+        .expect("the returning Owner observes all Member commits");
+    let overdue = database.store_current_publication().await.unwrap();
+    assert_eq!(
+        overdue.record().accepted().unwrap().position.get()
+            - overdue
+                .record()
+                .latest_snapshot()
+                .unwrap()
+                .publication
+                .position
+                .get(),
+        6
+    );
+    let frontier = database.materialized_frontier().await.unwrap();
+    assert_eq!(owner.replay_row_count_for_test("notes").await.unwrap(), 6);
+    owner
+        .authorize_writer()
+        .await
+        .unwrap()
+        .snapshots()
+        .publish_due_snapshots("2026-09-08T00:00:03Z", None, false, threshold)
+        .await
+        .expect("publish the aggregate accepted cut when an Owner returns");
+    let after = database.store_current_publication().await.unwrap();
+    assert_ne!(after.record().latest_snapshot(), Some(baseline_snapshot));
+    assert_eq!(
+        after.record().accepted().unwrap(),
+        &after.record().latest_snapshot().unwrap().publication
+    );
+    assert_eq!(database.materialized_frontier().await.unwrap(), frontier);
+    assert_eq!(owner.replay_row_count_for_test("notes").await.unwrap(), 6);
+    owner
+        .authorize_writer()
+        .await
+        .unwrap()
+        .snapshots()
+        .publish_due_snapshots("2026-09-08T00:00:04Z", None, false, threshold)
+        .await
+        .expect("the accepted snapshot resets the aggregate threshold");
+    assert_eq!(database.store_current_publication().await.unwrap(), after);
+    for member in [&first, &second] {
+        member.pull_store().await.unwrap();
+        assert_eq!(member.replay_row_count_for_test("notes").await.unwrap(), 6);
+    }
+}

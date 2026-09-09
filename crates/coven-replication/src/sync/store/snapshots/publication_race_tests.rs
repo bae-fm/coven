@@ -611,3 +611,157 @@ async fn a_snapshot_cannot_publish_a_cut_older_than_its_accepted_predecessor() {
         "rejected snapshot publication must not advance the provider boundary"
     );
 }
+
+#[tokio::test]
+async fn recreating_a_retired_publication_entry_cannot_restore_its_accepted_position() {
+    let source_dir = test_store_dir();
+    let source = open_test_db(source_dir.clone());
+    let signer = UserKeypair::generate();
+    let home = test_cloud_home();
+    let (store, storage) = TestStore::create_with_connection(
+        &source,
+        source_dir.clone(),
+        "retired-publication-recreation",
+        signer.clone(),
+        home.clone(),
+    )
+    .await
+    .expect("create Store");
+    let owner = store
+        .bind_device_in(&source, source_dir, &signer)
+        .await
+        .unwrap();
+    let database = StoreDatabase::new(&source);
+    let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+    {
+        let mut writer = owner.authorize_writer().await.unwrap();
+        let cut = writer
+            .snapshots()
+            .capture_snapshot_cut(Some(&encryption))
+            .await
+            .unwrap();
+        // The image, rollup, and metadata precede the immutable publication entry.
+        home.fail_exact_create_before_call(4);
+        writer
+            .snapshots()
+            .push_snapshot_cut(cut, "2026-09-08T00:00:01Z".into())
+            .await
+            .expect_err("retain the exact publication before its entry upload");
+    }
+    let pending = database
+        .outbound_snapshot_publication()
+        .await
+        .unwrap()
+        .expect("retain the original prepared entry and conditional update");
+    assert!(storage
+        .observe_exact_slot(pending.publication.entry_object.slot())
+        .await
+        .unwrap()
+        .is_none());
+    let first = owner
+        .resume_snapshot_publication()
+        .await
+        .unwrap()
+        .expect("accept the first snapshot");
+    assert_eq!(first.snapshot_hash(), pending.reference.snapshot_hash);
+    assert_eq!(
+        database.store_current_publication().await.unwrap().record(),
+        &pending.publication.replacement
+    );
+    assert!(storage
+        .observe_exact_slot(pending.publication.entry_object.slot())
+        .await
+        .unwrap()
+        .is_some());
+    source.execute_test_host_write(
+        "INSERT INTO notes (id, title, shared, _updated_at, created_at) VALUES \
+         ('after-retired-snapshot', 'Accepted successor', 1, '0000000003000-0000-owner', '2026-09-08')",
+    ).await;
+    assert!(owner.prepare_pending_store_write().await.unwrap());
+    assert_eq!(owner.drain_store_writes().await.unwrap(), 1);
+    let successor = {
+        let mut writer = owner.authorize_writer().await.unwrap();
+        let cut = writer
+            .snapshots()
+            .capture_snapshot_cut(Some(&encryption))
+            .await
+            .unwrap();
+        writer
+            .snapshots()
+            .push_snapshot_cut(cut, "2026-09-08T00:00:02Z".into())
+            .await
+            .unwrap()
+    };
+    owner.stand_on_accepted_snapshot().await.unwrap();
+    owner
+        .reclaim_packages()
+        .await
+        .expect("physically retire the old history");
+    for object in [
+        &pending.publication.entry_object,
+        &pending.reference.object,
+        &first.image.object,
+    ] {
+        assert!(
+            storage
+                .observe_exact_slot(object.slot())
+                .await
+                .unwrap()
+                .is_none(),
+            "reclamation must delete the historical object before delayed recreation: {object:?}"
+        );
+    }
+    let before = database.store_current_publication().await.unwrap();
+    storage
+        .create_protocol_object(&pending.publication.prepared_entry().unwrap())
+        .await
+        .expect("a delayed immutable create can recreate deleted bytes");
+    assert!(storage
+        .observe_exact_slot(pending.publication.entry_object.slot())
+        .await
+        .unwrap()
+        .is_some());
+    let context = ProtocolObjectContext::signed_plaintext(
+        store.root().store_root_hash,
+        ProtocolObjectDomain::StoreCurrentPublication,
+    );
+    let outcome = storage
+        .replace_protocol_record_if_version(
+            &context,
+            &owner
+                .protocol_root_for_test()
+                .descriptor
+                .current_publication_slot,
+            coven_protocol::store_commit::store_current_publication_semantic_prefix(),
+            &pending.publication.previous_version,
+            pending.publication.replacement.to_bytes(),
+        )
+        .await
+        .expect("evaluate the delayed original conditional update");
+    assert_eq!(
+        outcome,
+        coven_storage::cloud::ConditionalWriteOutcome::VersionChanged
+    );
+    let (_, pulled) = owner
+        .pull_store()
+        .await
+        .expect("read accepted history after recreation");
+    assert!(pulled.held_positions.is_empty(), "{pulled:?}");
+    assert_eq!(database.store_current_publication().await.unwrap(), before);
+    assert_eq!(
+        before
+            .record()
+            .latest_snapshot()
+            .unwrap()
+            .snapshot
+            .snapshot_hash,
+        successor.snapshot_hash()
+    );
+    assert_eq!(
+        source
+            .query_test_text("SELECT title FROM notes WHERE id = 'after-retired-snapshot'")
+            .await,
+        "Accepted successor"
+    );
+    assert_eq!(owner.replay_row_count_for_test("notes").await.unwrap(), 1);
+}
