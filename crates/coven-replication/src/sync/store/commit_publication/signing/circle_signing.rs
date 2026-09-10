@@ -266,12 +266,6 @@ impl LocalStoreWriter {
         coven_protocol::store_commit::CircleSnapshotMeta,
         coven_protocol::store_commit::StoreProtocolError,
     > {
-        let activation = coven_protocol::store_commit::circle_snapshot_stream_activation(
-            root_hash,
-            self.registration.reference(),
-            circle_id,
-            &self.registration.value().device_id.to_string(),
-        )?;
         coven_protocol::store_commit::CircleSnapshotMeta::signed(
             root_hash,
             circle_id,
@@ -283,7 +277,6 @@ impl LocalStoreWriter {
             bootstrap,
             created_at,
             coven_protocol::store_commit::CircleSnapshotSuccessorLink {
-                activation,
                 predecessor,
                 next_slot,
             },

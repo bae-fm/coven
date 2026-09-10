@@ -408,7 +408,6 @@ impl CircleSnapshotImageReclaimTarget {
                 store_root_hash,
                 &self.snapshot_author,
                 self.circle_id,
-                &self.snapshot_author.device_id.to_string(),
             )?,
             generation: self.snapshot.generation,
         })

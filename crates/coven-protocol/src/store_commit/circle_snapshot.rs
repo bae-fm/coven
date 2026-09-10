@@ -18,11 +18,10 @@ pub fn circle_snapshot_stream_activation(
     store_root_hash: ObjectHash,
     author_registration: &StoreDeviceRegistrationRef,
     circle_id: CircleId,
-    device_id: &str,
 ) -> Result<StreamActivationId, StoreProtocolError> {
     let first_slot = ObjectSlot::logical(format!(
         "{}.json",
-        circle_snapshot_slot_prefix(circle_id, device_id, 0)
+        circle_snapshot_slot_prefix(circle_id, &author_registration.device_id.to_string(), 0)
     ))?;
     Ok(StreamActivation::device_authorized(
         store_root_hash,
@@ -40,7 +39,6 @@ pub fn circle_snapshot_stream_activation(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CircleSnapshotSuccessorLink {
-    pub activation: StreamActivationId,
     pub predecessor: Option<CircleSnapshotRef>,
     pub next_slot: ObjectSlot,
 }
@@ -119,11 +117,9 @@ impl CircleSnapshotMeta {
     }
 
     /// Verify one exact Circle snapshot against its expected reference and author
-    /// registration. The successor's stream activation is not recomputed here:
-    /// a Circle snapshot stream has no per-(device, Circle) first slot in the
-    /// registration for a reader to derive, so the create-once successor slot and
-    /// predecessor chain establish stream position, exactly as the Circle
-    /// acknowledgement stream does.
+    /// registration. The author and Circle determine the stream identity; the
+    /// reader follows its deterministic generation-zero slot and verifies the
+    /// exact predecessor chain to establish each snapshot's stream position.
     pub fn parse_at(
         bytes: &[u8],
         expected_store_root_hash: ObjectHash,

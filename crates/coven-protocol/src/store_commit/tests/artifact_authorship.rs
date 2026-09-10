@@ -164,13 +164,6 @@ fn circle_snapshot_requires_an_author_from_the_expected_store() {
             },
             "2026-09-10T00:00:00Z".into(),
             CircleSnapshotSuccessorLink {
-                activation: circle_snapshot_stream_activation(
-                    expected_root.store_root_hash,
-                    &author.registration_ref,
-                    circle_id,
-                    &author.registration.device_id.to_string(),
-                )
-                .unwrap(),
                 predecessor: None,
                 next_slot: slot(format!(
                     "{}.json",

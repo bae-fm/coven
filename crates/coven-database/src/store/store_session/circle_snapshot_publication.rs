@@ -136,19 +136,11 @@ impl StoreSession<'_> {
             .generation
             .checked_add(1)
             .ok_or_else(|| DbError::Message("Circle snapshot generation overflow".to_string()))?;
-        let activation = coven_protocol::store_commit::circle_snapshot_stream_activation(
-            registration.store_root.store_root_hash,
-            registration_ref,
-            meta.circle_id,
-            &device_id,
-        )
-        .map_err(DbError::from)?;
-        if meta.successor.activation != activation
-            || meta.successor.next_slot.logical_key()
-                != format!(
-                    "{}.json",
-                    circle_snapshot_slot_prefix(meta.circle_id, &device_id, next_generation)
-                )
+        if meta.successor.next_slot.logical_key()
+            != format!(
+                "{}.json",
+                circle_snapshot_slot_prefix(meta.circle_id, &device_id, next_generation)
+            )
         {
             return Err(DbError::Message(
                 "Circle snapshot successor is outside its activated exact stream".to_string(),
@@ -215,7 +207,12 @@ impl StoreSession<'_> {
             ));
         }
         let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner::Circle {
-            activation: outbound.meta.value.successor.activation,
+            activation: coven_protocol::store_commit::circle_snapshot_stream_activation(
+                outbound.meta.value.store_root_hash,
+                &outbound.meta.value.author_registration,
+                outbound.meta.value.circle_id,
+            )
+            .map_err(DbError::from)?,
             generation: outbound.meta.value.generation,
         };
         persist_snapshot_image_on(
