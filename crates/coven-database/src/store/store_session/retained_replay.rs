@@ -457,14 +457,13 @@ impl RetainedReplayBaseline {
                 self.validate_image_metadata(image)?;
                 let protocol_keys = protocol_state_keys(image)?;
                 let founder_membership_cursor = founder_membership_cursor_key(image)?;
-                if protocol_keys.iter().any(|key| {
-                    !generation_zero_protocol_key(founder_membership_cursor.as_deref(), key)
-                }) || !required_generation_zero_protocol_keys()
+                if protocol_keys
                     .iter()
-                    .all(|key| protocol_keys.contains(*key))
-                    || founder_membership_cursor
-                        .as_ref()
-                        .is_none_or(|key| !protocol_keys.contains(key))
+                    .any(|key| !generation_zero_protocol_key(&founder_membership_cursor, key))
+                    || !required_generation_zero_protocol_keys()
+                        .iter()
+                        .all(|key| protocol_keys.contains(*key))
+                    || !protocol_keys.contains(&founder_membership_cursor)
                 {
                     return Err(DbError::Message(
                         "retained replay image protocol state is not the generation-zero set"
@@ -674,7 +673,7 @@ pub(super) fn project_generation_zero_image(
     }
     let protocol_keys = protocol_state_keys(&transaction)?;
     for key in protocol_keys {
-        if !generation_zero_protocol_key(founder_membership_cursor.as_deref(), &key) {
+        if !generation_zero_protocol_key(&founder_membership_cursor, &key) {
             crate::delete_protocol_state_on(&transaction, &key)?;
         }
     }
@@ -740,7 +739,7 @@ fn required_generation_zero_protocol_keys() -> &'static [&'static str] {
     ]
 }
 
-fn founder_membership_cursor_key(connection: &Connection) -> Result<Option<String>, DbError> {
+fn founder_membership_cursor_key(connection: &Connection) -> Result<String, DbError> {
     let bytes: Vec<u8> = connection
         .query_row(
             "SELECT store_protocol_root_bytes
@@ -755,17 +754,16 @@ fn founder_membership_cursor_key(connection: &Connection) -> Result<Option<Strin
         &root.descriptor.store_root_id().to_string(),
         &root.descriptor.founder_pubkey,
     );
-    Ok(Some(
+    Ok(
         crate::InitialStoreMembershipAuthority::cursor_state_key_for_stream(
             &root.descriptor.founder_grant,
             stream,
         ),
-    ))
+    )
 }
 
-fn generation_zero_protocol_key(founder_membership_cursor: Option<&str>, key: &str) -> bool {
-    required_generation_zero_protocol_keys().contains(&key)
-        || founder_membership_cursor == Some(key)
+fn generation_zero_protocol_key(founder_membership_cursor: &str, key: &str) -> bool {
+    required_generation_zero_protocol_keys().contains(&key) || founder_membership_cursor == key
 }
 
 #[cfg(test)]

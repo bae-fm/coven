@@ -71,9 +71,8 @@ fn populate_fixture(connection: &Connection) {
     database
         .install_test_store_root_authority("retained-replay-fixture")
         .expect("install retained-replay Store root authority");
-    let cursor = founder_membership_cursor_key(connection)
-        .expect("derive founder membership cursor")
-        .expect("founder membership cursor");
+    let cursor =
+        founder_membership_cursor_key(connection).expect("derive founder membership cursor");
     connection
         .execute(
             "INSERT INTO protocol_state (key, value) VALUES (?1, '{}')",
