@@ -610,15 +610,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     )
                     .await?;
             }
-            self.upload_commit(&activation.candidate)
-                .await
-                .map_err(MembershipMutationError::from)?;
-            persistence
-                .mark_remote_object_uploaded(
-                    exact_owned_remote(&remotes, &activation.candidate.reference.object)?
-                        .into_record(),
-                )
-                .await?;
             let accepted = self.publish_membership_activation(
                 &activation.transition, &activation.publication, activation.candidate.clone(),
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {

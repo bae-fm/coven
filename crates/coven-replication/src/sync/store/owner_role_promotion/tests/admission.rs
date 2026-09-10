@@ -239,10 +239,13 @@ async fn staged_admission_with_guard(
                         }
                     }
                 } else {
-                    fixture.home.fail_exact_create_before_call(7);
-                    founder.admit_member(&admitted_pubkey, requested_email, MemberRole::Member,
+                    // The original wrap, entry, head, and commit precede the
+                    // abandonment commit; stop at its publication entry.
+                    fixture.home.fail_exact_create_before_call(6);
+                    let error = founder.admit_member(&admitted_pubkey, requested_email, MemberRole::Member,
                         &fixture.encryption, &root.store_root_id.to_string(), "Pending admission").await
                         .expect_err("interrupt abandonment after its commit upload but before acceptance");
+                    assert!(error.to_string().contains("forced failure before exact create call 6"), "{error}");
                 }
                 let active = database.active_store_publication().await.unwrap().unwrap();
                 let abandonment = active.membership_abandonment().expect("the retained request owns its exact abandonment").clone();

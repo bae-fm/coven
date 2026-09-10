@@ -538,29 +538,6 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             candidate,
             publication,
         } = plan.publication;
-        // Every publication attempt re-derives this from the candidate it
-        // is about to publish, and a reprepare changes the candidate.
-        let candidate_remotes =
-            |candidate: &coven_protocol::prepared_commit::PreparedStoreOperationCommit| {
-                candidate
-                    .merge_membership_activation_remote_objects(
-                        &transition,
-                        &publication,
-                        &prepared_wraps,
-                    )
-                    .map_err(MembershipMutationError::from)
-            };
-        let initial_remotes = candidate_remotes(&candidate)?;
-        operation
-            .upload_commit(&candidate)
-            .await
-            .map_err(MembershipMutationError::from)?;
-        persistence
-            .mark_remote_object_uploaded(
-                exact_owned_remote(&initial_remotes, &candidate.reference.object)?.into_record(),
-            )
-            .await?;
-        let current_remotes = candidate_remotes(&candidate)?;
         let reference = operation
             .publish_membership_activation(
                 &transition,
@@ -572,9 +549,9 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         candidate: candidate.reference.clone(),
                     }
                     .encode()?,
-                    remote_objects: current_remotes
-                        .iter()
-                        .map(|remote| remote.record().clone())
+                    remote_objects: remote_objects
+                        .into_iter()
+                        .map(|remote| remote.into_record())
                         .collect(),
                 },
             )

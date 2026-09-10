@@ -274,3 +274,166 @@ async fn a_rollup_cannot_substitute_another_signed_predecessor_result() {
     assert_eq!(actual.head_refs(), expected.head_refs());
     assert_eq!(actual.effective_frontier(), expected.effective_frontier());
 }
+
+#[tokio::test]
+async fn an_unaccepted_membership_head_does_not_require_its_commit_to_be_uploaded() {
+    // The publisher stays in this future: timeout or assertion failure drops
+    // the paused operation and releases its permits without a detached task.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        use crate::sync::test_helpers::{InterceptedStorage, StorageInterceptor};
+        use coven_protocol::objects::{PreparedExactObject, StorageError};
+        use tokio::sync::{oneshot, Notify};
+
+        type PauseNotifications = (Arc<Notify>, Arc<Notify>);
+
+        struct PauseHeadCreation {
+            home: Arc<coven_storage::InMemoryCloudHome>,
+            slot: ObjectSlot,
+            armed: std::sync::Mutex<Option<oneshot::Sender<PauseNotifications>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl StorageInterceptor for PauseHeadCreation {
+            async fn before_protocol_create(
+                &self,
+                prepared: &PreparedExactObject,
+            ) -> Result<(), StorageError> {
+                if prepared.reference().slot() == &self.slot {
+                    let sender = self.armed.lock().unwrap().take().expect("head created once");
+                    let pause = self.home.pause_after_exact_create_call(1);
+                    assert!(sender.send(pause).is_ok(), "head observer remains alive");
+                }
+                Ok(())
+            }
+        }
+
+        let fixture = MergeFixture::new("membership-head-before-commit").await;
+        let peer_directory = crate::sync::test_helpers::test_store_dir();
+        let peer_db = crate::sync::test_helpers::open_test_db(peer_directory.clone());
+        let peer = fixture.store.activate_joined_device(
+            &fixture.db,
+            fixture.store_dir.clone(),
+            &peer_db,
+            peer_directory,
+            &fixture.owner,
+            "2026-09-09T00:00:00Z",
+        ).await.expect("activate the independent peer");
+        let (_, initial_pull) = peer.pull_store().await.expect("catch the peer up");
+        assert!(initial_pull.held_positions.is_empty(), "{initial_pull:?}");
+        let before_membership = peer.membership_for_test().await.expect("peer membership");
+        let peer_database = StoreDatabase::new(&peer_db);
+        let before_boundary = peer_database.store_publication_boundary().await
+            .expect("read peer boundary").expect("peer has accepted history");
+        before_boundary.require_observed().expect("peer observed the provider");
+        let current_slot = fixture.device.protocol_root_for_test()
+            .descriptor.current_publication_slot.clone();
+        let before_current = fixture.home.stored_exact_bytes(&current_slot)
+            .expect("current publication exists");
+        let current: coven_protocol::store_commit::StoreCurrentPublicationRecord =
+            coven_protocol::objects::decode_protocol_object(&before_current)
+                .expect("decode current publication");
+        assert_eq!(before_boundary.record(), &current);
+
+        let predecessor = fixture.load().await;
+        assert_eq!(before_membership.head_refs(), predecessor.head_refs());
+        let tip = predecessor.head_refs().last().expect("Owner stream head");
+        let prior_head = fixture.device.load_membership_head_for_test(tip).await
+            .expect("read the exact predecessor head");
+        let head_slot = prior_head.body.successor.next_slot.clone();
+        assert!(fixture.home.stored_exact_bytes(&head_slot).is_none());
+        let (armed_sender, armed_receiver) = oneshot::channel();
+        let storage = Arc::new(InterceptedStorage::new(
+            fixture.storage.clone(),
+            PauseHeadCreation {
+                home: fixture.home.clone(),
+                slot: head_slot.clone(),
+                armed: std::sync::Mutex::new(Some(armed_sender)),
+            },
+        ));
+        let store = fixture.store.open_store_with_storage(
+            fixture.database.clone(), storage, fixture.store_dir.clone(), &fixture.owner,
+        ).await.expect("open the real admission owner with intercepted storage");
+        let member = pubkey_hex(&UserKeypair::generate());
+        let encryption = EncryptionService::from_key([42; 32]);
+        fixture.home.clear_exact_creates();
+        let mut admission = Box::pin(store.admit_member(
+            &member, None, MemberRole::Member, &encryption, &fixture.store_id, "Test Store",
+        ));
+        let (reached, release) = tokio::select! {
+            pause = armed_receiver => pause.expect("head creation armed its pause"),
+            result = &mut admission => panic!("admission ended before head creation: {result:?}"),
+        };
+        tokio::select! {
+            _ = reached.notified() => {},
+            result = &mut admission => panic!("admission ended before the head became visible: {result:?}"),
+        }
+        let bytes = fixture.home.stored_exact_bytes(&head_slot)
+            .expect("paused head is physically present");
+        let head: AuthorHead = coven_protocol::objects::decode_protocol_object(&bytes)
+            .expect("decode actual membership head");
+        let head_ref = MembershipHeadRef {
+            coord: head.entry_coord(),
+            head_hash: head.head_hash(),
+            object: ExactObjectRef::new(
+                head_slot, bytes.len() as u64,
+                coven_protocol::store_commit::ObjectHash::digest(&bytes),
+            ),
+        };
+        let coven_protocol::membership::MembershipHeadActivation::StoreCommit {
+            commit, acceptance_slot,
+        } = &head.activation else {
+            panic!("admission head requires accepted Store publication");
+        };
+        assert!(fixture.home.stored_exact_bytes(acceptance_slot).is_none());
+        assert_eq!(fixture.home.stored_exact_bytes(&current_slot), Some(before_current.clone()));
+        let active = fixture.database.active_store_publication().await
+            .expect("read active publication").expect("admission retains its reservation");
+        assert_eq!(active.commit_reservation().expect("reserved commit").2, &commit.coord);
+
+        fixture.home.clear_exact_reads();
+        let cold = crate::sync::store::HistoryConstructionAuthority::admission()
+            .open_pinned(&*fixture.storage, &fixture.store.root()).await
+            .expect("open independent cold authority");
+        let error = cold.load_accepted_anchored_membership(
+            predecessor.head_refs(), Some(&fixture.owner_pubkey),
+        ).await.expect_err("an unfinished active head cannot authorize cold discovery");
+        match error {
+            AnchoredChainError::IncompleteFinalization { head, source: StorageError::NotFound(_) } => {
+                assert_eq!(*head, head_ref);
+            }
+            error => panic!("expected exact unfinished head, got {error:?}"),
+        }
+        assert!(!fixture.home.exact_reads().contains(commit.object.slot()));
+        fixture.home.clear_exact_reads();
+        let (_, pulled) = peer.pull_store().await
+            .expect("retained accepted history remains pullable");
+        assert!(pulled.held_positions.is_empty(), "{pulled:?}");
+        assert_eq!(pulled.frontier, initial_pull.frontier);
+        assert_eq!(peer_database.store_publication_boundary().await.unwrap(), Some(before_boundary));
+        let peer_membership = peer.membership_for_test().await.expect("read accepted peer membership");
+        assert_eq!(peer_membership.head_refs(), before_membership.head_refs());
+        assert_eq!(peer_membership.current_members(), before_membership.current_members());
+        assert!(!peer_membership.can_write_now(&member));
+        assert!(!fixture.home.exact_reads().contains(commit.object.slot()));
+        assert_eq!(fixture.home.stored_exact_bytes(&current_slot), Some(before_current));
+        assert!(fixture.home.stored_exact_bytes(commit.object.slot()).is_none(),
+            "the shared publisher uploads the commit after its provisional membership head");
+
+        release.notify_one();
+        let admitted = admission.await.expect("finish the exact admission");
+        assert!(admitted.membership_floor.0.contains(&head_ref));
+        assert!(fixture.home.stored_exact_bytes(acceptance_slot).is_some());
+        assert!(fixture.home.stored_exact_bytes(commit.object.slot()).is_some());
+        assert_eq!(fixture.home.exact_creates().iter()
+            .filter(|slot| *slot == commit.object.slot()).count(), 1);
+        assert!(fixture.database.active_store_publication().await.unwrap().is_none());
+        assert!(fixture.database.outbound_membership_mutation().await.unwrap().is_none());
+        let accepted = walk_admission_membership(&fixture, &admitted, false).await;
+        assert!(accepted.can_write_now(&member));
+        let (_, pulled) = peer.pull_store().await.expect("peer installs the completed admission");
+        assert!(pulled.held_positions.is_empty(), "{pulled:?}");
+        let peer_membership = peer.membership_for_test().await.expect("peer accepted membership");
+        assert_eq!(peer_membership.head_refs(), accepted.head_refs());
+        assert_eq!(peer_membership.current_members(), accepted.current_members());
+    }).await.expect("membership head publication completes within the test deadline");
+}

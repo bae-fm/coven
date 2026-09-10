@@ -421,15 +421,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 exact_owned_remote(&remotes, &plan.transition.entry_ref.object)?.into_record(),
             )
             .await?;
-        self.upload_commit(&plan.candidate)
-            .await
-            .map_err(MembershipMutationError::from)?;
-        persistence
-            .mark_remote_object_uploaded(
-                exact_owned_remote(&remotes, &plan.candidate.reference.object)?.into_record(),
-            )
-            .await?;
-        let current_remotes = plan.remote_objects()?;
         let reference = self
             .publish_membership_activation(
                 &plan.transition,
@@ -441,9 +432,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         candidate: plan.candidate.reference.clone(),
                     }
                     .encode()?,
-                    remote_objects: current_remotes
-                        .iter()
-                        .map(|remote| remote.record().clone())
+                    remote_objects: remotes
+                        .into_iter()
+                        .map(|remote| remote.into_record())
                         .collect(),
                 },
             )
