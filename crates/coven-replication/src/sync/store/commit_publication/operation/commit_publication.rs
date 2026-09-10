@@ -598,15 +598,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         };
         let acknowledgement = match acknowledgement_evidence {
             Some((reference, value)) => Some(
-                plan.retain_acknowledgement(
-                    &self.history,
-                    &common.reference,
-                    &common.commit,
-                    reference,
-                    value,
-                )
-                .await
-                .map_err(StoreError::from)?,
+                self.history
+                    .retain_acknowledgement(&verified_commit, reference, value)
+                    .map_err(StoreError::from)?,
             ),
             None => None,
         };

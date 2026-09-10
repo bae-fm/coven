@@ -113,6 +113,7 @@ async fn a_standing_acknowledgement_survives_reopening_without_another_publicati
     );
 }
 
+mod preparation_tests;
 mod publication_race_tests;
 
 #[tokio::test]

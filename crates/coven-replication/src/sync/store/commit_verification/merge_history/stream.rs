@@ -339,17 +339,14 @@ impl<'a> MergeHistoryVerifier<'a> {
                         .verified_merge_membership_objects(&reference, &commit),
                 )
                 .await?;
-                let retained_acknowledgement = match acknowledgement.clone() {
-                    Some((acknowledgement_ref, acknowledgement_value)) => Some(
-                        self.retain_acknowledgement(
-                            &reference,
-                            &commit,
-                            &author,
+                let retained_acknowledgement = match acknowledgement {
+                    Some((acknowledgement_ref, acknowledgement_value)) => {
+                        Some(self.retain_acknowledgement(
+                            &verified,
                             acknowledgement_ref,
                             acknowledgement_value,
-                        )
-                        .await?,
-                    ),
+                        )?)
+                    }
                     None => None,
                 };
                 let history_evidence = store_commit::RetainedMergeCommitEvidence {

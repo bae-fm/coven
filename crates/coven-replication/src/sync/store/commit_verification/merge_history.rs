@@ -130,25 +130,20 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.commit_verifier.membership_objects()
     }
 
-    pub(crate) async fn retain_acknowledgement(
+    pub(crate) fn retain_acknowledgement(
         &self,
-        activating_commit: &StoreBatchCommitRef,
-        activating_commit_value: &StoreBatchCommit,
-        registration: &StoreDeviceRegistration,
+        activating_commit: &VerifiedStoreBatchCommit,
         reference: StoreAckRef,
         value: StoreAck,
     ) -> Result<store_commit::RetainedVerifiedActivatedAck, StorePullError> {
-        if activating_commit_value.acknowledgement() != Some(&reference)
-            || activating_commit_value.author_registration != reference.registration
+        if activating_commit.acknowledgement() != Some(&reference)
+            || activating_commit.author_registration != reference.registration
             || value.registration != reference.registration
         {
             return Err(StorePullError::InvalidState(
                 "Store acknowledgement differs from its activating commit".to_string(),
             ));
         }
-        activating_commit
-            .verify_commit(activating_commit_value)
-            .map_err(StorePullError::Protocol)?;
         // Only the acknowledgement this commit activated. Its predecessors are
         // retained beside the commits that activated them, and each
         // acknowledgement names the object of the one before it, so the chain is
@@ -160,11 +155,16 @@ impl<'a> MergeHistoryVerifier<'a> {
             .object
             .verify(&object)
             .map_err(|error| StorePullError::context("retained acknowledgement object", error))?;
-        StoreAck::parse_at(&object, self.root.reference(), &reference, registration)
-            .map_err(StorePullError::Protocol)?;
+        StoreAck::parse_at(
+            &object,
+            self.root.reference(),
+            &reference,
+            activating_commit.author(),
+        )
+        .map_err(StorePullError::Protocol)?;
         Ok(store_commit::RetainedVerifiedActivatedAck {
             acknowledgement: (reference, value),
-            activating_commit: activating_commit.clone(),
+            activating_commit: activating_commit.reference().clone(),
             predecessors: Vec::new(),
         })
     }

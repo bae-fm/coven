@@ -564,21 +564,18 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
 
     pub(crate) async fn retain_acknowledgement(
         &self,
-        commit_ref: &StoreBatchCommitRef,
-        commit: &StoreBatchCommit,
-        author: &StoreDeviceRegistration,
+        commit: &VerifiedStoreBatchCommit,
     ) -> Result<Option<coven_protocol::store_commit::RetainedVerifiedActivatedAck>, StorePullError>
     {
         let acknowledgement = self
             .history
-            .validate_commit_acknowledgement(commit, author)
+            .validate_commit_acknowledgement(commit.value(), commit.author())
             .await
             .map_err(StorePullError::from)?;
         match acknowledgement {
             Some((reference, value)) => self
                 .history
-                .retain_acknowledgement(commit_ref, commit, author, reference, value)
-                .await
+                .retain_acknowledgement(commit, reference, value)
                 .map(Some),
             None => Ok(None),
         }

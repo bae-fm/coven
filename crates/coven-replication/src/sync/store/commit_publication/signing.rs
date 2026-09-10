@@ -141,28 +141,6 @@ impl LocalStoreWriter {
             .await
     }
 
-    pub(super) async fn retain_acknowledgement(
-        &self,
-        history: &super::AuthorizedStoreHistory<'_>,
-        activating_commit: &coven_protocol::store_commit::StoreBatchCommitRef,
-        activating_commit_value: &coven_protocol::store_commit::StoreBatchCommit,
-        reference: coven_protocol::store_commit::StoreAckRef,
-        value: coven_protocol::store_commit::StoreAck,
-    ) -> Result<
-        coven_protocol::store_commit::RetainedVerifiedActivatedAck,
-        super::pull::StorePullError,
-    > {
-        history
-            .retain_acknowledgement(
-                activating_commit,
-                activating_commit_value,
-                self.registration.value(),
-                reference,
-                value,
-            )
-            .await
-    }
-
     pub(super) fn announcement_stream_id(
         &self,
         store_root_hash: coven_protocol::store_commit::ObjectHash,

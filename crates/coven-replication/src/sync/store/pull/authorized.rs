@@ -699,8 +699,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         let root = self.history.root().clone();
         let candidate = &merge_candidate.candidate;
         let commit = candidate.commit();
-        let commit_ref = candidate.commit_ref();
-        let author = candidate.author();
         let predecessor_membership = &merge_candidate.predecessor_membership;
         let predecessor_state = self.history.verified_predecessor_state(commit)?;
         verify_merge_membership_state_ref(
@@ -729,7 +727,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             .map_err(StorePullError::Protocol)?;
         let retained_acknowledgement = self
             .history
-            .retain_acknowledgement(commit_ref, commit, author)
+            .retain_acknowledgement(&candidate.verified)
             .await?;
         let registrations = candidate
             .registrations

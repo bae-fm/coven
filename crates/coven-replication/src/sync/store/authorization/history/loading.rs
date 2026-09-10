@@ -155,24 +155,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    pub(crate) async fn retain_acknowledgement(
+    pub(crate) fn retain_acknowledgement(
         &self,
-        activating_commit: &StoreBatchCommitRef,
-        activating_commit_value: &coven_protocol::store_commit::StoreBatchCommit,
-        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
+        activating_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         reference: coven_protocol::store_commit::StoreAckRef,
         value: coven_protocol::store_commit::StoreAck,
     ) -> Result<coven_protocol::store_commit::RetainedVerifiedActivatedAck, pull::StorePullError>
     {
         self.history_verifier
-            .retain_acknowledgement(
-                activating_commit,
-                activating_commit_value,
-                registration,
-                reference,
-                value,
-            )
-            .await
+            .retain_acknowledgement(activating_commit, reference, value)
     }
 
     pub(crate) async fn derive_local_post_device_state(

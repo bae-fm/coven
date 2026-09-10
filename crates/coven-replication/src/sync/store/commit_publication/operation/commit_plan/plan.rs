@@ -250,25 +250,6 @@ impl StoreOperationCommitPlan {
             .map_err(StoreError::from)
     }
 
-    pub(crate) async fn retain_acknowledgement(
-        &self,
-        history: &AuthorizedStoreHistory<'_>,
-        activating_commit: &super::store_commit::StoreBatchCommitRef,
-        activating_commit_value: &super::store_commit::StoreBatchCommit,
-        reference: super::store_commit::StoreAckRef,
-        value: super::store_commit::StoreAck,
-    ) -> Result<super::store_commit::RetainedVerifiedActivatedAck, pull::StorePullError> {
-        self.writer
-            .retain_acknowledgement(
-                history,
-                activating_commit,
-                activating_commit_value,
-                reference,
-                value,
-            )
-            .await
-    }
-
     pub(crate) fn owner_grant(&self) -> Option<&super::membership::MembershipGrantId> {
         self.owner_grant.as_ref()
     }
