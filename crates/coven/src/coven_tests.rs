@@ -1231,13 +1231,20 @@ impl RemoteOnlyStoreBlob {
     async fn move_circle_file_to_its_destination(
         &self,
     ) -> crate::CovenResult<crate::WriteReceipt<()>> {
-        let destination_circle_value = self.destination_circle.to_string();
+        self.move_circle_file(Some(self.destination_circle.to_string()))
+            .await
+    }
+
+    async fn move_circle_file(
+        &self,
+        audience: Option<String>,
+    ) -> crate::CovenResult<crate::WriteReceipt<()>> {
         self.handle
             .write(move |sql| {
                 sql.execute(
                     "UPDATE files SET audience = ?1, _updated_at = ?2
                      WHERE id = 'circle-file'",
-                    params![destination_circle_value, sql.stamp()],
+                    params![audience, sql.stamp()],
                 )?;
                 Ok(())
             })
@@ -1257,7 +1264,7 @@ impl RemoteOnlyStoreBlob {
             })
             .await
     }
-    async fn create() -> Self {
+    async fn create(bytes: Vec<u8>) -> Self {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new_ephemeral(tmp.path());
         let signer = coven_keys::keys::UserKeypair::generate();
@@ -1279,7 +1286,6 @@ impl RemoteOnlyStoreBlob {
             .await
             .expect("publish the destination Circle authority");
 
-        let bytes = b"remote-only-circle-blob".to_vec();
         let hash = coven_protocol::blob::content_hash(&bytes);
         handle
             .write_with_blobs(
@@ -1340,22 +1346,17 @@ impl RemoteOnlyStoreBlob {
     }
 }
 
-fn outbound_blob_spools(dir: &StoreDir) -> std::collections::BTreeSet<PathBuf> {
-    let path = dir.storage_dir().join("outbound-blobs");
-    match std::fs::read_dir(path) {
-        Ok(entries) => entries
-            .map(|entry| entry.expect("read outbound blob spool entry").path())
-            .collect(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::collections::BTreeSet::new()
-        }
-        Err(error) => panic!("read outbound blob spools: {error}"),
-    }
+fn file_backed_move_source() -> Vec<u8> {
+    (0_u64..4096)
+        .flat_map(|index| {
+            *coven_protocol::store_commit::ObjectHash::digest(&index.to_le_bytes()).as_bytes()
+        })
+        .collect()
 }
 
 #[tokio::test]
 async fn audience_move_requires_remote_only_blob_before_committing_sql() {
-    let fixture = RemoteOnlyStoreBlob::create().await;
+    let fixture = RemoteOnlyStoreBlob::create(b"remote-only-circle-blob".to_vec()).await;
     ExactSlotStorage::delete_at(fixture.home.as_ref(), &fixture.source_object)
         .await
         .expect("remove the only remote source");
@@ -1383,7 +1384,7 @@ async fn audience_move_requires_remote_only_blob_before_committing_sql() {
 
 #[tokio::test]
 async fn blob_audience_move_without_staging_rejects_and_rolls_back_sql() {
-    let fixture = RemoteOnlyStoreBlob::create().await;
+    let fixture = RemoteOnlyStoreBlob::create(b"remote-only-circle-blob".to_vec()).await;
     let destination_circle_value = fixture.destination_circle.to_string();
     let result = fixture
         .handle
@@ -1413,7 +1414,7 @@ async fn blob_audience_move_without_staging_rejects_and_rolls_back_sql() {
 
 #[tokio::test]
 async fn missing_authorized_store_only_blocks_a_move_that_needs_it() {
-    let fixture = RemoteOnlyStoreBlob::create().await;
+    let fixture = RemoteOnlyStoreBlob::create(b"remote-only-circle-blob".to_vec()).await;
 
     fixture
         .handle
@@ -1453,41 +1454,125 @@ async fn missing_authorized_store_only_blocks_a_move_that_needs_it() {
 }
 
 #[tokio::test]
-async fn journal_failure_removes_only_the_audience_move_spool_and_rolls_back_sql() {
-    let fixture = RemoteOnlyStoreBlob::create().await;
-    fixture
-        .handle
-        .connect_sync_with_test_home(
-            fixture.home.clone(),
-            CloudCipher::Encrypted(fixture.encryption.clone()),
-        )
-        .await
-        .expect("connect the exact test Store");
-    let before = outbound_blob_spools(&fixture.dir);
-    fixture
-        .handle
-        .install_store_write_failure_trigger_for_test()
-        .await
-        .expect("install Store write journal fault");
-
-    let result = fixture.move_circle_file_to_its_destination().await;
-
-    assert!(result.is_err(), "the injected journal failure must surface");
-    assert_eq!(
-        outbound_blob_spools(&fixture.dir),
-        before,
-        "rollback removes the destination spool created by this attempt",
-    );
-    let audience = fixture
-        .circle_file_audience()
-        .await
-        .expect("read rolled-back audience");
-    assert_eq!(audience, None);
+async fn journal_failure_rolls_back_new_move_payloads_and_preserves_existing_owners() {
+    for reuse_existing_payload in [false, true] {
+        let bytes = file_backed_move_source();
+        let hash = coven_protocol::store_commit::ObjectHash::digest(&bytes);
+        let fixture = RemoteOnlyStoreBlob::create(bytes.clone()).await;
+        fixture
+            .handle
+            .connect_sync_with_test_home_caller_driven(
+                fixture.home.clone(),
+                CloudCipher::Encrypted(fixture.encryption.clone()),
+            )
+            .await
+            .expect("connect the exact test Store without a background publisher");
+        let payload_path = fixture.dir.payload_spool_path(hash);
+        assert!(
+            !payload_path.exists(),
+            "the source has not been captured for a move"
+        );
+        let before_audience = if reuse_existing_payload {
+            fixture
+                .move_circle_file_to_its_destination()
+                .await
+                .expect("capture a payload owned by the first move");
+            fixture
+                .handle
+                .publish_test_store(&fixture.store)
+                .await
+                .expect("publish the first move while retaining its replay inputs");
+            assert!(
+                payload_path.is_file(),
+                "the first move retains file-backed bytes"
+            );
+            Some(fixture.destination_circle.to_string())
+        } else {
+            None
+        };
+        let before_payload = if reuse_existing_payload {
+            Some(std::fs::read(&payload_path).expect("read the first move's retained payload"))
+        } else {
+            None
+        };
+        let before_journal = fixture
+            .handle
+            .store_write_journal_counts_for_test()
+            .await
+            .expect("read the journal before the rejected write");
+        fixture
+            .handle
+            .install_store_write_failure_trigger_for_test()
+            .await
+            .expect("install Store write journal fault");
+        let destination = if reuse_existing_payload {
+            None
+        } else {
+            Some(fixture.destination_circle.to_string())
+        };
+        let error = fixture
+            .move_circle_file(destination.clone())
+            .await
+            .expect_err("the journal fault must reject a fully captured move");
+        assert!(
+            error
+                .to_string()
+                .contains("injected Store write journal failure"),
+            "capture must reach the injected journal failure: {error}",
+        );
+        match before_payload {
+            Some(before) => assert_eq!(
+                std::fs::read(&payload_path).expect("the prior owner's payload survives rollback"),
+                before,
+            ),
+            None => assert!(
+                !payload_path.exists(),
+                "rollback removes the file-backed payload installed by this attempt",
+            ),
+        }
+        assert_eq!(
+            fixture.circle_file_audience().await.unwrap(),
+            before_audience
+        );
+        assert_eq!(
+            fixture
+                .handle
+                .store_write_journal_counts_for_test()
+                .await
+                .unwrap(),
+            before_journal,
+            "rollback preserves the journal and its retained payload ownership",
+        );
+        fixture
+            .handle
+            .remove_store_write_failure_trigger_for_test()
+            .await
+            .expect("remove the journal fault");
+        fixture
+            .move_circle_file(destination)
+            .await
+            .expect("retry the rejected move");
+        assert!(
+            payload_path.is_file(),
+            "the retry captures a file-backed payload"
+        );
+        fixture
+            .handle
+            .publish_test_store(&fixture.store)
+            .await
+            .expect("publish the retried move");
+        let published = fixture
+            .handle
+            .row_blob_ref("files", "circle-file")
+            .await
+            .unwrap();
+        assert_eq!(fixture.handle.read_blob(&published).await.unwrap(), bytes);
+    }
 }
 
 #[tokio::test]
 async fn local_audience_move_rolls_back_its_file_and_reuses_an_exact_leftover() {
-    let fixture = RemoteOnlyStoreBlob::create().await;
+    let fixture = RemoteOnlyStoreBlob::create(b"remote-only-circle-blob".to_vec()).await;
     fixture
         .handle
         .connect_sync_with_test_home(
@@ -1578,43 +1663,40 @@ async fn local_audience_move_rolls_back_its_file_and_reuses_an_exact_leftover() 
 }
 
 #[tokio::test]
-async fn audience_move_publishes_from_precommit_spool_after_source_disappears() {
-    let fixture = RemoteOnlyStoreBlob::create().await;
+async fn audience_move_publishes_from_captured_payload_after_source_disappears() {
+    let bytes = file_backed_move_source();
+    let hash = coven_protocol::store_commit::ObjectHash::digest(&bytes);
+    let fixture = RemoteOnlyStoreBlob::create(bytes.clone()).await;
     fixture
         .handle
-        .connect_sync_with_test_home(
+        .connect_sync_with_test_home_caller_driven(
             fixture.home.clone(),
             CloudCipher::Encrypted(fixture.encryption.clone()),
         )
         .await
         .expect("connect the exact test Store");
 
-    let destination_circle_value = fixture.destination_circle.to_string();
     let receipt = fixture
-        .handle
-        .write(move |sql| {
-            sql.execute(
-                "UPDATE files SET audience = ?1, _updated_at = ?2
-                     WHERE id = 'circle-file'",
-                params![destination_circle_value, sql.stamp()],
-            )?;
-            Ok(())
-        })
+        .move_circle_file_to_its_destination()
         .await
-        .expect("commit audience move after staging its destination blob");
+        .expect("commit audience move after capturing its source bytes");
     let blob_facts = fixture
         .handle
         .write_blob_facts_for_test(receipt.write_id.clone())
         .await
         .expect("read durable move blob facts");
-    let blob_facts: serde_json::Value =
+    let blob_facts: coven_database::StoreWriteBlobFacts =
         serde_json::from_str(&blob_facts).expect("decode move blob facts");
-    let spool_path = blob_facts["blobs"][0]["audience_move"]["remote"]["spool_path"]
-        .as_str()
-        .expect("move fact records its exact destination spool");
+    assert_eq!(blob_facts.blobs.len(), 1);
+    assert_eq!(blob_facts.blobs[0].plaintext_hash, hash);
+    assert_eq!(
+        blob_facts.blobs[0].audience_move,
+        Some(coven_database::StoreWriteBlobMoveMaterialization::Payload),
+    );
+    let payload_path = fixture.dir.payload_spool_path(hash);
     assert!(
-        std::path::Path::new(spool_path).is_file(),
-        "the destination spool is durable before the SQL write returns",
+        payload_path.is_file(),
+        "the file-backed source payload is durable before the SQL write returns",
     );
 
     ExactSlotStorage::delete_at(fixture.home.as_ref(), &fixture.source_object)
@@ -1624,10 +1706,10 @@ async fn audience_move_publishes_from_precommit_spool_after_source_disappears() 
         .handle
         .publish_test_store(&fixture.store)
         .await
-        .expect("publish the move from its durable destination spool");
+        .expect("publish the move from its captured source payload");
     assert!(
-        !std::path::Path::new(spool_path).exists(),
-        "prepared-object completion retires the durable precommit spool",
+        payload_path.is_file(),
+        "the published write retains its source payload for replay until it is folded",
     );
     assert!(
         !fixture
@@ -1646,6 +1728,7 @@ async fn audience_move_publishes_from_precommit_spool_after_source_disappears() 
         published.authority().audience(),
         crate::Audience::Circle(fixture.destination_circle),
     );
+    assert_eq!(fixture.handle.read_blob(&published).await.unwrap(), bytes);
 }
 
 #[tokio::test]

@@ -442,3 +442,175 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
         "the reclaimed ciphertext stays absent"
     );
 }
+
+#[tokio::test]
+async fn a_metadata_edit_after_circle_rotation_reseals_the_existing_blob() {
+    use coven_storage::CloudSyncObjectStorage;
+
+    let fixture = RotationFixture::build("circle-rotated-blob-metadata").await;
+    fixture.member_device.pull().await;
+    let document = "00000000-0000-4000-8000-0000000000e6";
+    let destination = "00000000-0000-4000-8000-0000000000e7";
+    let file = "00000000-0000-4000-8000-0000000000f6";
+    let bytes = b"unchanged attachment bytes across a Circle key rotation";
+    fixture
+        .capture_document_with_file(
+            document,
+            file,
+            Some(fixture.circle_id),
+            bytes,
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
+    fixture
+        .capture_document(destination, Some(fixture.circle_id), "2026-07-23T00:10:01Z")
+        .await;
+    fixture
+        .components
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
+        .await
+        .expect("publish the attachment and both Circle documents");
+    let database = StoreDatabase::new(&fixture.db);
+    let original = database
+        .row_blob_ref("document_files", file)
+        .await
+        .expect("read the original exact file binding");
+    let original = original.stored().expect("file is uploaded").clone();
+    assert!(fixture
+        .store
+        .contains_stored_blob_object(&original)
+        .await
+        .unwrap());
+
+    fixture.close_epoch_by_removing_the_circle_member().await;
+    let (successor, _) = database
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("read activated successor control");
+    let successor_key = successor.control.value.key_fingerprint();
+    assert_ne!(original.locator().key_fingerprint(), Some(successor_key));
+    assert_eq!(
+        database
+            .local_activated_registration_ref()
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(original.locator().uploader()),
+        "rotation preserves the uploading device"
+    );
+
+    let captured = database
+        .run_host_store_write_for_test(
+            Some(EncryptionService::from_key([42; 32])),
+            None,
+            move |transaction| {
+                transaction.execute(
+                "UPDATE document_files SET document_id = ?2, _updated_at = ?3 WHERE id = ?1",
+                rusqlite::params![file, destination, "2026-07-23T00:20:00Z"],
+            ).map(|_| ()).map_err(DbError::from)
+            },
+        )
+        .await
+        .expect("capture a metadata edit within the same Circle");
+    let capture = database
+        .store_write_capture_for_test(captured.write_id.clone())
+        .await
+        .unwrap();
+    let facts: coven_database::StoreWriteBlobFacts = serde_json::from_str(&capture.2).unwrap();
+    let [fact] = facts.blobs.as_slice() else {
+        panic!("metadata edit captures exactly one file: {facts:?}");
+    };
+    assert!(
+        fact.audience_move.is_none(),
+        "the document move stays in one audience"
+    );
+    assert_eq!(fact.plaintext_size, bytes.len() as u64);
+    assert_eq!(
+        fact.plaintext_hash,
+        coven_protocol::store_commit::ObjectHash::digest(bytes)
+    );
+    assert_eq!(
+        &fact
+            .previous
+            .as_ref()
+            .expect("edit retains its uploaded source")
+            .stored,
+        &original
+    );
+
+    let mut writer = fixture.owner_device.authorize_writer().await.unwrap();
+    assert!(writer
+        .prepare_pending_store_write()
+        .await
+        .expect("prepare metadata under the current Circle key"));
+    assert_eq!(
+        writer
+            .drain_store_writes()
+            .await
+            .expect("publish the metadata edit"),
+        1
+    );
+    drop(writer);
+    let published = match database.write_status(&captured.write_id).await.unwrap() {
+        coven_protocol::write::WriteStatus::Published(position) => position
+            .exact_commit()
+            .expect("published edit has an exact commit")
+            .clone(),
+        status => panic!("metadata edit must publish: {status:?}"),
+    };
+    let commit = fixture
+        .owner_device
+        .load_commit_for_test(&published)
+        .await
+        .unwrap();
+    let [package] = commit.value().circle_packages() else {
+        panic!("metadata edit publishes one Circle package");
+    };
+    assert_eq!(package.control, successor.control.coord);
+    assert_eq!(package.key_fingerprint, successor_key);
+    let current = database.row_blob_ref("document_files", file).await.unwrap();
+    let stored = current
+        .stored()
+        .expect("updated metadata retains remote blob authority");
+    assert_eq!(stored.locator().uploader(), original.locator().uploader());
+    assert_eq!(stored.locator().key_fingerprint(), Some(successor_key));
+    assert_ne!(stored.object(), original.object());
+    assert_eq!(
+        fixture.document_file_stamp(file).await,
+        "2026-07-23T00:20:00Z"
+    );
+    assert_eq!(fixture.db.query_test_text(
+        "SELECT document_id FROM document_files WHERE id = '00000000-0000-4000-8000-0000000000f6'",
+    ).await, destination);
+    let access = fixture
+        .owner_device
+        .circle_epoch_access(fixture.circle_id, successor.control.coord)
+        .await
+        .unwrap()
+        .expect("owner holds the successor Circle key");
+    let stage = fixture
+        .store_dir
+        .stage_atomic_file(
+            &fixture
+                .store_dir
+                .storage_dir()
+                .join("verified-rotated-circle-file"),
+        )
+        .await
+        .unwrap();
+    let plaintext = fixture
+        .cloud_storage
+        .stage_verified_blob_plaintext(
+            stored,
+            access.blob_protection(),
+            stage,
+            coven_storage::cloud::no_download_progress(),
+        )
+        .await
+        .expect("open the new exact ciphertext with the successor Circle key");
+    assert_eq!(tokio::fs::read(plaintext.path()).await.unwrap(), bytes);
+}

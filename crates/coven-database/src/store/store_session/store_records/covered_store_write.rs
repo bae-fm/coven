@@ -282,7 +282,7 @@ impl StoreRecords<'_> {
                     if path != store.store_dir.outbound_blob_spool_path(blob.blob().locator().locator_hash()) {
                         return Err(DbError::Message("covered blob spool differs from its locator".into()));
                     }
-                    if crate::store::store_session::active_store_publication::retained_blob_spool_has_claim_on(store.transaction, path, None)? {
+                    if crate::store::store_session::active_store_publication::retained_blob_spool_has_claim_on(store.transaction, path)? {
                         continue;
                     }
                     match std::fs::remove_file(path) {

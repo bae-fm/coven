@@ -274,7 +274,9 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         let payloads = self.replace_store_write_partitions(
             write_id,
             partitions,
-            std::collections::BTreeSet::from([changeset_hash]),
+            std::iter::once(changeset_hash)
+                .chain(blob_facts.captured_payloads())
+                .collect(),
         )?;
         crate::payload_store::set_payload_owner_claims_on(
             tx,

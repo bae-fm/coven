@@ -160,7 +160,6 @@ impl ReplayProjection {
                                 authority: package.package().audience().clone(),
                                 stored: binding.blob().clone(),
                             });
-                            fact.audience_move = None;
                         }
                     }
                 }

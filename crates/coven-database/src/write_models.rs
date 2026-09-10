@@ -180,7 +180,7 @@ pub struct StoreWriteBlobFact {
     pub plaintext_hash: ObjectHash,
     pub external_path: Option<PathBuf>,
     pub previous: Option<StoreWriteRemoteBlob>,
-    pub audience_move: Option<StoreWriteBlobMoveDestination>,
+    pub audience_move: Option<StoreWriteBlobMoveMaterialization>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -192,13 +192,20 @@ pub struct StoreWriteRemoteBlob {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreWriteBlobMoveDestination {
+pub enum StoreWriteBlobMoveMaterialization {
     Local,
-    Remote {
-        audience: coven_protocol::blob::locator::RemoteAudience,
-        locator: coven_protocol::blob::locator::BlobLocator,
-        spool_path: PathBuf,
-    },
+    /// Exact source bytes in PayloadStore, addressed by the containing fact's
+    /// plaintext hash. Destination signing and encryption belong to publication.
+    Payload,
+}
+
+impl StoreWriteBlobFacts {
+    pub(crate) fn captured_payloads(&self) -> impl Iterator<Item = ObjectHash> + '_ {
+        self.blobs.iter().filter_map(|fact| {
+            (fact.audience_move == Some(StoreWriteBlobMoveMaterialization::Payload))
+                .then_some(fact.plaintext_hash)
+        })
+    }
 }
 
 impl StoreWriteBlobFact {

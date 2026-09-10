@@ -360,19 +360,7 @@ impl StoreSession<'_> {
                         "retired blob spool differs from its locator".to_string(),
                     ));
                 }
-                let ignored_write = if expected.is_discarding() {
-                    match expected.owner() {
-                        ActiveStorePublicationOwner::StoreWrite(write_id) => Some(write_id),
-                        _ => {
-                            return Err(DbError::Message(
-                                "discarded spool has no Store-write owner".to_string(),
-                            ));
-                        }
-                    }
-                } else {
-                    None
-                };
-                if retained_blob_spool_has_claim_on(&tx, path, ignored_write)? {
+                if retained_blob_spool_has_claim_on(&tx, path)? {
                     continue;
                 }
                 match std::fs::remove_file(path) {
@@ -471,7 +459,6 @@ impl StoreDatabase {
 pub(super) fn retained_blob_spool_has_claim_on(
     conn: &rusqlite::Connection,
     path: &std::path::Path,
-    discarded_write: Option<&coven_protocol::write::WriteId>,
 ) -> Result<bool, DbError> {
     let encoded = path
         .to_str()
@@ -482,54 +469,6 @@ pub(super) fn retained_blob_spool_has_claim_on(
         |row| row.get::<_, bool>(0),
     )? {
         return Ok(true);
-    }
-    let discarded_ordinal = discarded_write
-        .map(|write_id| {
-            conn.query_row(
-                "SELECT ordinal FROM store_writes WHERE write_id = ?1",
-                [write_id.as_str()],
-                |row| row.get::<_, i64>(0),
-            )
-        })
-        .transpose()?;
-    for (ordinal, original, rebased) in crate::query_mapped_rows(
-        conn,
-        "SELECT ordinal, blob_facts, rebased FROM store_writes
-         WHERE blob_facts IS NOT NULL
-           AND json_extract(status, '$.published') IS NULL
-           AND json_extract(status, '$.resolved') IS NULL",
-        [],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        },
-    )? {
-        if discarded_ordinal.is_some_and(|discarded| ordinal >= discarded) {
-            continue;
-        }
-        // Preparation and subsequent rebase both consume the effective facts.
-        // Original capture remains immutable, but cannot keep a replaced source
-        // alive after the current input owns a verified remote object instead.
-        let facts = match rebased {
-            Some(encoded) => {
-                let rebased: crate::write_models::RebasedStoreWrite =
-                    serde_json::from_str(&encoded)
-                        .map_err(|error| DbError::context("rebased blob spool owner", error))?;
-                rebased.blob_facts
-            }
-            None => serde_json::from_str::<crate::StoreWriteBlobFacts>(&original)
-                .map_err(|error| DbError::context("captured blob spool owner", error))?,
-        };
-        for fact in &facts.blobs {
-            if matches!(&fact.audience_move,
-                Some(crate::StoreWriteBlobMoveDestination::Remote { spool_path, .. }) if spool_path == path)
-            {
-                return Ok(true);
-            }
-        }
     }
     for encoded in crate::query_mapped_rows(
         conn,

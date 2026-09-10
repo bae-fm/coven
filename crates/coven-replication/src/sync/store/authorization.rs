@@ -10,6 +10,8 @@ mod history_construction;
 pub(crate) mod keyring;
 pub(crate) use keyring::load_wrapped_store_key;
 #[cfg(test)]
+mod recovery_blob_tests;
+#[cfg(test)]
 mod recovery_publication_tests;
 mod registration;
 pub(crate) mod registration_outbox;

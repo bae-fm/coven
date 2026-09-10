@@ -19,7 +19,13 @@ use coven_protocol::synced_schema::SyncedTable;
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::write::WriteReceipt;
 
+use super::payload_store::PayloadStore;
+use super::verified_store_authority::VerifiedStoreAuthority;
 use super::*;
+
+#[path = "host_write_blob_transaction.rs"]
+mod blob_transaction;
+pub use blob_transaction::HostWriteBlobTransaction;
 
 /// Rolls back the staged audience blob files after a failed capture,
 /// folding any cleanup failure into the operation error it returns.
@@ -35,16 +41,15 @@ fn rollback_staged_audience_blobs(
     }
 }
 
-/// Staging audience-move blobs into the spool needs the connected staging
-/// owner replication composes. The capture transaction names only this port;
-/// the returned rollback closure is consumed on failure.
+/// Capturing immutable blob sources or materializing a Local destination needs
+/// the connected owner replication composes. The capture transaction names only
+/// this port; the returned rollback closure is consumed on failure.
 pub trait AudienceBlobMoveStaging: Send + Sync {
     fn stage_audience_move_blobs_on(
         &self,
         transaction: &mut HostWriteBlobTransaction<'_, '_>,
         facts: &mut StoreWriteBlobFacts,
         moves: &[AudienceMove],
-        partitions: &[AudiencePartition],
     ) -> Result<StagedAudienceBlobRollback, DbError>;
 }
 
@@ -63,13 +68,8 @@ pub(crate) struct CapturedStoreWriteTransaction<'connection, 'operation> {
     blob_decls: &'operation BlobDecls,
     routing: StoreWriteRouting<'operation>,
     blob_materialization: Option<AudienceBlobMoveMaterialization<'operation>>,
-    verified_authority: &'operation mut super::verified_store_authority::VerifiedStoreAuthority,
+    verified_authority: &'operation mut VerifiedStoreAuthority,
     write_id: WriteId,
-}
-
-pub struct HostWriteBlobTransaction<'transaction, 'connection> {
-    store: crate::store::store_session::StoreTransaction<'transaction, 'connection>,
-    verified_authority: &'transaction mut super::verified_store_authority::VerifiedStoreAuthority,
 }
 
 impl StoreSession<'_> {
@@ -123,106 +123,6 @@ impl StoreSession<'_> {
             base: effective_base,
             blob_facts: effective_blob_facts,
         }))
-    }
-}
-
-impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connection> {
-    fn new(
-        store: crate::store::store_session::StoreTransaction<'transaction, 'connection>,
-        verified_authority: &'transaction mut super::verified_store_authority::VerifiedStoreAuthority,
-    ) -> Self {
-        Self {
-            store,
-            verified_authority,
-        }
-    }
-
-    pub fn local_activated_registration(
-        &mut self,
-        root: &coven_protocol::store_commit::StoreRootRef,
-    ) -> Result<coven_protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
-        let reference =
-            local_activated_registration_ref_on(self.store.transaction)?.ok_or_else(|| {
-                DbError::Message(
-                    "audience blob move has no activated local Store registration".to_string(),
-                )
-            })?;
-        let registration =
-            self.store
-                .activated_registration(self.verified_authority, root, &reference)?;
-        coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
-            reference,
-            registration,
-        )
-        .map_err(DbError::from)
-    }
-
-    pub fn circle_publication_context(
-        &self,
-        circle_id: coven_protocol::circle::CircleId,
-        expected_control: &coven_protocol::circle::CircleControlCoord,
-    ) -> Result<coven_protocol::circle_activation::CircleEpochAccess, DbError> {
-        super::circle_publication_context_on(self.store.transaction, circle_id, expected_control)
-    }
-
-    pub fn circle_blob_opening_protection(
-        &mut self,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        circle_id: coven_protocol::circle::CircleId,
-        expected_control: &coven_protocol::circle::CircleControlCoord,
-        expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
-    ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
-        self.store.circle_blob_opening_protection(
-            self.verified_authority,
-            root,
-            circle_id,
-            expected_control,
-            expected_key_fingerprint,
-        )
-    }
-
-    pub fn external_local_path(
-        &self,
-        fact: &StoreWriteBlobFact,
-    ) -> Result<Option<PathBuf>, DbError> {
-        let stored = self
-            .store
-            .transaction
-            .query_row(
-                "SELECT path, plaintext_size, plaintext_hash
-                 FROM local_blob_refs
-                 WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
-                   AND namespace = ?4 AND blob_id = ?5
-                 ORDER BY row_stamp DESC LIMIT 1",
-                rusqlite::params![
-                    fact.table,
-                    fact.row_id,
-                    fact.column,
-                    fact.blob.namespace,
-                    fact.blob.id,
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        let Some((path, size, hash)) = stored else {
-            return Ok(None);
-        };
-        let size = u64::try_from(size).map_err(|_| {
-            DbError::Message("registered external blob has a negative size".to_string())
-        })?;
-        if size != fact.plaintext_size || hash != fact.plaintext_hash.to_string() {
-            return Err(DbError::Message(
-                "registered external blob identity differs from the moved row".to_string(),
-            ));
-        }
-        Ok(Some(PathBuf::from(path)))
     }
 }
 
@@ -514,7 +414,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         blob_decls: &'operation BlobDecls,
         routing_encryption: Option<&'operation EncryptionService>,
         blob_staging: Option<&'operation dyn AudienceBlobMoveStaging>,
-        verified_authority: &'operation mut super::verified_store_authority::VerifiedStoreAuthority,
+        verified_authority: &'operation mut VerifiedStoreAuthority,
         write_id: WriteId,
     ) -> Result<Self, DbError> {
         Self::begin(
@@ -537,7 +437,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         gates: &'operation Gates,
         blob_decls: &'operation BlobDecls,
         routing_encryption: Option<&'operation EncryptionService>,
-        verified_authority: &'operation mut super::verified_store_authority::VerifiedStoreAuthority,
+        verified_authority: &'operation mut VerifiedStoreAuthority,
         write_id: WriteId,
     ) -> Result<Self, DbError> {
         Self::begin(
@@ -562,7 +462,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         blob_decls: &'operation BlobDecls,
         routing_encryption: Option<&'operation EncryptionService>,
         blob_materialization: Option<AudienceBlobMoveMaterialization<'operation>>,
-        verified_authority: &'operation mut super::verified_store_authority::VerifiedStoreAuthority,
+        verified_authority: &'operation mut VerifiedStoreAuthority,
         write_id: WriteId,
     ) -> Result<Self, DbError> {
         let routing =
@@ -896,11 +796,11 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             validate_scoped_foreign_key_audiences(&tx, gates)
                 .map_err(DbError::from)
                 .map_err(E::from)?;
-            // A move whose blobs get re-sealed owes those rows new stamps, and the
+            // A move whose blobs will be published owes those rows new stamps, and the
             // rows have to reach the destination audience carrying them — so the
             // moves are read first, the stamps land as more changes to this same
             // transaction, and the journal that now holds all of it is what gets
-            // partitioned. Only the re-sealing materialization owes them: a blob
+            // partitioned. Only audience-move capture owes them: a blob
             // locality transition moves its own bindings across the two phases it
             // already runs, and restamping under it would rewrite rows it is
             // mid-flight over.
@@ -981,20 +881,38 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             let staged_files = match (moved_blob_exists, &blob_materialization) {
                 (false, _) => None,
                 (true, Some(AudienceBlobMoveMaterialization::Host(staging))) => {
+                    let mut created_payload_files = Vec::new();
                     let mut blob_transaction = HostWriteBlobTransaction::new(
                         crate::store::store_session::StoreTransaction::new(&tx, store_dir),
                         verified_authority,
+                        &mut created_payload_files,
                     );
-                    Some(
-                        staging
-                            .stage_audience_move_blobs_on(
-                                &mut blob_transaction,
-                                &mut blob_facts,
-                                &partitioned.moves,
-                                &partitioned.partitions,
-                            )
-                            .map_err(E::from)?,
-                    )
+                    let staged = staging.stage_audience_move_blobs_on(
+                        &mut blob_transaction,
+                        &mut blob_facts,
+                        &partitioned.moves,
+                    );
+                    match staged {
+                        Ok(rollback) => {
+                            let directory = store_dir.clone();
+                            Some(Box::new(move |error| {
+                                blob_transaction::rollback_captured_payload_files(
+                                    &directory,
+                                    created_payload_files,
+                                    rollback(error),
+                                )
+                            }) as StagedAudienceBlobRollback)
+                        }
+                        Err(error) => {
+                            return Err(E::from(
+                                blob_transaction::rollback_captured_payload_files(
+                                    store_dir,
+                                    created_payload_files,
+                                    error,
+                                ),
+                            ));
+                        }
+                    }
                 }
                 (true, Some(AudienceBlobMoveMaterialization::PreparedTransition)) => {
                     record_prepared_transition_local_blob_moves(
@@ -1067,7 +985,7 @@ pub(crate) fn record_prepared_transition_local_blob_moves(
             continue;
         };
         if audience_move.destination == coven_protocol::circle::Audience::Local {
-            fact.audience_move = Some(StoreWriteBlobMoveDestination::Local);
+            fact.audience_move = Some(StoreWriteBlobMoveMaterialization::Local);
         }
     }
     Ok(())

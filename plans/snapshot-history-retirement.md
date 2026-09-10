@@ -9,15 +9,28 @@ and ordinary replay history to be retired without waiting for every active
 device. A returning device preserves its local data and rebases unpublished
 work whose original shared context has been retired.
 
-This document specifies implementation work; it does not describe an
-implemented protocol. Writing and committing this plan does not authorize
-production changes, a deployment, a dependency repin, or live-library repair.
+The implementation landed in Coven main as
+`24e92f73335ea0ac7befc09bd0871c542cf262d4`; the host-facing conflict exports
+followed in `b0d1f524`. Coven main is now pushed through
+`21fc87dbb55d64e4b46ccdc5f2048d961fcdca4f`, including the provider-probe fix
+`0b8489d5`, scenario 4/22 tests in `cb03b144`, and the recovery/publication
+identity guards in `21fc87db`, each with normal hooks. bae main is verified
+pushed at `2a59a5700e0acaaf1908bf5dff539e664885b738`, pinning `21fc87db` after
+core/bridge verification 114 and its normal hook.
+Source-payload capture now passes recovery, interrupted publication/reopen and
+snapshot-rebase regressions. Uploaded-blob reuse corrections and facade rollback
+and source-disappearance cases also pass build 117. Current-source check120
+passes the complete `scripts/check.sh`, including all-feature and default-feature
+tests and doctests. The blob correction has passed required checks before its
+commit; final publication and the subsequent bae repin remain pending.
+Earlier check104 receipts apply to the earlier tested source, not these
+subsequent edits.
 
-Build on [local replay causality](local-replay-causality.md), including its
-private-state and blob-preservation fixes. Integrate the completed work from
-`/Users/dima/dev/bae/.worktrees/coven-local-replay-causality` before modifying
-overlapping production paths. Do not edit or commit that checkout's outstanding
-changes as part of this plan.
+This plan builds on [local replay causality](local-replay-causality.md), including
+its private-state and blob-preservation fixes. The active Coven worktree remains
+`/Users/dima/dev/bae/.worktrees/coven-local-replay-causality`. Preserve it and the
+separate ignored main-checkout follow-up outline. This plan does not authorize
+live-library repair.
 
 Coven is greenfield. Replace the superseded internal protocol, schema, tests,
 fixtures, and descriptions directly. Maintain the application-facing schema
@@ -45,9 +58,8 @@ migration capability; introduce no compatibility reader or internal migration.
 
 ## Source-grounded starting points
 
-The following files were read completely while preparing this plan. Their
-behavior establishes the boundaries to change, rather than precedent for the
-new protocol.
+The following table records the pre-implementation source review. Its behavior
+descriptions are historical starting points, not claims about the landed code.
 
 | Source | Relevant existing behavior |
 | --- | --- |
@@ -571,14 +583,18 @@ its payload leases, and clear the reservation in one database transaction.
 Exercise interruption during file removal after remote absence verification,
 then reopen and resume discard; no partially discarded operation may publish.
 
-Select spool claims from the effective replacement blob facts when present,
-otherwise from the original capture, matching preparation and subsequent rebase.
-Original observations remain immutable but do not retain an obsolete spool
-once the effective input uses a verified remote source. Existing prepared
-writes, outbox transfers, and snapshot candidates still retain their own files.
-Keep cleanup obligations under their current owners; do not add a second source
-lifetime ledger. Exercise a sharing transition whose blob upload succeeds while
-its package fails, followed by snapshot rebase and source transfer.
+Capture exact source plaintext as a payload claimed by the existing WriteId,
+before committing a remote audience move. Retain the source claims named by
+both original and rebased blob facts until that write is folded; immutable
+capture and effective rebase inputs may each remain necessary for replay.
+Publication selects the current signer, audience and encryption key when it
+prepares the destination locator and ciphertext. Prepared candidates, outbox
+transfers and snapshot candidates own their ciphertext files separately from
+the captured plaintext. Retire an uploaded old candidate only through its
+authenticated nonactivation and exact cleanup obligations, preserving every
+source needed by the replacement. Do not add a second source lifetime ledger.
+Exercise a sharing transition whose blob upload succeeds while its package
+fails, followed by snapshot rebase, candidate cleanup and replacement publication.
 
 Exercise the production path through partial-column peer edits, deleted
 targets, mixed private/shared/Circle suffixes, sharing transitions and blob
@@ -794,15 +810,64 @@ explicit task authorization.
 
 ## Implementation and verification status — 2026-09-09
 
-This records verification before landing `fix/snapshot-history-retirement`.
-At that point Coven main is
-`efcfc95598074f26f15bb5d243b37f8c9febf09e`; Bae still pins that revision. Keep this
-worktree after landing, as subsequently requested by the user. Both main
-branches must be pushed immediately when advanced.
+Coven main is pushed through `21fc87dbb55d64e4b46ccdc5f2048d961fcdca4f`,
+following the snapshot-retirement implementation
+`24e92f73335ea0ac7befc09bd0871c542cf262d4`, facade exports `b0d1f524`,
+provider-probe fix `0b8489d5`, scenario 4/22 tests `cb03b144`, and identity guards
+`21fc87db`. The latter commit passed normal hooks, was fast-forwarded to main,
+and its pushed identity was independently verified. Full replication112
+terminates with 953 passed and 1 failed, zero ignored or filtered (129.89
+seconds). Its sole failure is the existing unreserved audience-move regression;
+the three original recovery cases and cached promotion pass. Database113 passes
+all 299 runtime tests and its one doctest. These receipts precede the pending
+blob-source implementation and do not verify that subsequent source.
+
+bae main is verified pushed at `2a59a5700e0acaaf1908bf5dff539e664885b738`,
+pinning `21fc87db`. Core114 passes 2,309 tests with zero failures and the three
+existing CPU filters; bridge114 passes all 46 tests. The normal hook passes
+(`commit-pin114.log`). The update changes only the revision in Cargo.toml and
+all eight Coven lockfile packages; independent review found no unrelated
+dependency change. The unrelated locale edit in bae's main checkout remains
+untouched. Keep both worktrees and the ignored main-checkout follow-up outline.
+
+Payload118 passes all 17 payload-store tests. Reuse-red115 stops during fixture
+setup with SQLite CannotOpen and does not establish a production cause.
+Blob-red116 compiles and runs the corrected fixtures: 3 pass and 2 fail. Source
+capture survives recovery, interrupted publication/reopen and snapshot rebase.
+The two genuine failures are `LocatorUploaderMismatch` when a recovered device
+reuses an old uploaded blob, and `LocatorKeyFingerprintMismatch` when a metadata
+edit reuses a blob after Circle rotation. Uploader and Circle-key reuse guards
+were absent from that run. Blob-green117 passes both facade tests and all five
+replication tests after those guards are applied, including actual source
+deletion, new-payload rollback, existing-payload preservation, recovered upload
+retry and source retention through snapshot rebase. A separate Store older-key
+reuse regression also passes (`store-key-reuse117.log`); Circle key rotation
+does not impose resealing on legitimate Store key-history reuse.
+
+Check118 stops at owner boundaries: the fixture's added constructor bypassed
+its registered composition root, and new production imports skipped their
+immediate parent. Corrections restore one parameterized fixture composition
+root and import capabilities through the parent, without changing checker
+rules. Check119 passes ownership and stops on export-list formatting. The
+formatter applies that correction. Check120 passes ownership, formatting,
+strict Clippy, rustdoc, documentation links and shipping-feature checks. Its
+all-feature run passes 2,318 runtime tests across 18 outer targets, with zero
+failures and 12 ignored tests, plus 8 passing doctests. These counts exclude
+the facade and storage nested subprocess results. Replication contributes 957
+passes. The additional ignored test since check104 is the live S3
+`configured_s3_principals_compete_on_one_revision` case added in `0b8489d5`;
+it requires a bucket and two independent permitted credentials. All 11 earlier
+ignored live S3 cases remain ignored, and the Windows keyring target runs no
+tests on this host. The default-feature run passes 2,206 runtime tests across
+17 outer targets, with zero failures and 12 ignored tests, plus 8 passing
+doctests. Replication again contributes 957 passes. The complete script exits
+successfully. The reviewed blob correction therefore passes required checks
+before its commit; normal-hook commit, fast-forward publication and the
+subsequent verified bae pin remain required.
 
 ### Verified receipts
 
-The latest complete all-feature runtime inventory is `check104`: 2,304 passed,
+The complete all-feature runtime inventory for the landed implementation is `check104`: 2,304 passed,
 zero failed and 11 ignored across all 18 test targets, plus 8 passing doctests.
 It runs through the actual `scripts/check.sh`, after ownership, formatting,
 strict all-target/all-feature Clippy, strict rustdoc, documentation links and
@@ -810,8 +875,9 @@ all nine shipping-feature checks pass. Replication contributes 947 passes.
 The same script completes the default configuration with 2,192 passing runtime
 tests, zero failures, 11 ignored and 8 passing doctests. The complete script exits
 successfully. The site's actual `npm run build` also passes, including rustdoc,
-VitePress bundles and page rendering. Commit and both main pushes remain
-outstanding. The eight S3 test variables are unset and the local
+VitePress bundles and page rendering. The implementation and consumer pin were
+subsequently committed and pushed as recorded above. The eight S3 test variables
+checked during that run were unset and the local
 test endpoint is unavailable; no live-provider success is claimed.
 
 The earlier complete all-feature runtime inventory was `full83`: 2,288 passed,
@@ -1538,23 +1604,121 @@ A lean bae worktree at
 consumer update without a platform build prime. It shares the existing FFmpeg
 distribution. The obsolete test-only blob-key facade is removed; cover replacement
 checks compare the actual recorded cloud keys and exact stored references.
-The dependency revision is unchanged until Coven lands, and the unrelated main
-checkout localization edit remains untouched.
+At that pre-landing checkpoint the dependency revision was unchanged. The pin
+subsequently advanced as recorded below; the unrelated main-checkout localization
+edit remained untouched.
 
-### Verification and remaining landing work
+### Landing and final scenario audit
 
-The complete check104 run covers membership continuation and issuer retirement,
-receipt compression, retained-history and snapshot adoption, physical Circle
-source preservation, generated production-owner sequences, and the original
-stack regressions. Independent reviewers checked the final snapshot, admission,
-promotion serialization, derived cleanup and terminal retry corrections. The
-ownership/visibility, formatting, strict lint, documentation and feature gates
-pass. Live S3 checks remain unavailable for the reasons recorded above; ignored
-tests are not counted as successful checks.
+The implementation, facade exports, provider-probe fix, scenario 4/22 tests and
+recovery identity guards are landed and pushed; the earlier bae pin and its
+affected core/bridge checks
+are recorded at the top of this status section.
+The check104 counts remain evidence for that earlier source. They do not verify
+the subsequent final-audit edits described here.
 
-1. Commit the reviewed source and documentation paths with normal hooks, rebase
-   onto Coven main, merge fast-forward only and push Coven main immediately.
-2. Update Bae's pin to the pushed Coven revision, verify its affected components,
-   commit with normal hooks, merge fast-forward only and push Bae main.
-3. Confirm the final local branches, remote branches and dependency revision.
-   Preserve both worktrees and the ignored main-checkout follow-up outline.
+- Scenario 4: `retired-entry105.log`, 1 passed, 0 failed (0.10 seconds).
+  Real reclaim removes the old entry/image/metadata; recreating the exact old
+  entry cannot advance acceptance, and its original conditional update conflicts.
+- Scenario 22: `cadence105.log`, 1 passed, 0 failed (2.52 seconds).
+  Two Member authors publish six commits at N=4 while the Owner is offline;
+  its return snapshots the aggregate cut and resets the count.
+- Scenario 5: `probe-red106.log` reproduces zero conditional updates where two
+  independent principals are required. The saved probe now retains the original
+  provider revision before the peer update, signs its exact evidence, and tests
+  the administrator's stale update before durable cleanup. Independent source
+  review found no issue in that sequence or its exact-slot cleanup retries.
+  `probe-green107.log` passes all four production-owner regressions. The consumer
+  run passes domain 90, protocol 202 and storage 284 tests: 576 runtime passes,
+  10 ignored, plus 2 passing doctests. `provider-joins108.log` adds 22 passing
+  Join tests. The fix landed as `0b8489d5` with normal hooks and was
+  fast-forwarded and pushed. The ignored live S3 test requires two independent
+  permitted credential sets; live S3 is unavailable and is not reported as passing.
+- Scenario 9: RED108 confirms both actual failures. Staging refuses the occupied
+  reservation after changing the local registration; accepted recovery returns
+  success, but the reopened old-write drain then fails with
+  `Protocol(InvalidSignature)`. The landed fix checks the active publication
+  author inside the existing registration replacement transaction and holds
+  the existing authorship turn across recovery. A positive case retains
+  same-author accepted-recovery retries with a prepared write. All three cases
+  pass in full replication109: 952 passed, zero failed, ignored or filtered,
+  in 129.68 seconds. Refusal preserves the exact registration, acknowledgement,
+  pending writes and active reservation. The recovery filter in build 110 runs
+  33 cases: 31 pass and 2 fail. Cached promotion is a confirmed continuation
+  failure: reopening under the recovered registration fails with
+  `Protocol(InvalidSignature)`. The other failure, a blob drain returning zero
+  instead of one, omitted preparation in the fixture and does not confirm a
+  production cause. The corrected blob case invokes real preparation before
+  draining. Build 111 then fails at actual preparation with
+  `InvalidOutbound("audience-move blob note_photos/recovery-photo/id destination
+  differs from its durable spool")`, after the exact captured facts, sealed
+  source and host plaintext checks pass. This confirms a source-binding gap;
+  subsequent source-capture verification is recorded in the current status
+  above. The shared publication-claim author guard for the cached case passed
+  independent source review. Build 112 then passes 32 recovery-filter cases, including cached
+  promotion and all three original recovery cases; the blob mismatch is its
+  only failure. Full replication112 and database113 results are recorded in
+  the current status above. The identity guards landed as `21fc87db` with normal
+  hooks. Registration replacement preserves an active operation's original
+  author; the common reservation claim rejects a cached author that differs
+  from the current exact local registration. Recovery's Created registration
+  remains valid without requiring an already activated local-device marker.
+  Immutable source capture and uploaded-blob reuse corrections have focused
+  passing coverage and pass both feature configurations in the completed
+  check120 script.
+  Capture records Local or Payload materialization; the Payload case uses the
+  fact's existing plaintext hash and WriteId claims, leaving locator/encryption
+  preparation to publication under current authority. The migrated facade
+  regressions preserve actual source deletion, late journal rollback, and
+  preexisting file-backed payload ownership. Both facade cases pass in build117.
+
+The following mapping identifies concrete production-owner tests for all
+23 required rows. Coverage is split across the named fixtures; this is not a
+claim that one test exercises every combination in a row. `check104` means the earlier full-suite receipt, not a new
+execution of the current working tree. Paths below are relative to
+`crates/coven-replication/src/sync/store/` unless another crate is named.
+
+| Row / scenario | Concrete test or test group | Evidence / limit |
+| --- | --- | --- |
+| 1 Commit wins against snapshot | `snapshots/publication_race_tests.rs::a_snapshot_retry_includes_an_intervening_accepted_commit` | check104; actual intervening accepted edit is in the retried image. |
+| 2 Snapshot wins against commit | `pull/write_rebase_tests.rs::snapshot_rebase_preserves_recorded_columns_and_reserved_write` | check104; replacement preserves the reserved logical write. |
+| 3 Two snapshot owners | `snapshots/publication_race_tests.rs::a_snapshot_retry_continues_from_an_intervening_accepted_snapshot` | check104; losing contender continues from the accepted peer snapshot. |
+| 4 Delayed recreation after deletion | `snapshots/publication_race_tests.rs::recreating_a_retired_publication_entry_cannot_restore_its_accepted_position` | retired-entry105, 1 pass; landed `cb03b144`. |
+| 5 Separate provider principals | `coven-storage/src/provider_probe_tests.rs::cross_principal_probe_requires_both_accounts_to_compete_on_one_revision` and its lost-response, cleanup-reopen and stale-provider siblings | Four probe passes, 576 consumer passes and 22 Join passes; landed `0b8489d5` with normal hooks; live S3 unavailable. |
+| 6 Lost response, advancing/compacting peer | `snapshots/publication_race_tests.rs::a_lost_snapshot_response_is_superseded_after_its_accepted_history_is_compacted`; `pull/write_rebase_completion_tests.rs::a_restarted_writer_settles_a_compacted_replacement_of_its_reserved_operation` | check104; exact versus snapshot-covered outcomes stay distinct. |
+| 7 Restart at durable boundaries | `snapshots/publication_race_tests.rs` cleanup/reopen cases; `pull/write_rebase_tests.rs::snapshot_rebase_awaiting_preparation_survives_database_reopen`; `pull/warm_snapshot_adoption_tests.rs::warm_snapshot_adoption_rolls_back_image_journal_and_configuration_together` | check104; preparation, publication cleanup and installation rollback coverage. |
+| 8 Authority changes during preparation | `owner_role_promotion/tests/issuer_retirement.rs::a_promotion_request_cannot_be_accepted_when_its_issuer_is_removed_during_publication` and request/merge retirement-reopen siblings | check104; actual race and exact candidate deletion. |
+| 9 Recovery versus old prepared write | `authorization/recovery_publication_tests.rs` original/new/adopted identity cases; `owner_role_promotion/tests/recovery.rs::a_cached_promoter_cannot_strand_an_operation_after_device_recovery`; `authorization/recovery_blob_tests.rs` captured-source and uploaded-reuse cases | Identity guards and four passing cases landed `21fc87db`; source recovery/reopen and uploaded reuse pass117 after genuine red111/red116 failures. Complete check120 passes both feature configurations. |
+| 10 Returning already-accepted edit | `pull/write_rebase_tests.rs::snapshot_rebase_does_not_replace_a_write_accepted_before_the_snapshot`; `pull/publication_replacement_tests.rs::retry_completes_a_write_installed_by_pull_without_publishing_or_replaying_it_again` | check104; no duplicate publication or replay. |
+| 11 Unpublished/dependent private suffix | `pull/write_rebase_private_tests.rs::snapshot_rebase_blocks_a_conflicting_private_only_suffix_without_losing_private_work`; reserved-rebase cases | check104; conflicting suffix remains owned. |
+| 12 Folded private rows | `pull/publication_tests.rs::snapshot_boundaries_preserve_private_rows_and_roll_back_with_their_tail`; `pull/warm_snapshot_adoption_tests.rs::warm_snapshot_adoption_migrates_an_older_image_and_preserves_local_work` | check104; private baseline and atomic image/journal preservation. |
+| 13 Mixed audiences and sharing | `pull/write_rebase_covered_circle_tests.rs::covered_circle_restoration_survives_independent_store_package_retirement`; `pull/write_rebase_private_tests.rs::snapshot_rebase_preserves_rows_made_private_after_their_accepted_sharing`; generated sequences; `pull/write_rebase_blob_tests.rs::snapshot_rebase_retains_an_audience_move_payload_until_its_write_is_folded` | check104 audience ownership; source payload/rebase and Circle-key resealing pass117. |
+| 14 Sparse-column peer edit | `pull/write_rebase_tests.rs::snapshot_rebase_preserves_recorded_columns_and_reserved_write` | check104; untouched peer columns and immutable capture survive. |
+| 15 Missing/conflicting row or blob | `pull/write_rebase_tests.rs::snapshot_rebase_conflict_preserves_the_entire_previous_state`; `pull/write_rebase_private_tests.rs` collision cases; `snapshots/blob_capture_tests.rs::snapshot_missing_accepted_blob_preserves_publication_for_retry_after_restart` | check104; typed refusal retains input and rollback state. |
+| 16 Local reconstruction without download | `pull/seeded_snapshot_adoption_tests.rs::seeded_delivery_restart_and_retirement_preserve_rows_blobs_and_pending_work`; opposite held-row case in `held_snapshot_adoption_tests.rs` | check104; exact predecessor/cut prerequisites and no-image assertion. |
+| 17 Full-history versus snapshot replay | Same seeded comparison, plus `pull/publication_tests.rs::snapshot_boundaries_preserve_private_rows_and_roll_back_with_their_tail` | check104; independent values, blobs, ownership and journal assertions. |
+| 18 Exclusion/control across retirement | `device_exclusion/completion_tests.rs::device_authority_completion_restarts_after_snapshot_retirement`; `device_exclusion/tests.rs::owner_finalizes_exclusion_without_remaining_device_acknowledgements`; generated withdrawal sequence | check104; existing explicit control effects remain separate from compaction. |
+| 19 Repeated unchanged device states | `reclaim/snapshot_retirement_tests.rs::repeated_snapshot_adoption_retires_covered_device_state_mappings` | check104; covered mappings retire while current state remains. |
+| 20 New join after deleted prefix | `pull/publication_tests.rs::fresh_snapshot_bootstrap_does_not_read_retired_commits_or_publications` | check104; cold bootstrap from accepted snapshot and retained interval. |
+| 21 Reclaim with live consumers | `device_join/finalization_tests.rs::an_unconsumed_join_handoff_survives_peer_snapshot_retirement` and deleted-blob sibling; `reclaim/snapshot_retirement_tests.rs::peer_retirement_cannot_delete_a_new_snapshot_candidates_rollup`; covered-write concurrent-import test | check104; download occurs after completed reclaim and reads exact original bytes, not a paused transfer race; publication/import cases use real barriers. |
+| 22 Multi-author N overshoot, Owner offline | `snapshots/cadence_tests.rs::member_publication_overshoots_the_shared_threshold_while_the_owner_is_offline` | cadence105, 1 pass; landed `cb03b144`. |
+| 23 Idle sync | `../acknowledged_history_tests.rs::{an_idle_cycle_appends_no_commit,snapshot_publication_does_not_repeat_a_standing_store_acknowledgement}`; cadence reset assertion | check104, plus cadence105; no idle publication loop. |
+
+For row 21, the Join's accepted closure protects its exact snapshot artifacts
+until that registered target publishes. Successor snapshots carry the closure;
+reclaim excludes its exact artifacts and local lease retirement excludes its
+metadata slot. The fixture completes reclaim before the first download, then
+installs the original image and reads its lazy blob. A later target publication
+and successor snapshot release those artifacts, whose physical deletion is
+asserted. This establishes the live-source ownership interval without claiming
+that a byte-stream transfer was paused concurrently.
+
+Remaining work in this final audit:
+
+1. Commit reviewed blob-source and plan changes with normal hooks, advance Coven
+   main by fast-forward and push; update and verify the bae pin for the final
+   Coven revision. The identity guards and bae's interim `21fc87db` pin are
+   already pushed after their affected-component tests and normal hooks.
+2. Confirm branch/remote/pin identities, preserving both worktrees and the ignored
+   main-checkout follow-up outline. The broader simplification outline remains
+   separate from these required scenario checks.

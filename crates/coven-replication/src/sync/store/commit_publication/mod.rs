@@ -9,7 +9,6 @@ pub(crate) use signing::LocalStoreWriter;
 pub(crate) use signing::LocalWriterKeyrings;
 use signing::StoreOperationSigningContext;
 
-pub(crate) use operation::prepare_partition_blob_locator;
 pub use operation::StoreWriterAuthorizationError;
 
 #[derive(Clone, Copy)]

@@ -307,7 +307,8 @@ pub use write_models::{
     ActivatedStoreAck, InitialStoreMembershipAuthority, OutboundStoreAck,
     OutboundStoreAckActivation, PreparedStoreWrite, PreparedStoreWriteCommit,
     PreparedStoreWritePartitions, PublishedStoreAck, StoreWriteBase, StoreWriteBlobFact,
-    StoreWriteBlobFacts, StoreWriteBlobMoveDestination, StoreWriteRemoteBlob, StoreWriteRouting,
+    StoreWriteBlobFacts, StoreWriteBlobMoveMaterialization, StoreWriteRemoteBlob,
+    StoreWriteRouting,
 };
 pub(crate) use write_models::{
     MergeReplayWrite, MergeReplayWriteEffect, ReplayJournal, SettledStoreWrite, SettledWriteFold,

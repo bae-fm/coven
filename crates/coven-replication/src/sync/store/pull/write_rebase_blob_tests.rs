@@ -1,8 +1,9 @@
 use super::RebaseFixture;
 use coven_database::{DbError, HostWriteOperation, StoreDatabase, StoreRowWrites, WriteBatch};
+use coven_storage::CloudSyncObjectStorage;
 
 #[tokio::test]
-async fn snapshot_rebase_releases_an_audience_move_spool_after_remote_source_transfer() {
+async fn snapshot_rebase_retains_an_audience_move_payload_until_its_write_is_folded() {
     let fixture = RebaseFixture::with_tables(
         coven_database::synthetic_store::test_synced_tables_with_blob(
             coven_database::synthetic_store::photo_decl(),
@@ -46,26 +47,30 @@ async fn snapshot_rebase_releases_an_audience_move_spool_after_remote_source_tra
             Some(Box::new(fixture.owner.host_write_blob_staging())),
         )
         .await
-        .expect("stage exact audience-move spool");
-    let original: coven_database::StoreWriteBlobFacts = serde_json::from_str(
-        &fixture
-            .source
-            .query_test_text(&format!(
-                "SELECT blob_facts FROM store_writes WHERE write_id = '{}'",
-                captured.write_id.as_str(),
-            ))
-            .await,
-    )
-    .expect("read captured source ownership");
+        .expect("capture exact audience-move plaintext");
+    let original_capture = database
+        .store_write_capture_for_test(captured.write_id.clone())
+        .await
+        .expect("read immutable captured source ownership");
+    let original: coven_database::StoreWriteBlobFacts =
+        serde_json::from_str(&original_capture.2).expect("decode captured blob facts");
     let [fact] = original.blobs.as_slice() else {
         panic!("one captured file: {original:?}");
     };
-    let Some(coven_database::StoreWriteBlobMoveDestination::Remote { spool_path, .. }) =
-        &fact.audience_move
-    else {
-        panic!("sharing owns a staged remote source: {fact:?}");
-    };
-    let spool_path = spool_path.clone();
+    assert_eq!(
+        fact.audience_move,
+        Some(coven_database::StoreWriteBlobMoveMaterialization::Payload)
+    );
+    let source_hash = fact.plaintext_hash;
+    assert_eq!(fact.plaintext_size, bytes.len() as u64);
+    assert_captured_payload(
+        &database,
+        &captured.write_id,
+        &original_capture,
+        source_hash,
+        bytes,
+    )
+    .await;
     let mut writer = fixture
         .owner
         .authorize_writer()
@@ -81,6 +86,13 @@ async fn snapshot_rebase_releases_an_audience_move_spool_after_remote_source_tra
         .expect("read sharing candidate")
         .expect("candidate prepared");
     assert_eq!(prepared.commit.value.write_id, captured.write_id);
+    let spool_path = prepared
+        .audiences
+        .blobs
+        .iter()
+        .find_map(|blob| blob.spool_path())
+        .expect("candidate owns a sealed upload spool")
+        .to_path_buf();
     let objects = database
         .prepared_remote_objects(&captured.write_id)
         .await
@@ -109,8 +121,16 @@ async fn snapshot_rebase_releases_an_audience_move_spool_after_remote_source_tra
     }));
     assert!(
         spool_path.is_file(),
-        "failed publication retains its exact source"
+        "failed candidate retains its upload spool"
     );
+    assert_captured_payload(
+        &database,
+        &captured.write_id,
+        &original_capture,
+        source_hash,
+        bytes,
+    )
+    .await;
 
     fixture.snapshot_peer_edit(false).await;
     fixture
@@ -128,6 +148,14 @@ async fn snapshot_rebase_releases_an_audience_move_spool_after_remote_source_tra
         spool_path.is_file(),
         "retirement awaits a prepared replacement"
     );
+    assert_captured_payload(
+        &database,
+        &captured.write_id,
+        &original_capture,
+        source_hash,
+        bytes,
+    )
+    .await;
     let mut writer = fixture
         .owner
         .authorize_writer()
@@ -162,6 +190,90 @@ async fn snapshot_rebase_releases_an_audience_move_spool_after_remote_source_tra
     ));
     assert!(
         !spool_path.exists(),
-        "the replacement uses the verified remote object, so the original captured spool no longer has a reader"
+        "the retired candidate no longer owns its upload spool"
+    );
+    assert_captured_payload(
+        &database,
+        &captured.write_id,
+        &original_capture,
+        source_hash,
+        bytes,
+    )
+    .await;
+
+    fixture
+        .owner
+        .publish_snapshot_generation_for_test()
+        .await
+        .expect("fold the accepted sharing write into a snapshot");
+    assert!(database
+        .store_write_payload_claims_for_test(&captured.write_id)
+        .await
+        .expect("read folded write payload ownership")
+        .is_empty());
+    assert!(!database
+        .has_payload_for_test(source_hash)
+        .await
+        .expect("captured plaintext is released after folding"));
+    assert!(matches!(
+        database
+            .write_status(&captured.write_id)
+            .await
+            .expect("folding retains the original write receipt"),
+        coven_protocol::write::WriteStatus::Published(_)
+    ));
+    assert_eq!(
+        database
+            .row_blob_ref("note_photos", "moved-photo")
+            .await
+            .expect("snapshot retains the exact published blob"),
+        published
+    );
+    let destination = fixture
+        .source_dir
+        .storage_dir()
+        .join("verified-rebased-photo");
+    let stage = fixture
+        .source_dir
+        .stage_atomic_file(&destination)
+        .await
+        .unwrap();
+    let plaintext = fixture
+        .storage
+        .stage_verified_store_blob_plaintext(
+            stored,
+            stage,
+            coven_storage::cloud::no_download_progress(),
+        )
+        .await
+        .expect("read published blob after releasing the captured payload");
+    assert_eq!(tokio::fs::read(plaintext.path()).await.unwrap(), bytes);
+}
+
+async fn assert_captured_payload(
+    database: &StoreDatabase,
+    write_id: &coven_protocol::write::WriteId,
+    original_capture: &(String, String, String),
+    source_hash: coven_foundation::object_hash::ObjectHash,
+    bytes: &[u8],
+) {
+    assert_eq!(
+        &database
+            .store_write_capture_for_test(write_id.clone())
+            .await
+            .expect("read immutable capture"),
+        original_capture
+    );
+    assert!(database
+        .store_write_payload_claims_for_test(write_id)
+        .await
+        .expect("read the write's exact payload claims")
+        .contains(&source_hash));
+    assert_eq!(
+        database
+            .payload_for_test(source_hash)
+            .await
+            .expect("read retained captured plaintext"),
+        bytes
     );
 }

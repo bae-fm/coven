@@ -1,44 +1,15 @@
 use std::path::{Path, PathBuf};
 
-use coven_database::{AudienceMove, AudiencePartition};
+use coven_database::AudienceMove;
 use coven_database::{
     DbError, HostWriteBlobTransaction, StoreWriteBlobFact, StoreWriteBlobFacts,
-    StoreWriteBlobMoveDestination,
+    StoreWriteBlobMoveMaterialization,
 };
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::locator::RemoteAudience;
 use coven_protocol::blob::{Provenance, RowBlobAuthority};
-use coven_protocol::objects::{BlobSpoolProtection, BlobWriteAuthority};
+use coven_protocol::objects::BlobSpoolProtection;
 use coven_storage::CloudSyncObjectStorage;
-
-enum BlobMoveDestination {
-    Store {
-        key_fingerprint: Option<coven_keys::encryption::KeyFingerprint>,
-    },
-    Circle {
-        circle_id: coven_protocol::CircleId,
-        protection: BlobSpoolProtection,
-    },
-}
-
-impl BlobMoveDestination {
-    fn audience(&self) -> RemoteAudience {
-        match self {
-            Self::Store { .. } => RemoteAudience::Store,
-            Self::Circle { circle_id, .. } => RemoteAudience::Circle(*circle_id),
-        }
-    }
-
-    fn key_fingerprint(&self) -> Option<coven_keys::encryption::KeyFingerprint> {
-        match self {
-            Self::Store { key_fingerprint } => *key_fingerprint,
-            Self::Circle { protection, .. } => match protection {
-                BlobSpoolProtection::Opaque(encryption) => Some(encryption.seal_key_fingerprint()),
-                BlobSpoolProtection::Browsable => None,
-            },
-        }
-    }
-}
 
 enum BlobMoveOpening {
     Store,
@@ -73,12 +44,11 @@ impl HostWriteBlobStaging {
         transaction: &mut HostWriteBlobTransaction<'_, '_>,
         facts: &mut StoreWriteBlobFacts,
         moves: &[AudienceMove],
-        partitions: &[AudiencePartition],
     ) -> Result<StagedAudienceBlobFiles, DbError> {
         self.runtime.block_on(async {
             let mut files = StagedAudienceBlobFiles::new(self.store_dir.clone());
             let result = self
-                .stage_audience_move_blobs_inner(transaction, facts, moves, partitions, &mut files)
+                .stage_audience_move_blobs_inner(transaction, facts, moves, &mut files)
                 .await;
             match result {
                 Ok(()) => Ok(files),
@@ -98,26 +68,12 @@ impl HostWriteBlobStaging {
         transaction: &mut HostWriteBlobTransaction<'_, '_>,
         facts: &mut StoreWriteBlobFacts,
         moves: &[AudienceMove],
-        partitions: &[AudiencePartition],
         files: &mut StagedAudienceBlobFiles,
     ) -> Result<(), DbError> {
         let moved_rows = coven_database::audience_moves_by_row(moves)?;
         if moved_rows.is_empty() {
             return Ok(());
         }
-
-        let remote_destination_exists = facts.blobs.iter().any(|fact| {
-            moved_rows
-                .get(&(fact.table.clone(), fact.row_id.clone()))
-                .is_some_and(|audience_move| {
-                    audience_move.destination != coven_protocol::circle::Audience::Local
-                })
-        });
-        let registration = if remote_destination_exists {
-            Some(transaction.local_activated_registration(&self.store_root)?)
-        } else {
-            None
-        };
 
         for fact in &mut facts.blobs {
             let Some(audience_move) = moved_rows.get(&(fact.table.clone(), fact.row_id.clone()))
@@ -129,128 +85,21 @@ impl HostWriteBlobStaging {
                 coven_protocol::circle::Audience::Local => {
                     self.stage_local_destination(transaction, fact, &source, files)
                         .await?;
-                    fact.audience_move = Some(StoreWriteBlobMoveDestination::Local);
+                    fact.audience_move = Some(StoreWriteBlobMoveMaterialization::Local);
                 }
-                destination => {
-                    let registration = registration
-                        .as_ref()
-                        .expect("remote destination loads authority");
-                    let authority = BlobWriteAuthority::new(registration);
-                    let destination =
-                        self.destination_protection(transaction, destination, partitions, fact)?;
-                    let audience = destination.audience();
-                    let locator =
-                        crate::sync::store::commit_publication::prepare_partition_blob_locator(
-                            fact,
-                            audience.clone(),
-                            destination.key_fingerprint(),
-                            &authority,
-                        )
-                        .map_err(|error| {
-                            move_materialization_error(
-                                fact,
-                                DbError::AudienceBlobStaging(Box::new(error)),
-                            )
-                        })?;
-                    let spool_path = self
-                        .store_dir
-                        .outbound_blob_spool_path(locator.locator_hash());
+                _ => {
+                    let source_stage = self.store_dir.payload_spool_path(fact.plaintext_hash);
                     let source_path = self
-                        .move_source_plaintext(transaction, fact, &source, &spool_path)
+                        .move_source_plaintext(transaction, fact, &source, &source_stage)
                         .await?;
-                    let spool = self
-                        .store_dir
-                        .stage_atomic_file(&spool_path)
-                        .await
-                        .map_err(|error| move_materialization_error(fact, DbError::File(error)))?;
-                    let sealed = match destination {
-                        BlobMoveDestination::Store { .. } => {
-                            self.storage
-                                .seal_store_blob_to_spool(
-                                    &locator,
-                                    &authority,
-                                    source_path.path(),
-                                    spool,
-                                    coven_storage::cloud::no_preparation_progress(),
-                                )
-                                .await
-                        }
-                        BlobMoveDestination::Circle { protection, .. } => {
-                            self.storage
-                                .seal_blob_to_spool(
-                                    &locator,
-                                    &authority,
-                                    protection,
-                                    source_path.path(),
-                                    spool,
-                                    coven_storage::cloud::no_preparation_progress(),
-                                )
-                                .await
-                        }
-                    };
-                    let spool_write =
-                        sealed.map_err(|error| move_materialization_error(fact, error))?;
-                    if spool_write == coven_protocol::objects::BlobSpoolWrite::Created {
-                        files
-                            .created
-                            .push(StagedAudienceBlobFile::new(spool_path.clone()));
-                    }
-                    fact.audience_move = Some(StoreWriteBlobMoveDestination::Remote {
-                        audience,
-                        locator,
-                        spool_path,
-                    });
+                    transaction
+                        .retain_source_plaintext(fact, source_path.path())
+                        .map_err(|error| move_materialization_error(fact, error))?;
+                    fact.audience_move = Some(StoreWriteBlobMoveMaterialization::Payload);
                 }
             }
         }
         Ok(())
-    }
-
-    fn destination_protection(
-        &self,
-        transaction: &HostWriteBlobTransaction<'_, '_>,
-        destination: &coven_protocol::circle::Audience,
-        partitions: &[AudiencePartition],
-        fact: &StoreWriteBlobFact,
-    ) -> Result<BlobMoveDestination, DbError> {
-        match destination {
-            coven_protocol::circle::Audience::Store => self
-                .storage
-                .store_blob_key_fingerprint()
-                .map(|key_fingerprint| BlobMoveDestination::Store { key_fingerprint })
-                .map_err(|error| move_materialization_error(fact, error)),
-            coven_protocol::circle::Audience::Circle(circle_id) => {
-                let partition = partitions
-                    .iter()
-                    .find(|partition| partition.audience == *destination)
-                    .ok_or_else(|| {
-                        move_materialization_error(
-                            fact,
-                            DbError::Message(format!(
-                                "destination Circle {circle_id} has no audience partition"
-                            )),
-                        )
-                    })?;
-                let control = partition.control.as_ref().ok_or_else(|| {
-                    move_materialization_error(
-                        fact,
-                        DbError::Message(format!(
-                            "destination Circle {circle_id} has no exact control"
-                        )),
-                    )
-                })?;
-                let access = transaction
-                    .circle_publication_context(*circle_id, control.coordinate())
-                    .map_err(|error| move_materialization_error(fact, error))?;
-                Ok(BlobMoveDestination::Circle {
-                    circle_id: *circle_id,
-                    protection: access.blob_protection(),
-                })
-            }
-            coven_protocol::circle::Audience::Local => {
-                unreachable!("Local handled before protection")
-            }
-        }
     }
 
     fn opening_protection(
@@ -651,15 +500,9 @@ impl coven_database::AudienceBlobMoveStaging for HostWriteBlobStaging {
         transaction: &mut HostWriteBlobTransaction<'_, '_>,
         facts: &mut StoreWriteBlobFacts,
         moves: &[AudienceMove],
-        partitions: &[AudiencePartition],
     ) -> Result<coven_database::StagedAudienceBlobRollback, DbError> {
-        let files = HostWriteBlobStaging::stage_audience_move_blobs_on(
-            self,
-            transaction,
-            facts,
-            moves,
-            partitions,
-        )?;
+        let files =
+            HostWriteBlobStaging::stage_audience_move_blobs_on(self, transaction, facts, moves)?;
         let runtime = self.runtime.clone();
         Ok(Box::new(move |operation: DbError| {
             match runtime.block_on(files.rollback()) {

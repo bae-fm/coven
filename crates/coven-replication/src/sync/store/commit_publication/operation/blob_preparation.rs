@@ -303,78 +303,31 @@ impl AuthorizedWriterOperation<'_> {
         };
         let locator =
             prepare_partition_blob_locator(fact, audience.clone(), key_fingerprint, authority)?;
-        if let Some(audience_move) = &fact.audience_move {
-            let coven_database::StoreWriteBlobMoveDestination::Remote {
-                audience: staged_audience,
-                locator: staged_locator,
-                spool_path,
-            } = audience_move
-            else {
-                return Err(StoreError::InvalidOutbound(format!(
-                    "Local audience-move blob {}/{}/{} reached remote package preparation",
-                    fact.table, fact.row_id, fact.column
-                )));
-            };
-            if staged_audience != &audience || staged_locator != &locator {
-                return Err(StoreError::InvalidOutbound(format!(
-                    "audience-move blob {}/{}/{} destination differs from its durable spool",
-                    fact.table, fact.row_id, fact.column
-                )));
-            }
-            let expected_path = self
-                .store_dir
-                .outbound_blob_spool_path(locator.locator_hash());
-            if spool_path != &expected_path {
-                return Err(StoreError::InvalidOutbound(format!(
-                    "audience-move blob {}/{}/{} durable spool has the wrong path",
-                    fact.table, fact.row_id, fact.column
-                )));
-            }
-            let slot = storage
-                .allocate_blob_slot(&locator, authority)
-                .await
-                .map_err(|source| StoreError::BlobStorage {
-                    namespace: fact.blob.namespace.clone(),
-                    id: fact.blob.id.clone(),
-                    source,
-                })?;
-            let stored = storage
-                .prepare_blob_object(&locator, authority, slot, spool_path)
-                .await
-                .map_err(|source| StoreError::BlobStorage {
-                    namespace: fact.blob.namespace.clone(),
-                    id: fact.blob.id.clone(),
-                    source,
-                })?;
-            let binding = audience_package::RowBlobLocatorBinding::new(
-                fact.table.clone(),
-                fact.row_id.clone(),
-                fact.row_stamp.clone(),
-                fact.column.clone(),
-                stored.clone(),
-            )
-            .map_err(StoreError::from)?;
-            return Ok((
-                binding,
-                PreparedPartitionBlob {
-                    audience,
-                    stored,
-                    spool_path: Some(spool_path.clone()),
-                    uploaded_verified: false,
-                },
-            ));
+        if fact.audience_move == Some(coven_database::StoreWriteBlobMoveMaterialization::Local) {
+            return Err(StoreError::InvalidOutbound(format!(
+                "Local audience-move blob {}/{}/{} reached remote package preparation",
+                fact.table, fact.row_id, fact.column,
+            )));
         }
         let spool_path = self
             .store_dir
             .outbound_blob_spool_path(locator.locator_hash());
         if let Some(previous) = &fact.previous {
-            if coven_protocol::blob::locator_is_this_rows_upload(
-                previous.stored.locator(),
-                &fact.blob,
-                fact.plaintext_size,
-                fact.plaintext_hash,
-                &audience,
-            ) {
+            // Store blobs retain their sealing generation across Store key rotation;
+            // Circle packages bind every blob to their current Circle key.
+            if previous.stored.locator().uploader() == authority.reference
+                && (!matches!(
+                    audience,
+                    coven_protocol::blob::locator::RemoteAudience::Circle(_)
+                ) || previous.stored.locator().key_fingerprint() == key_fingerprint)
+                && coven_protocol::blob::locator_is_this_rows_upload(
+                    previous.stored.locator(),
+                    &fact.blob,
+                    fact.plaintext_size,
+                    fact.plaintext_hash,
+                    &audience,
+                )
+            {
                 let binding = audience_package::RowBlobLocatorBinding::new(
                     fact.table.clone(),
                     fact.row_id.clone(),
@@ -402,19 +355,27 @@ impl AuthorizedWriterOperation<'_> {
             ),
             coven_protocol::blob::Provenance::UserProvided => None,
         };
-        let source = if let Some(path) = &fact.external_path {
+        let source = if fact.audience_move
+            == Some(coven_database::StoreWriteBlobMoveMaterialization::Payload)
+        {
+            let destination = spool_path.with_extension("captured-plaintext");
+            let staged = self.store_dir.stage_atomic_file(&destination).await?;
+            let staged = self
+                .database
+                .stage_captured_blob_source(fact.clone(), staged)
+                .await?;
+            PartitionBlobSource::temporary(staged)
+        } else if let Some(path) = &fact.external_path {
             if fact.blob.provenance != coven_protocol::blob::Provenance::UserProvided {
                 return Err(StoreError::InvalidOutbound(format!(
                     "host-provided blob {}/{} carries an external path",
                     fact.blob.namespace, fact.blob.id
                 )));
             }
-            PartitionBlobSource::existing(self.store_dir, path.clone())
+            PartitionBlobSource::existing(path.clone())
         } else if let Some(path) = host_path {
             match tokio::fs::metadata(&path).await {
-                Ok(metadata) if metadata.is_file() => {
-                    PartitionBlobSource::existing(self.store_dir, path)
-                }
+                Ok(metadata) if metadata.is_file() => PartitionBlobSource::existing(path),
                 Ok(_) => {
                     return Err(StoreError::InvalidOutbound(format!(
                         "host blob source is not a file: {}",
@@ -423,7 +384,6 @@ impl AuthorizedWriterOperation<'_> {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     PartitionBlobSource::temporary(
-                        self.store_dir,
                         self.materialize_previous_blob(fact, locator.locator_hash())
                             .await?,
                     )
@@ -437,16 +397,14 @@ impl AuthorizedWriterOperation<'_> {
             }
         } else {
             PartitionBlobSource::temporary(
-                self.store_dir,
                 self.materialize_previous_blob(fact, locator.locator_hash())
                     .await?,
             )
         };
-        let spool = self
-            .store_dir
-            .stage_atomic_file(&spool_path)
-            .await
-            .map_err(StoreError::File)?;
+        let spool = match self.store_dir.stage_atomic_file(&spool_path).await {
+            Ok(spool) => spool,
+            Err(error) => return Err(source.cleanup_failure(StoreError::File(error)).await),
+        };
         let sealed = match destination {
             PartitionBlobDestination::Store => {
                 storage
@@ -479,11 +437,15 @@ impl AuthorizedWriterOperation<'_> {
         }) {
             Ok(spool_write) => spool_write,
             Err(error) => {
-                return Err(source.cleanup_failure(None, error).await);
+                return Err(source.cleanup_failure(error).await);
             }
         };
+        if let Err(error) = source.retire_temporary().await {
+            let created_spool = (spool_write == coven_protocol::objects::BlobSpoolWrite::Created)
+                .then(|| PreparedBlobSpool::new(self.store_dir, &spool_path));
+            return Err(rollback_created_spool(created_spool, error.into()).await);
+        }
         let prepared = async {
-            source.retire_temporary().await?;
             let slot = storage
                 .allocate_blob_slot(&locator, authority)
                 .await
@@ -517,7 +479,7 @@ impl AuthorizedWriterOperation<'_> {
                 let created_spool = (spool_write
                     == coven_protocol::objects::BlobSpoolWrite::Created)
                     .then(|| PreparedBlobSpool::new(self.store_dir, &spool_path));
-                return Err(source.cleanup_failure(created_spool, error).await);
+                return Err(rollback_created_spool(created_spool, error).await);
             }
         };
         Ok((
@@ -535,7 +497,7 @@ impl AuthorizedWriterOperation<'_> {
         &self,
         fact: &StoreWriteBlobFact,
         destination_locator: ObjectHash,
-    ) -> Result<std::path::PathBuf, StoreError> {
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, StoreError> {
         let previous = fact
             .previous
             .as_ref()
@@ -560,8 +522,7 @@ impl AuthorizedWriterOperation<'_> {
                 },
                 error => StoreError::BlobCache(error),
             })?;
-        staged.commit().await.map_err(StoreError::File)?;
-        Ok(destination)
+        Ok(staged)
     }
 }
 
@@ -597,65 +558,52 @@ fn partition_blob_facts<'a>(
         .collect())
 }
 
-struct PartitionBlobSource<'store> {
-    store_dir: &'store coven_foundation::store_dir::StoreDir,
-    path: std::path::PathBuf,
-    temporary: bool,
+enum PartitionBlobSource {
+    Existing(std::path::PathBuf),
+    Temporary(coven_foundation::local_file::AtomicStagedFile),
 }
 
-impl<'store> PartitionBlobSource<'store> {
-    fn existing(
-        store_dir: &'store coven_foundation::store_dir::StoreDir,
-        path: std::path::PathBuf,
-    ) -> Self {
-        Self {
-            store_dir,
-            path,
-            temporary: false,
-        }
+impl PartitionBlobSource {
+    fn existing(path: std::path::PathBuf) -> Self {
+        Self::Existing(path)
     }
 
-    fn temporary(
-        store_dir: &'store coven_foundation::store_dir::StoreDir,
-        path: std::path::PathBuf,
-    ) -> Self {
-        Self {
-            store_dir,
-            path,
-            temporary: true,
-        }
+    fn temporary(staged: coven_foundation::local_file::AtomicStagedFile) -> Self {
+        Self::Temporary(staged)
     }
 
     fn path(&self) -> &std::path::Path {
-        &self.path
+        match self {
+            Self::Existing(path) => path,
+            Self::Temporary(staged) => staged.path(),
+        }
     }
 
-    async fn retire_temporary(&self) -> Result<(), BlobPreparationCleanupError> {
-        if !self.temporary {
-            return Ok(());
+    async fn retire_temporary(self) -> Result<(), BlobPreparationCleanupError> {
+        match self {
+            Self::Existing(_) => Ok(()),
+            Self::Temporary(staged) => staged.discard().await.map_err(Into::into),
         }
-        remove_durable_file(self.store_dir, &self.path, false).await
     }
 
-    async fn cleanup_failure(
-        &self,
-        created_spool: Option<PreparedBlobSpool<'_>>,
-        error: StoreError,
-    ) -> StoreError {
-        let mut failures = Vec::new();
-        if let Err(cleanup_error) = self.retire_temporary().await {
-            failures.push(cleanup_error);
+    async fn cleanup_failure(self, error: StoreError) -> StoreError {
+        match self.retire_temporary().await {
+            Ok(()) => error,
+            Err(cleanup) => BlobPreparationRollback::new(error, vec![cleanup]).into(),
         }
-        if let Some(spool) = created_spool {
-            if let Err(cleanup_error) = spool.rollback().await {
-                failures.push(cleanup_error);
-            }
-        }
-        if failures.is_empty() {
-            error
-        } else {
-            BlobPreparationRollback::new(error, failures).into()
-        }
+    }
+}
+
+async fn rollback_created_spool(
+    created_spool: Option<PreparedBlobSpool<'_>>,
+    error: StoreError,
+) -> StoreError {
+    match created_spool {
+        Some(spool) => match spool.rollback().await {
+            Ok(()) => error,
+            Err(cleanup) => BlobPreparationRollback::new(error, vec![cleanup]).into(),
+        },
+        None => error,
     }
 }
 
@@ -673,20 +621,16 @@ impl<'a> PreparedBlobSpool<'a> {
     }
 
     async fn rollback(self) -> Result<(), BlobPreparationCleanupError> {
-        remove_durable_file(self.store_dir, self.path, true).await
+        remove_durable_file(self.store_dir, self.path).await
     }
 }
 
 async fn remove_durable_file(
     store_dir: &coven_foundation::store_dir::StoreDir,
     path: &std::path::Path,
-    require_present: bool,
 ) -> Result<(), BlobPreparationCleanupError> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_present => {
-            return Ok(());
-        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(BlobPreparationCleanupError::MissingSpool {
                 path: path.to_path_buf(),
@@ -704,7 +648,7 @@ async fn remove_durable_file(
     store_dir.sync_parent_dir(path).await.map_err(Into::into)
 }
 
-pub(crate) fn prepare_partition_blob_locator(
+fn prepare_partition_blob_locator(
     fact: &StoreWriteBlobFact,
     audience: coven_protocol::blob::locator::RemoteAudience,
     key_fingerprint: Option<coven_keys::encryption::KeyFingerprint>,

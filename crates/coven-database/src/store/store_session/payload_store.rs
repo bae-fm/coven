@@ -18,7 +18,7 @@
 //! the deletion rather than losing it.
 
 use std::collections::BTreeSet;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use coven_foundation::atomic_file::AtomicFileStage;
@@ -119,7 +119,7 @@ impl StoredPayload {
 
 enum ExistingPayloadState {
     Absent,
-    Verified(Vec<u8>),
+    Verified,
     RepairableFile,
 }
 
@@ -143,13 +143,7 @@ impl<'store> PayloadStore<'store> {
         let existing_file = match self.existing_payload_state(hash, bytes.len() as u64)? {
             ExistingPayloadState::Absent => false,
             ExistingPayloadState::RepairableFile => true,
-            ExistingPayloadState::Verified(installed) if installed == bytes => return Ok(hash),
-            ExistingPayloadState::Verified(_) => {
-                return Err(PayloadStoreError::Storage {
-                    hash,
-                    error: "installed logical bytes differ from the payload".to_string(),
-                });
-            }
+            ExistingPayloadState::Verified => return Ok(hash),
         };
         let compressed = compress_payload(hash, bytes)?;
         if existing_file || compressed.len() > INLINE_PAYLOAD_LIMIT {
@@ -161,81 +155,18 @@ impl<'store> PayloadStore<'store> {
         Ok(hash)
     }
 
-    pub(crate) fn read(self, hash: ObjectHash) -> Result<Vec<u8>, PayloadStoreError> {
-        let stored = self
-            .stored(hash)?
-            .ok_or_else(|| PayloadStoreError::Storage {
-                hash,
-                error: "no catalog row".to_string(),
-            })?;
-        self.decode_stored(hash, stored)
-    }
-
-    fn decode_stored(
+    pub(super) fn copy_verified(
         self,
         hash: ObjectHash,
-        stored: StoredPayload,
-    ) -> Result<Vec<u8>, PayloadStoreError> {
-        let (compressed, payload_size) = match stored {
-            StoredPayload::Inline {
-                compressed,
-                payload_size,
-            } => (compressed, payload_size),
-            StoredPayload::File {
-                compressed_size,
-                payload_size,
-            } => {
-                let compressed = read_payload_file_blocking(self.store_dir, hash)?;
-                if compressed.len() as u64 != compressed_size {
-                    return Err(PayloadStoreError::Storage {
-                        hash,
-                        error: format!(
-                            "catalog records {compressed_size} compressed file bytes, but the spool contains {}",
-                            compressed.len()
-                        ),
-                    });
-                }
-                (compressed, payload_size)
-            }
-        };
-        let bytes = decompress_payload(hash, &compressed, payload_size)?;
-        if bytes.len() as u64 != payload_size {
-            return Err(PayloadStoreError::Storage {
-                hash,
-                error: format!(
-                    "catalog records {payload_size} payload bytes, but decompression produced {}",
-                    bytes.len()
-                ),
-            });
-        }
-        Ok(bytes)
-    }
-
-    pub(crate) fn read_verified(self, hash: ObjectHash) -> Result<Vec<u8>, PayloadStoreError> {
-        let stored = self
-            .stored(hash)?
-            .ok_or_else(|| PayloadStoreError::Storage {
-                hash,
-                error: "no catalog row".to_string(),
-            })?;
+        output: &mut impl std::io::Write,
+    ) -> Result<u64, PayloadStoreError> {
+        let stored = self.require_stored(hash)?;
+        let size = stored.payload_size();
         let inline = matches!(stored, StoredPayload::Inline { .. });
-        let bytes = self.decode_stored(hash, stored)?;
-        let actual = ObjectHash::digest(&bytes);
-        if actual == hash {
-            return Ok(bytes);
-        }
-        if inline {
-            Err(PayloadStoreError::InlineContentMismatch {
-                expected: hash,
-                actual,
-            })
-        } else {
-            Err(PayloadStoreError::ContentMismatch {
-                expected: hash,
-                actual,
-                path: self.store_dir.payload_spool_path(hash),
-            })
-        }
+        let mut output = reading::HashedPayloadOutput::new(output);
+        self.copy_stored(hash, stored, &mut output)?;
+        self.verify_hash(hash, output.finish(), inline)?;
+        Ok(size)
     }
 
     fn writer(self) -> PayloadWriter<'store> {
@@ -247,6 +178,24 @@ impl<'store> PayloadStore<'store> {
             hasher: coven_protocol::blob::ContentHasher::new(),
             size: 0,
         }
+    }
+
+    pub(super) fn file_writer(
+        self,
+        source: &Path,
+    ) -> Result<PayloadWriter<'store>, PayloadStoreError> {
+        let mut input = std::fs::File::open(source).map_err(|error| PayloadStoreError::FileIo {
+            operation: "open",
+            path: source.to_path_buf(),
+            source: error,
+        })?;
+        let mut writer = self.writer();
+        std::io::copy(&mut input, &mut writer).map_err(|error| PayloadStoreError::FileIo {
+            operation: "copy",
+            path: source.to_path_buf(),
+            source: error,
+        })?;
+        Ok(writer)
     }
 
     fn require_transaction(self, hash: ObjectHash) -> Result<(), PayloadStoreError> {
@@ -277,8 +226,10 @@ impl<'store> PayloadStore<'store> {
             });
         }
         let inline = matches!(stored, StoredPayload::Inline { .. });
-        let bytes = match self.decode_stored(hash, stored) {
-            Ok(bytes) => bytes,
+        let mut sink = std::io::sink();
+        let mut output = reading::HashedPayloadOutput::new(&mut sink);
+        match self.copy_stored(hash, stored, &mut output) {
+            Ok(()) => {}
             Err(
                 PayloadStoreError::Missing { .. }
                 | PayloadStoreError::Storage { .. }
@@ -288,22 +239,8 @@ impl<'store> PayloadStore<'store> {
             ) if !inline => return Ok(ExistingPayloadState::RepairableFile),
             Err(error) => return Err(error),
         };
-        let actual = ObjectHash::digest(&bytes);
-        if actual == hash {
-            return Ok(ExistingPayloadState::Verified(bytes));
-        }
-        if inline {
-            Err(PayloadStoreError::InlineContentMismatch {
-                expected: hash,
-                actual,
-            })
-        } else {
-            Err(PayloadStoreError::ContentMismatch {
-                expected: hash,
-                actual,
-                path: self.store_dir.payload_spool_path(hash),
-            })
-        }
+        self.verify_hash(hash, output.finish(), inline)?;
+        Ok(ExistingPayloadState::Verified)
     }
 
     fn stored(self, hash: ObjectHash) -> Result<Option<StoredPayload>, PayloadStoreError> {
@@ -487,6 +424,20 @@ impl<'store> CompressedPayloadTarget<'store> {
 
 impl<'store> PayloadWriter<'store> {
     pub(crate) fn commit(self) -> Result<(ObjectHash, u64), PayloadStoreError> {
+        self.commit_tracking_created_files(None)
+    }
+
+    pub(super) fn commit_for_capture(
+        self,
+        created_files: &mut Vec<PathBuf>,
+    ) -> Result<(ObjectHash, u64), PayloadStoreError> {
+        self.commit_tracking_created_files(Some(created_files))
+    }
+
+    fn commit_tracking_created_files(
+        self,
+        created_files: Option<&mut Vec<PathBuf>>,
+    ) -> Result<(ObjectHash, u64), PayloadStoreError> {
         let hash = self
             .hasher
             .finish()
@@ -496,7 +447,7 @@ impl<'store> PayloadWriter<'store> {
         let existing_file = match self.payloads.existing_payload_state(hash, self.size)? {
             ExistingPayloadState::Absent => false,
             ExistingPayloadState::RepairableFile => true,
-            ExistingPayloadState::Verified(_) => return Ok((hash, self.size)),
+            ExistingPayloadState::Verified => return Ok((hash, self.size)),
         };
         let compressed = self
             .encoder
@@ -515,9 +466,17 @@ impl<'store> PayloadWriter<'store> {
                 let path = self.payloads.store_dir.payload_spool_path(hash);
                 self.payloads
                     .record_file(hash, self.size, compressed.size)?;
-                staged
-                    .commit(&path)
-                    .map_err(|source| PayloadStoreError::AtomicFile { path, source })?;
+                let installation = staged.commit(&path);
+                let renamed = match &installation {
+                    Ok(()) => true,
+                    Err(error) => error.committed(),
+                };
+                if !existing_file && renamed {
+                    if let Some(created_files) = created_files {
+                        created_files.push(path.clone());
+                    }
+                }
+                installation.map_err(|source| PayloadStoreError::AtomicFile { path, source })?;
             }
         }
         Ok((hash, self.size))
@@ -600,19 +559,6 @@ fn compress_payload(hash: ObjectHash, bytes: &[u8]) -> Result<Vec<u8>, PayloadSt
     encoder
         .finish()
         .map_err(|source| PayloadStoreError::CompressionFrame { hash, source })
-}
-
-fn decompress_payload(
-    hash: ObjectHash,
-    compressed: &[u8],
-    payload_size: u64,
-) -> Result<Vec<u8>, PayloadStoreError> {
-    let mut bytes = Vec::new();
-    lz4_flex::frame::FrameDecoder::new(compressed)
-        .take(payload_size.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|source| PayloadStoreError::CompressionIo { hash, source })?;
-    Ok(bytes)
 }
 
 /// Delete the payload behind every committed cleanup obligation, clearing each
@@ -731,18 +677,9 @@ pub(crate) fn write_payload_file_blocking(
     store_dir: &StoreDir,
     source: &Path,
 ) -> Result<(ObjectHash, u64), PayloadStoreError> {
-    let mut input = std::fs::File::open(source).map_err(|error| PayloadStoreError::FileIo {
-        operation: "open",
-        path: source.to_path_buf(),
-        source: error,
-    })?;
-    let mut writer = PayloadStore::new(conn, store_dir).writer();
-    std::io::copy(&mut input, &mut writer).map_err(|error| PayloadStoreError::FileIo {
-        operation: "copy",
-        path: source.to_path_buf(),
-        source: error,
-    })?;
-    writer.commit()
+    PayloadStore::new(conn, store_dir)
+        .file_writer(source)?
+        .commit()
 }
 
 /// Read a payload on the database's connection thread.
@@ -752,14 +689,6 @@ pub(crate) fn read_payload_blocking(
     hash: ObjectHash,
 ) -> Result<Vec<u8>, PayloadStoreError> {
     PayloadStore::new(conn, store_dir).read(hash)
-}
-
-fn read_payload_file_blocking(
-    store_dir: &StoreDir,
-    hash: ObjectHash,
-) -> Result<Vec<u8>, PayloadStoreError> {
-    let path = store_dir.payload_spool_path(hash);
-    std::fs::read(&path).map_err(|error| read_error(hash, path, error))
 }
 
 pub(super) fn read_verified_payload_blocking(
@@ -912,7 +841,7 @@ pub(crate) fn outbound_circle_snapshot_owner_key(
     format!("outbound-circle-snapshot:{circle_id}")
 }
 
-/// One queued Store write's captured SQLite changeset.
+/// One queued Store write's captured edits, partitions and immutable blob sources.
 pub(crate) fn store_write_owner_key(write_id: &coven_protocol::write::WriteId) -> String {
     format!("store-write:{write_id}")
 }
@@ -954,3 +883,6 @@ mod test_support;
 #[cfg(test)]
 #[path = "payload_store_tests.rs"]
 mod tests;
+
+#[path = "payload_store_reading.rs"]
+mod reading;

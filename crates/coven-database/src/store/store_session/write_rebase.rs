@@ -4,7 +4,6 @@ use coven_protocol::store_commit::{
     AcceptedStoreSnapshotRef, CommitFrontier, StorePublicationBase,
 };
 use coven_protocol::write::WriteId;
-use std::collections::BTreeSet;
 
 impl VerifiedStoreTransaction<'_, '_, '_, '_> {
     pub(super) fn rebase_unpublished_store_writes(
@@ -242,7 +241,11 @@ impl StoreTransaction<'_, '_> {
         let payloads = self.replace_store_write_partitions(
             write_id,
             partitions,
-            BTreeSet::from([original_hash, rebased.changeset_hash]),
+            [original_hash, rebased.changeset_hash]
+                .into_iter()
+                .chain(original_facts.captured_payloads())
+                .chain(rebased.blob_facts.captured_payloads())
+                .collect(),
         )?;
         crate::payload_store::set_payload_owner_claims_on(
             self.transaction,

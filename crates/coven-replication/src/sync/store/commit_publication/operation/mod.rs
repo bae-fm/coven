@@ -33,7 +33,6 @@ mod signing;
 mod store_writes;
 
 pub(super) use blob_preparation::close_prepared_packages;
-pub(crate) use blob_preparation::prepare_partition_blob_locator;
 
 use membership_mutation_journal::{
     decode_membership_mutation, exact_owned_remote, AdmissionMutationPlan, MembershipMutationPlan,
