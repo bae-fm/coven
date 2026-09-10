@@ -52,11 +52,7 @@ pub(crate) fn migrate_retained_replay_schema_on(
     )?
     .is_some();
     let transaction = image.unchecked_transaction().map_err(DbError::from)?;
-    crate::coven_migration::run_initialized_coven_schema_migrations_in_transaction(
-        &transaction,
-        routing.has_scoped_graph(),
-        policy,
-    )?;
+    crate::run_coven_migrations_in_transaction(&transaction, routing.has_scoped_graph(), policy)?;
     let migrated_host_schema_version =
         crate::run_migrations_in_transaction(&transaction, migrations)?;
     if !had_schema_version {

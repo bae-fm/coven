@@ -377,20 +377,6 @@ pub(crate) fn run_coven_migrations_in_transaction(
     )
 }
 
-pub(crate) fn run_initialized_coven_schema_migrations_in_transaction(
-    conn: &Connection,
-    include_routing: bool,
-    policy: CovenMigrationPolicy,
-) -> Result<(), CovenMigrationError> {
-    let migrations = migration_ladder(include_routing)?;
-    run_coven_migrations_with_ladder(
-        conn,
-        policy,
-        expected_coven_schema_v0_manifest(include_routing)?,
-        &migrations,
-    )
-}
-
 pub(crate) fn run_uninitialized_snapshot_coven_migrations_in_transaction(
     conn: &Connection,
     include_routing: bool,
