@@ -1013,8 +1013,8 @@ pub fn audience_moves_by_row(
 }
 
 /// Capture routing and audience closure from the actual changed columns on the
-/// target database. Host writes and recorded-edit rebase use this same owner.
-pub(super) fn partition_captured_write_on(
+/// host transaction.
+fn partition_captured_write_on(
     transaction: &rusqlite::Transaction<'_>,
     captured: &[u8],
     gates: &Gates,

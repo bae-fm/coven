@@ -61,8 +61,7 @@ impl ReplayProjectionResult {
         let mut private_rows = projection.private_rows(live.gates, &schema)?;
         let mut authority =
             VerifiedStoreAuthority::for_replay_baseline(projection.baseline.clone());
-        let write_id = effect.write_id.clone();
-        let outcome = ReplaySql::begin(&projection.connection)?.run(|| {
+        ReplaySql::begin(&projection.connection)?.run(|| {
             projection.apply_write_effect(
                 &mut authority,
                 live.authority.root(),
@@ -72,11 +71,6 @@ impl ReplayProjectionResult {
                 &mut private_rows,
             )
         })?;
-        if let Some(hold) = outcome {
-            return Err(DbError::Message(format!(
-                "prepared write {write_id} cannot replay at its current snapshot base: {hold:?}"
-            )));
-        }
         Ok(())
     }
 
@@ -84,11 +78,9 @@ impl ReplayProjectionResult {
         &self,
         transaction: &mut VerifiedStoreTransaction<'_, '_, '_, '_>,
         effect: crate::MergeReplayWriteEffect,
-        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         base: &coven_protocol::store_commit::StorePublicationBase,
     ) -> Result<(), DbError> {
-        self.projection
-            .rebase_write(transaction, effect, routing_key, base)
+        self.projection.rebase_write(transaction, effect, base)
     }
 
     pub(super) fn watched_outcome(&self) -> Option<WatchedReplayOutcome> {
@@ -184,7 +176,6 @@ impl ReplayProjection {
         image: &[u8],
         store_dir: coven_foundation::store_dir::StoreDir,
         baseline: &RetainedReplayBaseline,
-        gates: &crate::Gates,
         accepted: std::collections::BTreeMap<
             coven_protocol::store_commit::StoreBatchCommitRef,
             std::sync::Arc<coven_protocol::store_commit::ResolvedStoreDeviceState>,
@@ -220,11 +211,6 @@ impl ReplayProjection {
             }
         }
         transaction.commit().map_err(DbError::from)?;
-        // Rebase partitions captured writes inside a transaction. Its empty
-        // comparison schema must already exist: SQLite cannot detach a schema
-        // created by that transaction until the transaction ends.
-        crate::gate::attach_empty_clone(&connection, gates)
-            .map_err(|error| DbError::context("install replay transaction gate", error))?;
         Ok(Self {
             connection,
             store_dir,
@@ -344,13 +330,13 @@ impl ReplayProjection {
         schema: std::sync::Arc<TableSchema>,
         gates: &crate::Gates,
         private_rows: &mut super::merge_materialization_transaction::ReplayRows,
-    ) -> Result<Option<crate::MaterializationHold>, DbError> {
+    ) -> Result<(), DbError> {
         let transaction = self
             .connection
             .unchecked_transaction()
             .map_err(DbError::from)?;
         let mut next_private_rows = private_rows.clone();
-        let outcome = MergeMaterializationTransaction::from_store(
+        MergeMaterializationTransaction::from_store(
             crate::store::store_session::StoreTransaction::new(&transaction, &self.store_dir),
         )
         .apply_unaccepted_replay_effect(
@@ -361,17 +347,9 @@ impl ReplayProjection {
             gates,
             &mut next_private_rows,
         )?;
-        match outcome {
-            None => {
-                transaction.commit().map_err(DbError::from)?;
-                *private_rows = next_private_rows;
-                Ok(None)
-            }
-            Some(hold) => {
-                transaction.rollback().map_err(DbError::from)?;
-                Ok(Some(hold))
-            }
-        }
+        transaction.commit().map_err(DbError::from)?;
+        *private_rows = next_private_rows;
+        Ok(())
     }
 
     pub(super) fn private_rows(

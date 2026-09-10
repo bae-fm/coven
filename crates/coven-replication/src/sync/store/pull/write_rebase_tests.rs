@@ -199,53 +199,42 @@ impl RebaseFixture {
             .await
             .expect("peer publishes snapshot");
     }
-
-    async fn assert_rows(&self, database: &Database) {
-        assert_eq!(
-            database
-                .query_test_text("SELECT title FROM notes WHERE id = 'shared'")
-                .await,
-            "Recorded local title"
-        );
-        assert_eq!(
-            database
-                .query_test_text("SELECT body FROM notes WHERE id = 'shared'")
-                .await,
-            "Peer changed body"
-        );
-        assert_eq!(
-            database
-                .query_test_text("SELECT title FROM notes WHERE id = 'private'")
-                .await,
-            "Private local effect"
-        );
-    }
 }
 
 #[tokio::test]
 async fn snapshot_rebase_preserves_recorded_columns_and_reserved_write() {
-    exercise_reserved_rebase(false, false).await;
+    exercise_reserved_rebase(false, false, false).await;
 }
 
 #[tokio::test]
 async fn snapshot_rebase_awaiting_preparation_survives_database_reopen() {
-    exercise_reserved_rebase(true, false).await;
+    exercise_reserved_rebase(true, false, false).await;
 }
 
 #[tokio::test]
 async fn snapshot_rebase_can_cross_another_snapshot_before_preparation() {
-    exercise_reserved_rebase(true, true).await;
+    exercise_reserved_rebase(true, true, false).await;
 }
 
-async fn exercise_reserved_rebase(reopen: bool, second_snapshot: bool) {
+async fn exercise_reserved_rebase(reopen: bool, second_snapshot: bool, same_column: bool) {
     let fixture = RebaseFixture::new().await;
+    let expected_title = if same_column {
+        "Peer changed title"
+    } else {
+        "Recorded local title"
+    };
+    let expected_body = if same_column {
+        "Original body"
+    } else {
+        "Peer changed body"
+    };
     let original = fixture.prepare_local().await;
     let (write_id, registration, coord) = original.commit_reservation().expect("reserved commit");
     let original_capture = StoreDatabase::new(&fixture.source)
         .store_write_capture_for_test(write_id.clone())
         .await
         .expect("read original captured edit");
-    fixture.snapshot_peer_edit(false).await;
+    fixture.snapshot_peer_edit(same_column).await;
     let (_, pulled) = fixture
         .owner
         .pull_store()
@@ -276,7 +265,7 @@ async fn exercise_reserved_rebase(reopen: bool, second_snapshot: bool) {
         original_capture,
         "recorded observations and edit remain immutable",
     );
-    fixture.assert_rows(&fixture.source).await;
+    assert_rebased_rows(&fixture.source, expected_title, expected_body).await;
     if second_snapshot {
         fixture
             .peer
@@ -289,7 +278,7 @@ async fn exercise_reserved_rebase(reopen: bool, second_snapshot: bool) {
             .await
             .expect("rebase awaiting work again");
         assert!(pulled.held_positions.is_empty(), "{pulled:?}");
-        fixture.assert_rows(&fixture.source).await;
+        assert_rebased_rows(&fixture.source, expected_title, expected_body).await;
     }
     let resumed_source = if reopen {
         RebaseFixture::open(&fixture.path, fixture.source_dir.clone())
@@ -313,7 +302,7 @@ async fn exercise_reserved_rebase(reopen: bool, second_snapshot: bool) {
         1
     );
     drop(writer);
-    fixture.assert_rows(&resumed_source).await;
+    assert_rebased_rows(&resumed_source, expected_title, expected_body).await;
     let resumed_database = StoreDatabase::new(&resumed_source);
     assert!(resumed_database
         .active_store_publication()
@@ -354,7 +343,7 @@ async fn exercise_reserved_rebase(reopen: bool, second_snapshot: bool) {
             .target
             .query_test_text("SELECT title FROM notes WHERE id = 'shared'")
             .await,
-        "Recorded local title"
+        expected_title
     );
     assert!(
         !fixture
@@ -365,71 +354,28 @@ async fn exercise_reserved_rebase(reopen: bool, second_snapshot: bool) {
 }
 
 #[tokio::test]
-async fn snapshot_rebase_conflict_preserves_the_entire_previous_state() {
-    let fixture = RebaseFixture::new().await;
-    let original = fixture.prepare_local().await;
-    let database = StoreDatabase::new(&fixture.source);
-    let before = database
-        .retained_store_publication()
-        .await
-        .expect("original accepted boundary");
-    let baseline = database
-        .installed_replay_baseline()
-        .await
-        .expect("original baseline");
-    fixture.snapshot_peer_edit(true).await;
-    let error = fixture
-        .owner
-        .pull_store()
-        .await
-        .expect_err("conflicting recorded column stops adoption");
-    assert!(
-        format!("{error:?}").contains("WriteRebaseConflict"),
-        "{error:?}"
+async fn snapshot_rebase_automatically_merges_a_newer_peer_value_and_keeps_the_write_receipt() {
+    exercise_reserved_rebase(true, true, true).await;
+}
+
+async fn assert_rebased_rows(database: &Database, title: &str, body: &str) {
+    assert_eq!(
+        database
+            .query_test_text("SELECT title FROM notes WHERE id = 'shared'")
+            .await,
+        title
     );
     assert_eq!(
         database
-            .active_store_publication()
-            .await
-            .expect("preserved reservation"),
-        Some(original)
-    );
-    let after = database
-        .retained_store_publication()
-        .await
-        .expect("preserved observed history");
-    assert_eq!(after.0, before.0);
-    let entries = |values: &[coven_database::ExactProtocolObject<
-        coven_protocol::store_commit::StorePublicationEntry,
-    >]| {
-        values
-            .iter()
-            .map(|entry| (entry.prepared.reference().clone(), entry.value.to_bytes()))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(entries(&after.1), entries(&before.1));
-    let unchanged = database
-        .installed_replay_baseline()
-        .await
-        .expect("preserved baseline");
-    assert_eq!(unchanged.coverage(), baseline.coverage());
-    assert_eq!(
-        unchanged.snapshot().map(|snapshot| &snapshot.reference),
-        baseline.snapshot().map(|snapshot| &snapshot.reference)
-    );
-    assert_eq!(
-        fixture
-            .source
-            .query_test_text("SELECT title FROM notes WHERE id = 'shared'")
-            .await,
-        "Recorded local title"
-    );
-    assert_eq!(
-        fixture
-            .source
             .query_test_text("SELECT body FROM notes WHERE id = 'shared'")
             .await,
-        "Original body"
+        body
+    );
+    assert_eq!(
+        database
+            .query_test_text("SELECT title FROM notes WHERE id = 'private'")
+            .await,
+        "Private local effect"
     );
 }
 
@@ -600,7 +546,7 @@ async fn snapshot_rebase_cleanup_failure_keeps_the_replacement_reserved() {
             .expect("cleanup cannot publish"),
         boundary
     );
-    fixture.assert_rows(&fixture.source).await;
+    assert_rebased_rows(&fixture.source, "Recorded local title", "Peer changed body").await;
     let reopened = RebaseFixture::open(&fixture.path, fixture.source_dir.clone());
     let resumed = fixture
         .store
@@ -627,7 +573,7 @@ async fn snapshot_rebase_cleanup_failure_keeps_the_replacement_reserved() {
             .expect("read retired candidate ownership"),
         "obsolete candidate bytes have no lifetime owner after verified deletion"
     );
-    fixture.assert_rows(&reopened).await;
+    assert_rebased_rows(&reopened, "Recorded local title", "Peer changed body").await;
 }
 
 #[tokio::test]
@@ -688,69 +634,281 @@ async fn snapshot_rebase_does_not_replace_a_write_accepted_before_the_snapshot()
         .has_rebased_store_writes_for_test()
         .await
         .expect("read replacement inputs"));
-    fixture.assert_rows(&fixture.source).await;
+    assert_rebased_rows(&fixture.source, "Recorded local title", "Peer changed body").await;
 }
 
 #[tokio::test]
-async fn snapshot_rebase_blocks_the_conflicting_suffix_write_during_another_publication() {
+async fn snapshot_rebase_merges_the_suffix_during_another_publication() {
     let fixture = RebaseFixture::new().await;
     let prepared = fixture.prepare_local().await;
-    let (first_id, _, _) = prepared.commit_reservation().expect("first reservation");
-    fixture.source.execute_test_host_write(
-        "UPDATE notes SET body = 'Recorded second body', _updated_at = '0000000002500-0000-owner' WHERE id = 'shared'",
-    ).await;
+    let (first_id, _, first_coord) = prepared.commit_reservation().expect("first reservation");
     let database = StoreDatabase::new(&fixture.source);
-    let suffix = database
-        .pending_writes()
+    let second = database.run_host_store_write_for_test(Some(fixture.routing.clone()), None, |sql| {
+        sql.execute_batch("UPDATE notes SET body = 'Recorded second body', _updated_at = '0000000002500-0000-owner' WHERE id = 'shared'").map_err(coven_database::DbError::from)
+    }).await.expect("capture second edit").write_id;
+    let original_capture = database
+        .store_write_capture_for_test(second.clone())
         .await
-        .expect("read actual captured suffix");
-    let second = suffix
-        .iter()
-        .find(|write| &write.write_id != first_id)
-        .expect("second captured write")
-        .write_id
-        .clone();
+        .unwrap();
     fixture.snapshot_peer_edit(false).await;
     let mut writer = fixture
         .owner
         .authorize_writer()
         .await
         .expect("resume first publication");
-    let error = writer
-        .drain_store_writes()
-        .await
-        .expect_err("second recorded write conflicts during first publication");
-    drop(writer);
-    assert!(
-        format!("{error:?}").contains("WriteRebaseConflict"),
-        "{error:?}"
-    );
-    let first = database.write_status(first_id).await.expect("first status");
     assert_eq!(
-        first,
-        coven_protocol::write::WriteStatus::Publishing,
-        "first write did not conflict"
+        writer
+            .drain_store_writes()
+            .await
+            .expect("merge the pending suffix and publish first write"),
+        1
     );
-    let blocked = database.write_status(&second).await.expect("second status");
-    assert!(
-        matches!(blocked,
-            coven_protocol::write::WriteStatus::Blocked(coven_protocol::write::WriteBlock::RebaseConflict(ref conflict))
-            if conflict.write_id == second
-        ),
-        "wrong suffix write was blocked: {blocked:?}"
-    );
+    assert_rebased_rows(&fixture.source, "Recorded local title", "Peer changed body").await;
     assert_eq!(
         database
+            .store_write_capture_for_test(second.clone())
+            .await
+            .unwrap(),
+        original_capture
+    );
+    assert_eq!(
+        database.write_status(&second).await.unwrap(),
+        coven_protocol::write::WriteStatus::Pending
+    );
+    let first = database.write_status(first_id).await.unwrap();
+    let coven_protocol::write::WriteStatus::Published(first) = first else {
+        panic!("first write must publish: {first:?}");
+    };
+    assert_eq!(&first.exact_commit().unwrap().coord, first_coord);
+    assert!(writer
+        .prepare_pending_store_write()
+        .await
+        .expect("prepare the merged second write"));
+    assert_eq!(
+        writer
+            .drain_store_writes()
+            .await
+            .expect("publish the second write receipt"),
+        1
+    );
+    drop(writer);
+    assert!(matches!(
+        database.write_status(&second).await.unwrap(),
+        coven_protocol::write::WriteStatus::Published(_)
+    ));
+    assert!(database.active_store_publication().await.unwrap().is_none());
+    assert!(database.pending_writes().await.unwrap().is_empty());
+    fixture
+        .peer
+        .pull_store()
+        .await
+        .expect("peer observes both publications");
+    assert_eq!(
+        fixture
+            .target
+            .query_test_text("SELECT title || ':' || body FROM notes WHERE id = 'shared'")
+            .await,
+        "Recorded local title:Peer changed body"
+    );
+    assert!(
+        !fixture
+            .target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'private'")
+            .await
+    );
+}
+
+#[tokio::test]
+async fn repeated_snapshots_preserve_local_edit_order_across_reopen() {
+    exercise_repeated_snapshot_suffix(true).await;
+}
+
+#[tokio::test]
+async fn repeated_snapshots_do_not_promote_an_earlier_body_edit_over_a_later_title_edit() {
+    exercise_repeated_snapshot_suffix(false).await;
+}
+
+async fn exercise_repeated_snapshot_suffix(first_changes_title: bool) {
+    let fixture = RebaseFixture::new().await;
+    let original = if first_changes_title {
+        fixture.prepare_local().await
+    } else {
+        RebaseFixture::capture_host_edit(&fixture.source, &fixture.routing,
+            "UPDATE notes SET body = 'Earlier local body', _updated_at = '0000000002000-0000-owner' WHERE id = 'shared'; INSERT INTO notes (id, title, shared, _updated_at, created_at) VALUES ('private', 'Private local effect', 0, '0000000002000-0000-owner', '2026-01-01')",
+        ).await;
+        let mut writer = fixture.owner.authorize_writer().await.unwrap();
+        assert!(writer.prepare_pending_store_write().await.unwrap());
+        StoreDatabase::new(&fixture.source)
             .active_store_publication()
             .await
-            .expect("preserved first reservation"),
-        Some(prepared)
-    );
+            .unwrap()
+            .expect("first body edit is reserved")
+    };
+    let expected_body = if first_changes_title {
+        "Original body"
+    } else {
+        "Earlier local body"
+    };
+    let (first_id, registration, coord) = original
+        .commit_reservation()
+        .expect("first local edit reserves its author coordinate");
+    let database = StoreDatabase::new(&fixture.source);
+    let second = database.run_host_store_write_for_test(Some(fixture.routing.clone()), None, |sql| {
+        sql.execute_batch("UPDATE notes SET title = 'Later local title', _updated_at = '0000000004000-0000-owner' WHERE id = 'shared'").map_err(coven_database::DbError::from)
+    }).await.expect("capture a later edit of the same column").write_id;
+    let first_capture = database
+        .store_write_capture_for_test(first_id.clone())
+        .await
+        .unwrap();
+    let second_capture = database
+        .store_write_capture_for_test(second.clone())
+        .await
+        .unwrap();
+    // The peer's timestamp is after the first local edit and before the second.
+    fixture.snapshot_peer_edit(true).await;
+    fixture
+        .owner
+        .pull_store()
+        .await
+        .expect("merge both original edits against the first snapshot");
+    assert_rebased_rows(&fixture.source, "Later local title", expected_body).await;
     assert_eq!(
         fixture
             .source
+            .query_test_text("SELECT _updated_at FROM notes WHERE id = 'shared'")
+            .await,
+        "0000000004000-0000-owner"
+    );
+    let awaiting = database
+        .active_store_publication()
+        .await
+        .unwrap()
+        .expect("first edit stays reserved");
+    assert!(awaiting.is_awaiting_preparation());
+    assert_eq!(
+        awaiting.commit_reservation(),
+        Some((first_id, registration, coord))
+    );
+
+    fixture
+        .peer
+        .publish_snapshot_generation_for_test()
+        .await
+        .expect("publish a second snapshot before either local edit publishes");
+    let reopened = RebaseFixture::open(&fixture.path, fixture.source_dir.clone());
+    let resumed = fixture
+        .store
+        .bind_device_in(&reopened, fixture.source_dir.clone(), &fixture.signer)
+        .await
+        .expect("reopen the original write journal");
+    resumed
+        .pull_store()
+        .await
+        .expect("merge original timestamps again after reopening");
+    let records = StoreDatabase::new(&reopened);
+    assert_rebased_rows(&reopened, "Later local title", expected_body).await;
+    assert_eq!(
+        reopened
+            .query_test_text("SELECT _updated_at FROM notes WHERE id = 'shared'")
+            .await,
+        "0000000004000-0000-owner"
+    );
+    assert_eq!(
+        records
+            .store_write_capture_for_test(first_id.clone())
+            .await
+            .unwrap(),
+        first_capture
+    );
+    assert_eq!(
+        records
+            .store_write_capture_for_test(second.clone())
+            .await
+            .unwrap(),
+        second_capture
+    );
+    let reservation = records
+        .active_store_publication()
+        .await
+        .unwrap()
+        .expect("reopened first edit retains its reservation");
+    assert!(reservation.is_awaiting_preparation());
+    assert_eq!(
+        reservation.commit_reservation(),
+        Some((first_id, registration, coord))
+    );
+    let mut writer = resumed.authorize_writer().await.unwrap();
+    assert_eq!(
+        writer
+            .drain_store_writes()
+            .await
+            .expect("publish first rebased edit"),
+        1
+    );
+    assert!(writer
+        .prepare_pending_store_write()
+        .await
+        .expect("prepare later original edit"));
+    assert_eq!(
+        writer
+            .drain_store_writes()
+            .await
+            .expect("publish later original edit"),
+        1
+    );
+    drop(writer);
+    let first_receipt = records.write_status(first_id).await.unwrap();
+    let second_receipt = records.write_status(&second).await.unwrap();
+    let coven_protocol::write::WriteStatus::Published(first) = first_receipt else {
+        panic!("first edit needs its receipt: {first_receipt:?}");
+    };
+    let coven_protocol::write::WriteStatus::Published(second_position) = second_receipt else {
+        panic!("second edit needs its receipt: {second_receipt:?}");
+    };
+    assert_eq!(&first.exact_commit().unwrap().coord, coord);
+    assert_ne!(first.exact_commit(), second_position.exact_commit());
+    assert!(records.active_store_publication().await.unwrap().is_none());
+    assert!(records.pending_writes().await.unwrap().is_empty());
+    assert_rebased_rows(&reopened, "Later local title", expected_body).await;
+    fixture
+        .peer
+        .pull_store()
+        .await
+        .expect("peer installs both exact write publications");
+    assert_eq!(
+        fixture
+            .target
+            .query_test_text("SELECT title || ':' || _updated_at FROM notes WHERE id = 'shared'")
+            .await,
+        "Later local title:0000000004000-0000-owner"
+    );
+    assert!(
+        !fixture
+            .target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'private'")
+            .await
+    );
+    assert_eq!(
+        resumed
+            .load_commit_for_test(first.exact_commit().unwrap())
+            .await
+            .unwrap()
+            .write_id,
+        first_id.clone()
+    );
+    assert_eq!(
+        resumed
+            .load_commit_for_test(second_position.exact_commit().unwrap())
+            .await
+            .unwrap()
+            .write_id,
+        second
+    );
+    assert_eq!(
+        fixture
+            .target
             .query_test_text("SELECT body FROM notes WHERE id = 'shared'")
             .await,
-        "Recorded second body"
+        expected_body
     );
 }

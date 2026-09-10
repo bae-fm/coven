@@ -151,8 +151,9 @@ pub struct StoreWriteBase {
     pub dependencies: BTreeMap<String, StoreBatchCommitRef>,
 }
 
-/// Current publication inputs produced by reapplying the recorded edit. The
-/// journal's original base, changeset and blob facts remain the capture record.
+/// A write's current replay base and actual effect for inverse discard.
+/// Publication keeps the captured partitions and timestamps. Blob facts retain
+/// exact sources, including verified uploads from retired candidates.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RebasedStoreWrite {

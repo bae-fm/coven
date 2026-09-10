@@ -832,7 +832,6 @@ impl StoreTransaction<'_, '_> {
     pub(crate) fn open_replay_projection(
         self,
         baseline: &crate::RetainedReplayBaseline,
-        gates: &crate::Gates,
     ) -> Result<crate::store::ReplayProjection, DbError> {
         // Accepted history belongs to this transaction. Only positions under
         // the rewind cut may seed the projection; later states must be replayed.
@@ -844,7 +843,6 @@ impl StoreTransaction<'_, '_> {
             &baseline.image_bytes(self.transaction, self.store_dir)?,
             self.store_dir.clone(),
             baseline,
-            gates,
             covered,
         )?;
         projection.replace_store_publication_state(self.transaction)?;

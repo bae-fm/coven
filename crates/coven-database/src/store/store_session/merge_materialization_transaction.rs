@@ -2,7 +2,6 @@ mod changeset_application;
 mod conflict;
 mod private_shared;
 mod replay_effect;
-use replay_effect::replay_effect_local_rows;
 
 mod activation_records;
 mod application;
@@ -160,28 +159,6 @@ pub(crate) struct MergeMaterializationTransaction<'transaction, 'connection> {
 }
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
-    pub(super) fn validate_recorded_replay_context(
-        &self,
-        authority: &mut dyn VerifiedStoreLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        effect: &crate::MergeReplayWriteEffect,
-        gates: &crate::Gates,
-    ) -> Result<(), DbError> {
-        self.validate_unaccepted_circle_context(authority, root, effect)?;
-        let public_rows = replay_effect_public_rows(self.store.transaction, effect)?;
-        let local_rows = replay_effect_local_rows(effect)?;
-        if let Some((table, primary_key)) =
-            self.local_write_would_change_shared_row(gates, &public_rows, &local_rows)?
-        {
-            return Err(Self::local_shared_conflict(
-                &effect.write_id,
-                table,
-                primary_key,
-            ));
-        }
-        Ok(())
-    }
-
     pub(super) fn validate_recorded_foreign_keys(
         &self,
         write_id: &WriteId,
@@ -293,7 +270,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         schema: std::sync::Arc<TableSchema>,
         gates: &crate::Gates,
         replay_rows: &mut ReplayRows,
-    ) -> Result<Option<crate::MaterializationHold>, DbError> {
+    ) -> Result<(), DbError> {
         self.apply_unaccepted_replay_effect_inner(
             authority,
             root,

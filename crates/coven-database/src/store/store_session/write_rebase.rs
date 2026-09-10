@@ -71,7 +71,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
                 replay.restore_unaccepted_write(self, effect)?;
                 continue;
             }
-            replay.rebase_write(self, effect, routing_key, &base)?;
+            replay.rebase_write(self, effect, &base)?;
             if let Some(candidate) = candidate {
                 self.retire_rebased_candidate(&write_id, snapshot, candidate)?;
             }

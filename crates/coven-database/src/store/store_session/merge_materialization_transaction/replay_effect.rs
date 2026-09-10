@@ -9,7 +9,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         schema: std::sync::Arc<TableSchema>,
         gates: &crate::Gates,
         replay_rows: &mut ReplayRows,
-    ) -> Result<Option<crate::MaterializationHold>, DbError> {
+    ) -> Result<(), DbError> {
         self.validate_unaccepted_circle_context(authority, root, &effect)?;
         let public_rows = replay_effect_public_rows(self.store.transaction, &effect)?;
         let local_rows = replay_effect_local_rows(&effect)?;
@@ -25,11 +25,7 @@ impl MergeMaterializationTransaction<'_, '_> {
             .into_iter()
             .chain(effect.partitions.circles)
             .chain(effect.partitions.local);
-        if let Some(tables) =
-            self.apply_replay_partitions(&effect.write_id, partitions, schema.clone())?
-        {
-            return Ok(Some(crate::MaterializationHold::ConstraintConflict(tables)));
-        }
+        self.apply_replay_partitions(&effect.write_id, partitions, schema.clone())?;
         self.validate_recorded_foreign_keys(&effect.write_id, &schema)?;
         if let Some((table, row_id)) = self.update_replay_rows_after_unaccepted_effect(
             gates,
@@ -40,7 +36,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         )? {
             return Err(Self::local_shared_conflict(&effect.write_id, table, row_id));
         }
-        Ok(None)
+        Ok(())
     }
 
     pub(super) fn validate_unaccepted_circle_context(
@@ -162,11 +158,7 @@ impl MergeMaterializationTransaction<'_, '_> {
                 commit: commit.clone(),
             }));
         }
-        if let Some(tables) =
-            self.apply_replay_partitions(&effect.write_id, effect.partitions.local, schema.clone())?
-        {
-            return Ok(Some(crate::MaterializationHold::ConstraintConflict(tables)));
-        }
+        self.apply_replay_partitions(&effect.write_id, effect.partitions.local, schema.clone())?;
         if let Some((table, row_id)) = self.update_private_rows_after_effect(
             gates,
             &schema,
@@ -225,7 +217,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         write_id: &WriteId,
         partitions: impl IntoIterator<Item = crate::AudiencePartition>,
         schema: std::sync::Arc<TableSchema>,
-    ) -> Result<Option<Vec<String>>, DbError> {
+    ) -> Result<(), DbError> {
         self.store
             .transaction
             .pragma_update(None, "defer_foreign_keys", "ON")
@@ -235,13 +227,9 @@ impl MergeMaterializationTransaction<'_, '_> {
                 ValidatedChangeset::new(partition.changeset, schema.clone()).map_err(|error| {
                     DbError::context(format!("local replay write {write_id} changeset"), error)
                 })?;
-            let applied =
-                self.apply_changeset(changeset, IncomingTimestampPolicy::LocallyAuthored)?;
-            if !applied.constraint_conflict_tables.is_empty() {
-                return Ok(Some(applied.constraint_conflict_tables));
-            }
+            self.apply_recorded_changeset(changeset, write_id)?;
         }
-        Ok(None)
+        Ok(())
     }
 
     pub(super) fn has_foreign_key_violations(&self) -> Result<bool, DbError> {

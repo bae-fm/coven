@@ -514,7 +514,7 @@ impl RetainedReplayCache {
             .as_ref()
             .expect("retained replay baseline was installed in the cache")
             .clone();
-        let replay = transaction_records.open_replay_projection(&baseline, gates)?;
+        let replay = transaction_records.open_replay_projection(&baseline)?;
         let schema = replay.table_schema(synced_tables, gates)?;
         let mut private_rows = replay.private_rows(gates, &schema)?;
         let circle_bootstraps = transaction_records.claimed_circle_bootstrap_coverage_refs()?;
@@ -872,7 +872,7 @@ impl RetainedReplayCache {
                         applied.insert(reference.clone());
                         applied_order.push(reference);
                         made_progress = true;
-                        let reason = {
+                        {
                             let mut authority = ReplayVerifiedStoreLookup {
                                 cache: self,
                                 registrations,
@@ -891,25 +891,6 @@ impl RetainedReplayCache {
                                 false,
                             )?
                         };
-                        if let Some(reason) = reason {
-                            if watched.is_some() {
-                                return Ok(
-                                    crate::store::store_session::ReplayProjectionResult::new(
-                                        replay,
-                                        Some(
-                                            crate::store::store_session::WatchedReplayOutcome::Held(
-                                                reason,
-                                            ),
-                                        ),
-                                        applied_order,
-                                        max_updated_at,
-                                    ),
-                                );
-                            }
-                            return Err(DbError::Message(format!(
-                                "retained local replay conflicts with accepted Store history: {reason:?}"
-                            )));
-                        }
                     }
                     crate::MaterializationOutcome::Held(
                         crate::MaterializationHold::ForeignKeyDependency,
@@ -954,7 +935,7 @@ impl RetainedReplayCache {
                 ));
             }
         }
-        let reason = {
+        {
             let mut authority = ReplayVerifiedStoreLookup {
                 cache: self,
                 registrations,
@@ -973,21 +954,6 @@ impl RetainedReplayCache {
                 !rebase,
             )?
         };
-        if let Some(reason) = reason {
-            if watched.is_some() {
-                return Ok(crate::store::store_session::ReplayProjectionResult::new(
-                    replay,
-                    Some(crate::store::store_session::WatchedReplayOutcome::Held(
-                        reason,
-                    )),
-                    applied_order,
-                    max_updated_at,
-                ));
-            }
-            return Err(DbError::Message(format!(
-                "retained local replay conflicts with accepted Store history: {reason:?}"
-            )));
-        }
         if let Some(write) = replay_journal.front().filter(|_| !rebase) {
             return Err(DbError::Message(format!(
                 "retained local write {} cannot be placed in available Store history",
@@ -1020,7 +986,7 @@ fn drain_replay_journal(
     applied: &BTreeSet<StoreBatchCommitRef>,
     baseline: &CommitFrontier,
     include_unaccepted: bool,
-) -> Result<Option<crate::MaterializationHold>, DbError> {
+) -> Result<(), DbError> {
     loop {
         let effect = match journal.front() {
             Some(crate::MergeReplayWrite::Consumed { .. }) => {
@@ -1041,21 +1007,12 @@ fn drain_replay_journal(
             Some(crate::MergeReplayWrite::Accepted { .. })
             | Some(crate::MergeReplayWrite::LocalOnly { .. })
             | Some(crate::MergeReplayWrite::Unaccepted { .. }) => None,
-            None => return Ok(None),
+            None => return Ok(()),
         };
         let Some(effect) = effect else {
-            return Ok(None);
+            return Ok(());
         };
-        if let Some(hold) = replay.apply_write_effect(
-            authority,
-            root,
-            effect,
-            schema.clone(),
-            gates,
-            private_rows,
-        )? {
-            return Ok(Some(hold));
-        }
+        replay.apply_write_effect(authority, root, effect, schema.clone(), gates, private_rows)?;
         journal.pop_front();
     }
 }
