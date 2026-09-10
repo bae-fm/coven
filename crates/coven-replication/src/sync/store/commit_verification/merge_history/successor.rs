@@ -125,6 +125,40 @@ pub(crate) struct MergedRetainedMergeHistory {
 }
 
 impl MergedRetainedMergeHistory {
+    // The caller completes acknowledgement chains before validating the summary.
+    fn into_snapshot_summary(
+        mut self,
+        root: &StoreRootRef,
+        coverage: &CommitFrontier,
+        membership: &MembershipChain,
+        state: &ResolvedStoreDeviceState,
+        author_ref: &StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+    ) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
+        insert_exact(
+            &mut self.registrations,
+            author_ref.device_id,
+            ReferencedStoreDeviceRegistration::verified(author_ref.clone(), author.clone())
+                .map_err(StorePullError::Protocol)?,
+            "Merge snapshot author registration conflicts with retained authority",
+        )?;
+        Ok(RetainedVerifiedMergeHistorySummary {
+            version: store_commit::STORE_PROTOCOL_VERSION,
+            store_root_hash: root.store_root_hash,
+            reclaim: self.reclaim,
+            causal_cut: self.causal_cut,
+            last_non_acknowledgement_commits: self.last_non_acknowledgement_commits,
+            post_state: StoreDeviceStateRef::from_resolved(coverage.clone(), state)
+                .map_err(StorePullError::Protocol)?,
+            membership_floor: store_commit::MembershipCausalFloor::from_membership(membership),
+            registrations: self.registrations,
+            acknowledgements: self.acknowledgements,
+            membership_proofs: self.membership_proofs,
+            pending_owner_promotions: self.pending_owner_promotions,
+            pending_device_joins: self.pending_device_joins,
+        })
+    }
+
     fn include_non_acknowledgement_commit(
         &mut self,
         reference: StoreBatchCommitRef,
@@ -284,7 +318,6 @@ pub(crate) fn compose_merge_snapshot_history_summary(
     author: &StoreDeviceRegistration,
     predecessors: &[coven_database::RetainedMergeHistoryCheckpoint],
 ) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
-    let frontier = &coverage.0;
     let snapshot_predecessors = predecessors
         .iter()
         .filter_map(|checkpoint| match checkpoint {
@@ -295,8 +328,8 @@ pub(crate) fn compose_merge_snapshot_history_summary(
         })
         .collect();
     let mut merged = merge_retained_merge_history(root, membership, snapshot_predecessors)?;
-    let mut reclaim = merged.reclaim.clone();
-    reclaim
+    merged
+        .reclaim
         .extend(
             predecessors
                 .iter()
@@ -308,7 +341,6 @@ pub(crate) fn compose_merge_snapshot_history_summary(
                 }),
         )
         .map_err(StorePullError::Protocol)?;
-    merged.reclaim = reclaim;
     for checkpoint in predecessors {
         let coven_database::RetainedMergeHistoryCheckpoint::Commit(materialization) = checkpoint
         else {
@@ -324,46 +356,7 @@ pub(crate) fn compose_merge_snapshot_history_summary(
             materialization.history_evidence(),
         )?;
     }
-    let MergedRetainedMergeHistory {
-        reclaim,
-        causal_cut,
-        last_non_acknowledgement_commits,
-        mut registrations,
-        acknowledgements,
-        membership_proofs,
-        pending_owner_promotions,
-        pending_device_joins,
-    } = merged;
-    author_ref
-        .verify_registration(author)
-        .map_err(StorePullError::Protocol)?;
-    insert_exact(
-        &mut registrations,
-        author_ref.device_id,
-        ReferencedStoreDeviceRegistration::verified(author_ref.clone(), author.clone())
-            .map_err(StorePullError::Protocol)?,
-        "Merge snapshot author registration conflicts with retained authority",
-    )?;
-    let summary = RetainedVerifiedMergeHistorySummary {
-        reclaim,
-        version: store_commit::STORE_PROTOCOL_VERSION,
-        store_root_hash: root.store_root_hash,
-        causal_cut,
-        last_non_acknowledgement_commits,
-        post_state: StoreDeviceStateRef::from_resolved(coverage.clone(), state)
-            .map_err(StorePullError::Protocol)?,
-        membership_floor: store_commit::MembershipCausalFloor::from_membership(membership),
-        registrations,
-        acknowledgements,
-        membership_proofs,
-        pending_owner_promotions,
-        pending_device_joins,
-    };
-    // Assembled, not yet valid — see
-    // `validate_composed_snapshot_history_summary`, which the caller runs once
-    // each device's acknowledgement chain has been walked back to sequence one.
-    let _ = frontier;
-    Ok(summary)
+    merged.into_snapshot_summary(root, coverage, membership, state, author_ref, author)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -468,46 +461,7 @@ pub(crate) fn compose_verified_merge_snapshot_history_summary<'a>(
             &verified.history_evidence,
         )?;
     }
-    let MergedRetainedMergeHistory {
-        reclaim,
-        causal_cut,
-        last_non_acknowledgement_commits,
-        mut registrations,
-        acknowledgements,
-        membership_proofs,
-        pending_owner_promotions,
-        pending_device_joins,
-    } = merged;
-    author_ref
-        .verify_registration(author)
-        .map_err(StorePullError::Protocol)?;
-    insert_exact(
-        &mut registrations,
-        author_ref.device_id,
-        ReferencedStoreDeviceRegistration::verified(author_ref.clone(), author.clone())
-            .map_err(StorePullError::Protocol)?,
-        "Merge snapshot author registration conflicts with retained authority",
-    )?;
-    let summary = RetainedVerifiedMergeHistorySummary {
-        reclaim,
-        version: store_commit::STORE_PROTOCOL_VERSION,
-        store_root_hash: root.store_root_hash,
-        causal_cut,
-        last_non_acknowledgement_commits,
-        post_state: StoreDeviceStateRef::from_resolved(coverage.clone(), state)
-            .map_err(StorePullError::Protocol)?,
-        membership_floor: store_commit::MembershipCausalFloor::from_membership(membership),
-        registrations,
-        acknowledgements,
-        membership_proofs,
-        pending_owner_promotions,
-        pending_device_joins,
-    };
-    // Assembled, not yet valid: each device's acknowledgement chain still has to
-    // be completed back to sequence one, which needs a walker this function does
-    // not have. `validate_composed_snapshot_history_summary` is the other half
-    // and runs once the caller has completed them.
-    Ok(summary)
+    merged.into_snapshot_summary(root, coverage, membership, state, author_ref, author)
 }
 
 /// Check a composed snapshot summary once its acknowledgement chains are whole.
