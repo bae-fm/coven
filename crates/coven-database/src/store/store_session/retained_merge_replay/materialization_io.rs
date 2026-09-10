@@ -432,23 +432,13 @@ impl StoreDatabase {
     fn retained_write_effect_on(
         records: StoreRecords<'_>,
         write_id: WriteId,
-        raw_base: Option<String>,
-        raw_changeset_hash: Option<String>,
+        base: &str,
+        changeset_hash: &str,
         local_only: bool,
     ) -> Result<(MergeReplayWriteEffect, CommitFrontier), DbError> {
-        let base = raw_base.ok_or_else(|| {
-            DbError::Message(format!(
-                "retained write {write_id} has no observed frontier"
-            ))
-        })?;
-        let changeset_hash = raw_changeset_hash.ok_or_else(|| {
-            DbError::Message(format!(
-                "retained write {write_id} has no original changeset"
-            ))
-        })?;
         let changeset_hash = changeset_hash.parse::<ObjectHash>()?;
         records.payload(changeset_hash)?;
-        let base = records.effective_store_write_base(&write_id, &base)?;
+        let base = records.effective_store_write_base(&write_id, base)?;
         let observed = CommitFrontier::from_refs(base.dependencies)
             .map_err(|error| DbError::context("retained write observed frontier", error))?;
         let mut partitions = records.store_write_partitions(write_id.as_str())?;
@@ -504,8 +494,8 @@ impl StoreDatabase {
                     let (effect, observed) = Self::retained_write_effect_on(
                         records,
                         settled.write_id.clone(),
-                        Some(row.base),
-                        Some(row.changeset_hash),
+                        &row.base,
+                        &row.changeset_hash,
                         true,
                     )?;
                     MergeReplayWrite::LocalOnly { effect, observed }
@@ -514,8 +504,8 @@ impl StoreDatabase {
                     let (effect, observed) = Self::retained_write_effect_on(
                         records,
                         settled.write_id.clone(),
-                        Some(row.base),
-                        Some(row.changeset_hash),
+                        &row.base,
+                        &row.changeset_hash,
                         matches!(published.as_ref(), PublishedWrite::Snapshot(_)),
                     )?;
                     match *published {
@@ -572,8 +562,8 @@ impl StoreDatabase {
                 let (effect, _) = Self::retained_write_effect_on(
                     records,
                     write_id,
-                    Some(row.base),
-                    Some(row.changeset_hash),
+                    &row.base,
+                    &row.changeset_hash,
                     false,
                 )?;
                 effects.push(effect);
@@ -610,8 +600,8 @@ impl StoreDatabase {
                     let (effect, observed) = Self::retained_write_effect_on(
                         records,
                         write_id,
-                        Some(row.base),
-                        Some(row.changeset_hash),
+                        &row.base,
+                        &row.changeset_hash,
                         false,
                     )?;
                     if effect.partitions.store.is_some() || !effect.partitions.circles.is_empty() {
@@ -625,8 +615,8 @@ impl StoreDatabase {
                     let (effect, observed) = Self::retained_write_effect_on(
                         records,
                         write_id,
-                        Some(row.base),
-                        Some(row.changeset_hash),
+                        &row.base,
+                        &row.changeset_hash,
                         false,
                     )?;
                     MergeReplayWrite::Unaccepted { effect, observed }
@@ -663,8 +653,8 @@ impl StoreDatabase {
                     let (effect, observed) = Self::retained_write_effect_on(
                         records,
                         write_id,
-                        Some(row.base),
-                        Some(row.changeset_hash),
+                        &row.base,
+                        &row.changeset_hash,
                         covered,
                     )?;
                     if covered {
@@ -706,8 +696,8 @@ impl StoreDatabase {
                             let (effect, observed) = Self::retained_write_effect_on(
                                 records,
                                 write_id,
-                                Some(row.base),
-                                Some(row.changeset_hash),
+                                &row.base,
+                                &row.changeset_hash,
                                 true,
                             )?;
                             MergeReplayWrite::LocalOnly { effect, observed }
@@ -719,8 +709,8 @@ impl StoreDatabase {
                                 let (effect, observed) = Self::retained_write_effect_on(
                                     records,
                                     write_id,
-                                    Some(row.base),
-                                    Some(row.changeset_hash),
+                                    &row.base,
+                                    &row.changeset_hash,
                                     true,
                                 )?;
                                 MergeReplayWrite::LocalOnly { effect, observed }
@@ -738,8 +728,8 @@ impl StoreDatabase {
                                 let (effect, observed) = Self::retained_write_effect_on(
                                     records,
                                     write_id,
-                                    Some(row.base),
-                                    Some(row.changeset_hash),
+                                    &row.base,
+                                    &row.changeset_hash,
                                     false,
                                 )?;
                                 MergeReplayWrite::Accepted {
