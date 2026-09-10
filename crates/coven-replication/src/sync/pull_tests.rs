@@ -2287,33 +2287,44 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
 
     let db2_store_dir = crate::sync::test_helpers::test_store_dir();
     let db2 = unique_note_db(db2_store_dir.clone());
-    db2.execute_test_host_write(
-        "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
-         VALUES ('local', 'same-slug', 'Local', '0000000002000-0000-dev2', '2026-01-01')",
-    )
-    .await;
-    let ld = db2_store_dir.clone();
-    let (updated, result) = storage.pull_into(&db2, &ld).await;
-
-    let conflicts = constraint_conflicts(&result);
+    let receipt = coven_database::StoreDatabase::new(&db2)
+        .run_host_store_write_for_test(None, None, |transaction| {
+            transaction
+                .execute_batch(
+                    "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
+                 VALUES ('local', 'same-slug', 'Local', '0000000002000-0000-dev2', '2026-01-01')",
+                )
+                .map_err(coven_database::DbError::from)
+        })
+        .await
+        .expect("capture the unpublished conflicting write");
+    let error = storage
+        .pull_into_result(&db2, &db2_store_dir)
+        .await
+        .expect_err("the unpublished write conflicts with accepted rows");
+    let TestPullError::Pull(error) = error else {
+        panic!("expected a replay conflict during pull: {error:?}");
+    };
+    let error = crate::sync::store::StoreError::from(error);
+    let (write_id, block) = error
+        .write_block(&receipt.write_id)
+        .expect("pull preserves the typed local write conflict");
+    let coven_protocol::write::WriteBlock::RebaseConflict(conflict) = block else {
+        panic!("expected a typed local replay conflict: {block:?}");
+    };
+    assert_eq!(write_id, receipt.write_id);
+    assert_eq!(conflict.write_id, receipt.write_id);
     assert_eq!(
-        conflicts.len(),
-        1,
-        "held positions: {:#?}",
-        result.held_positions
+        conflict.affected_rows,
+        vec![coven_protocol::write::AffectedRow {
+            table: "unique_notes".to_string(),
+            primary_key: "local".to_string(),
+        }]
     );
-    assert_eq!(
-        conflicts[0].coordinate,
-        HeldStoreCoordinate::Commit {
-            device_id: stream_id.clone(),
-            commit: commit.clone(),
-        }
-    );
-    assert_eq!(
-        conflicts[0].reason,
-        HeldStorePositionReason::ConstraintConflict(vec!["unique_notes".to_string()])
-    );
-    assert_eq!(updated.get(&stream_id), None);
+    assert!(matches!(
+        conflict.reason,
+        coven_protocol::write::WriteRebaseConflictReason::Constraint { .. }
+    ));
     assert_eq!(
         db2.materialized_sequences().await.get(&stream_id),
         None,
