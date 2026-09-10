@@ -28,7 +28,7 @@ use std::collections::BTreeSet;
 use super::retained_replay::PreparedRetainedReplayBaseline;
 use super::{StoreRecords, StoreTransaction};
 use crate::store::verified_store_authority::VerifiedStoreLookup;
-use crate::{Database, DbError, ObjectHash, RetainedReplayOwner};
+use crate::{DbError, ObjectHash, RetainedReplayOwner};
 use coven_protocol::store_commit::{CommitFrontier, StoreBatchCommitRef, StoreRootRef};
 
 /// What one advancement retired, for the reclaim report that follows it.
@@ -353,37 +353,6 @@ impl StoreTransaction<'_, '_> {
         .map_err(DbError::from)?;
         u64::try_from(object_ids.len())
             .map_err(|_| DbError::Message("released replay pin count exceeded u64".to_string()))
-    }
-
-    /// Restate the advanced cut as this device's snapshot coverage.
-    ///
-    /// The frontier reads coverage beside `materialized_commits` and takes the
-    /// later of the two, so this is what carries the position of the commits
-    /// retired above.
-    pub(super) fn rewrite_snapshot_coverage(
-        &self,
-        cut: &CommitFrontier,
-        snapshot_hash: ObjectHash,
-    ) -> Result<(), DbError> {
-        let conn = self.transaction;
-        conn.execute("DELETE FROM snapshot_coverage", [])
-            .map_err(DbError::from)?;
-        for (stream_id, reference) in cut.clone().into_refs() {
-            let encoded = serde_json::to_string(&reference)
-                .map_err(|error| DbError::context("serialize advanced snapshot coverage", error))?;
-            conn.execute(
-                "INSERT INTO snapshot_coverage
-                 (device_id, seq, commit_ref, snapshot_hash) VALUES (?1, ?2, ?3, ?4)",
-                (
-                    &stream_id,
-                    Database::sequence_to_sqlite(&stream_id, reference.coord.sequence())?,
-                    encoded,
-                    snapshot_hash.to_string(),
-                ),
-            )
-            .map_err(DbError::from)?;
-        }
-        Ok(())
     }
 }
 

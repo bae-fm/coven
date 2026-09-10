@@ -1,6 +1,6 @@
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord};
-use coven_protocol::store_commit::ObjectHash;
+use coven_protocol::store_commit::{CommitFrontier, ObjectHash};
 use coven_protocol::write::{AffectedRow, WriteId, WriteResolution, WriteStatus};
 
 use super::payload_store::PayloadStoreError;
@@ -146,6 +146,34 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             routing_hash,
             authority,
         )
+    }
+
+    /// Replace snapshot coverage with the exact covered commits in this transaction.
+    /// The materialized frontier combines these rows with retained commits above the cut.
+    pub(super) fn rewrite_snapshot_coverage(
+        &self,
+        cut: &CommitFrontier,
+        snapshot_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        let conn = self.transaction;
+        conn.execute("DELETE FROM snapshot_coverage", [])
+            .map_err(DbError::from)?;
+        for (stream_id, reference) in cut.clone().into_refs() {
+            let encoded = serde_json::to_string(&reference)
+                .map_err(|error| DbError::context("serialize snapshot coverage", error))?;
+            conn.execute(
+                "INSERT INTO snapshot_coverage
+                 (device_id, seq, commit_ref, snapshot_hash) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    &stream_id,
+                    Database::sequence_to_sqlite(&stream_id, reference.coord.sequence())?,
+                    encoded,
+                    snapshot_hash.to_string(),
+                ),
+            )
+            .map_err(DbError::from)?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

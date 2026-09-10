@@ -2,9 +2,8 @@ use super::{StoreRecords, StoreTransaction};
 use crate::store::retained_replay::install_snapshot_replay_baseline_on;
 use crate::{
     install_store_founder_state_on, install_store_root_authority_on,
-    validate_snapshot_object_owners_on, CircleRestoreSelection, Database, DbError,
-    ResolvedStoreDeviceState, StoreDatabase, StoreDeviceRegistrationRef, SyncedTable,
-    VerifiedSnapshotBootstrapInstall,
+    validate_snapshot_object_owners_on, CircleRestoreSelection, DbError, ResolvedStoreDeviceState,
+    StoreDatabase, StoreDeviceRegistrationRef, SyncedTable, VerifiedSnapshotBootstrapInstall,
 };
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -129,23 +128,10 @@ impl StoreTransaction<'_, '_> {
             ));
         }
         let coverage_started = coven_foundation::clock::Stopwatch::start();
-        conn.execute("DELETE FROM snapshot_coverage", [])
-            .map_err(DbError::from)?;
-        for (stream_id, reference) in install.snapshot.meta.coverage.clone().into_refs() {
-            let encoded = serde_json::to_string(&reference)
-                .map_err(|error| DbError::context("serialize snapshot exact commit ref", error))?;
-            conn.execute(
-                "INSERT INTO snapshot_coverage
-                 (device_id, seq, commit_ref, snapshot_hash) VALUES (?1, ?2, ?3, ?4)",
-                (
-                    &stream_id,
-                    Database::sequence_to_sqlite(&stream_id, reference.coord.sequence())?,
-                    encoded,
-                    install.snapshot.reference.snapshot_hash.to_string(),
-                ),
-            )
-            .map_err(DbError::from)?;
-        }
+        self.rewrite_snapshot_coverage(
+            &install.snapshot.meta.coverage,
+            install.snapshot.reference.snapshot_hash,
+        )?;
         timings.record("record the coverage", coverage_started.elapsed(), 0);
         let blob_decls =
             crate::BlobDecls::from_tables(conn, synced_tables).map_err(DbError::from)?;

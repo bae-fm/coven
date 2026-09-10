@@ -423,30 +423,8 @@ impl ReplayProjection {
         let mut authority =
             super::VerifiedStoreAuthority::for_replay_baseline(self.baseline.clone());
         records.retain_snapshot_replay_inputs(&mut authority, root, cut)?;
-        let records = super::StoreTransaction::new(&transaction, &self.store_dir);
         records.retain_snapshot_device_states(&mut authority, root, cut.clone().into_refs())?;
-        transaction
-            .execute("DELETE FROM snapshot_coverage", [])
-            .map_err(DbError::from)?;
-        for (stream_id, reference) in cut.clone().into_refs() {
-            let encoded = serde_json::to_string(&reference)
-                .map_err(|error| DbError::context("serialize replay baseline coverage", error))?;
-            transaction
-                .execute(
-                    "INSERT INTO snapshot_coverage
-                     (device_id, seq, commit_ref, snapshot_hash) VALUES (?1, ?2, ?3, ?4)",
-                    (
-                        &stream_id,
-                        crate::Database::sequence_to_sqlite(
-                            &stream_id,
-                            reference.coord.sequence(),
-                        )?,
-                        encoded,
-                        snapshot_hash.to_string(),
-                    ),
-                )
-                .map_err(DbError::from)?;
-        }
+        records.rewrite_snapshot_coverage(cut, snapshot_hash)?;
         transaction.commit().map_err(DbError::from)?;
         crate::connection_io::serialize_database_image(&self.connection)
     }
