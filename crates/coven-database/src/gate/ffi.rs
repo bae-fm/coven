@@ -118,6 +118,19 @@ impl Changegroup {
         Ok(())
     }
 
+    /// Append a complete changeset without decoding its rows in Rust.
+    pub(crate) fn add_changeset(&self, bytes: &[u8]) -> Result<(), GateError> {
+        let length = c_int::try_from(bytes.len())
+            .map_err(|_| GateError::Ffi("append changeset", ffi::SQLITE_TOOBIG))?;
+        let rc = unsafe {
+            ffi::sqlite3changegroup_add(self.raw, length, bytes.as_ptr().cast_mut().cast())
+        };
+        if rc != ffi::SQLITE_OK {
+            return Err(GateError::Ffi("sqlite3changegroup_add", rc));
+        }
+        Ok(())
+    }
+
     /// Encode one UPDATE against the schema configured on this group. `None`
     /// omits a cell; `Some(Value::Null)` records SQL NULL. Non-primary-key cells
     /// must appear on both sides, including equal values that belong to an

@@ -24,7 +24,7 @@ use fallible_streaming_iterator::FallibleStreamingIterator;
 use rusqlite::hooks::Action;
 use rusqlite::session::{ChangesetItem, ChangesetIter, ConflictAction, ConflictType};
 use rusqlite::types::{Value, ValueRef};
-use rusqlite::{params_from_iter, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use tracing::warn;
 
 use super::conflict::{
@@ -32,6 +32,7 @@ use super::conflict::{
 };
 use crate::changeset::{value_ref_to_string, UpdateValue};
 use crate::changeset_identity::validate_changeset_row_identities;
+use crate::gate::Changegroup;
 use crate::store::store_session::replay_sql::ReplaySql;
 use crate::{quote_ident, ChangesetIdentityError, DbError};
 use coven_protocol::hlc::Timestamp;
@@ -39,10 +40,6 @@ use coven_protocol::hlc::Timestamp;
 use coven_protocol::synced_schema::SyncedTable;
 
 use super::MergeMaterializationTransaction;
-
-#[path = "column_merge.rs"]
-mod column_merge;
-use column_merge::ColumnMergeEncoder;
 
 #[path = "recorded_changeset.rs"]
 mod recorded_changeset;
@@ -474,7 +471,7 @@ fn prepare_column_merges<'bytes>(
         }
     }
     let prepared = match encoder {
-        Some(encoder) => Cow::Owned(encoder.finish()?),
+        Some(encoder) => Cow::Owned(encoder.output()?),
         None => Cow::Borrowed(bytes),
     };
     Ok((prepared, handled))
@@ -572,7 +569,7 @@ fn prepare_losing_update(
     update: &IncomingUpdate,
     timestamp_policy: IncomingTimestampPolicy,
     indirect: bool,
-    encoder: &mut Option<ColumnMergeEncoder>,
+    encoder: &mut Option<Changegroup>,
     bytes: &[u8],
 ) -> Result<bool, DbError> {
     let columns = schema.columns(&update.table).ok_or_else(|| {
@@ -654,9 +651,30 @@ fn prepare_losing_update(
     }
     let encoder = match encoder {
         Some(encoder) => encoder,
-        slot @ None => slot.insert(ColumnMergeEncoder::new(bytes)?),
+        slot @ None => {
+            let group = Changegroup::new()?;
+            // The live connection outlives this group and supplies only its
+            // column/primary-key layout; encoding does not mutate its rows.
+            unsafe { group.set_schema(conn.handle()) }?;
+            group.add_changeset(bytes)?;
+            slot.insert(group)
+        }
     };
-    encoder.record(&update.table, columns, &incoming, &merged, indirect)?;
+    let (old, new): (Vec<_>, Vec<_>) = incoming
+        .into_iter()
+        .zip(merged)
+        .enumerate()
+        .map(|(index, (incoming, merged))| {
+            if index == 0 {
+                (Some(incoming), None)
+            } else if incoming != merged {
+                (Some(incoming), Some(merged))
+            } else {
+                (None, None)
+            }
+        })
+        .unzip();
+    encoder.add_update(&update.table, &old, &new, indirect)?;
     Ok(true)
 }
 
