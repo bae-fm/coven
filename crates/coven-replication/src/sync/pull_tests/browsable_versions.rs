@@ -237,3 +237,233 @@ async fn readable_path_rename_republishes_remote_content_without_local_bytes() {
     fixture.assert_bytes(&renamed, bytes).await;
     fixture.assert_peer(&renamed, bytes).await;
 }
+
+#[tokio::test]
+async fn replacement_and_delete_reinsert_keep_earlier_exact_versions_readable() {
+    for delete_first in [false, true] {
+        let fixture = BrowsableFixture::new().await;
+        let original_bytes = b"original attachment";
+        let next_bytes = b"replacement attachment";
+        let previous = fixture
+            .insert_source("first", "Album/cover.jpg", original_bytes)
+            .await;
+        fixture.assert_peer(&previous, original_bytes).await;
+        if delete_first {
+            capture(
+                &fixture.source,
+                None,
+                "DELETE FROM note_photos WHERE id = 'photo'".into(),
+            )
+            .await;
+            publish(&fixture.owner).await;
+        }
+        let sql = if delete_first {
+            insert_photo(
+                "photo",
+                "second",
+                "Album/cover.jpg",
+                next_bytes,
+                "0000000004000-0000-owner",
+            )
+        } else {
+            format!(
+                "UPDATE note_photos SET blob_id = 'second', size = {}, hash = '{}', \
+                 _updated_at = '0000000004000-0000-owner' WHERE id = 'photo'",
+                next_bytes.len(),
+                coven_protocol::blob::content_hash(next_bytes),
+            )
+        };
+        capture(&fixture.source, Some(("second", next_bytes)), sql).await;
+        publish(&fixture.owner).await;
+        let next = stored(&fixture.source, "photo").await;
+        assert_eq!(previous.locator().cloud_path(), next.locator().cloud_path());
+        assert_ne!(previous.object(), next.object());
+        fixture.assert_bytes(&previous, original_bytes).await;
+        fixture.assert_bytes(&next, next_bytes).await;
+        fixture.assert_peer(&next, next_bytes).await;
+    }
+}
+
+#[tokio::test]
+async fn two_devices_publishing_one_readable_path_keep_both_exact_objects() {
+    let fixture = BrowsableFixture::new().await;
+    let original = b"initial cover";
+    let left = b"left device cover";
+    let right = b"right device cover";
+    let previous = fixture
+        .insert_source("initial", "Album/cover.jpg", original)
+        .await;
+    fixture.assert_peer(&previous, original).await;
+    for (database, blob_id, bytes, stamp) in [
+        (
+            &fixture.source,
+            "left",
+            left.as_slice(),
+            "0000000003000-0000-owner",
+        ),
+        (
+            &fixture.target,
+            "right",
+            right.as_slice(),
+            "0000000004000-0000-peer",
+        ),
+    ] {
+        capture(
+            database,
+            Some((blob_id, bytes)),
+            format!(
+                "UPDATE note_photos SET blob_id = '{blob_id}', size = {}, hash = '{}', \
+             _updated_at = '{stamp}' WHERE id = 'photo'",
+                bytes.len(),
+                coven_protocol::blob::content_hash(bytes),
+            ),
+        )
+        .await;
+    }
+    publish(&fixture.owner).await;
+    let left_stored = stored(&fixture.source, "photo").await;
+    publish(&fixture.peer).await;
+    let right_stored = stored(&fixture.target, "photo").await;
+    assert_ne!(
+        left_stored.locator().uploader(),
+        right_stored.locator().uploader()
+    );
+    assert_eq!(
+        left_stored.locator().cloud_path(),
+        right_stored.locator().cloud_path()
+    );
+    assert_ne!(left_stored.object(), right_stored.object());
+    fixture.assert_bytes(&previous, original).await;
+    fixture.assert_bytes(&left_stored, left).await;
+    fixture.assert_bytes(&right_stored, right).await;
+    fixture
+        .owner
+        .pull_store()
+        .await
+        .expect("owner merges the peer replacement");
+    assert_eq!(stored(&fixture.source, "photo").await, right_stored);
+    fixture.assert_peer(&right_stored, right).await;
+}
+
+struct RefuseBlobCreate {
+    fail: std::sync::atomic::AtomicBool,
+    attempts: std::sync::Mutex<Vec<StoredBlobRef>>,
+}
+
+#[async_trait::async_trait]
+impl StorageInterceptor for RefuseBlobCreate {
+    async fn before_blob_create(
+        &self,
+        blob: &StoredBlobRef,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
+        self.attempts
+            .lock()
+            .expect("upload attempts")
+            .push(blob.clone());
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(coven_protocol::objects::StorageError::Storage(
+                "interrupted exact blob create".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn interrupted_readable_replacement_reopens_the_exact_reserved_candidate() {
+    let fixture = BrowsableFixture::new().await;
+    let original_bytes = b"original attachment";
+    let next_bytes = b"replacement attachment";
+    let previous = fixture
+        .insert_source("first", "Album/cover.jpg", original_bytes)
+        .await;
+    let failure = Arc::new(RefuseBlobCreate {
+        fail: std::sync::atomic::AtomicBool::new(true),
+        attempts: std::sync::Mutex::new(Vec::new()),
+    });
+    let intercepted = Arc::new(InterceptedStorage::new(
+        fixture.storage.clone(),
+        failure.clone(),
+    ));
+    let operation = fixture
+        .store
+        .open_founder_store_with_storage(
+            StoreDatabase::new(&fixture.source),
+            intercepted.clone(),
+            fixture.source_dir.clone(),
+        )
+        .await
+        .expect("open the publisher before capturing its replacement");
+    capture(
+        &fixture.source,
+        Some(("second", next_bytes)),
+        format!(
+            "UPDATE note_photos SET blob_id = 'second', size = {}, hash = '{}', \
+         _updated_at = '0000000003000-0000-owner' WHERE id = 'photo'",
+            next_bytes.len(),
+            coven_protocol::blob::content_hash(next_bytes),
+        ),
+    )
+    .await;
+    let mut writer = operation
+        .authorize_writer()
+        .await
+        .expect("authorize replacement");
+    assert!(writer
+        .prepare_pending_store_write()
+        .await
+        .expect("prepare replacement"));
+    let before = StoreDatabase::new(&fixture.source)
+        .active_store_publication()
+        .await
+        .expect("read reservation")
+        .expect("replacement owns its turn");
+    writer
+        .drain_store_writes()
+        .await
+        .expect_err("provider refuses the blob create");
+    let attempted = failure.attempts.lock().expect("upload attempts").clone();
+    assert_eq!(attempted.len(), 1);
+    assert_eq!(
+        StoreDatabase::new(&fixture.source)
+            .active_store_publication()
+            .await
+            .expect("read retained reservation")
+            .as_ref(),
+        Some(&before)
+    );
+    drop(writer);
+    drop(operation);
+    failure
+        .fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let reopened = fixture
+        .store
+        .open_founder_store_with_storage(
+            StoreDatabase::new(&fixture.source),
+            intercepted,
+            fixture.source_dir.clone(),
+        )
+        .await
+        .expect("reopen the publisher with its retained candidate");
+    let mut writer = reopened
+        .authorize_writer()
+        .await
+        .expect("authorize retained candidate");
+    assert_eq!(
+        writer
+            .drain_store_writes()
+            .await
+            .expect("retry reserved publication"),
+        1
+    );
+    let next = stored(&fixture.source, "photo").await;
+    assert_eq!(attempted[0], next);
+    assert_eq!(
+        failure.attempts.lock().expect("upload attempts").as_slice(),
+        &[next.clone(), next.clone()]
+    );
+    fixture.assert_bytes(&previous, original_bytes).await;
+    fixture.assert_bytes(&next, next_bytes).await;
+    fixture.assert_peer(&next, next_bytes).await;
+}

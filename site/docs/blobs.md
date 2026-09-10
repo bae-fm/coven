@@ -88,8 +88,9 @@ host never names where a blob file lives.
 
 `cloud_path` is consulted only by a [browsable home](#browsable-home-blob-paths);
 an opaque home (the default) ignores it, so leave the `cloud_path_column` unset
-unless the home is browsable. What a browsable home requires of that path depends on
-whether the blob is [replaceable or write-once](#a-cloud-object-is-never-rewritten).
+unless the home is browsable. A browsable path must be relative, contain no empty,
+`.` or `..` components, and avoid backslashes, drive prefixes, and the reserved
+`.coven-versions` component. The filename does not need to include the blob id.
 
 ### Cache fill
 
@@ -392,25 +393,16 @@ reference records the exact object's length and hash, and downloads are checked
 against that reference and the locator's plaintext facts. An object existing at a
 path alone is not proof that it contains the expected bytes.
 
-The blob declaration also states whether its row can be repointed. These are row
-and readable-name constraints; version addressing supplies the cloud object
-identity for both cases.
+The blob declaration separately states whether a changeset update may repoint its
+row at another blob id. Version addressing supplies cloud-object identity for both
+replacement policies.
 
 #### Replaceable (the default)
 
-A row may point to a replacement blob. If it supplies a readable path, the path's
-file name, before its extension, must be the blob id or end in `-{blob_id}`:
-
-```
-covers/Live at Leeds/cover-0ef7a1c9.jpg     ✓
-covers/Live at Leeds/0ef7a1c9.jpg           ✓
-covers/Live at Leeds/cover.jpg              ✗
-covers/Live at Leeds/0ef7a1c9/cover.jpg     ✗
-```
-
-The declaration resolver rejects a readable name that does not meet this rule.
-The final cloud key appends `.coven-versions/{locator_hash}` after that readable
-path.
+A row may point to a replacement blob while retaining its readable path, such as
+`Live at Leeds/cover.jpg`. The new locator includes the replacement's identity and
+content, so its exact object has a different version key. The earlier object is
+unchanged and remains readable until independently reclaimed.
 
 #### Write-once
 
@@ -422,12 +414,11 @@ SyncedTable::new("release_files", RowIdentity::IndependentUuid).carries_blob(
 )
 ```
 
-A write-once row cannot change its blob-id column. Its readable path need not
-include the blob id; `Live at Leeds/01 Sonata No. 3.flac` is valid. The final object
-still has a locator-hash version beneath that path. coven's declaration resolver
-rejects a changeset update that repoints a write-once row.
+A write-once row cannot change its blob-id column through a changeset update.
+The declaration resolver refuses that update. This row policy does not constrain
+the readable filename or replace the locator's exact object identity.
 
-#### What either guarantee buys
+#### Exact versions
 
 Different locators occupy different version keys, including when two devices
 choose the same readable path. The installed row's stored reference identifies

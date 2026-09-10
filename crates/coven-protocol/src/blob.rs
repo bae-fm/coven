@@ -255,53 +255,16 @@ pub enum CacheFill {
     CacheLazy,
 }
 
-/// Whether a blob-bearing row may be repointed, and the readable-name policy
-/// enforced when the database resolves that row's blob declaration.
-/// Orthogonal to [`Provenance`] and [`CacheFill`].
-///
-/// Both variants use [`locator::BlobLocator`] to identify immutable cloud
-/// versions. The replacement policy constrains rows and readable names; it
-/// does not determine the exact object's identity.
+/// Whether changeset updates may repoint a blob-bearing row at another blob id.
+/// Orthogonal to [`Provenance`] and [`CacheFill`]. Both variants use
+/// [`locator::BlobLocator`] to identify immutable cloud objects independently
+/// of the row's replacement policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlobReplacement {
-    /// The row may be repointed at another blob id. When a readable
-    /// `cloud_path` is supplied, its file-name stem must name the blob id;
-    /// see [`cloud_path_names_blob`]. This is the default declaration.
+    /// The row may be repointed at another blob id. This is the default.
     Replaceable,
-    /// Changeset updates may not change this row's blob-id column. A readable
-    /// `cloud_path` need not include that id, so a name such as
-    /// `Live at Leeds/01 Sonata.flac` is accepted.
-    ///
-    /// The path is still followed by `.coven-versions/{locator_hash}` in the
-    /// cloud. Reusing a readable name for a different locator does not reuse
-    /// the earlier locator's exact object.
+    /// Changeset updates may not change this row's blob-id column.
     WriteOnce,
-}
-
-/// Whether a readable path satisfies the [`Replaceable`](BlobReplacement::Replaceable)
-/// declaration's naming policy. This checks the readable name, not cloud-object
-/// identity; [`locator::BlobLocator`] appends the immutable version.
-///
-/// The path's file name (its last `/`-segment), with any extension stripped,
-/// must equal the blob id or end with `-{blob_id}`:
-///
-/// ```text
-/// covers/Live at Leeds/cover-0ef7a1c9.jpg   ✓   stem ends with -0ef7a1c9
-/// covers/Live at Leeds/0ef7a1c9.jpg         ✓   stem equals the blob id
-/// covers/Live at Leeds/cover.jpg            ✗   stem does not name the blob id
-/// ```
-///
-/// The `-` delimiter distinguishes a named id from a suffix embedded in
-/// another id: `cover-11` does not satisfy id `1`.
-pub fn cloud_path_names_blob(cloud_path: &str, blob_id: &str) -> bool {
-    let file_name = cloud_path.rsplit('/').next().unwrap_or(cloud_path);
-    let stem = file_name
-        .rsplit_once('.')
-        .map_or(file_name, |(stem, _extension)| stem);
-    stem == blob_id
-        || stem
-            .strip_suffix(blob_id)
-            .is_some_and(|prefix| prefix.ends_with('-'))
 }
 
 /// A blob a row references: its logical identity, encryption scope, and the two
@@ -786,53 +749,6 @@ pub trait BlobTransitionObserver: Send + Sync {
         total: u64,
     ) {
         let _ = (root_table, root_id, blob_id, done, total);
-    }
-}
-
-#[cfg(test)]
-mod cloud_path_tests {
-    use super::cloud_path_names_blob;
-
-    /// Replaceable declarations require the blob id at the end of the readable
-    /// file-name stem; an id in a parent directory does not satisfy that policy.
-    #[test]
-    fn a_cloud_path_names_the_blob_whose_id_ends_its_file_name() {
-        assert!(cloud_path_names_blob(
-            "Live at Leeds/cover-0ef7a1c9.jpg",
-            "0ef7a1c9"
-        ));
-        assert!(cloud_path_names_blob(
-            "Live at Leeds/0ef7a1c9.jpg",
-            "0ef7a1c9"
-        ));
-        assert!(
-            cloud_path_names_blob("0ef7a1c9", "0ef7a1c9"),
-            "no directory and no extension: the whole path is the blob id",
-        );
-
-        assert!(
-            !cloud_path_names_blob("Live at Leeds/cover.jpg", "0ef7a1c9"),
-            "the file-name stem does not name the blob id",
-        );
-        assert!(
-            !cloud_path_names_blob("0ef7a1c9/cover.jpg", "0ef7a1c9"),
-            "the id must name the file, not a directory above it",
-        );
-        assert!(
-            !cloud_path_names_blob("Live at Leeds/cover-0ef7a1c9-thumb.jpg", "0ef7a1c9"),
-            "the id must END the file name's stem, not sit inside it",
-        );
-    }
-
-    /// A suffix embedded in another id does not satisfy the naming policy;
-    /// a distinct `-` delimiter is required.
-    #[test]
-    fn one_blob_id_cannot_satisfy_another_s_path_by_being_a_tail_of_it() {
-        assert!(cloud_path_names_blob("cover-10ef7a1c9.jpg", "10ef7a1c9"));
-        assert!(
-            !cloud_path_names_blob("cover-10ef7a1c9.jpg", "0ef7a1c9"),
-            "0ef7a1c9 is embedded in the named id, not preceded by a delimiter",
-        );
     }
 }
 

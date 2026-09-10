@@ -20,11 +20,9 @@
 //! A declaration's three blob properties — [`Provenance`] (the Local story),
 //! [`CacheFill`] (the Remote story), and [`BlobReplacement`] (whether the row may be
 //! repointed at a different blob) — are described by the blob concept tree in
-//! the replication layer. The last of them is enforced here, because it is a rule about a
-//! row's `(blob id, cloud path)` pair and this is the one place coven reads that pair off
-//! a row: a replaceable blob's readable path must name its blob, and a write-once row may
-//! never be repointed. These are declaration constraints. Immutable cloud-object
-//! identity comes from the blob locator and retained exact object reference.
+//! the replication layer. Write-once updates are refused here, where the declaration
+//! and changed blob-id column are available. Immutable cloud-object identity comes
+//! from the blob locator and retained exact object reference.
 
 use std::collections::HashMap;
 
@@ -32,9 +30,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::{quote_ident, table_columns as session_table_columns};
 use coven_foundation::changeset::{ChangeOp, RowChange};
-use coven_protocol::blob::{
-    cloud_path_names_blob, BlobRef, BlobReplacement, BlobScope, CacheFill, Provenance,
-};
+use coven_protocol::blob::{BlobRef, BlobReplacement, BlobScope, CacheFill, Provenance};
 use coven_protocol::synced_schema::SyncedTable;
 
 /// Why building the blob-declaration model failed.
@@ -64,13 +60,6 @@ pub enum BlobDeclError {
         primary_key: String,
         changed_blob_id: String,
         row_blob_id: String,
-    },
-    /// A [`Replaceable`](BlobReplacement::Replaceable) blob's readable cloud path
-    /// does not satisfy the declared naming policy. See `cloud_path_names_blob`.
-    CloudPathNotKeyedByBlob {
-        table: String,
-        blob_id: String,
-        cloud_path: String,
     },
     /// A [`WriteOnce`](BlobReplacement::WriteOnce) changeset update changed the
     /// row's blob-id column, contrary to its declaration.
@@ -128,16 +117,6 @@ impl std::fmt::Display for BlobDeclError {
                 "blob-bearing Store write row {table:?}/{primary_key:?} changed from introduced blob \
                  {changed_blob_id:?} to {row_blob_id:?} before commit"
             ),
-            BlobDeclError::CloudPathNotKeyedByBlob {
-                table,
-                blob_id,
-                cloud_path,
-            } => write!(
-                f,
-                "replaceable blob {blob_id} in {table} has cloud path {cloud_path:?}, which does \
-                 not name it: the path's file name must be the blob id, or end with -{blob_id} \
-                 before its extension"
-            ),
             BlobDeclError::WriteOnceBlobRepointed { table, blob_id } => write!(
                 f,
                 "write-once row in {table} was repointed at blob {blob_id}: its declaration \
@@ -181,8 +160,7 @@ struct TableBlob {
     id_col_name: String,
     /// The encryption scope, fixed per table by the declaration.
     scope: BlobScope,
-    /// This table's row-repointing and readable-name policy. See
-    /// [`TableBlob::blob_ref`] and [`TableBlob::ref_from_change`].
+    /// This table's row-repointing policy, enforced by [`TableBlob::ref_from_change`].
     replacement: BlobReplacement,
 }
 
@@ -235,42 +213,18 @@ impl BlobColumns {
 }
 
 impl TableBlob {
-    /// Build the [`BlobRef`] for one of this table's rows from the per-row `id`,
-    /// `scope`, and `cloud_path` plus this table's fixed namespace, provenance, and
-    /// cache fill. Shared by changeset and live-row readers.
-    ///
-    /// Enforce the [`Replaceable`](BlobReplacement::Replaceable) declaration's
-    /// readable-name policy through [`cloud_path_names_blob`]. A
-    /// [`WriteOnce`](BlobReplacement::WriteOnce) declaration does not require the
-    /// id in its readable name; [`TableBlob::ref_from_change`] instead refuses
-    /// updates to its blob-id column. Locator construction determines the final
-    /// immutable cloud-object key independently of these row constraints.
-    fn blob_ref(
-        &self,
-        table: &str,
-        id: String,
-        scope: BlobScope,
-        cloud_path: Option<String>,
-    ) -> Result<BlobRef, BlobDeclError> {
-        if self.replacement == BlobReplacement::Replaceable {
-            if let Some(path) = cloud_path.as_deref() {
-                if !cloud_path_names_blob(path, &id) {
-                    return Err(BlobDeclError::CloudPathNotKeyedByBlob {
-                        table: table.to_string(),
-                        blob_id: id,
-                        cloud_path: path.to_string(),
-                    });
-                }
-            }
-        }
-        Ok(BlobRef {
+    /// Build the row's blob from its declared identity and readable path.
+    /// Shared by changeset and live-row readers; locator construction owns
+    /// path validation and exact cloud-object identity.
+    fn blob_ref(&self, id: String, cloud_path: Option<String>) -> BlobRef {
+        BlobRef {
             namespace: self.namespace.clone(),
             id,
-            scope,
+            scope: self.scope.clone(),
             cloud_path,
             provenance: self.provenance,
             fill: self.fill,
-        })
+        }
     }
 
     /// The blob a changeset row references.
@@ -302,19 +256,14 @@ impl TableBlob {
             .cloud_path
             .and_then(|i| change.col(i))
             .map(str::to_string);
-        self.blob_ref(table, id, self.scope.clone(), cloud_path)
-            .map(Some)
+        Ok(Some(self.blob_ref(id, cloud_path)))
     }
 
     /// Build the [`BlobRef`] for a live `SELECT *` row of this table, or `None` when
     /// the row's blob id is NULL. The resolved
     /// indices address a `SELECT *` row in schema order, exactly as they address a
     /// changeset row.
-    fn ref_from_row(
-        &self,
-        table: &str,
-        row: &rusqlite::Row<'_>,
-    ) -> Result<Option<BlobRef>, BlobDeclError> {
+    fn ref_from_row(&self, row: &rusqlite::Row<'_>) -> Result<Option<BlobRef>, BlobDeclError> {
         let Some(id) = row.get::<_, Option<String>>(self.columns.id)? else {
             return Ok(None);
         };
@@ -322,8 +271,7 @@ impl TableBlob {
             Some(i) => row.get::<_, Option<String>>(i)?,
             None => None,
         };
-        self.blob_ref(table, id, self.scope.clone(), cloud_path)
-            .map(Some)
+        Ok(Some(self.blob_ref(id, cloud_path)))
     }
 
     fn size_from_row(&self, table: &str, row: &rusqlite::Row<'_>) -> Result<u64, BlobDeclError> {
@@ -636,7 +584,7 @@ impl BlobDecls {
             let mut statement = conn.prepare(&sql)?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
-                let Some(reference) = blob.ref_from_row(table, row)? else {
+                let Some(reference) = blob.ref_from_row(row)? else {
                     continue;
                 };
                 let row_id = row.get::<_, String>("id")?;
@@ -802,7 +750,7 @@ fn publication_blob_from_row(
 ) -> Result<PublicationBlob, BlobDeclError> {
     let row_id = row.get::<_, String>("id")?;
     let reference =
-        blob.ref_from_row(table, row)?
+        blob.ref_from_row(row)?
             .ok_or_else(|| BlobDeclError::MissingPublicationBlob {
                 table: table.to_string(),
                 primary_key: row_id.clone(),

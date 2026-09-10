@@ -4169,10 +4169,9 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
 /// A re-emitted row whose blob this device no longer holds still pushes, because the
 /// blob is already in the cloud.
 ///
-/// The two absences are different, and only one of them aborts. `BlobMissing` means *no
-/// bytes anywhere* — not in the local store, not in the cache, and not in the cloud. A
-/// device that holds no copy but whose blob's object stands at its key has nothing to
-/// push: the object at that key is that blob's bytes, because the key names the blob.
+/// A previously published exact binding lets the device reuse the unchanged blob
+/// without local bytes. Its retained locator and stored-object reference identify
+/// the accepted content; the readable filename does not establish that identity.
 ///
 /// Device A publishes a cover, then loses every local copy of it (the local store's and
 /// the cache's), and its row is re-emitted — the shape a `make_remote` gate flip produces
@@ -4339,55 +4338,6 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     assert_eq!(
         downloaded, plaintext,
         "device B recovers the source bytes from the readable plain-scheme key",
-    );
-}
-
-/// A browsable home's cloud key is `{namespace}/{cloud_path}`, and coven requires a
-/// host-provided blob's `cloud_path` to name the blob it holds. A path that does not is
-/// refused where coven derives the blob from its row — the push aborts rather than
-/// keying a blob at an object another blob could also be keyed at.
-#[tokio::test]
-async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
-    let (home, keypair, storage) = plain_cloud_test_store();
-
-    let bytes = b"COVER-BYTES";
-    let db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let db = crate::sync::test_helpers::open_test_db_with_blob(
-        db_store_dir.clone(),
-        readable_photo_decl(),
-    );
-    let ld = db_store_dir.clone();
-    ld.store_local("p1cover", bytes).await;
-    // `n1/cover.jpg` names no blob: it would key p1cover today and its replacement
-    // tomorrow at one and the same cloud object.
-    let outgoing = db
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            &format!(
-                "INSERT INTO note_photos \
-                 (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
-                 VALUES ('p1cover', 'n1', 'cover', {}, '{}', 'n1/cover.jpg', \
-                 '0000000001000-0000-dev1', '2026-01-01')",
-                bytes.len(),
-                coven_protocol::blob::content_hash(bytes),
-            ),
-        ])
-        .await;
-
-    let err = storage
-        .sync_for_test(&db, outgoing, 0, "", &keypair, &ld)
-        .await
-        .expect_err("a cloud path that does not name its blob must fail the cycle");
-
-    let message = err.to_string();
-    assert!(
-        message.contains("p1cover") && message.contains("n1/cover.jpg"),
-        "the error must name the blob and the path it was given, got {message:?}",
-    );
-    assert!(
-        home.get("photos/n1/cover.jpg").is_none(),
-        "nothing is uploaded for a blob coven refuses to key",
     );
 }
 
@@ -4558,10 +4508,8 @@ async fn plain_scheme_two_replacements_write_two_objects() {
             .await;
         let from_b_key = db_a.row_blob_object_key("note_photos", "ph1").await;
 
-        // Neither replacement overwrote the other: both objects stand, each holding the bytes
-        // of the blob its key names. Under a key that did not name its blob, these two writes
-        // would have been one object, and its bytes would be whichever device the bucket saw
-        // last — not necessarily the device the row's conflict resolved to.
+        // Each locator identifies a separate immutable version, so publishing the
+        // later replacement leaves the earlier object's bytes unchanged.
         assert_eq!(
             home.get(&from_a_key).as_deref(),
             Some(from_a.as_slice()),
@@ -4690,10 +4638,8 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
     );
 }
 
-/// A **write-once** browsable declaration: the row is never repointed at a different
-/// blob, so its readable cloud path is free to be a stable, fully human-readable name —
-/// no blob id in it. The blob id is its own column, so the shape of an (illegal)
-/// repointing is expressible and can be tested.
+/// A write-once declaration with a separate blob-id column, so an attempted
+/// repointing is expressible and the declaration can refuse it.
 fn write_once_photo_decl() -> BlobDecl {
     BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
         .with_id_column("blob_id")
@@ -4701,14 +4647,8 @@ fn write_once_photo_decl() -> BlobDecl {
         .write_once()
 }
 
-/// A write-once blob keeps a stable, fully readable cloud path — no blob id in the name —
-/// and round-trips through the cloud on it.
-///
-/// This is the shape a browsable home exists for: the bucket mirrors the consumer's own
-/// names (`n1/Sonata No. 3.flac`), and a reader who is not coven can find and play the
-/// file. It is safe precisely because the row is never repointed, so nothing ever rewrites
-/// the object standing at that key — which is what [`BlobDecl::write_once`] declares and
-/// what the test below enforces.
+/// A write-once row publishes and reads its exact immutable blob version
+/// beneath the consumer's readable path.
 #[tokio::test]
 async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     let (home, keypair, storage) = plain_cloud_test_store();
@@ -4765,16 +4705,8 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     assert_eq!(cached, bytes.as_slice());
 }
 
-/// Repointing a write-once row is refused.
-///
-/// A write-once row's cloud path is a stable readable name that does NOT carry its blob
-/// id, so a second blob under that row would be keyed at the first blob's cloud object and
-/// overwrite it — the corruption the whole model exists to prevent. Write-once is the
-/// declaration that this never happens, and coven holds the consumer to it: the repointing
-/// is a loud error, not a silently rewritten object.
-///
-/// A changeset UPDATE reports only the columns whose values changed, so the blob-id column
-/// appearing in one *is* the repointing.
+/// Repointing a write-once row violates its declared update policy and is
+/// refused before publication. Immutable cloud versions do not relax that policy.
 #[tokio::test]
 async fn plain_scheme_repointing_a_write_once_row_is_refused() {
     let (home, keypair, storage) = plain_cloud_test_store();
@@ -4807,8 +4739,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
         .await;
     let audio_key = db.row_blob_object_key("note_photos", "ph1").await;
 
-    // Repoint the write-once row at a second blob — the move that would rewrite the object
-    // the first blob occupies.
+    // Attempt the blob-id update forbidden by this row's declaration.
     ld.store_local("f2audio", second).await;
     let outgoing = db
         .capture_test_changeset(&[&format!(
@@ -4844,15 +4775,8 @@ fn replaceable_photo_decl() -> BlobDecl {
         .with_cloud_path_column("cloud_path")
 }
 
-/// Repointing a row at a new blob moves its cloud key, and the new bytes land there.
-///
-/// The row keeps its primary key and gets a new blob — which means a new blob id, and
-/// therefore a new `cloud_path`, because a host-provided path must name its blob. So the
-/// repointing writes a new cloud object and leaves the one it replaced standing at its own
-/// key.
-///
-/// Device A publishes a cover and device B pulls it; A then repoints the row at a fresh
-/// blob and pushes; B pulls again and must serve the new bytes and drop the old.
+/// A replacement with a changed readable path publishes a distinct exact object.
+/// A peer serves the replacement and drops its obsolete cached copy.
 #[tokio::test]
 async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     tokio::spawn(async {
@@ -4906,8 +4830,8 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
         let old_cache_path =
             exact_cache_path(&ld2, &db2.exact_row_blob_ref("note_photos", "ph1").await);
 
-        // Repoint the row at a new blob: same primary key, new blob id, and the cloud path
-        // moves with it because it names the blob. The replaced blob's local copy goes away.
+        // Replace both the blob and its readable path. The replaced local copy
+        // is no longer needed to publish the new bytes.
         ld1.store_local("p2cover", new_bytes).await;
         ld1.remove_local_blob("photos", "p1cover")
             .await
@@ -4961,71 +4885,6 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     })
     .await
     .expect("browsable blob repointing orchestration task");
-}
-
-/// Repointing a row at a new blob while HOLDING its cloud path is the shape the rule
-/// exists to refuse, and it is the one a changeset cannot show on its own: an UPDATE
-/// reports only the columns whose values changed, so it carries the new blob id and not
-/// the (unchanged) path. coven reads the path from the row that owns the blob — which is
-/// where it catches that the path names the blob the row no longer points at.
-#[tokio::test]
-async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused() {
-    let (home, keypair, storage) = plain_cloud_test_store();
-    let old_bytes = b"OLD-COVER-BYTES";
-    let new_bytes = b"NEW-COVER-BYTES";
-
-    let db1_store_dir = crate::sync::test_helpers::test_store_dir();
-    let db1 = crate::sync::test_helpers::open_test_db_with_blob(
-        db1_store_dir.clone(),
-        replaceable_photo_decl(),
-    );
-    let ld1 = db1_store_dir.clone();
-    ld1.store_local("p1cover", old_bytes).await;
-    let outgoing = db1
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            &format!(
-                "INSERT INTO note_photos \
-                 (id, note_id, kind, size, hash, cloud_path, blob_id, _updated_at, created_at) \
-                 VALUES ('ph1', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', 'p1cover', \
-                 '0000000001000-0000-dev1', '2026-01-01')",
-                old_bytes.len(),
-                coven_protocol::blob::content_hash(old_bytes),
-            ),
-        ])
-        .await;
-    storage
-        .publish_test_cycle(&db1, outgoing, 0, &keypair, &ld1)
-        .await;
-    let old_key = db1.row_blob_object_key("note_photos", "ph1").await;
-
-    // The repointing leaves `cloud_path` naming the blob it replaced, so the new blob
-    // would be keyed at the old blob's object.
-    ld1.store_local("p2cover", new_bytes).await;
-    let outgoing = db1
-        .capture_test_changeset(&[&format!(
-            "UPDATE note_photos SET blob_id = 'p2cover', size = {}, hash = '{}', \
-             _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
-            new_bytes.len(),
-            coven_protocol::blob::content_hash(new_bytes),
-        )])
-        .await;
-    let err = storage
-        .sync_for_test(&db1, outgoing, 1, "", &keypair, &ld1)
-        .await
-        .expect_err("a repointing that holds its cloud path must fail the cycle");
-
-    let message = err.to_string();
-    assert!(
-        message.contains("p2cover") && message.contains("n1/cover-p1cover.jpg"),
-        "the error must name the new blob and the path it kept, got {message:?}",
-    );
-    assert_eq!(
-        home.get(&old_key).as_deref(),
-        Some(old_bytes.as_slice()),
-        "the replaced blob's object is untouched — the cycle aborted before any upload",
-    );
 }
 
 /// Full encrypted blob round-trip through `CloudSyncConnection` (encrypted) over a

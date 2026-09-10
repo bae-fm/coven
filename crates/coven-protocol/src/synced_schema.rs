@@ -340,7 +340,7 @@ pub struct BlobDecl {
     /// into the cache on every pull) or [`crate::blob::CacheFill::CacheLazy`]
     /// (fetched into the cache on first read).
     pub fill: crate::blob::CacheFill,
-    /// The row's repointing and readable-name policy
+    /// The row's repointing policy
     /// ([`crate::blob::BlobReplacement`]). Exact cloud-object identity is supplied
     /// by the blob locator in both cases. Defaults to
     /// [`crate::blob::BlobReplacement::Replaceable`].
@@ -372,9 +372,8 @@ impl BlobDecl {
     }
 
     /// Refuse changeset updates that change a row's blob-id column
-    /// ([`crate::blob::BlobReplacement::WriteOnce`]). The readable `cloud_path`
-    /// need not contain the blob id; its final cloud key still includes the
-    /// locator-hash version.
+    /// ([`crate::blob::BlobReplacement::WriteOnce`]). This constrains row updates;
+    /// the locator identifies its immutable cloud object independently.
     pub fn write_once(mut self) -> Self {
         self.replacement = crate::blob::BlobReplacement::WriteOnce;
         self
