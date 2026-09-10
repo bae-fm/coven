@@ -606,21 +606,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .merge_membership_activation_remote_objects(std::slice::from_ref(
                         &plan.wrapped_key,
                     ))?;
-            self.publish_membership_authority(
-                &publication.transition(),
-                std::slice::from_ref(&plan.wrapped_key),
-            )
-            .await?;
-            for object in [
-                &plan.wrapped_key.reference.object,
-                &publication.entry_ref.object,
-            ] {
-                persistence
-                    .mark_remote_object_uploaded(
-                        exact_owned_remote(&remotes, object)?.into_record(),
-                    )
-                    .await?;
-            }
+            self.publish_membership_authority(&plan.candidate, &remotes)
+                .await?;
             let accepted = self.publish_membership_activation(
                 plan.candidate.clone(),
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {

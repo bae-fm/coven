@@ -534,24 +534,14 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
                 "active exclusion operation has no activation candidate".to_string(),
             )
         })?;
-        let publication = candidate
-            .prepared_membership_publication()
-            .map_err(StoreError::from)?;
-        let transition = publication.transition();
+        let remote_objects = operation.remote_objects()?;
         self.writer
-            .publish_membership_authority(&transition, &[])
+            .publish_membership_authority(&candidate, &remote_objects)
             .await?;
         let completion = coven_protocol::membership_mutation::StoreMembershipJournalCompletion::DeviceExclusion {
             operation: Box::new(operation.clone()),
-            remote_objects: operation.remote_objects()?.into_iter().map(|object| object.record().clone()).collect(),
+            remote_objects: remote_objects.into_iter().map(|object| object.into_record()).collect(),
         };
-        self.database
-            .mark_remote_object_uploaded(
-                completion
-                    .remote_object(&publication.entry_ref.object)
-                    .map_err(crate::sync::store::membership::MembershipMutationError::from)?,
-            )
-            .await?;
         self.writer
             .publish_membership_activation(Box::new(candidate), completion)
             .await?;

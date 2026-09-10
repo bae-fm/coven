@@ -717,16 +717,14 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         self.retire_candidate_with_lost_authority(previous.promotion_id, authorship)
             .await?;
         let operation = &mut *self;
-        let database = operation.database.clone();
         let publication = candidate.prepared_membership_publication()?;
         let candidate_ref = candidate.reference.clone();
         let candidate_commit = &candidate.commit;
+        let remote_objects = candidate
+            .merge_membership_activation_remote_objects(std::slice::from_ref(&wrapped_key))?;
         operation
             .writer
-            .publish_membership_authority(
-                &publication.transition(),
-                std::slice::from_ref(&wrapped_key),
-            )
+            .publish_membership_authority(&candidate, &remote_objects)
             .await
             .map_err(OwnerPromotionError::from)?;
         let predecessor = &candidate_commit.membership_state;
@@ -829,23 +827,6 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             },
         };
         let journal_transition = previous.transition_to(&finalized)?;
-        let remote_objects = candidate
-            .merge_membership_activation_remote_objects(std::slice::from_ref(&wrapped_key))?;
-        for object in [&publication.entry_ref.object, &wrapped_key.reference.object] {
-            let remote = remote_objects
-                .iter()
-                .find(|remote| remote.object() == object)
-                .cloned()
-                .ok_or_else(|| {
-                    OwnerPromotionError::Protocol(
-                        "Owner-promotion completion omits a published membership authority"
-                            .to_string(),
-                    )
-                })?;
-            database
-                .mark_remote_object_uploaded(remote.into_record())
-                .await?;
-        }
         let accepted = operation
             .writer
             .publish_membership_activation_with_authorship(
@@ -853,8 +834,8 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::OwnerPromotion {
                     transition: journal_transition,
                     remote_objects: remote_objects
-                        .iter()
-                        .map(|remote| remote.record().clone())
+                        .into_iter()
+                        .map(|remote| remote.into_record())
                         .collect(),
                 },
                 authorship,

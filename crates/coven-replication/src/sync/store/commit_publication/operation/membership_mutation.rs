@@ -13,8 +13,8 @@ pub(super) enum MembershipRevocation {
 }
 
 use super::{
-    decode_membership_mutation, exact_owned_remote, MembershipMutationPlan,
-    MembershipMutationProgress, RevokeMutationPlan,
+    decode_membership_mutation, MembershipMutationPlan, MembershipMutationProgress,
+    RevokeMutationPlan,
 };
 
 pub(super) fn publication_predecessor_changed(
@@ -74,3 +74,6 @@ pub(super) fn validate_revoke_rotation_adoption(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod authority_upload_tests;

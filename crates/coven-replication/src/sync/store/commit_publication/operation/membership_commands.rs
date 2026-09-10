@@ -361,7 +361,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 (plan, MembershipMutationProgress::Pending, intent_hash)
             }
         };
-        let persistence = self.membership_mutation_persistence(intent_hash);
         let publication = plan
             .prepared_membership_publication()
             .map_err(MembershipMutationError::from)?;
@@ -420,23 +419,18 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .load_resolution(&resolution_ref)
             .await
             .map_err(MembershipMutationError::from)?;
-        persistence
+        self.database
             .mark_remote_object_uploaded(
                 exact_owned_remote(&remotes, &resolution_ref.object)?.into_record(),
             )
-            .await?;
-        self.publish_membership_authority(&publication.transition(), &[])
-            .await?;
-        persistence
-            .mark_remote_object_uploaded(
-                exact_owned_remote(&remotes, &publication.entry_ref.object)?.into_record(),
-            )
-            .await?;
+            .await
+            .map_err(MembershipMutationError::from)?;
+        self.publish_membership_authority(&plan, &remotes).await?;
         let reference = self
             .publish_membership_activation(
                 plan.clone(),
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
-                    intent_hash: persistence.intent_hash(),
+                    intent_hash,
                     progress_bytes: MembershipMutationProgress::ResolutionActivated {
                         candidate: plan.reference.clone(),
                     }

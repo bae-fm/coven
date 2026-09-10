@@ -189,55 +189,75 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) async fn publish_membership_authority(
         &mut self,
-        transition: &PreparedMembershipTransition,
-        wraps: &[PreparedWrappedStoreKey],
+        candidate: &commit_plan::PreparedStoreOperationCommit,
+        remotes: &[coven_protocol::remote_object::ClosedRemoteObject],
     ) -> Result<(), MembershipMutationError> {
-        transition.validate()?;
-        let expected_wraps: Vec<&WrappedStoreKeyRef> = match &transition.entry.change {
-            StoreAuthorityChange::SetMember { wrapped_key, .. } => vec![wrapped_key],
-            StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => {
-                wrapped_keys.iter().collect()
+        use coven_protocol::objects::PreparedExactObject;
+        use coven_protocol::remote_object::ClosedRemoteObject;
+
+        let publication = candidate.prepared_membership_publication()?;
+        let expected_wraps: &[WrappedStoreKeyRef] = match &publication.entry.change {
+            StoreAuthorityChange::SetMember { wrapped_key, .. } => {
+                std::slice::from_ref(wrapped_key)
             }
+            StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => wrapped_keys,
             StoreAuthorityChange::Founder { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
             | StoreAuthorityChange::DeviceExclusionOutcome { .. }
             | StoreAuthorityChange::ProviderAdmin
-            | StoreAuthorityChange::ResolutionActivation { .. } => Vec::new(),
+            | StoreAuthorityChange::ResolutionActivation { .. } => &[],
         };
-        if expected_wraps.len() != wraps.len()
-            || expected_wraps
-                .iter()
-                .zip(wraps)
-                .any(|(expected, prepared)| **expected != prepared.reference)
-        {
-            return Err(MembershipMutationError::InvalidDurableMutation(
-                "prepared Merge membership wraps differ from their exact transition".to_string(),
-            ));
-        }
-        for prepared in wraps {
-            prepared.validate()?;
+        let prepare_exact = |reference: &coven_protocol::objects::ExactObjectRef| -> Result<
+            (ClosedRemoteObject, PreparedExactObject),
+            MembershipMutationError,
+        > {
+            let remote = exact_owned_remote(remotes, reference)?;
+            let bytes = remote.stored_bytes().ok_or_else(|| {
+                MembershipMutationError::InvalidDurableMutation(format!(
+                    "membership candidate lacks stored bytes for exact object {}",
+                    reference.slot().logical_key(),
+                ))
+            })?;
+            let prepared = PreparedExactObject::new(reference.clone(), bytes.to_vec())?;
+            Ok((remote, prepared))
+        };
+        let (entry_remote, entry) = prepare_exact(&publication.entry_ref.object)?;
+        let wraps = expected_wraps
+            .iter()
+            .map(|reference| {
+                let (remote, object) = prepare_exact(&reference.object)?;
+                let prepared = PreparedWrappedStoreKey {
+                    reference: reference.clone(),
+                    object,
+                };
+                prepared.validate()?;
+                Ok((remote, prepared))
+            })
+            .collect::<Result<Vec<_>, MembershipMutationError>>()?;
+
+        for (remote, prepared) in wraps {
             self.storage
                 .as_ref()
                 .create_protocol_object(&prepared.object)
-                .await
-                .map_err(MembershipMutationError::from)?;
+                .await?;
             load_wrapped_store_key(
                 self.storage.as_ref(),
                 self.store_root().store_root_hash,
                 &prepared.reference,
             )
             .await?;
+            self.database
+                .mark_remote_object_uploaded(remote.into_record())
+                .await?;
         }
-        self.storage
-            .as_ref()
-            .create_protocol_object(&transition.prepared_entry()?)
-            .await
-            .map_err(MembershipMutationError::from)?;
+        self.storage.as_ref().create_protocol_object(&entry).await?;
         self.membership_objects()
-            .load_entry(&transition.entry_ref)
-            .await
-            .map_err(MembershipMutationError::from)?;
+            .load_entry(&publication.entry_ref)
+            .await?;
+        self.database
+            .mark_remote_object_uploaded(entry_remote.into_record())
+            .await?;
         Ok(())
     }
 

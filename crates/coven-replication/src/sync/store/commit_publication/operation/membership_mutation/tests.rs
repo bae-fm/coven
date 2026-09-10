@@ -4,23 +4,28 @@ use coven_protocol::store_commit::ObjectHash;
 
 #[tokio::test]
 async fn a_retained_writer_verifies_control_after_another_writer_advances_its_database() {
-    use crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch;
+    use super::{decode_membership_mutation, MembershipMutationPlan};
     use crate::sync::test_helpers::{open_test_db, test_cloud_home, test_store_dir, TestStore};
+    use coven_database::StoreDatabase;
     use coven_keys::encryption::EncryptionService;
 
     let store_dir = test_store_dir();
     let db = open_test_db(store_dir.clone());
     let owner = UserKeypair::generate();
+    let home = test_cloud_home();
     let store = TestStore::create(
         &db,
         store_dir.clone(),
         "retained-writer-predecessor",
         owner.clone(),
-        test_cloud_home(),
+        home.clone(),
     )
     .await
     .expect("create Store");
-    let device = store.bind_device_in(&db, store_dir, &owner).await.unwrap();
+    let device = store
+        .bind_device_in(&db, store_dir.clone(), &owner)
+        .await
+        .unwrap();
     let mut writer = device.authorize_writer().await.unwrap();
     db.execute_test_host_write(
         "INSERT INTO notes (id, title, shared, _updated_at, created_at)
@@ -41,57 +46,91 @@ async fn a_retained_writer_verifies_control_after_another_writer_advances_its_da
         .0
         .values()
         .any(|tip| tip == &predecessor));
-    let chain = plan.membership().clone();
+    drop(plan);
     let recipient = keys::public_key_hex(&UserKeypair::generate());
-    let wrapped = writer
-        .prepare_member_wrapped_key(&chain, &EncryptionService::from_key([42; 32]), &recipient)
-        .await
-        .unwrap();
-    let stream = writer
-        .select_membership_author_stream(&chain)
-        .await
-        .unwrap();
-    let entry = writer
-        .writer
-        .sign_set_member(
-            &chain,
-            stream,
-            recipient,
+    let encryption = EncryptionService::from_key([42; 32]);
+    home.fail_exact_create_before_call(1);
+    let error = store
+        .admit_member(
+            &db,
+            store_dir.clone(),
+            &owner,
+            &recipient,
             None,
             MemberRole::Member,
-            wrapped.reference.clone(),
-            "2026-09-08T00:00:00Z".into(),
-        )
-        .unwrap();
-    let transition = writer
-        .prepare_membership_transition(&chain, entry)
-        .await
-        .unwrap();
-    let mut candidate = writer
-        .prepare_candidate(
-            &plan,
-            StoreOperationBatch::MergeMembershipActivation {
-                transition: transition.transition.clone(),
-                stream_activations: Vec::new(),
-            },
+            &encryption,
+            "Retained writer",
         )
         .await
+        .expect_err("retain a real admission before its first authority upload");
+    assert!(
+        error
+            .to_string()
+            .contains("forced failure before exact create call 1"),
+        "{error}"
+    );
+    let database = StoreDatabase::new(&db);
+    let row = database
+        .outbound_membership_mutation()
+        .await
+        .unwrap()
+        .expect("actual staged admission");
+    let (MembershipMutationPlan::Admission(admission), _) =
+        decode_membership_mutation(row).unwrap()
+    else {
+        panic!("the actual request must be an admission");
+    };
+    let candidate = &admission.candidate;
+    assert!(candidate
+        .commit
+        .order
+        .predecessor_cut()
+        .unwrap()
+        .0
+        .values()
+        .any(|tip| tip == &predecessor));
+    let remotes = candidate
+        .merge_membership_activation_remote_objects(std::slice::from_ref(&admission.wrapped_key))
         .unwrap();
-    let publication = writer
-        .finish_store_membership_transition(transition.clone(), candidate.reference.clone())
+    writer
+        .publish_membership_authority(candidate, &remotes)
         .await
         .unwrap();
     writer
-        .attach_membership_proof(&mut candidate, &publication)
-        .unwrap();
-    writer
-        .publish_membership_authority(&transition, &[wrapped])
+        .upload_prepared(candidate.clone())
         .await
-        .unwrap();
-    writer
-        .upload_prepared(Box::new(candidate))
+        .expect("the retained writer verifies control against the actual accepted predecessor");
+    drop(writer);
+    store
+        .admit_member(
+            &db,
+            store_dir,
+            &owner,
+            &recipient,
+            None,
+            MemberRole::Member,
+            &encryption,
+            "Retained writer",
+        )
         .await
-        .expect("verify the control against the accepted predecessor used to prepare it");
+        .expect("finish the same staged admission");
+    let accepted = database.store_publication_entries().await.unwrap();
+    assert_eq!(
+        accepted
+            .iter()
+            .filter(|entry| entry.value.payload
+                == coven_protocol::store_commit::StorePublicationPayload::Commit(
+                    candidate.reference.clone()
+                ))
+            .count(),
+        1
+    );
+    assert!(database
+        .outbound_membership_mutation()
+        .await
+        .unwrap()
+        .is_none());
+    assert!(database.active_store_publication().await.unwrap().is_none());
 }
 
 #[tokio::test]

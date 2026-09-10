@@ -3,7 +3,7 @@ use coven_database::StoreDatabase;
 use coven_protocol::membership::{self, MemberRole, StoreAuthorityChange};
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
-use coven_protocol::remote_object::{ClosedRemoteObject, RemoteObjectRecord};
+use coven_protocol::remote_object::ClosedRemoteObject;
 use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
 use coven_protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use coven_storage::cloud::{CloudAccessState, CloudHomeJoinInfo};
@@ -102,7 +102,9 @@ impl RevokeMutationPlan {
             ))
     }
 
-    pub(super) fn validate_closed_shape(&self) -> Result<(), MembershipMutationError> {
+    pub(super) fn candidate_remote_objects(
+        &self,
+    ) -> Result<Vec<ClosedRemoteObject>, MembershipMutationError> {
         let publication = self.candidate.prepared_membership_publication()?;
         let StoreAuthorityChange::RemoveMember {
             retirement_device_state,
@@ -129,13 +131,6 @@ impl RevokeMutationPlan {
                 "membership retirement differs from its exact Store device state".into(),
             ));
         }
-        self.candidate_remote_objects()?;
-        Ok(())
-    }
-
-    pub(super) fn candidate_remote_objects(
-        &self,
-    ) -> Result<Vec<ClosedRemoteObject>, MembershipMutationError> {
         Ok(self
             .candidate
             .merge_membership_activation_remote_objects(&self.wraps)?)
@@ -185,14 +180,6 @@ impl MutationPersistence {
 
     pub(super) fn intent_hash(&self) -> ObjectHash {
         self.intent_hash
-    }
-
-    pub(super) async fn mark_remote_object_uploaded(
-        &self,
-        remote: RemoteObjectRecord,
-    ) -> Result<(), MembershipMutationError> {
-        self.database.mark_remote_object_uploaded(remote).await?;
-        Ok(())
     }
 
     pub(super) async fn complete(&self) -> Result<(), MembershipMutationError> {

@@ -1,6 +1,6 @@
 use super::{
-    decode_membership_mutation, exact_owned_remote, MembershipMutationError,
-    MembershipMutationPlan, MembershipMutationProgress, MembershipRevocation, RevokeMutationPlan,
+    decode_membership_mutation, MembershipMutationError, MembershipMutationPlan,
+    MembershipMutationProgress, MembershipRevocation, RevokeMutationPlan,
 };
 use coven_keys::encryption::{self, EncryptionService};
 use coven_keys::keys;
@@ -255,7 +255,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     .map_err(MembershipMutationError::from)?;
                 let write_id = self.operation.database.new_store_write_id();
                 let plan = Box::pin(self.build_revoke_mutation(&operation_plan, write_id)).await?;
-                plan.validate_closed_shape()?;
+                let remote_objects = plan.candidate_remote_objects()?;
                 let encoded = MembershipMutationPlan::Revoke(plan.clone()).encode()?;
                 let progress = MembershipMutationProgress::Pending;
                 let progress_bytes = progress.encode()?;
@@ -264,7 +264,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     .stage_membership_mutation(
                         encoded,
                         progress_bytes,
-                        plan.candidate_remote_objects()?,
+                        remote_objects,
                         (*plan.candidate).clone(),
                     )
                     .await?;
@@ -338,7 +338,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 self.build_revoke_mutation(&operation_plan, plan.candidate.commit.write_id.clone()),
             )
             .await?;
-            replacement.validate_closed_shape()?;
+            let remote_objects = replacement.candidate_remote_objects()?;
             intent_hash = self
                 .operation
                 .database
@@ -348,7 +348,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     (*replacement.candidate).clone(),
                     MembershipMutationPlan::Revoke(replacement.clone()).encode()?,
                     MembershipMutationProgress::Pending.encode()?,
-                    replacement.candidate_remote_objects()?,
+                    remote_objects,
                 )
                 .await?;
             self.pending_rotation
@@ -395,7 +395,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         }
         .map_err(MembershipMutationError::RotationState)?;
         let persistence = operation.membership_mutation_persistence(intent_hash);
-        plan.validate_closed_shape()?;
+        let remote_objects = plan.candidate_remote_objects()?;
         if matches!(
             progress,
             MembershipMutationProgress::AdmissionGranted { .. }
@@ -457,21 +457,8 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             )));
             }
         }
-        let remote_objects = plan.candidate_remote_objects()?;
         operation
-            .publish_membership_authority(&publication.transition(), &plan.wraps)
-            .await?;
-        for wrapped in &plan.wraps {
-            persistence
-                .mark_remote_object_uploaded(
-                    exact_owned_remote(&remote_objects, &wrapped.reference.object)?.into_record(),
-                )
-                .await?;
-        }
-        persistence
-            .mark_remote_object_uploaded(
-                exact_owned_remote(&remote_objects, &publication.entry_ref.object)?.into_record(),
-            )
+            .publish_membership_authority(&plan.candidate, &remote_objects)
             .await?;
         match operation
             .set_membership_access(plan.desired_access()?)

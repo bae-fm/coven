@@ -187,32 +187,20 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             OwnerJoinPublication::SamePrincipalActivation { .. }
                 | OwnerJoinPublication::JoinActivation { .. }
         ) {
-            let publication = prepared
-                .candidate
-                .prepared_membership_publication()
-                .map_err(crate::sync::store::StoreError::from)?;
-            let transition = publication.transition();
-            self.writer
-                .publish_membership_authority(&transition, &[])
-                .await
-                .map_err(crate::sync::store::StoreError::from)?;
             let remote_objects = prepared
                 .remote_objects(attempt_id)
-                .map_err(crate::sync::store::StoreError::from)?
-                .into_iter()
-                .map(|object| object.into_record())
-                .collect();
+                .map_err(crate::sync::store::StoreError::from)?;
+            self.writer
+                .publish_membership_authority(&prepared.candidate, &remote_objects)
+                .await
+                .map_err(crate::sync::store::StoreError::from)?;
             let completion =
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::DeviceJoin {
-                    remote_objects,
+                    remote_objects: remote_objects
+                        .into_iter()
+                        .map(|object| object.into_record())
+                        .collect(),
                 };
-            self.database
-                .mark_remote_object_uploaded(
-                    completion
-                        .remote_object(&transition.entry_ref.object)
-                        .map_err(crate::sync::store::StoreError::from)?,
-                )
-                .await?;
             return self
                 .writer
                 .publish_membership_activation(prepared.candidate, completion)

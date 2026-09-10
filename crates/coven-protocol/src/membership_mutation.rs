@@ -229,11 +229,6 @@ impl PreparedMembershipTransition {
         }
         Ok(())
     }
-
-    /// The entry object this transition uploads.
-    pub fn prepared_entry(&self) -> Result<PreparedExactObject, MembershipPreparationError> {
-        prepare_exact_object(&self.entry_ref.object, &self.entry)
-    }
 }
 
 pub enum StoreMembershipJournalCompletion {
