@@ -59,7 +59,7 @@ impl MergeHistoryVerifier<'_> {
             .load_membership_at_verified_prefix(&heads.0, &prefix)
             .await?;
         prefix.validate_complete_membership(&membership)?;
-        if !membership_authorizes(Some(&membership), commit.value(), commit.author()) {
+        if !membership_authorizes(&membership, commit.value(), commit.author()) {
             return Err(StorePullError::InvalidState(
                 "Store publication author lacks current membership authority".to_string(),
             ));

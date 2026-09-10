@@ -206,7 +206,7 @@ impl<'a> StoreCommitVerifier<'a> {
         &mut self,
         commit: &StoreBatchCommit,
         predecessor_state: &ResolvedStoreDeviceState,
-        predecessor_membership: Option<&MembershipChain>,
+        predecessor: &MembershipChain,
     ) -> Result<VerifiedStoreDeviceOperations, RegistrationLoadError> {
         if commit.device_exclusion_proposals().is_empty()
             && commit.device_exclusion_outcomes().is_empty()
@@ -214,12 +214,6 @@ impl<'a> StoreCommitVerifier<'a> {
             return VerifiedStoreDeviceOperations::without_exclusions(commit)
                 .map_err(RegistrationLoadError::from);
         }
-        let predecessor = predecessor_membership.ok_or_else(|| {
-            RegistrationLoadError::Invalid(
-                "device exclusion activation has no exact predecessor membership authority"
-                    .to_string(),
-            )
-        })?;
         let mut proposals = Vec::with_capacity(commit.device_exclusion_proposals().len());
         for reference in commit.device_exclusion_proposals() {
             let opened = self

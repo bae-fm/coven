@@ -195,11 +195,10 @@ impl<'a> MergeHistoryVerifier<'a> {
             ));
         }
         verify_merge_membership_state_ref(&commit.membership_state, membership, &state)?;
-        Box::pin(self.commit_verifier.load_commit_device_operations(
-            commit,
-            &state,
-            Some(membership),
-        ))
+        Box::pin(
+            self.commit_verifier
+                .load_commit_device_operations(commit, &state, membership),
+        )
         .await
         .map_err(StorePullError::from)
     }

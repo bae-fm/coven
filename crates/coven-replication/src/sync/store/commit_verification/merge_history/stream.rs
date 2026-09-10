@@ -257,7 +257,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     &membership,
                     &predecessor_state,
                 )?;
-                if !membership_authorizes(Some(&membership), &commit, &author) {
+                if !membership_authorizes(&membership, &commit, &author) {
                     return Err(StorePullError::InvalidState(
                         "Merge history commit lacks exact membership authority".to_string(),
                     ));
@@ -291,7 +291,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 let operations = Box::pin(self.commit_verifier.load_commit_device_operations(
                     &commit,
                     &authorized_predecessor,
-                    Some(&membership),
+                    &membership,
                 ))
                 .await
                 .map_err(StorePullError::from)?;
