@@ -30,6 +30,48 @@ impl Fixture {
 }
 
 #[test]
+fn store_ack_rejects_an_author_registered_in_another_store() {
+    let expected = fixture();
+    let author = fixture();
+    assert_ne!(
+        expected.root_ref.store_root_hash,
+        author.root_ref.store_root_hash
+    );
+    let mut ack = author.signed_ack("2026-07-16T00:00:00Z");
+    let reference = |ack: &StoreAck| StoreAckRef {
+        registration: author.registration_ref.clone(),
+        sequence: ack.sequence,
+        ack_hash: ack.ack_hash(),
+        object: exact("store-v1/acks/founder/1.json".to_string(), &ack.to_bytes()),
+    };
+    StoreAck::parse_at(
+        &ack.to_bytes(),
+        &author.root_ref,
+        &reference(&ack),
+        &author.registration,
+    )
+    .expect("the acknowledgement is valid in its author's Store");
+
+    ack.body_mut().store_root_hash = expected.root_ref.store_root_hash;
+    ack.resign(&author.registration.device_signer(&author.signer).unwrap());
+    let result = StoreAck::parse_at(
+        &ack.to_bytes(),
+        &expected.root_ref,
+        &reference(&ack),
+        &author.registration,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(StoreProtocolError::StoreRootMismatch { expected: root, actual })
+                if root == expected.root_ref.store_root_hash
+                    && actual == author.root_ref.store_root_hash
+        ),
+        "a valid signature cannot move its registration to another Store: {result:?}"
+    );
+}
+
+#[test]
 fn store_ack_semantic_hash_is_distinct_from_its_stored_json_hash() {
     let ack = fixture().signed_ack("2026-07-16T00:00:00Z");
     let bytes = ack.to_bytes();

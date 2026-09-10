@@ -207,6 +207,10 @@ impl StoreAck {
             expected_store_root.store_root_hash,
             ack.store_root_hash,
         )?;
+        crate::objects::verify_store_root(
+            expected_store_root.store_root_hash,
+            author.store_root.store_root_hash,
+        )?;
         ack.registration.verify_registration(author)?;
         if ack.registration != expected.registration {
             return Err(StoreProtocolError::DeviceRegistrationRefMismatch {
