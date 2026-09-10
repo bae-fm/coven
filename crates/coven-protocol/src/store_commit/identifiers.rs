@@ -589,10 +589,6 @@ impl StoreCommitOrder {
         &self.dependencies
     }
 
-    pub fn stream_id<'a>(&self, device_id: &'a str) -> &'a str {
-        device_id
-    }
-
     pub fn predecessor_cut(&self) -> Result<StoreHistoryCut, StoreProtocolError> {
         let mut cut = self.dependencies.clone();
         if let Some(predecessor) = &self.predecessor {
