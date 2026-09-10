@@ -1,6 +1,13 @@
 use super::replay_sql::ReplaySql;
 use super::*;
 
+#[cfg(test)]
+use super::blob_outbox::{reinsert_published_blob_drop_intent_on, PublishedBlobDropIntent};
+#[cfg(test)]
+use super::local_blob_cleanup::{
+    local_blob_cleanup_intents_on, reevaluate_suspended_blob_cleanup_on,
+};
+
 mod rebase;
 mod relationships;
 
@@ -144,6 +151,14 @@ impl ReplayProjectionResult {
 }
 
 impl ReplayProjection {
+    pub(super) fn suspend_blob_cleanup_for_restoration_on(
+        &self,
+        target: &rusqlite::Connection,
+        blob_decls: &crate::BlobDecls,
+    ) -> Result<super::local_blob_cleanup::SuspendedBlobCleanup, DbError> {
+        suspend_projection_blob_cleanup_on(&self.connection, target, blob_decls)
+    }
+
     pub(super) fn replace_store_publication_state(
         &self,
         source: &rusqlite::Connection,
@@ -161,15 +176,6 @@ impl ReplayProjection {
             ],
         )?;
         transaction.commit().map_err(DbError::from)
-    }
-
-    pub(super) fn publication_blobs(
-        &self,
-        blob_decls: &crate::BlobDecls,
-    ) -> Result<Vec<crate::PublicationBlob>, DbError> {
-        blob_decls
-            .publication_blobs_in_db(&self.connection)
-            .map_err(DbError::from)
     }
 
     pub(super) fn from_image(
@@ -495,6 +501,49 @@ pub(super) fn replace_tables_from_projection_on(
     replace_tables_from_connection_on(&source.connection, target, tables)
 }
 
+fn suspend_projection_blob_cleanup_on(
+    source: &rusqlite::Connection,
+    target: &rusqlite::Connection,
+    blob_decls: &crate::BlobDecls,
+) -> Result<super::local_blob_cleanup::SuspendedBlobCleanup, DbError> {
+    use crate::local_blob_cleanup_intents::LocalBlobCleanupIdentity;
+
+    let blobs = blob_decls
+        .publication_blobs_in_db(source)?
+        .into_iter()
+        .map(|publication| publication.blob)
+        .collect::<Vec<_>>();
+    super::local_blob_cleanup::suspend_blob_cleanup_for_restoration_on(
+        target,
+        &blobs,
+        |intent, leased| {
+            if leased {
+                return Ok(true);
+            }
+            let referenced = match intent.identity() {
+                LocalBlobCleanupIdentity::Local => blob_decls.local_copy_is_referenced(
+                    source,
+                    intent.namespace(),
+                    intent.blob_id(),
+                )?,
+                LocalBlobCleanupIdentity::Exact(hash) => blob_decls.exact_copy_is_referenced(
+                    source,
+                    intent.namespace(),
+                    intent.blob_id(),
+                    *hash,
+                )?,
+                LocalBlobCleanupIdentity::Row { .. } => {
+                    return Err(DbError::Message("durable blob cleanup is row-bound".into()));
+                }
+            };
+            // The projection owns the complete final rows and bindings. A
+            // drain already deleting this copy can finish safely because those
+            // rows do not use it. Reinsertion keeps the obligation durable.
+            Ok(!referenced)
+        },
+    )
+}
+
 fn replace_tables_from_connection_on(
     source: &rusqlite::Connection,
     target: &rusqlite::Transaction<'_>,
@@ -741,3 +790,7 @@ fn projection_table_rows(
 #[cfg(test)]
 #[path = "replay_projection_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "replay_projection_cleanup_tests.rs"]
+mod cleanup_tests;

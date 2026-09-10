@@ -451,9 +451,10 @@ impl StoreSession<'_> {
     }
 }
 
-pub(super) fn take_leased_published_blob_drop_intents_for_restoration_on(
+pub(super) fn take_published_blob_drop_intents_for_restoration_on(
     conn: &rusqlite::Connection,
     blobs: &[coven_protocol::blob::BlobRef],
+    can_restore: impl Fn(&PublishedBlobDropIntent, bool) -> Result<bool, DbError>,
 ) -> Result<Vec<PublishedBlobDropIntent>, DbError> {
     let blobs = blobs
         .iter()
@@ -464,10 +465,8 @@ pub(super) fn take_leased_published_blob_drop_intents_for_restoration_on(
         let intents = {
             let mut statement = conn
                 .prepare(
-                    "SELECT seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition
-                     FROM published_blob_drop_intents
-                     WHERE namespace = ?1 AND blob_id = ?2
-                       AND (
+                    "SELECT seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition,
+                       (
                            EXISTS (
                                SELECT 1 FROM store_write_blob_leases
                                WHERE namespace = ?1 AND blob_id = ?2
@@ -476,17 +475,27 @@ pub(super) fn take_leased_published_blob_drop_intents_for_restoration_on(
                                WHERE namespace = ?1 AND blob_id = ?2
                            )
                        )
+                     FROM published_blob_drop_intents
+                     WHERE namespace = ?1 AND blob_id = ?2
                      ORDER BY seq, locator_hash",
                 )
                 .map_err(DbError::from)?;
             let intents = statement
-                .query_map((namespace, blob_id), row_to_published_blob_drop_intent)
+                .query_map((namespace, blob_id), |row| {
+                    Ok((
+                        row_to_published_blob_drop_intent(row)?,
+                        row.get::<_, bool>(7)?,
+                    ))
+                })
                 .map_err(DbError::from)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(DbError::from)?;
             intents
         };
-        for intent in intents {
+        for (intent, leased) in intents {
+            if !can_restore(&intent, leased)? {
+                continue;
+            }
             let removed = crate::with_coven_sql_authority(|| {
                 conn.execute(
                     "DELETE FROM published_blob_drop_intents

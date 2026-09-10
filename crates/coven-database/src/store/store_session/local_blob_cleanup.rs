@@ -194,32 +194,39 @@ pub(crate) fn suspend_leased_blob_cleanup_for_restoration_on(
     conn: &rusqlite::Connection,
     blobs: &[coven_protocol::blob::BlobRef],
 ) -> Result<SuspendedBlobCleanup, DbError> {
+    suspend_blob_cleanup_for_restoration_on(conn, blobs, |_, leased| Ok(leased))
+}
+
+/// The selection owner must prove either that a lease prevents deletion or
+/// that the installed rows never reference the copy being deleted. A filesystem
+/// drain may already hold an intent, so suspending its SQL guard cannot cancel
+/// an unleased deletion.
+pub(super) fn suspend_blob_cleanup_for_restoration_on(
+    conn: &rusqlite::Connection,
+    blobs: &[coven_protocol::blob::BlobRef],
+    can_restore: impl Fn(&LocalBlobCleanupIntent, bool) -> Result<bool, DbError>,
+) -> Result<SuspendedBlobCleanup, DbError> {
     let blob_keys = blobs
         .iter()
         .map(|blob| (blob.namespace.as_str(), blob.id.as_str()))
         .collect::<std::collections::BTreeSet<_>>();
     let mut taken = Vec::new();
-    for (namespace, blob_id) in blob_keys {
+    for (intent, leased) in local_blob_cleanup_intents_on(conn)? {
+        let namespace = intent.namespace();
+        let blob_id = intent.blob_id();
+        if !blob_keys.contains(&(namespace, blob_id)) || !can_restore(&intent, leased)? {
+            continue;
+        }
         let removed = crate::with_coven_sql_authority(|| {
             conn.execute(
                 "DELETE FROM local_cleanup_intents
-                 WHERE namespace = ?1 AND blob_id = ?2 AND copy_identity = 'local'
-                   AND (
-                       EXISTS (
-                           SELECT 1 FROM store_write_blob_leases
-                           WHERE namespace = ?1 AND blob_id = ?2
-                       ) OR EXISTS (
-                           SELECT 1 FROM retained_replay_blob_leases
-                           WHERE namespace = ?1 AND blob_id = ?2
-                       )
-                   )",
-                (namespace, blob_id),
+                 WHERE namespace = ?1 AND blob_id = ?2 AND copy_identity = ?3",
+                (namespace, blob_id, intent.persisted_identity()?),
             )
             .map_err(DbError::from)
         })?;
         match removed {
-            0 => {}
-            1 => taken.push(LocalBlobCleanupIntent::local(namespace, blob_id)),
+            1 => taken.push(intent),
             count => {
                 return Err(DbError::Message(format!(
                     "local cleanup restoration removed {count} obligations for {namespace}/{blob_id}"
@@ -227,8 +234,15 @@ pub(crate) fn suspend_leased_blob_cleanup_for_restoration_on(
             }
         }
     }
-    let published = super::blob_outbox::take_leased_published_blob_drop_intents_for_restoration_on(
-        conn, blobs,
+    let published = super::blob_outbox::take_published_blob_drop_intents_for_restoration_on(
+        conn,
+        blobs,
+        |intent, leased| {
+            can_restore(
+                &LocalBlobCleanupIntent::local(&intent.drop.namespace, &intent.drop.id),
+                leased,
+            )
+        },
     )?;
     Ok(SuspendedBlobCleanup {
         local: taken,
@@ -244,7 +258,16 @@ pub(crate) fn reevaluate_suspended_blob_cleanup_on(
     cleanup: &SuspendedBlobCleanup,
 ) -> Result<(), DbError> {
     for intent in &cleanup.local {
-        record_obsolete_copy_intents_on(conn, decls, intent)?;
+        if let LocalBlobCleanupIdentity::Exact(hash) = intent.identity() {
+            if decls.exact_copy_is_referenced(conn, intent.namespace(), intent.blob_id(), *hash)? {
+                return Err(DbError::Message(
+                    "restored projection references a suspended exact blob cleanup copy".into(),
+                ));
+            }
+            record_durable_intent(conn, intent)?;
+        } else {
+            record_obsolete_copy_intents_on(conn, decls, intent)?;
+        }
     }
     for intent in &cleanup.published {
         let local_referenced = decls

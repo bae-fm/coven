@@ -411,16 +411,8 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
         );
         tables.sort();
         tables.dedup();
-        let projected_blobs = replay
-            .publication_blobs(self.blob_decls)?
-            .into_iter()
-            .map(|publication| publication.blob)
-            .collect::<Vec<_>>();
         let suspended_cleanup =
-            super::local_blob_cleanup::suspend_leased_blob_cleanup_for_restoration_on(
-                tx,
-                &projected_blobs,
-            )?;
+            replay.suspend_blob_cleanup_for_restoration_on(tx, self.blob_decls)?;
         let old_exact_bindings = super::local_blob_cleanup::exact_blob_bindings_on(tx)?;
         tx.pragma_update(None, "defer_foreign_keys", "ON")
             .map_err(DbError::from)?;

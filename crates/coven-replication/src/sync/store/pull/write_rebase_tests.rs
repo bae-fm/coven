@@ -5,6 +5,8 @@ use coven_database::{Database, StoreDatabase};
 use coven_keys::keys::UserKeypair;
 use std::sync::Arc;
 
+#[path = "write_rebase_blob_merge_tests.rs"]
+mod blob_merges;
 #[path = "write_rebase_blob_source_tests.rs"]
 mod blob_sources;
 #[path = "write_rebase_blob_tests.rs"]
