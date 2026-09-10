@@ -22,23 +22,34 @@ impl StoreSession<'_> {
     }
 }
 
-/// A closed, migrated snapshot image and the directory owning its payloads.
-/// Installation opens the image only within the receiving database operation.
+/// A closed, migrated snapshot database and the directory owning its payloads.
+/// Installation opens the database only within the receiving database operation.
 pub struct PreparedStoreSnapshot {
-    image: crate::SnapshotDatabaseImage,
     directory: SnapshotPreparationDirectory,
 }
 
 impl PreparedStoreSnapshot {
     pub(crate) fn seal(core: crate::DatabaseCore) -> Result<Self, DbError> {
-        let (bytes, directory) = core.serialize_and_close_snapshot()?;
-        let image =
-            crate::SnapshotDatabaseImage::create(directory.path.join("prepared.sqlite"), &bytes)
-                .map_err(DbError::from);
-        match image {
-            Ok(image) => Ok(Self { image, directory }),
-            Err(error) => directory.finish(Err(error)),
-        }
+        Ok(Self {
+            directory: core.close_snapshot()?,
+        })
+    }
+
+    fn read<T>(
+        &self,
+        read: impl FnOnce(
+            &rusqlite::Connection,
+            &coven_foundation::store_dir::StoreDir,
+        ) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let directory = coven_foundation::store_dir::StoreDir::new_ephemeral(&self.directory.path);
+        // Read through SQLite so committed WAL pages remain part of the source.
+        // The preparation owns the database, its sidecars, and payloads together.
+        let source = rusqlite::Connection::open_with_flags(
+            directory.db_path(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        read(&source, &directory)
     }
 
     pub(crate) fn install_on(
@@ -59,15 +70,11 @@ impl PreparedStoreSnapshot {
         ),
         DbError,
     > {
-        let Self { image, directory } = self;
-        let outcome = (|| {
-            let bytes = image.read_and_discard().map_err(DbError::from)?;
-            let mut source = rusqlite::Connection::open_in_memory()?;
-            crate::connection_io::deserialize_database_image_into(&mut source, &bytes)?;
-            let source_dir = coven_foundation::store_dir::StoreDir::new_ephemeral(&directory.path);
+        let outcome = self.read(|source, source_dir| {
+            let source_records = StoreRecords::new(source, source_dir);
             let source_version: u32 =
                 source.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            let source_routing = crate::database_open::load_coven_metadata(&source)?;
+            let source_routing = crate::database_open::load_coven_metadata(source)?;
             if source_version != receiver.schema_version
                 || source_routing.hash() != receiver.sync_routing_hash
             {
@@ -76,7 +83,6 @@ impl PreparedStoreSnapshot {
                 ));
             }
             let root = receiver.required_root_authority()?;
-            let source_records = StoreRecords::new(&source, &source_dir);
             let mut source_authority = VerifiedStoreAuthority::default();
             if source_authority.required_root_authority_on(source_records)? != root {
                 return Err(DbError::Message(
@@ -111,12 +117,12 @@ impl PreparedStoreSnapshot {
                 .retained_replay_inputs_on(source_records, &root)
                 .map_err(|error| DbError::context("checkpoint source retained inputs", error))?;
             let source_floor = crate::connection_io::parse_seed(
-                crate::get_protocol_state_on(&source, coven_protocol::hlc::HIGHWATER_STATE_KEY)?,
+                crate::get_protocol_state_on(source, coven_protocol::hlc::HIGHWATER_STATE_KEY)?,
                 "received checkpoint clock floor",
             )?;
             let row_floor = crate::connection_io::parse_seed(
                 crate::connection_io::scan_max_updated_at(
-                    &source,
+                    source,
                     receiver.synced_tables,
                     receiver_wall_ms.saturating_add(coven_protocol::hlc::MAX_FUTURE_SKEW_MS),
                 )?,
@@ -256,36 +262,14 @@ impl PreparedStoreSnapshot {
                     Ok(StoreTransactionOutcome::Rollback(applied))
                 }
             })
-        })();
-        directory.finish(outcome)
+        });
+        self.directory.finish(outcome)
     }
 
     /// Release a preparation whose verified interval cannot be installed.
     #[cfg(test)]
     pub(crate) fn discard(self) -> Result<(), DbError> {
-        self.finish(Ok(()))
-    }
-
-    #[cfg(test)]
-    fn finish<T>(self, outcome: Result<T, DbError>) -> Result<T, DbError> {
-        let outcome = match self.image.finish_operation(outcome) {
-            Ok(value) => Ok(value),
-            Err(crate::SnapshotImageOperationError::Operation(error)) => Err(error),
-            Err(crate::SnapshotImageOperationError::Cleanup { path, cleanup }) => {
-                Err(crate::SnapshotImageError::Cleanup { path, cleanup }.into())
-            }
-            Err(crate::SnapshotImageOperationError::CleanupAfterFailure {
-                path,
-                cleanup,
-                cause,
-            }) => Err(crate::SnapshotImageError::CleanupAfterFailure {
-                path,
-                cleanup,
-                cause: Box::new(crate::SnapshotImageError::from(cause)),
-            }
-            .into()),
-        };
-        self.directory.finish(outcome)
+        self.directory.finish(Ok(()))
     }
 }
 
@@ -297,27 +281,6 @@ pub(crate) struct SnapshotPreparationDirectory {
 }
 
 impl SnapshotPreparationDirectory {
-    pub(crate) fn after_close<T>(
-        self,
-        outcome: Result<T, DbError>,
-        closed: Result<(), DbError>,
-    ) -> Result<(T, Self), DbError> {
-        let outcome = match (outcome, closed) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-            (Err(operation), Err(close)) => Err(crate::SnapshotImageError::CleanupAfterFailure {
-                path: self.path.clone(),
-                cleanup: close.to_string(),
-                cause: Box::new(crate::SnapshotImageError::from(operation)),
-            }
-            .into()),
-        };
-        match outcome {
-            Ok(value) => Ok((value, self)),
-            Err(error) => self.finish(Err(error)),
-        }
-    }
-
     pub(crate) fn create(path: std::path::PathBuf) -> Result<Self, DbError> {
         std::fs::create_dir(&path)
             .map_err(|error| DbError::context("create snapshot preparation directory", error))?;

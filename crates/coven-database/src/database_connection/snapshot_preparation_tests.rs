@@ -60,7 +60,7 @@ async fn sealed_snapshot_retains_final_rows_and_payloads_without_its_worker() {
         std::fs::read(path.join("payload")).expect("retained payload"),
         b"payload"
     );
-    sealed.assert_prepared_row_for_test("prepared").await;
+    sealed.assert_prepared_row_for_test("prepared");
     sealed.discard().expect("release sealed preparation");
     assert!(
         !path.exists(),
@@ -69,39 +69,60 @@ async fn sealed_snapshot_retains_final_rows_and_payloads_without_its_worker() {
 }
 
 #[tokio::test]
-async fn failed_snapshot_sealing_closes_and_releases_the_preparation() {
+async fn sealed_snapshot_reads_committed_pages_retained_in_the_wal() {
     let temporary = tempfile::tempdir().expect("preparation parent");
     let path = temporary.path().join("preparation");
     let connection = open_preparation(path.clone());
-    let context = Arc::downgrade(&connection.context);
-    std::fs::write(path.join("prepared.sqlite"), b"occupied").expect("occupy output path");
-    let error = match connection.into_prepared_snapshot().await {
-        Ok(_) => panic!("sealing overwrote an existing image"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error,
-        DbError::SnapshotImage(error)
-            if matches!(*error, crate::SnapshotImageError::Io(ref error)
-                if error.kind() == std::io::ErrorKind::AlreadyExists)
-    ));
-    assert!(context.upgrade().is_none());
+    let database_path = coven_foundation::store_dir::StoreDir::new_ephemeral(&path).db_path();
+    let reader = rusqlite::Connection::open_with_flags(
+        &database_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open reader holding the initial snapshot");
+    let transaction = reader.unchecked_transaction().expect("begin read snapshot");
+    let initial: String = transaction
+        .query_row("SELECT value FROM prepared_rows", [], |row| row.get(0))
+        .expect("pin initial rows in the reader");
+    assert_eq!(initial, "initial");
+    connection
+        .on_connection_thread(|core| {
+            core.conn
+                .execute("UPDATE prepared_rows SET value = 'prepared'", [])?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .expect("commit while the reader holds older rows");
+    let sealed = connection
+        .into_prepared_snapshot()
+        .await
+        .expect("seal preparation");
+    assert!(
+        std::fs::metadata(database_path.with_extension("db-wal"))
+            .expect("the reader prevents retiring the WAL")
+            .len()
+            > 0
+    );
+    sealed.assert_prepared_row_for_test("prepared");
+    drop(transaction);
+    drop(reader);
+    sealed
+        .discard()
+        .expect("release preparation and WAL together");
     assert!(!path.exists());
 }
 
 #[tokio::test]
-async fn discarded_snapshot_preparation_does_not_require_a_sealed_image() {
+async fn discarded_snapshot_preparation_releases_its_database_and_payloads() {
     let temporary = tempfile::tempdir().expect("preparation parent");
     let path = temporary.path().join("preparation");
     let connection = open_preparation(path.clone());
     let context = Arc::downgrade(&connection.context);
-    std::fs::write(path.join("prepared.sqlite"), b"occupied").expect("occupy output path");
     std::fs::write(path.join("payload"), b"payload").expect("write preparation payload");
 
     connection
         .discard_snapshot_preparation()
         .await
-        .expect("discard without creating another image");
+        .expect("discard preparation");
     assert!(context.upgrade().is_none());
     assert!(!path.exists());
 }

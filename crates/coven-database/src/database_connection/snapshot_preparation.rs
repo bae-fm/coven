@@ -1,22 +1,11 @@
 use super::*;
 
 impl DatabaseCore {
-    pub(crate) fn serialize_and_close_snapshot(
-        self,
-    ) -> Result<(Vec<u8>, SnapshotPreparationDirectory), DbError> {
-        let serialized = crate::connection_io::serialize_database_image(&self.conn);
-        self.close_snapshot(serialized)
-    }
-
     pub(super) fn discard_snapshot(self) -> Result<(), DbError> {
-        let ((), directory) = self.close_snapshot(Ok(()))?;
-        directory.finish(Ok(()))
+        self.close_snapshot()?.finish(Ok(()))
     }
 
-    fn close_snapshot<T>(
-        self,
-        outcome: Result<T, DbError>,
-    ) -> Result<(T, SnapshotPreparationDirectory), DbError> {
+    pub(crate) fn close_snapshot(self) -> Result<SnapshotPreparationDirectory, DbError> {
         let Self {
             conn,
             verified_store_authority,
@@ -29,7 +18,10 @@ impl DatabaseCore {
         let closed = conn.close().map_err(|(_, error)| DbError::from(error));
         drop(verified_store_authority);
         drop(context);
-        directory.after_close(outcome, closed)
+        match closed {
+            Ok(()) => Ok(directory),
+            Err(error) => directory.finish(Err(error)),
+        }
     }
 }
 
