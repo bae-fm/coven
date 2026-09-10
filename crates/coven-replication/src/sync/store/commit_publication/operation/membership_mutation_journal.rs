@@ -33,10 +33,6 @@ impl MembershipMutationPlan {
 #[serde(deny_unknown_fields)]
 pub(super) struct AdmissionMutationPlan {
     pub(super) candidate: Box<PreparedStoreOperationCommit>,
-    pub(super) member_pubkey: String,
-    pub(super) member_email: Option<String>,
-    pub(super) role: MemberRole,
-    pub(super) desired_access: CloudAccessState,
     pub(super) wrapped_key: PreparedWrappedStoreKey,
 }
 
@@ -52,14 +48,6 @@ impl AdmissionMutationPlan {
         let publication = self.candidate.prepared_membership_publication()?;
         Ok(publication.entry.author_pubkey == owner_pubkey
             && publication.entry.store_id == store_id
-            && self.member_pubkey == member_pubkey
-            && self.member_email.as_deref() == member_email
-            && &self.role == role
-            && self.desired_access
-                == (CloudAccessState::Present {
-                    member_pubkey: member_pubkey.to_string(),
-                    provider_account_email: member_email.map(str::to_string),
-                })
             && matches!(
                 &publication.entry.change,
                 StoreAuthorityChange::SetMember {
@@ -78,13 +66,26 @@ impl AdmissionMutationPlan {
 #[serde(deny_unknown_fields)]
 pub(super) struct RevokeMutationPlan {
     pub(super) candidate: Box<PreparedStoreOperationCommit>,
-    pub(super) revokee_pubkey: String,
-    pub(super) desired_access: CloudAccessState,
-    pub(super) wraps: Vec<ReplacementWrappedKey>,
+    pub(super) provider_account_email: Option<String>,
+    pub(super) wraps: Vec<PreparedWrappedStoreKey>,
     pub(super) keyring_payload: Vec<u8>,
 }
 
 impl RevokeMutationPlan {
+    pub(super) fn desired_access(&self) -> Result<CloudAccessState, MembershipMutationError> {
+        let publication = self.candidate.prepared_membership_publication()?;
+        let StoreAuthorityChange::RemoveMember { user_pubkey, .. } = &publication.entry.change
+        else {
+            return Err(MembershipMutationError::InvalidDurableMutation(
+                "membership removal plan contains another change".into(),
+            ));
+        };
+        Ok(CloudAccessState::Absent {
+            member_pubkey: user_pubkey.clone(),
+            provider_account_email: self.provider_account_email.clone(),
+        })
+    }
+
     pub(super) fn matches_request(
         &self,
         owner_pubkey: &str,
@@ -94,33 +95,16 @@ impl RevokeMutationPlan {
         let publication = self.candidate.prepared_membership_publication()?;
         Ok(publication.entry.author_pubkey == owner_pubkey
             && publication.entry.store_id == store_id
-            && self.revokee_pubkey == revokee_pubkey
             && matches!(
                 &publication.entry.change,
                 StoreAuthorityChange::RemoveMember { user_pubkey, .. }
                     if user_pubkey == revokee_pubkey
-            )
-            && matches!(
-                &self.desired_access,
-                CloudAccessState::Absent { member_pubkey, .. }
-                    if member_pubkey == revokee_pubkey
             ))
     }
 
     pub(super) fn validate_closed_shape(&self) -> Result<(), MembershipMutationError> {
         let publication = self.candidate.prepared_membership_publication()?;
-        if !matches!(
-            &self.desired_access,
-            CloudAccessState::Absent { member_pubkey, .. }
-                if member_pubkey == &self.revokee_pubkey
-        ) {
-            return Err(MembershipMutationError::InvalidDurableMutation(
-                "membership removal access differs from its requested member".to_string(),
-            ));
-        }
         let StoreAuthorityChange::RemoveMember {
-            user_pubkey,
-            wrapped_keys,
             retirement_device_state,
             retirement_barriers,
             ..
@@ -130,16 +114,6 @@ impl RevokeMutationPlan {
                 "membership removal plan contains another change".to_string(),
             ));
         };
-        let planned_wraps = self
-            .wraps
-            .iter()
-            .map(|wrap| wrap.prepared.reference.clone())
-            .collect::<Vec<_>>();
-        if user_pubkey != &self.revokee_pubkey || wrapped_keys != &planned_wraps {
-            return Err(MembershipMutationError::InvalidDurableMutation(
-                "membership removal plan differs from its exact entry".to_string(),
-            ));
-        }
         let retires_owner = retirement_barriers.values().any(|barrier| {
             matches!(
                 barrier,
@@ -162,20 +136,10 @@ impl RevokeMutationPlan {
     pub(super) fn candidate_remote_objects(
         &self,
     ) -> Result<Vec<ClosedRemoteObject>, MembershipMutationError> {
-        Ok(self.candidate.merge_membership_activation_remote_objects(
-            &self
-                .wraps
-                .iter()
-                .map(|wrap| wrap.prepared.clone())
-                .collect::<Vec<_>>(),
-        )?)
+        Ok(self
+            .candidate
+            .merge_membership_activation_remote_objects(&self.wraps)?)
     }
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ReplacementWrappedKey {
-    pub(super) prepared: PreparedWrappedStoreKey,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

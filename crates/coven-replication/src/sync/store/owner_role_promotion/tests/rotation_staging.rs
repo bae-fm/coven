@@ -62,9 +62,7 @@ async fn stage_removal(substitute_owner: bool) {
         .as_array()
         .unwrap()
         .iter()
-        .map(|wrap| {
-            serde_json::from_value::<PreparedWrappedStoreKey>(wrap["prepared"].clone()).unwrap()
-        })
+        .map(|wrap| serde_json::from_value::<PreparedWrappedStoreKey>(wrap.clone()).unwrap())
         .collect::<Vec<_>>();
     let mut remotes = candidate
         .merge_membership_activation_remote_objects(&wraps)
@@ -212,9 +210,7 @@ async fn complete_installed_removal(proof: CompletionProof) {
         .as_array()
         .unwrap()
         .iter()
-        .map(|wrap| {
-            serde_json::from_value::<PreparedWrappedStoreKey>(wrap["prepared"].clone()).unwrap()
-        })
+        .map(|wrap| serde_json::from_value::<PreparedWrappedStoreKey>(wrap.clone()).unwrap())
         .collect::<Vec<_>>();
     let remotes = candidate
         .merge_membership_activation_remote_objects(&wraps)

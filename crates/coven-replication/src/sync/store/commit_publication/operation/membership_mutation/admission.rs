@@ -2,6 +2,7 @@ use super::*;
 use crate::sync::store::commit_publication::operation::{
     commit_plan, AdmissionMutationPlan, AuthorizedWriterOperation,
 };
+use coven_protocol::membership::StoreAuthorityChange;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     #[allow(clippy::too_many_arguments)]
@@ -493,13 +494,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.attach_membership_proof(&mut candidate, &publication)?;
         let plan = AdmissionMutationPlan {
             candidate: Box::new(candidate),
-            member_pubkey: public_key_hex.to_string(),
-            member_email: member_email.map(str::to_string),
-            role: role.clone(),
-            desired_access: coven_storage::cloud::CloudAccessState::Present {
-                member_pubkey: public_key_hex.to_string(),
-                provider_account_email: member_email.map(str::to_string),
-            },
             wrapped_key,
         };
         Ok(plan)
@@ -515,9 +509,23 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             MembershipMutationProgress::AdmissionGranted { join_info }
             | MembershipMutationProgress::AdmissionActivated { join_info } => Ok(join_info),
             MembershipMutationProgress::Pending => {
+                let publication = plan.candidate.prepared_membership_publication()?;
+                let StoreAuthorityChange::SetMember {
+                    user_pubkey,
+                    provider_account_email,
+                    ..
+                } = &publication.entry.change
+                else {
+                    return Err(MembershipMutationError::InvalidDurableMutation(
+                        "membership admission plan contains another change".into(),
+                    ));
+                };
                 let outcome = self
                     .storage
-                    .set_member_access(plan.desired_access.clone())
+                    .set_member_access(coven_storage::cloud::CloudAccessState::Present {
+                        member_pubkey: user_pubkey.clone(),
+                        provider_account_email: provider_account_email.clone(),
+                    })
                     .await?;
                 let coven_storage::cloud::CloudAccessOutcome::Present(join_info) = outcome else {
                     return Err(MembershipMutationError::InvalidDurableMutation(
@@ -551,17 +559,22 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     > {
         let publication = plan.candidate.prepared_membership_publication()?;
         let wrapped = plan.wrapped_key.validate()?;
-        let authority_matches = matches!(
-            &publication.entry.change,
-            coven_protocol::membership::StoreAuthorityChange::SetMember { wrapped_key, .. }
-                if wrapped_key == &plan.wrapped_key.reference
-        );
-        if !authority_matches
+        let StoreAuthorityChange::SetMember {
+            user_pubkey,
+            wrapped_key,
+            ..
+        } = &publication.entry.change
+        else {
+            return Err(MembershipMutationError::InvalidDurableMutation(
+                "membership admission plan contains another change".into(),
+            ));
+        };
+        if wrapped_key != &plan.wrapped_key.reference
             || wrapped.author_pubkey != publication.entry.author_pubkey
             || wrapped
                 .verify_and_unwrap(
                     &publication.entry.store_id,
-                    &plan.member_pubkey,
+                    user_pubkey,
                     std::iter::once(publication.entry.author_pubkey.as_str()),
                 )
                 .is_err()

@@ -14,7 +14,7 @@ pub(super) enum MembershipRevocation {
 
 use super::{
     decode_membership_mutation, exact_owned_remote, MembershipMutationPlan,
-    MembershipMutationProgress, ReplacementWrappedKey, RevokeMutationPlan,
+    MembershipMutationProgress, RevokeMutationPlan,
 };
 
 pub(super) fn publication_predecessor_changed(

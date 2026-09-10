@@ -36,7 +36,7 @@ pub(super) use blob_preparation::close_prepared_packages;
 
 use membership_mutation_journal::{
     decode_membership_mutation, exact_owned_remote, AdmissionMutationPlan, MembershipMutationPlan,
-    MembershipMutationProgress, MutationPersistence, ReplacementWrappedKey, RevokeMutationPlan,
+    MembershipMutationProgress, MutationPersistence, RevokeMutationPlan,
 };
 
 pub(crate) struct MergeConflictResolutionCommitPlan {
