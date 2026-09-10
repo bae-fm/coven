@@ -411,9 +411,9 @@ mod tests {
             write_id: WriteId::from_generated("pending-write".into()),
             affected_rows: vec![AffectedRow {
                 table: "notes".into(),
-                primary_key: "deleted-note".into(),
+                primary_key: "private-note".into(),
             }],
-            reason: WriteRebaseConflictReason::MissingTarget,
+            reason: WriteRebaseConflictReason::PrivateShared,
         };
         let wrapped = || {
             coven_database::DbError::context(
@@ -444,8 +444,8 @@ mod tests {
                 table: "notes".into(),
                 primary_key: "conflicting-note".into(),
             }],
-            reason: WriteRebaseConflictReason::ChangedColumn {
-                column: "body".into(),
+            reason: WriteRebaseConflictReason::Constraint {
+                message: "CHECK constraint failed".into(),
             },
         };
         let pull = || {

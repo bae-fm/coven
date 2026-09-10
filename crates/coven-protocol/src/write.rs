@@ -130,7 +130,7 @@ pub struct AffectedRow {
     pub primary_key: String,
 }
 
-/// A recorded edit cannot be applied to the accepted state without changing its intent.
+/// A recorded edit violates a constraint or its retained audience authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(deny_unknown_fields)]
 #[error("write {write_id} cannot rebase rows {affected_rows:?}: {reason}")]
@@ -145,12 +145,6 @@ pub struct WriteRebaseConflict {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum WriteRebaseConflictReason {
-    #[error("the edited row is absent")]
-    MissingTarget,
-    #[error("column {column:?} conflicts with the recorded edit")]
-    ChangedColumn { column: String },
-    #[error("the inserted row identity already exists")]
-    IdentityCollision,
     #[error("the private edit conflicts with an accepted shared row")]
     PrivateShared,
     #[error("Circle {circle_id} no longer authorizes the captured edit")]

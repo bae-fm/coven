@@ -14,9 +14,11 @@ fn recorded_edit_conflict_survives_operation_context_and_cleanup_errors() {
         write_id: WriteId::from_generated("pending-edit".into()),
         affected_rows: vec![AffectedRow {
             table: "notes".into(),
-            primary_key: "deleted-note".into(),
+            primary_key: "invalid-note".into(),
         }],
-        reason: WriteRebaseConflictReason::MissingTarget,
+        reason: WriteRebaseConflictReason::Constraint {
+            message: "CHECK constraint failed".into(),
+        },
     };
     let error = DbError::context(
         "replace unpublished suffix",
