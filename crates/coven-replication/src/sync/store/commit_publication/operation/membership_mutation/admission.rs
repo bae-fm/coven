@@ -166,7 +166,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     member_email,
                     &role,
                     &protocol_store_id,
-                ) {
+                )? {
                     return Err(MembershipMutationError::PendingMutation(
                         "the pending admission has different immutable inputs".into(),
                     )
@@ -186,10 +186,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         self.database.new_store_write_id(),
                     )
                     .await?;
-                plan.activation.validate()?;
                 let remotes = plan
-                    .activation
-                    .remote_objects(std::slice::from_ref(&plan.wrapped_key))?;
+                    .candidate
+                    .merge_membership_activation_remote_objects(std::slice::from_ref(
+                        &plan.wrapped_key,
+                    ))
+                    .map_err(MembershipMutationError::from)?;
                 let progress = MembershipMutationProgress::Pending;
                 let intent_hash = self
                     .database
@@ -197,16 +199,19 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         MembershipMutationPlan::Admission(plan.clone()).encode()?,
                         progress.encode()?,
                         remotes,
-                        (*plan.activation.candidate).clone(),
+                        (*plan.candidate).clone(),
                     )
                     .await?;
                 (plan, progress, intent_hash)
             }
         };
         loop {
+            let publication = plan
+                .candidate
+                .prepared_membership_publication()
+                .map_err(MembershipMutationError::from)?;
             let mut active = self.database.active_store_publication().await?;
             let creation = plan
-                .activation
                 .candidate
                 .commit
                 .membership_authority
@@ -231,12 +236,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     // still settle. Retirement of the original membership grant
                     // cannot prove this abandonment will never activate.
                     active = Some(
-                        self.abandon_membership_candidate(
-                            intent_hash,
-                            &plan.activation.candidate,
-                            &plan.activation.publication,
-                        )
-                        .await?,
+                        self.abandon_membership_candidate(intent_hash, &plan.candidate)
+                            .await?,
                     );
                 }
                 if let Some(reserved) = active
@@ -246,8 +247,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     let candidate = self
                         .history
                         .authenticate_commit_bytes(
-                            &plan.activation.candidate.reference,
-                            &plan.activation.candidate.commit.to_bytes(),
+                            &plan.candidate.reference,
+                            &plan.candidate.commit.to_bytes(),
                         )
                         .await?;
                     if let Some((membership, publication)) = self
@@ -261,7 +262,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                                 .retire_membership_candidate_authority(
                                     intent_hash,
                                     reserved.clone(),
-                                    (*plan.activation.candidate).clone(),
+                                    (*plan.candidate).clone(),
                                     membership,
                                     publication,
                                 )
@@ -337,17 +338,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     Err(error)
                         if super::publication_predecessor_changed(
                             &error,
-                            &plan.activation.publication.entry.coord(),
+                            &publication.entry.coord(),
                         ) => {}
                     Err(error) => return Err(error.into()),
                 }
             }
             let active = self
-                .abandon_membership_candidate(
-                    intent_hash,
-                    &plan.activation.candidate,
-                    &plan.activation.publication,
-                )
+                .abandon_membership_candidate(intent_hash, &plan.candidate)
                 .await?;
             let row = self
                 .database
@@ -427,19 +424,21 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     member_email,
                     &role,
                     encryption,
-                    plan.activation.candidate.commit.write_id.clone(),
+                    plan.candidate.commit.write_id.clone(),
                 )
                 .await?;
-            replacement.activation.validate()?;
             let remotes = replacement
-                .activation
-                .remote_objects(std::slice::from_ref(&replacement.wrapped_key))?;
+                .candidate
+                .merge_membership_activation_remote_objects(std::slice::from_ref(
+                    &replacement.wrapped_key,
+                ))
+                .map_err(MembershipMutationError::from)?;
             intent_hash = self
                 .database
                 .replace_membership_candidate_mutation(
                     intent_hash,
                     active,
-                    (*replacement.activation.candidate).clone(),
+                    (*replacement.candidate).clone(),
                     MembershipMutationPlan::Admission(replacement.clone()).encode()?,
                     MembershipMutationProgress::Pending.encode()?,
                     remotes,
@@ -489,15 +488,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
             .map_err(MembershipMutationError::from)?;
         let publication = self
-            .finish_store_membership_transition(transition.clone(), candidate.reference.clone())
+            .finish_store_membership_transition(transition, candidate.reference.clone())
             .await?;
         self.attach_membership_proof(&mut candidate, &publication)?;
         let plan = AdmissionMutationPlan {
-            activation: PreparedMembershipActivation {
-                transition: Box::new(transition),
-                candidate: Box::new(candidate),
-                publication: Box::new(publication),
-            },
+            candidate: Box::new(candidate),
             member_pubkey: public_key_hex.to_string(),
             member_email: member_email.map(str::to_string),
             role: role.clone(),
@@ -554,20 +549,20 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         ),
         MembershipMutationError,
     > {
-        plan.activation.validate()?;
+        let publication = plan.candidate.prepared_membership_publication()?;
         let wrapped = plan.wrapped_key.validate()?;
         let authority_matches = matches!(
-            &plan.activation.publication.entry.change,
+            &publication.entry.change,
             coven_protocol::membership::StoreAuthorityChange::SetMember { wrapped_key, .. }
                 if wrapped_key == &plan.wrapped_key.reference
         );
         if !authority_matches
-            || wrapped.author_pubkey != plan.activation.publication.entry.author_pubkey
+            || wrapped.author_pubkey != publication.entry.author_pubkey
             || wrapped
                 .verify_and_unwrap(
-                    &plan.activation.publication.entry.store_id,
+                    &publication.entry.store_id,
                     &plan.member_pubkey,
-                    std::iter::once(plan.activation.publication.entry.author_pubkey.as_str()),
+                    std::iter::once(publication.entry.author_pubkey.as_str()),
                 )
                 .is_err()
         {
@@ -589,20 +584,23 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         if matches!(progress, MembershipMutationProgress::Pending) {
             self.refresh_membership_publication().await?;
             self.membership
-                .validate_publication_predecessor(&plan.activation.publication.entry)?;
+                .validate_publication_predecessor(&publication.entry)?;
         }
         let join_info = self.admission_access(&plan, progress, intent_hash).await?;
         if !activated {
-            let activation = &plan.activation;
-            let remotes = activation.remote_objects(std::slice::from_ref(&plan.wrapped_key))?;
+            let remotes =
+                plan.candidate
+                    .merge_membership_activation_remote_objects(std::slice::from_ref(
+                        &plan.wrapped_key,
+                    ))?;
             self.publish_membership_authority(
-                &activation.transition,
+                &publication.transition(),
                 std::slice::from_ref(&plan.wrapped_key),
             )
             .await?;
             for object in [
                 &plan.wrapped_key.reference.object,
-                &activation.publication.entry_ref.object,
+                &publication.entry_ref.object,
             ] {
                 persistence
                     .mark_remote_object_uploaded(
@@ -611,14 +609,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .await?;
             }
             let accepted = self.publish_membership_activation(
-                &activation.transition, &activation.publication, activation.candidate.clone(),
+                plan.candidate.clone(),
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
                     intent_hash,
                     progress_bytes: MembershipMutationProgress::AdmissionActivated { join_info: join_info.clone() }.encode()?,
                     remote_objects: remotes.into_iter().map(|remote| remote.into_record()).collect(),
                 },
             ).await?;
-            if accepted != activation.candidate.reference {
+            if accepted != plan.candidate.reference {
                 return Err(MembershipMutationError::InvalidDurableMutation(
                     "membership admission accepted another Store candidate".into(),
                 ));

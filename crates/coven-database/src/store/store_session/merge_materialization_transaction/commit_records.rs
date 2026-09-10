@@ -283,9 +283,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         }
         match completion {
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion::MembershipCandidateAbandoned {
-                intent_hash, original, publication, remote_objects,
+                intent_hash, original, remote_objects,
             } => self.complete_membership_candidate_abandonment(
-                intent_hash, &original, *publication, &remote_objects, verified_commit,
+                intent_hash, &original, &remote_objects, verified_commit,
             ),
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion::DeviceJoin { remote_objects } => {
                 let object_ids = remote_objects.iter().map(|remote| remote.object_id()).collect::<Vec<_>>();
@@ -365,7 +365,6 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         &self,
         intent_hash: ObjectHash,
         original: &coven_protocol::prepared_commit::PreparedStoreOperationCommit,
-        publication: coven_protocol::membership_mutation::PreparedMembershipPublication,
         remote_objects: &[coven_protocol::remote_object::RemoteObjectRecord],
         accepted: &VerifiedStoreBatchCommit,
     ) -> Result<(), DbError> {
@@ -374,12 +373,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         };
         let tx = self.store.transaction;
         membership_mutations::require_membership_mutation_on(tx, intent_hash)?;
-        original.validate_closed_shape()?;
-        if publication != original.prepared_membership_publication()? {
-            return Err(DbError::Message(
-                "membership abandonment carries another original authority graph".into(),
-            ));
-        }
+        let publication = original.prepared_membership_publication()?;
         let active =
             active_store_publication::load_active_store_publication_on(tx)?.ok_or_else(|| {
                 DbError::Message("accepted membership abandonment has no owner".into())

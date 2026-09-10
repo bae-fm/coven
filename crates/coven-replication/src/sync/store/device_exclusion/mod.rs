@@ -553,12 +553,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             )
             .await?;
         self.writer
-            .publish_membership_activation(
-                &transition,
-                &publication,
-                Box::new(candidate),
-                completion,
-            )
+            .publish_membership_activation(Box::new(candidate), completion)
             .await?;
         completion_result(&operation.activated()?)
     }

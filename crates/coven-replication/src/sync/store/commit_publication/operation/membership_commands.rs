@@ -1,4 +1,5 @@
 use super::*;
+use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     #[allow(clippy::too_many_arguments)]
@@ -114,7 +115,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         conflict_hash: store_commit::ObjectHash,
         selection: membership::MembershipConflictSelection,
         created_at: &str,
-    ) -> Result<(ResolveMutationPlan, store_commit::ObjectHash), MembershipMutationError> {
+    ) -> Result<
+        (Box<PreparedStoreOperationCommit>, store_commit::ObjectHash),
+        MembershipMutationError,
+    > {
         let base = self
             .prepare_conflict_resolution_plan(chain.head_refs())
             .await
@@ -252,26 +256,20 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
             .map_err(MembershipMutationError::from)?;
         let publication = self
-            .finish_store_membership_transition(transition.clone(), candidate.reference.clone())
+            .finish_store_membership_transition(transition, candidate.reference.clone())
             .await?;
         self.attach_merge_membership_proof(&mut candidate, &publication, Some(&resolution))
             .map_err(MembershipMutationError::from)?;
-        let plan = ResolveMutationPlan {
-            resolution,
-            reference,
-            transition: Box::new(transition),
-            candidate: Box::new(candidate),
-            publication: Box::new(publication),
-        };
-        plan.validate_closed_shape()?;
+        let plan = Box::new(candidate);
         let bytes = MembershipMutationPlan::Resolve(plan.clone()).encode()?;
         let intent_hash = self
             .database
             .stage_membership_candidate_mutation(
                 bytes,
                 MembershipMutationProgress::Pending.encode()?,
-                plan.remote_objects()?,
-                (*plan.candidate).clone(),
+                plan.merge_membership_resolution_remote_objects()
+                    .map_err(MembershipMutationError::from)?,
+                (*plan).clone(),
             )
             .await
             .map_err(MembershipMutationError::from)?;
@@ -342,9 +340,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     )
                     .into());
                 };
-                if plan.resolution.conflict_hash != conflict_hash
-                    || plan.resolution.resolver_pubkey != signer_pubkey
-                    || plan.resolution.selection != selection
+                let resolution = plan
+                    .prepared_membership_resolution()
+                    .map_err(MembershipMutationError::from)?;
+                if resolution.value.conflict_hash != conflict_hash
+                    || resolution.value.resolver_pubkey != signer_pubkey
+                    || resolution.value.selection != selection
                 {
                     return Err(MembershipMutationError::PendingMutation(
                         "the pending resolution has different immutable inputs".to_string(),
@@ -361,9 +362,20 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             }
         };
         let persistence = self.membership_mutation_persistence(intent_hash);
-        plan.validate_closed_shape()?;
+        let publication = plan
+            .prepared_membership_publication()
+            .map_err(MembershipMutationError::from)?;
+        let resolution = plan
+            .prepared_membership_resolution()
+            .map_err(MembershipMutationError::from)?;
+        let resolution_ref = resolution
+            .value
+            .resolution_ref(resolution.prepared.reference().clone());
+        let remotes = plan
+            .merge_membership_resolution_remote_objects()
+            .map_err(MembershipMutationError::from)?;
         if let MembershipMutationProgress::ResolutionActivated { candidate } = &progress {
-            if candidate != &plan.candidate.reference {
+            if candidate != &plan.reference {
                 return Err(MembershipMutationError::InvalidDurableMutation(
                     "resolution activation names another candidate".to_string(),
                 )
@@ -371,18 +383,18 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             }
             membership
                 .apply_resolutions(
-                    plan.resolution.store_root_hash,
-                    &[(plan.reference.clone(), plan.resolution.clone())],
+                    resolution.value.store_root_hash,
+                    &[(resolution_ref.clone(), resolution.value.clone())],
                 )
                 .map_err(MembershipMutationError::from)?;
             membership
-                .add_entry(plan.publication.entry.clone())
+                .add_entry(publication.entry.clone())
                 .map_err(MembershipMutationError::from)?;
             membership
-                .activate_head_ref(plan.publication.head_ref.clone())
+                .activate_head_ref(publication.head_ref.clone())
                 .map_err(MembershipMutationError::from)?;
             self.membership = membership;
-            return Ok(plan.reference);
+            return Ok(resolution_ref);
         }
         if !matches!(progress, MembershipMutationProgress::Pending) {
             return Err(MembershipMutationError::InvalidDurableMutation(
@@ -392,44 +404,41 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         }
         membership
             .apply_resolutions(
-                plan.resolution.store_root_hash,
-                &[(plan.reference.clone(), plan.resolution.clone())],
+                resolution.value.store_root_hash,
+                &[(resolution_ref.clone(), resolution.value.clone())],
             )
             .map_err(MembershipMutationError::from)?;
         membership
-            .add_entry(plan.publication.entry.clone())
+            .add_entry(publication.entry.clone())
             .map_err(MembershipMutationError::from)?;
-        let remotes = plan.remote_objects()?;
         self.storage
             .as_ref()
-            .create_protocol_object(&plan.prepared_resolution()?)
+            .create_protocol_object(&resolution.prepared)
             .await
             .map_err(MembershipMutationError::from)?;
         self.membership_objects()
-            .load_resolution(&plan.reference)
+            .load_resolution(&resolution_ref)
             .await
             .map_err(MembershipMutationError::from)?;
         persistence
             .mark_remote_object_uploaded(
-                exact_owned_remote(&remotes, &plan.reference.object)?.into_record(),
+                exact_owned_remote(&remotes, &resolution_ref.object)?.into_record(),
             )
             .await?;
-        self.publish_membership_authority(&plan.transition, &[])
+        self.publish_membership_authority(&publication.transition(), &[])
             .await?;
         persistence
             .mark_remote_object_uploaded(
-                exact_owned_remote(&remotes, &plan.transition.entry_ref.object)?.into_record(),
+                exact_owned_remote(&remotes, &publication.entry_ref.object)?.into_record(),
             )
             .await?;
         let reference = self
             .publish_membership_activation(
-                &plan.transition,
-                &plan.publication,
-                plan.candidate.clone(),
+                plan.clone(),
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
                     intent_hash: persistence.intent_hash(),
                     progress_bytes: MembershipMutationProgress::ResolutionActivated {
-                        candidate: plan.candidate.reference.clone(),
+                        candidate: plan.reference.clone(),
                     }
                     .encode()?,
                     remote_objects: remotes
@@ -439,12 +448,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 },
             )
             .await?;
-        if reference != plan.candidate.reference {
+        if reference != plan.reference {
             return Err(MembershipMutationError::InvalidDurableMutation(
                 "membership resolution accepted another Store candidate".to_string(),
             )
             .into());
         }
-        Ok(plan.reference)
+        Ok(resolution_ref)
     }
 }

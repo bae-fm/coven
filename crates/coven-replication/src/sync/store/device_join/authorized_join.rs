@@ -215,12 +215,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 .await?;
             return self
                 .writer
-                .publish_membership_activation(
-                    &transition,
-                    &publication,
-                    prepared.candidate,
-                    completion,
-                )
+                .publish_membership_activation(prepared.candidate, completion)
                 .await
                 .map_err(crate::sync::store::StoreError::from)
                 .map_err(DeviceJoinError::from);

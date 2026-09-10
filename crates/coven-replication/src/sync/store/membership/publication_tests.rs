@@ -106,7 +106,7 @@ async fn the_membership_mutation_journal_carries_no_object_it_already_names() {
     let plan = String::from_utf8(staged.plan_bytes).expect("the plan is JSON");
     let envelope: serde_json::Value = serde_json::from_str(&plan).unwrap();
     let candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit =
-        serde_json::from_value(envelope["plan"]["publication"]["candidate"].clone()).unwrap();
+        serde_json::from_value(envelope["plan"]["candidate"].clone()).unwrap();
     candidate.validate_closed_shape().unwrap();
     candidate
         .prepared_commit()

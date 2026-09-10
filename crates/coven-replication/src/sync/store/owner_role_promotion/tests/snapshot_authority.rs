@@ -93,13 +93,15 @@ async fn an_unaccepted_owner_promotion_cannot_authorize_its_own_snapshot() {
         .expect("promotion journal exists");
     let OwnerPromotionJournalState::MergeHeadPrepared {
         candidate,
-        publication,
         wrapped_key,
         ..
     } = &journal.state
     else {
         panic!("promotion must be fully prepared, got {:?}", journal.state);
     };
+    let publication = candidate
+        .prepared_membership_publication()
+        .expect("prepared exact publication");
     candidate
         .validate_closed_shape()
         .expect("genuine signed promotion graph");

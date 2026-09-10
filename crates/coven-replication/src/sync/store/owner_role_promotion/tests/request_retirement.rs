@@ -135,12 +135,14 @@ async fn finalization_resumes_after_snapshot(pending_result: bool) {
         .expect("durable finalization")
         .expect("promotion remains owned");
     let publication = match &journal.state {
-        OwnerPromotionJournalState::MergeHeadPrepared { publication, .. } if pending_result => {
-            publication
+        OwnerPromotionJournalState::MergeHeadPrepared { candidate, .. } if pending_result => {
+            candidate
+                .prepared_membership_publication()
+                .expect("prepared publication")
         }
-        OwnerPromotionJournalState::Finalized { receipt, .. } if !pending_result => {
-            &receipt.publication
-        }
+        OwnerPromotionJournalState::Finalized { candidate, .. } if !pending_result => candidate
+            .prepared_membership_publication()
+            .expect("finalized publication"),
         state => panic!("wrong finalization state: {state:?}"),
     };
     let MembershipHeadActivation::StoreCommit {

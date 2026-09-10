@@ -444,8 +444,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let reference = verified_commit.reference();
         let mut membership_completion = membership_completion;
         if let Some(completion) = &mut membership_completion {
-            if let coven_protocol::membership_mutation::StoreMembershipJournalCompletion::MembershipCandidateAbandoned { original, publication, .. } = completion {
-                publication.candidate_object_refs(&original.commit, &original.reference)?;
+            if let coven_protocol::membership_mutation::StoreMembershipJournalCompletion::MembershipCandidateAbandoned { original, .. } = completion {
+                original.prepared_membership_publication()?.candidate_object_refs(&original.commit, &original.reference)?;
                 coven_protocol::remote_object::CandidateNonactivation::validate_durable_shape(
                     &original.reference,
                     &original.commit,

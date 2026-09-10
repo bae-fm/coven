@@ -197,7 +197,7 @@ async fn staged_admission_with_guard(
             .unwrap();
         let envelope: serde_json::Value = serde_json::from_slice(&pending.plan_bytes).unwrap();
         let original: PreparedStoreOperationCommit =
-            serde_json::from_value(envelope["plan"]["activation"]["candidate"].clone()).unwrap();
+            serde_json::from_value(envelope["plan"]["candidate"].clone()).unwrap();
         let old_wrap: coven_protocol::wrapped_store_key::PreparedWrappedStoreKey =
             serde_json::from_value(envelope["plan"]["wrapped_key"].clone()).unwrap();
         if issuer_removed {

@@ -57,8 +57,7 @@ async fn stage_removal(substitute_owner: bool) {
         .expect("production removal staged its rotation");
     let encoded: serde_json::Value = serde_json::from_slice(&row.plan_bytes).unwrap();
     let candidate: PreparedStoreOperationCommit =
-        serde_json::from_value(encoded["plan"]["publication"]["candidate"].clone()).unwrap();
-    let publication = candidate.prepared_membership_publication().unwrap();
+        serde_json::from_value(encoded["plan"]["candidate"].clone()).unwrap();
     let wraps = encoded["plan"]["wraps"]
         .as_array()
         .unwrap()
@@ -68,7 +67,7 @@ async fn stage_removal(substitute_owner: bool) {
         })
         .collect::<Vec<_>>();
     let mut remotes = candidate
-        .merge_membership_activation_remote_objects(&publication.transition(), &publication, &wraps)
+        .merge_membership_activation_remote_objects(&wraps)
         .unwrap();
     if substitute_owner {
         let other_candidate = database
@@ -208,8 +207,7 @@ async fn complete_installed_removal(proof: CompletionProof) {
         .unwrap();
     let encoded: serde_json::Value = serde_json::from_slice(&row.plan_bytes).unwrap();
     let candidate: PreparedStoreOperationCommit =
-        serde_json::from_value(encoded["plan"]["publication"]["candidate"].clone()).unwrap();
-    let publication = candidate.prepared_membership_publication().unwrap();
+        serde_json::from_value(encoded["plan"]["candidate"].clone()).unwrap();
     let wraps = encoded["plan"]["wraps"]
         .as_array()
         .unwrap()
@@ -219,7 +217,7 @@ async fn complete_installed_removal(proof: CompletionProof) {
         })
         .collect::<Vec<_>>();
     let remotes = candidate
-        .merge_membership_activation_remote_objects(&publication.transition(), &publication, &wraps)
+        .merge_membership_activation_remote_objects(&wraps)
         .unwrap();
     let (_, pulled) = owner
         .pull_store()

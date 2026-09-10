@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::circle_control::StoreMembershipStateRef;
 use crate::membership::StoreMembershipRoleGrant;
-use crate::membership_mutation::{PreparedMembershipPublication, PreparedMembershipTransition};
+use crate::membership_mutation::PreparedMembershipPublication;
 use crate::prepared_commit::PreparedStoreOperationCommit;
 use crate::store_commit::{
     membership_head_slot_prefix, owner_recovery_semantic_prefix, GrantStreamAnchor,
@@ -78,14 +78,12 @@ pub enum OwnerPromotionJournalState {
     MergeHeadPrepared {
         acceptance: OwnerPromotionAcceptance,
         wrapped_key: PreparedWrappedStoreKey,
-        transition: Box<PreparedMembershipTransition>,
-        publication: Box<PreparedMembershipPublication>,
         candidate: Box<PreparedStoreOperationCommit>,
     },
     Finalized {
         acceptance: OwnerPromotionAcceptance,
         membership: StoreMembershipStateRef,
-        receipt: Box<OwnerPromotionFinalizationReceipt>,
+        candidate: Box<PreparedStoreOperationCommit>,
     },
     Nonactivated {
         request: OwnerPromotionRequest,
@@ -100,20 +98,12 @@ pub enum OwnerPromotionJournalState {
 
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OwnerPromotionFinalizationReceipt {
-    pub candidate: Box<PreparedStoreOperationCommit>,
-    pub publication: Box<PreparedMembershipPublication>,
-}
-
-#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
-#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerPromotionStaleEvidence {
     BeforePublication,
     Candidate {
         nonactivation: crate::remote_object::CandidateNonactivation,
-        receipt: Box<OwnerPromotionFinalizationReceipt>,
+        candidate: Box<PreparedStoreOperationCommit>,
     },
 }
 
@@ -187,9 +177,8 @@ fn wrapped_key_matches_acceptance(
         && wrapped_key.reference.recipient_pubkey == acceptance.request.member_pubkey
 }
 
-fn transition_matches_acceptance(
-    transition: &PreparedMembershipTransition,
-    wrapped_key: &crate::wrapped_store_key::WrappedStoreKeyRef,
+fn publication_matches_acceptance(
+    publication: &PreparedMembershipPublication,
     acceptance: &OwnerPromotionAcceptance,
 ) -> bool {
     let OwnerPromotionFinalization {
@@ -197,13 +186,11 @@ fn transition_matches_acceptance(
         seq,
         previous_hash,
     } = &acceptance.request.finalization;
-    let entry = &transition.entry;
+    let entry = &publication.entry;
     let expected_replacements =
         std::collections::BTreeSet::from([acceptance.request.member_grant.clone()]);
-    transition.validate().is_ok()
-        && transition.transition.body.author_registration
-            == acceptance.request.promoter_registration
-        && transition.transition.body.resolutions == entry.resolution_dependencies
+    publication.head.body.author_registration == acceptance.request.promoter_registration
+        && publication.head.body.resolutions == entry.resolution_dependencies
         && entry.author_owner_grant == acceptance.request.promoter_owner_grant
         && entry.stream_id == *author_stream
         && entry.seq == *seq
@@ -220,20 +207,17 @@ fn transition_matches_acceptance(
                 grant_id,
                 membership: Some(membership),
                 replaces,
-                wrapped_key: entry_wrapped_key,
                 ..
             } if user_pubkey == &acceptance.request.member_pubkey
                 && entry_acceptance.as_ref() == acceptance
                 && grant_id == &acceptance.request.intended_owner_grant
                 && membership == &acceptance.anchors.membership
                 && replaces == &expected_replacements
-                && entry_wrapped_key == wrapped_key
         )
 }
 
 fn merge_candidate_matches_finalization(
     candidate: &PreparedStoreOperationCommit,
-    transition: &PreparedMembershipTransition,
     acceptance: &OwnerPromotionAcceptance,
 ) -> bool {
     let OwnerPromotionAnchors {
@@ -258,12 +242,7 @@ fn merge_candidate_matches_finalization(
     let Some(operations) = candidate.commit.operations() else {
         return false;
     };
-    candidate.validate_closed_shape().is_ok()
-        && candidate.commit.author_registration == acceptance.request.promoter_registration
-        && candidate.commit.control()
-            == Some(&crate::store_commit::StoreControl {
-                transition: transition.transition.clone(),
-            })
+    candidate.commit.author_registration == acceptance.request.promoter_registration
         && operations.acknowledgement.is_none()
         && operations.device_join_attempt_decisions.is_empty()
         && operations.provider_access_grants.is_empty()
@@ -276,85 +255,33 @@ fn merge_candidate_matches_finalization(
         && operations.circle_packages.is_empty()
 }
 
-fn finalization_receipt_matches_acceptance(
-    receipt: &OwnerPromotionFinalizationReceipt,
-    acceptance: &OwnerPromotionAcceptance,
-) -> bool {
-    {
-        let OwnerPromotionFinalizationReceipt {
-            candidate,
-            publication,
-        } = receipt;
-        let Some(crate::store_commit::StoreControl { transition }) = candidate.commit.control()
-        else {
-            return false;
-        };
-        let crate::membership::StoreAuthorityChange::SetMember { wrapped_key, .. } =
-            &publication.entry.change
-        else {
-            return false;
-        };
-        let prepared_transition = PreparedMembershipTransition {
-            entry: publication.entry.clone(),
-            entry_ref: publication.entry_ref.clone(),
-            transition: transition.clone(),
-        };
-        publication.validate().is_ok()
-            && transition_matches_acceptance(&prepared_transition, wrapped_key, acceptance)
-            && merge_candidate_matches_finalization(candidate, &prepared_transition, acceptance)
-            && prepared_transition
-                .transition
-                .matches_head(&publication.head, &publication.head_ref)
-            && matches!(
-                &publication.head.activation,
-                crate::membership::MembershipHeadActivation::StoreCommit { commit, .. }
-                    if commit == &candidate.reference
-            )
-    }
-}
-
-fn finalization_receipt_candidate(
-    receipt: &OwnerPromotionFinalizationReceipt,
-) -> &PreparedStoreOperationCommit {
-    &receipt.candidate
-}
-
-fn finalization_receipt_matches_membership(
-    receipt: &OwnerPromotionFinalizationReceipt,
-    membership: &StoreMembershipStateRef,
-) -> bool {
-    membership
-        .heads
-        .binary_search(&receipt.publication.head_ref)
-        .is_ok()
-}
-
-fn stale_candidate_evidence_matches(
-    nonactivation: &crate::remote_object::CandidateNonactivation,
-    receipt: &OwnerPromotionFinalizationReceipt,
-    acceptance: &OwnerPromotionAcceptance,
-) -> bool {
-    let candidate = finalization_receipt_candidate(receipt);
-    finalization_receipt_matches_acceptance(receipt, acceptance)
-        && nonactivation_matches_candidate(candidate, nonactivation)
-}
-
-fn receipt_matches_merge_preparation(
-    receipt: &OwnerPromotionFinalizationReceipt,
+fn finalization_publication(
     candidate: &PreparedStoreOperationCommit,
-    publication: &PreparedMembershipPublication,
+    acceptance: &OwnerPromotionAcceptance,
+) -> Result<PreparedMembershipPublication, OwnerPromotionJournalError> {
+    let publication = candidate.prepared_membership_publication()?;
+    if !publication_matches_acceptance(&publication, acceptance)
+        || !merge_candidate_matches_finalization(candidate, acceptance)
+    {
+        return Err(OwnerPromotionJournalError::Invariant(
+            "promotion candidate differs from its retained acceptance".into(),
+        ));
+    }
+    Ok(publication)
+}
+
+fn same_prepared_membership_candidate(
+    previous: &PreparedStoreOperationCommit,
+    next: &PreparedStoreOperationCommit,
 ) -> bool {
-    matches!(
-        receipt,
-        OwnerPromotionFinalizationReceipt {
-            candidate: receipt_candidate,
-            publication: receipt_publication,
-        } if same_prepared_candidate(candidate, receipt_candidate)
-            && publication.entry == receipt_publication.entry
-            && publication.entry_ref == receipt_publication.entry_ref
-            && publication.head == receipt_publication.head
-            && publication.head_ref == receipt_publication.head_ref
-    )
+    same_prepared_candidate(previous, next)
+        && match (
+            previous.prepared_membership_publication(),
+            next.prepared_membership_publication(),
+        ) {
+            (Ok(previous), Ok(next)) => previous.head_ref == next.head_ref,
+            _ => false,
+        }
 }
 
 impl OwnerPromotionJournal {
@@ -505,34 +432,26 @@ impl OwnerPromotionJournal {
             OwnerPromotionJournalState::MergeHeadPrepared {
                 acceptance,
                 wrapped_key,
-                transition,
-                publication,
                 candidate,
             } => {
+                let publication = finalization_publication(candidate, acceptance)?;
                 self.acceptance_has_closed_shape(acceptance)
                     && wrapped_key_matches_acceptance(wrapped_key, acceptance)
-                    && transition_matches_acceptance(transition, &wrapped_key.reference, acceptance)
-                    && merge_candidate_matches_finalization(candidate, transition, acceptance)
-                    && publication.validate().is_ok()
-                    && transition.entry == publication.entry
-                    && transition.entry_ref == publication.entry_ref
-                    && transition
-                        .transition
-                        .matches_head(&publication.head, &publication.head_ref)
-                    && matches!(
-                        &publication.head.activation,
-                        crate::membership::MembershipHeadActivation::StoreCommit { commit, .. }
-                            if commit == &candidate.reference
-                    )
+                    && matches!(&publication.entry.change,
+                        crate::membership::StoreAuthorityChange::SetMember { wrapped_key: expected, .. }
+                            if expected == &wrapped_key.reference)
             }
             OwnerPromotionJournalState::Finalized {
                 acceptance,
                 membership,
-                receipt,
+                candidate,
             } => {
+                let publication = finalization_publication(candidate, acceptance)?;
                 self.acceptance_has_closed_shape(acceptance)
-                    && finalization_receipt_matches_acceptance(receipt, acceptance)
-                    && finalization_receipt_matches_membership(receipt, membership)
+                    && membership
+                        .heads
+                        .binary_search(&publication.head_ref)
+                        .is_ok()
             }
             OwnerPromotionJournalState::Nonactivated {
                 request,
@@ -562,10 +481,12 @@ impl OwnerPromotionJournal {
                             OwnerPromotionStaleReason::MergeActivationRejected,
                             OwnerPromotionStaleEvidence::Candidate {
                                 nonactivation,
-                                receipt,
-                                ..
+                                candidate,
                             },
-                        ) => stale_candidate_evidence_matches(nonactivation, receipt, acceptance),
+                        ) => {
+                            finalization_publication(candidate, acceptance).is_ok()
+                                && nonactivation_matches_candidate(candidate, nonactivation)
+                        }
                         _ => false,
                     }
             }
@@ -698,65 +619,36 @@ impl OwnerPromotionJournal {
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance,
                     wrapped_key,
-                    transition,
-                    publication,
                     candidate,
                 },
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance: successor,
                     wrapped_key: successor_key,
-                    transition: successor_transition,
-                    publication: successor_publication,
                     candidate: successor_candidate,
                 },
             ) => {
                 acceptance == successor
                     && wrapped_key.reference == successor_key.reference
-                    && transition.entry_ref == successor_transition.entry_ref
-                    && transition.transition == successor_transition.transition
-                    && publication.entry_ref == successor_publication.entry_ref
-                    && publication.head_ref == successor_publication.head_ref
-                    && same_prepared_candidate(candidate, successor_candidate)
-                    && transition.entry == publication.entry
-                    && transition.entry == successor_publication.entry
-                    && transition
-                        .transition
-                        .matches_head(&successor_publication.head, &successor_publication.head_ref)
-                    && matches!(
-                        &successor_publication.head.activation,
-                        crate::membership::MembershipHeadActivation::StoreCommit { commit, .. }
-                            if commit == &successor_candidate.reference
-                    )
+                    && same_prepared_membership_candidate(candidate, successor_candidate)
             }
             (
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance,
-                    publication,
                     candidate,
                     ..
                 },
                 OwnerPromotionJournalState::Finalized {
                     acceptance: successor,
-                    membership,
-                    receipt,
+                    candidate: successor_candidate,
+                    ..
                 },
             ) => {
                 acceptance == successor
-                    && receipt_matches_merge_preparation(receipt, candidate, publication)
-                    && membership
-                        .heads
-                        .binary_search(&publication.head_ref)
-                        .is_ok()
-                    && matches!(
-                        &publication.head.activation,
-                        crate::membership::MembershipHeadActivation::StoreCommit { commit, .. }
-                            if commit == &candidate.reference
-                    )
+                    && same_prepared_membership_candidate(candidate, successor_candidate)
             }
             (
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance,
-                    publication,
                     candidate,
                     ..
                 },
@@ -768,18 +660,12 @@ impl OwnerPromotionJournal {
             ) => {
                 acceptance == successor
                     && matches!(reason, OwnerPromotionStaleReason::MergeActivationRejected)
-                    && matches!(
-                        evidence.as_ref(),
-                        OwnerPromotionStaleEvidence::Candidate {
-                            nonactivation,
-                            receipt,
-                        } if nonactivation_matches_candidate(candidate, nonactivation)
-                            && receipt_matches_merge_preparation(
-                                receipt,
-                                candidate,
-                                publication,
-                            )
-                    )
+                    && matches!(evidence.as_ref(),
+                    OwnerPromotionStaleEvidence::Candidate {
+                        nonactivation,
+                        candidate: successor_candidate,
+                    } if nonactivation_matches_candidate(candidate, nonactivation)
+                        && same_prepared_membership_candidate(candidate, successor_candidate))
             }
             _ => false,
         };
@@ -844,15 +730,10 @@ impl OwnerPromotionJournalPredecessor {
             }
             OwnerPromotionJournalState::MergeHeadPrepared {
                 wrapped_key,
-                transition,
-                publication,
                 candidate,
                 ..
-            } => candidate.merge_owner_promotion_remote_objects(
-                transition,
-                publication,
-                wrapped_key,
-            )?,
+            } => candidate
+                .merge_membership_activation_remote_objects(std::slice::from_ref(wrapped_key))?,
             _ => Vec::new(),
         };
         let next_value = serde_json::to_string(next)?;

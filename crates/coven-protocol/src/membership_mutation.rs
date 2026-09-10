@@ -240,7 +240,6 @@ pub enum StoreMembershipJournalCompletion {
     MembershipCandidateAbandoned {
         intent_hash: ObjectHash,
         original: Box<crate::prepared_commit::PreparedStoreOperationCommit>,
-        publication: Box<PreparedMembershipPublication>,
         remote_objects: Vec<crate::remote_object::RemoteObjectRecord>,
     },
     DeviceJoin {

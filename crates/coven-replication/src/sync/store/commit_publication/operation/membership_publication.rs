@@ -16,8 +16,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         intent_hash: store_commit::ObjectHash,
         original: &commit_plan::PreparedStoreOperationCommit,
-        publication: &PreparedMembershipPublication,
     ) -> Result<coven_database::ActiveStorePublication, MembershipMutationError> {
+        let publication = original.prepared_membership_publication()?;
         publication.candidate_object_refs(&original.commit, &original.reference)?;
         let active = self
             .database
@@ -79,7 +79,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 Some(coven_protocol::membership_mutation::StoreMembershipJournalCompletion::MembershipCandidateAbandoned {
                     intent_hash,
                     original: Box::new(original.clone()),
-                    publication: Box::new(publication.clone()),
                     remote_objects: vec![remote],
                 }),
             ).await?;
@@ -260,49 +259,24 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) async fn publish_membership_activation(
         &mut self,
-        transition: &PreparedMembershipTransition,
-        publication: &PreparedMembershipPublication,
         candidate: Box<commit_plan::PreparedStoreOperationCommit>,
         completion: coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
     ) -> Result<store_commit::StoreBatchCommitRef, MembershipMutationError> {
         let authorship = self.database.author_own_stream().await;
-        self.publish_membership_activation_with_authorship(
-            transition,
-            publication,
-            candidate,
-            completion,
-            &authorship,
-        )
-        .await
+        self.publish_membership_activation_with_authorship(candidate, completion, &authorship)
+            .await
     }
 
     pub(crate) async fn publish_membership_activation_with_authorship(
         &mut self,
-        transition: &PreparedMembershipTransition,
-        publication: &PreparedMembershipPublication,
         candidate: Box<commit_plan::PreparedStoreOperationCommit>,
         completion: coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         _authorship: &coven_database::OwnStreamAuthorship,
     ) -> Result<store_commit::StoreBatchCommitRef, MembershipMutationError> {
-        transition.validate()?;
-        publication.validate()?;
-        candidate
-            .validate_closed_shape()
+        let publication = candidate
+            .prepared_membership_publication()
             .map_err(MembershipMutationError::PreparedCommit)?;
-        if candidate.commit.control()
-            != Some(&store_commit::StoreControl {
-                transition: transition.transition.clone(),
-            })
-            || !transition
-                .transition
-                .matches_head(&publication.head, &publication.head_ref)
-            || !matches!(
-                &publication.head.activation,
-                membership::MembershipHeadActivation::StoreCommit { commit, .. }
-                    if commit == &candidate.reference
-            )
-            || !self.writer.verify_membership_head(&publication.head)
-        {
+        if !self.writer.verify_membership_head(&publication.head) {
             return Err(MembershipMutationError::InvalidDurableMutation(
                 "prepared Merge membership head differs from its exact Store activation"
                     .to_string(),
@@ -328,7 +302,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let membership_objects = VerifiedMergeMembershipObjects::verify(
             &candidate.commit,
             &candidate.reference,
-            &transition.entry,
+            &publication.entry,
             &publication.head,
             publication.head_ref.clone(),
         )?;

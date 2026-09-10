@@ -1,7 +1,7 @@
 use super::{
     decode_membership_mutation, exact_owned_remote, MembershipMutationError,
     MembershipMutationPlan, MembershipMutationProgress, MembershipRevocation,
-    PreparedMembershipActivation, ReplacementWrappedKey, RevokeMutationPlan,
+    ReplacementWrappedKey, RevokeMutationPlan,
 };
 use coven_keys::encryption::{self, EncryptionService};
 use coven_keys::keys;
@@ -154,20 +154,15 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         ).await.map_err(MembershipMutationError::from)?;
         let publication = self
             .operation
-            .finish_store_membership_transition(transition.clone(), candidate.reference.clone())
+            .finish_store_membership_transition(transition, candidate.reference.clone())
             .await?;
         self.operation
             .attach_membership_proof(&mut candidate, &publication)?;
-        let publication = PreparedMembershipActivation {
-            transition: Box::new(transition),
-            candidate: Box::new(candidate),
-            publication: Box::new(publication),
-        };
         let provider_account_email = chain
             .current_member_provider_email(revokee_pubkey)
             .map(str::to_string);
         Ok(RevokeMutationPlan {
-            publication,
+            candidate: Box::new(candidate),
             revokee_pubkey: revokee_pubkey.to_string(),
             desired_access: CloudAccessState::Absent {
                 member_pubkey: revokee_pubkey.to_string(),
@@ -198,7 +193,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     &self.operation.writer_pubkey(),
                     self.revokee_pubkey,
                     self.store_id,
-                ) {
+                )? {
                     return Err(MembershipMutationError::PendingMutation(
                         "the pending removal has different immutable inputs".to_string(),
                     ));
@@ -279,13 +274,14 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         encoded,
                         progress_bytes,
                         plan.candidate_remote_objects()?,
-                        (*plan.publication.candidate).clone(),
+                        (*plan.candidate).clone(),
                     )
                     .await?;
                 (plan, progress, intent_hash)
             }
         };
         loop {
+            let publication = plan.candidate.prepared_membership_publication()?;
             let active = self.operation.database.active_store_publication().await?;
             let continuing = active.as_ref().is_some_and(|active| {
                 active.owner() == &coven_database::ActiveStorePublicationOwner::MembershipMutation
@@ -301,18 +297,14 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     Err(error)
                         if super::publication_predecessor_changed(
                             &error,
-                            &plan.publication.entry().coord(),
+                            &publication.entry.coord(),
                         ) => {}
                     Err(error) => return Err(error),
                 }
             }
             let active = self
                 .operation
-                .abandon_membership_candidate(
-                    intent_hash,
-                    &plan.publication.candidate,
-                    &plan.publication.publication,
-                )
+                .abandon_membership_candidate(intent_hash, &plan.candidate)
                 .await?;
             let operation_plan = self.operation.prepare_plan().await?;
             if !operation_plan
@@ -351,10 +343,9 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     .install_durable_gate(self.operation.database.load_rotation_gate().await?);
                 return Ok(MembershipRevocation::AlreadyRemoved(keyring));
             }
-            let replacement = Box::pin(self.build_revoke_mutation(
-                &operation_plan,
-                plan.publication.candidate.commit.write_id.clone(),
-            ))
+            let replacement = Box::pin(
+                self.build_revoke_mutation(&operation_plan, plan.candidate.commit.write_id.clone()),
+            )
             .await?;
             replacement.validate_closed_shape()?;
             intent_hash = self
@@ -363,7 +354,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 .replace_membership_candidate_mutation(
                     intent_hash,
                     active,
-                    (*replacement.publication.candidate).clone(),
+                    (*replacement.candidate).clone(),
                     MembershipMutationPlan::Revoke(replacement.clone()).encode()?,
                     MembershipMutationProgress::Pending.encode()?,
                     replacement.candidate_remote_objects()?,
@@ -423,12 +414,10 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 "removal carries admission progress".to_string(),
             ));
         }
-        let mut validated_chain = operation
-            .membership
-            .with_exact_entry(plan.publication.entry())?;
+        let publication = plan.candidate.prepared_membership_publication()?;
+        let mut validated_chain = operation.membership.with_exact_entry(&publication.entry)?;
         if let MembershipMutationProgress::RevokeActivated { candidate } = &progress {
-            let publication = &plan.publication.publication;
-            if candidate != &plan.publication.candidate.reference {
+            if candidate != &plan.candidate.reference {
                 return Err(MembershipMutationError::InvalidDurableMutation(
                     "membership activation names another candidate".to_string(),
                 ));
@@ -438,7 +427,6 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             return EncryptionService::from_keyring_payload(plan.keyring_payload)
                 .map_err(MembershipMutationError::Encryption);
         }
-        let publication = plan.publication.publication.clone();
         let keyring = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
             .map_err(MembershipMutationError::Encryption)?;
         let remaining = validated_chain.current_members();
@@ -503,7 +491,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             .map(|wrap| wrap.prepared.clone())
             .collect::<Vec<_>>();
         operation
-            .publish_membership_authority(&plan.publication.transition, &prepared_wraps)
+            .publish_membership_authority(&publication.transition(), &prepared_wraps)
             .await?;
         for wrapped in &plan.wraps {
             persistence
@@ -533,15 +521,9 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             progress = MembershipMutationProgress::RevokeAccessRemoved;
             persistence.record_progress(&progress).await?;
         }
-        let PreparedMembershipActivation {
-            transition,
-            candidate,
-            publication,
-        } = plan.publication;
+        let candidate = plan.candidate;
         let reference = operation
             .publish_membership_activation(
-                &transition,
-                &publication,
                 candidate.clone(),
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
                     intent_hash: persistence.intent_hash(),

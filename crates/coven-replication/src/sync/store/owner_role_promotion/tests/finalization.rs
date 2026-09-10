@@ -91,17 +91,15 @@ async fn promotion_finalization_survives(
         .await
         .expect("load interrupted journal")
         .expect("journal remains owned");
-    let OwnerPromotionJournalState::MergeHeadPrepared {
-        publication,
-        candidate,
-        ..
-    } = &journal.state
-    else {
+    let OwnerPromotionJournalState::MergeHeadPrepared { candidate, .. } = &journal.state else {
         panic!(
             "accepted transition must retain finalization work: {:?}",
             journal.state
         );
     };
+    let publication = candidate
+        .prepared_membership_publication()
+        .expect("prepared exact publication");
     let MembershipHeadActivation::StoreCommit {
         acceptance_slot, ..
     } = &publication.head.activation

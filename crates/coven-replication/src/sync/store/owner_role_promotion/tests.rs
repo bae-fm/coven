@@ -391,13 +391,15 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         .expect("finalized promotion journal exists");
     let OwnerPromotionJournalState::Finalized {
         membership: state,
-        receipt,
+        candidate,
         ..
     } = &mut journal.state
     else {
         panic!("promotion journal is finalized with Merge membership")
     };
-    let publication = &receipt.publication;
+    let publication = candidate
+        .prepared_membership_publication()
+        .expect("finalized publication");
     let exact_head = publication.head_ref.clone();
     let index = state
         .heads
@@ -636,4 +638,115 @@ async fn promotion_waits_for_the_reserved_host_write_and_resumes_its_same_attemp
         .await
         .expect("read accepted promotion")
         .is_owner_now(&keys::public_key_hex(&member)));
+}
+
+#[tokio::test]
+async fn a_prepared_promotion_cannot_replace_its_exact_membership_head() {
+    let fixture = PromotionCandidate::build("promotion-exact-head-identity").await;
+    let owner = fixture
+        .store
+        .bind_device_in(
+            &fixture.owner_db,
+            fixture.owner_db_store_dir.clone(),
+            &fixture.owner,
+        )
+        .await
+        .expect("bind promoter");
+    let member = fixture
+        .store
+        .bind_device_in(
+            &fixture.member_db,
+            fixture.member_db_store_dir.clone(),
+            &fixture.member,
+        )
+        .await
+        .expect("bind promotion target");
+    let request = owner
+        .begin_owner_promotion(fixture.member_registration.clone())
+        .await
+        .expect("publish promotion request");
+    let acceptance = member
+        .accept_owner_promotion(request)
+        .await
+        .expect("accept promotion request");
+    fixture.home.fail_exact_create_before_call(1);
+    owner
+        .finalize_owner_promotion(&fixture.encryption, acceptance.clone())
+        .await
+        .expect_err("retain the prepared promotion before upload");
+    let database = StoreDatabase::new(&fixture.owner_db);
+    let journal = database
+        .load_owner_promotion_journal(acceptance.request.promotion_id)
+        .await
+        .expect("load prepared promotion")
+        .expect("promotion journal remains owned");
+    let OwnerPromotionJournalState::MergeHeadPrepared {
+        candidate: original_candidate,
+        ..
+    } = &journal.state
+    else {
+        panic!("promotion must retain its prepared membership head");
+    };
+    let original_publication = original_candidate
+        .prepared_membership_publication()
+        .expect("original candidate owns its exact membership publication");
+    let registration = database
+        .activated_store_device_registration(original_candidate.commit.author_registration.clone())
+        .await
+        .expect("load the actual promoter registration");
+    let signer = registration
+        .value()
+        .device_signer(&fixture.owner)
+        .expect("recover the actual promoter device signer");
+    let mut replacement = journal.clone();
+    let OwnerPromotionJournalState::MergeHeadPrepared { candidate, .. } = &mut replacement.state
+    else {
+        panic!("the copied journal must retain the same state");
+    };
+    let proof = candidate
+        .history_evidence
+        .membership_proof
+        .as_mut()
+        .expect("promotion candidate retains its signed membership proof");
+    let coven_protocol::membership::MembershipHeadActivation::StoreCommit {
+        acceptance_slot, ..
+    } = &mut proof.head_value.body_mut().activation
+    else {
+        panic!("promotion head must be activated by its Store candidate");
+    };
+    // Keep the semantic acceptance position but substitute another physical
+    // reservation, which the activating commit does not contain.
+    *acceptance_slot = coven_protocol::objects::ObjectSlot::opaque(
+        acceptance_slot.logical_key().to_string(),
+        "substituted-promotion-acceptance-reservation".to_string(),
+    )
+    .expect("valid alternate acceptance slot");
+    proof.head_value.resign(&signer);
+    assert!(proof.head_value.verify(registration.value()));
+    let head_bytes = proof.head_value.to_bytes();
+    proof.head.head_hash = proof.head_value.head_hash();
+    proof.head.object = ExactObjectRef::new(
+        proof.head.object.slot().clone(),
+        head_bytes.len() as u64,
+        ObjectHash::digest(&head_bytes),
+    );
+    let publication = candidate
+        .prepared_membership_publication()
+        .expect("changed proof still binds one internally valid publication");
+    assert_eq!(candidate.reference, original_candidate.reference);
+    assert_eq!(
+        candidate.commit.to_bytes(),
+        original_candidate.commit.to_bytes()
+    );
+    assert_ne!(publication.head_ref, original_publication.head_ref);
+    replacement
+        .validate_id(journal.promotion_id)
+        .expect("each journal independently contains a valid signed promotion");
+    journal
+        .validate_transition(&journal)
+        .expect("retry may retain the original exact head");
+    assert!(matches!(
+        journal.validate_transition(&replacement),
+        Err(coven_protocol::owner_promotion_journal::OwnerPromotionJournalError::Invariant(_))
+    ));
 }

@@ -3,8 +3,7 @@ use crate::store::store_session::{active_store_publication, candidate_records, S
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::owner_promotion_journal::{
-    OwnerPromotionFinalizationReceipt, OwnerPromotionJournal, OwnerPromotionJournalState,
-    OwnerPromotionStaleEvidence,
+    OwnerPromotionJournal, OwnerPromotionJournalState, OwnerPromotionStaleEvidence,
 };
 use coven_protocol::remote_object::{remote_object_id, CandidateNonactivation};
 use coven_protocol::store_commit::{
@@ -51,13 +50,12 @@ fn retirement_parts(
         OwnerPromotionJournalState::Stale { evidence, .. } => match evidence.as_ref() {
             OwnerPromotionStaleEvidence::Candidate {
                 nonactivation,
-                receipt,
+                candidate,
             } => Ok((
                 nonactivation,
-                receipt.publication.candidate_object_refs(
-                    &receipt.candidate.commit,
-                    &receipt.candidate.reference,
-                )?,
+                candidate
+                    .prepared_membership_publication()?
+                    .candidate_object_refs(&candidate.commit, &candidate.reference)?,
             )),
             OwnerPromotionStaleEvidence::BeforePublication => Err(DbError::Message(
                 "unprepared promotion has no candidate cleanup".into(),
@@ -160,7 +158,6 @@ impl StoreSession<'_> {
             }
             OwnerPromotionJournalState::MergeHeadPrepared {
                 acceptance,
-                publication,
                 candidate,
                 ..
             } => OwnerPromotionJournalState::Stale {
@@ -168,10 +165,7 @@ impl StoreSession<'_> {
                 reason: OwnerPromotionStaleReason::MergeActivationRejected,
                 evidence: Box::new(OwnerPromotionStaleEvidence::Candidate {
                     nonactivation,
-                    receipt: Box::new(OwnerPromotionFinalizationReceipt {
-                        candidate: candidate.clone(),
-                        publication: publication.clone(),
-                    }),
+                    candidate: candidate.clone(),
                 }),
             },
             _ => unreachable!("prepared promotion was checked"),

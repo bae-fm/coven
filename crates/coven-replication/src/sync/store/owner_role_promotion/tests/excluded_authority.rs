@@ -1,6 +1,5 @@
 use super::*;
 use coven_protocol::membership::{MemberRole, MembershipHeadAcceptance, MembershipHeadActivation};
-use coven_protocol::membership_mutation::PreparedMembershipPublication;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
 use coven_protocol::store_commit::*;
@@ -162,11 +161,10 @@ async fn accepted_member_retirement(continuation: RetirementContinuation) {
         );
         let durable: serde_json::Value = serde_json::from_slice(&staged.plan_bytes).unwrap();
         let original: PreparedStoreOperationCommit = serde_json::from_value(
-            durable["plan"]["publication"]["candidate"].clone(),
+            durable["plan"]["candidate"].clone(),
         ).expect("actual retained removal candidate");
-        let publication: PreparedMembershipPublication = serde_json::from_value(
-            durable["plan"]["publication"]["publication"].clone(),
-        ).expect("actual retained removal head");
+        let publication = original.prepared_membership_publication()
+            .expect("actual retained removal head");
         if matches!(continuation, RetirementContinuation::ForgedReceipt) {
             let registration = founder.latest_local_store_device_registration().await.unwrap().unwrap();
             let registration: StoreDeviceRegistration = serde_json::from_slice(&registration.registration_bytes).unwrap();
@@ -782,11 +780,12 @@ async fn excluded_device_authority_tail(tail: AuthorityTail) {
     let durable: serde_json::Value =
         serde_json::from_slice(&mutation.plan_bytes).expect("decode durable admission envelope");
     assert_eq!(durable["kind"], "admission");
-    let activation = &durable["plan"]["activation"];
     let candidate: PreparedStoreOperationCommit =
-        serde_json::from_value(activation["candidate"].clone()).expect("actual staged candidate");
-    let mut publication: PreparedMembershipPublication =
-        serde_json::from_value(activation["publication"].clone()).expect("actual staged head");
+        serde_json::from_value(durable["plan"]["candidate"].clone())
+            .expect("actual staged candidate");
+    let mut publication = candidate
+        .prepared_membership_publication()
+        .expect("actual staged head");
     let wrapped: coven_protocol::wrapped_store_key::PreparedWrappedStoreKey =
         serde_json::from_value(durable["plan"]["wrapped_key"].clone())
             .expect("actual staged key wrap");

@@ -2,7 +2,7 @@
 //! bytes, their reference, and the remote-object records a candidate or
 //! activation derives from them.
 
-use crate::membership_mutation::{PreparedMembershipPublication, PreparedMembershipTransition};
+use crate::membership_mutation::PreparedMembershipPublication;
 use crate::objects::{ExactObjectRef, ExactObjectVersion, PreparedExactObject, StoreObjectError};
 use crate::store_commit::{
     ActivatedStoreDeviceRegistration, SnapshotMeta, StoreBatchCommit, StoreBatchCommitRef,
@@ -184,38 +184,6 @@ impl PreparedStoreOperationCommit {
         .map_err(PreparedCommitError::from)
     }
 
-    /// Validate the frame every Merge membership-activation candidate shares:
-    /// a closed commit, valid transition and publication, the commit's control
-    /// naming the transition, and the published head activating this candidate.
-    fn validate_merge_membership_activation(
-        &self,
-        transition: &PreparedMembershipTransition,
-        publication: &PreparedMembershipPublication,
-    ) -> Result<(), PreparedCommitError> {
-        self.validate_closed_shape()?;
-        transition.validate().map_err(PreparedCommitError::from)?;
-        publication.validate().map_err(PreparedCommitError::from)?;
-        if self.commit.control()
-            != Some(&StoreControl {
-                transition: transition.transition.clone(),
-            })
-            || !transition
-                .transition
-                .matches_head(&publication.head, &publication.head_ref)
-            || !matches!(
-                &publication.head.activation,
-                super::membership::MembershipHeadActivation::StoreCommit { commit, .. }
-                    if commit == &self.reference
-            )
-        {
-            return Err(PreparedCommitError::Invariant(
-                "Merge membership authority graph differs from its activating Store candidate"
-                    .to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     pub fn prepared_membership_publication(
         &self,
     ) -> Result<PreparedMembershipPublication, PreparedCommitError> {
@@ -234,7 +202,8 @@ impl PreparedStoreOperationCommit {
             head: proof.head_value.clone(),
             head_ref: proof.head.clone(),
         };
-        self.validate_merge_membership_activation(&publication.transition(), &publication)?;
+        self.validate_closed_shape()?;
+        publication.validate()?;
         Ok(publication)
     }
 
@@ -248,23 +217,17 @@ impl PreparedStoreOperationCommit {
 
     pub fn merge_membership_activation_remote_objects(
         &self,
-        transition: &PreparedMembershipTransition,
-        publication: &PreparedMembershipPublication,
         wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
-        self.validate_merge_membership_activation(transition, publication)?;
+        let publication = self.prepared_membership_publication()?;
         let expected_wraps: &[super::wrapped_store_key::WrappedStoreKeyRef] =
-            match &transition.entry.change {
+            match &publication.entry.change {
                 super::membership::StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => {
                     wrapped_keys
                 }
-                super::membership::StoreAuthorityChange::SetMember {
-                    role:
-                        super::membership::StoreMembershipRoleGrant::Member
-                        | super::membership::StoreMembershipRoleGrant::Follower,
-                    wrapped_key,
-                    ..
-                } => std::slice::from_ref(wrapped_key),
+                super::membership::StoreAuthorityChange::SetMember { wrapped_key, .. } => {
+                    std::slice::from_ref(wrapped_key)
+                }
                 _ => {
                     return Err(PreparedCommitError::Invariant(
                         "Merge membership mutation graph contains another change".to_string(),
@@ -281,70 +244,56 @@ impl PreparedStoreOperationCommit {
                 "Merge membership mutation wraps differ from its exact entry".to_string(),
             ));
         }
-        self.close_merge_membership_remote_objects(publication, wraps, Vec::new())
+        self.close_merge_membership_remote_objects(&publication, wraps, Vec::new())
+    }
+
+    pub fn prepared_membership_resolution(
+        &self,
+    ) -> Result<
+        crate::objects::PreparedProtocolObject<
+            super::membership::StoreMembershipConflictResolution,
+        >,
+        PreparedCommitError,
+    > {
+        let publication = self.prepared_membership_publication()?;
+        let super::membership::StoreAuthorityChange::ResolutionActivation {
+            resolution: reference,
+        } = &publication.entry.change
+        else {
+            return Err(PreparedCommitError::Invariant(
+                "Store candidate does not activate a membership resolution".into(),
+            ));
+        };
+        let value = self
+            .history_evidence
+            .membership_proof
+            .as_ref()
+            .and_then(|proof| proof.resolution_value.as_ref())
+            .ok_or_else(|| {
+                PreparedCommitError::Invariant(
+                    "Store resolution activation lacks its prepared authority proof".into(),
+                )
+            })?
+            .clone();
+        let prepared = crate::membership_mutation::prepare_exact_object(&reference.object, &value)?;
+        Ok(crate::objects::PreparedProtocolObject { value, prepared })
     }
 
     pub fn merge_membership_resolution_remote_objects(
         &self,
-        transition: &PreparedMembershipTransition,
-        publication: &PreparedMembershipPublication,
-        resolution: &super::membership::StoreMembershipConflictResolution,
-        reference: &super::membership::StoreMembershipConflictResolutionRef,
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
-        self.validate_merge_membership_activation(transition, publication)?;
-        let resolution_bytes =
-            serde_json::to_vec(resolution).map_err(|source| PreparedCommitError::Json {
-                operation: "serialize Store membership resolution",
-                source,
-            })?;
-        if !matches!(
-            &transition.entry.change,
-            super::membership::StoreAuthorityChange::ResolutionActivation {
-                resolution: introduced,
-            } if introduced == reference
-        ) || reference.object.verify(&resolution_bytes).is_err()
-            || reference.resolution_hash != resolution.resolution_hash()
-            || reference.conflict_hash != resolution.conflict_hash
-            || reference.resolver_pubkey != resolution.resolver_pubkey
-        {
-            return Err(PreparedCommitError::Invariant(
-                "Merge membership resolution graph differs from its activating Store candidate"
-                    .to_string(),
-            ));
-        }
-        let authority =
-            crate::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
-                reference.clone(),
-                &resolution_bytes,
-                &resolution_bytes,
-                self.reference.clone(),
-            )
-            .map_err(PreparedCommitError::from)?;
-        self.close_merge_membership_remote_objects(publication, &[], vec![authority])
-    }
-
-    pub fn merge_owner_promotion_remote_objects(
-        &self,
-        transition: &PreparedMembershipTransition,
-        publication: &PreparedMembershipPublication,
-        wrapped_key: &super::wrapped_store_key::PreparedWrappedStoreKey,
-    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
-        self.validate_merge_membership_activation(transition, publication)?;
-        if !matches!(
-            &transition.entry.change,
-            super::membership::StoreAuthorityChange::SetMember { wrapped_key: expected, role: super::membership::StoreMembershipRoleGrant::Owner { .. }, .. }
-                if expected == &wrapped_key.reference
-        ) {
-            return Err(PreparedCommitError::Invariant(
-                "Merge Owner-promotion graph differs from its activating Store candidate"
-                    .to_string(),
-            ));
-        }
-        self.close_merge_membership_remote_objects(
-            publication,
-            std::slice::from_ref(wrapped_key),
-            Vec::new(),
-        )
+        let publication = self.prepared_membership_publication()?;
+        let resolution = self.prepared_membership_resolution()?;
+        let reference = resolution
+            .value
+            .resolution_ref(resolution.prepared.reference().clone());
+        let authority = crate::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
+            reference,
+            resolution.prepared.stored_bytes(),
+            resolution.prepared.stored_bytes(),
+            self.reference.clone(),
+        )?;
+        self.close_merge_membership_remote_objects(&publication, &[], vec![authority])
     }
 
     fn close_merge_membership_remote_objects(

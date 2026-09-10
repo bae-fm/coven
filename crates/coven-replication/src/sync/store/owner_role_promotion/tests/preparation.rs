@@ -110,17 +110,12 @@ async fn finalization_captures_peer_membership_and_store_predecessor_together() 
         .await
         .expect("finalized journal")
         .expect("durable completion");
-    let OwnerPromotionJournalState::Finalized { receipt, .. } = completed.state else {
+    let OwnerPromotionJournalState::Finalized { candidate, .. } = completed.state else {
         panic!("promotion must complete");
     };
     for head in peer_membership.head_refs() {
         assert!(
-            receipt
-                .candidate
-                .commit
-                .membership_state
-                .heads
-                .contains(head),
+            candidate.commit.membership_state.heads.contains(head),
             "the candidate must retain the exact peer authority its entry observed"
         );
     }

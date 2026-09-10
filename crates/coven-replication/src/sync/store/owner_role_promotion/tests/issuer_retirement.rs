@@ -267,15 +267,13 @@ async fn issuer_retirement(stage: PromotionStage, interruption: Interruption) {
             (
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     candidate,
-                    transition,
-                    publication,
                     wrapped_key,
                     ..
                 },
                 PromotionStage::MergeHead,
             ) => (
                 candidate.as_ref(),
-                candidate.merge_owner_promotion_remote_objects(transition, publication, wrapped_key)
+                candidate.merge_membership_activation_remote_objects(std::slice::from_ref(wrapped_key))
                     .unwrap().iter().map(|remote| remote.record().object().clone()).collect::<Vec<_>>(),
             ),
             _ => panic!(

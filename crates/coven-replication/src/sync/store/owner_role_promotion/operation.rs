@@ -4,9 +4,7 @@ use crate::sync::store::commit_publication::operation::commit_plan::{
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::circle_control::StoreMembershipStateRef;
 use coven_protocol::membership::StoreMembershipRoleGrant;
-use coven_protocol::membership_mutation::{
-    PreparedMembershipPublication, PreparedMembershipTransition,
-};
+use coven_protocol::membership_mutation::PreparedMembershipTransition;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
     membership_head_slot_prefix, owner_recovery_semantic_prefix, GrantStreamAnchor,
@@ -19,8 +17,8 @@ use coven_protocol::wrapped_store_key::PreparedWrappedStoreKey;
 
 use super::journal::target_key;
 use super::journal::{
-    OwnerPromotionFinalizationReceipt, OwnerPromotionJournal, OwnerPromotionJournalPredecessor,
-    OwnerPromotionJournalState, OwnerPromotionStaleEvidence,
+    OwnerPromotionJournal, OwnerPromotionJournalPredecessor, OwnerPromotionJournalState,
+    OwnerPromotionStaleEvidence,
 };
 use super::OwnerPromotionError;
 
@@ -29,22 +27,6 @@ pub(crate) struct AuthorizedOwnerPromotion<'operation, 'storage> {
     database: coven_database::StoreDatabase,
     storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
     root: coven_protocol::store_commit::StoreRootRef,
-}
-
-struct PublishedOwnerPromotionMergeHead {
-    acceptance: Box<OwnerPromotionAcceptance>,
-    wrapped_key: Box<PreparedWrappedStoreKey>,
-    transition: Box<PreparedMembershipTransition>,
-    publication: Box<PreparedMembershipPublication>,
-    candidate: Box<PreparedStoreOperationCommit>,
-}
-
-enum OwnerPromotionResumeOutcome {
-    Complete(StoreMembershipStateRef),
-    PublishMergeHead {
-        previous: OwnerPromotionJournalPredecessor,
-        pending: Box<PublishedOwnerPromotionMergeHead>,
-    },
 }
 
 impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
@@ -563,14 +545,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             ));
         }
         let authorship = self.database.author_own_stream().await;
-        let (outcome, authorship) = self.resume(encryption, &acceptance, authorship).await?;
-        match outcome {
-            OwnerPromotionResumeOutcome::Complete(membership) => Ok(membership),
-            OwnerPromotionResumeOutcome::PublishMergeHead { previous, pending } => {
-                self.activate_merge_head(&previous, pending, &authorship)
-                    .await
-            }
-        }
+        self.resume(encryption, &acceptance, authorship).await
     }
 
     /// Compose membership authority and its activating Store candidate from one accepted plan.
@@ -582,7 +557,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         plan: &StoreOperationCommitPlan,
         acceptance: &OwnerPromotionAcceptance,
         wrapped_key: PreparedWrappedStoreKey,
-        transition: Box<PreparedMembershipTransition>,
+        transition: PreparedMembershipTransition,
     ) -> Result<OwnerPromotionJournal, OwnerPromotionError> {
         let acceptance = acceptance.clone();
         let root = self.root.clone();
@@ -617,10 +592,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .await?;
         let publication = self
             .writer
-            .finish_store_membership_transition(
-                transition.as_ref().clone(),
-                candidate.reference.clone(),
-            )
+            .finish_store_membership_transition(transition, candidate.reference.clone())
             .await
             .map_err(OwnerPromotionError::from)?;
         self.writer
@@ -632,8 +604,6 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             state: OwnerPromotionJournalState::MergeHeadPrepared {
                 acceptance,
                 wrapped_key,
-                transition,
-                publication: Box::new(publication),
                 candidate: Box::new(candidate),
             },
         })
@@ -725,13 +695,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .await
             .map_err(OwnerPromotionError::from)?;
         let next = operation
-            .prepare_merge_store_candidate(
-                &journal,
-                &plan,
-                &acceptance,
-                wrapped_key,
-                Box::new(transition),
-            )
+            .prepare_merge_store_candidate(&journal, &plan, &acceptance, wrapped_key, transition)
             .await?;
         #[cfg(any(test, feature = "test-utils"))]
         operation
@@ -745,46 +709,26 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
     async fn activate_merge_head(
         &mut self,
         previous: &OwnerPromotionJournalPredecessor,
-        published: Box<PublishedOwnerPromotionMergeHead>,
+        acceptance: OwnerPromotionAcceptance,
+        wrapped_key: PreparedWrappedStoreKey,
+        candidate: Box<PreparedStoreOperationCommit>,
         authorship: &coven_database::OwnStreamAuthorship,
     ) -> Result<StoreMembershipStateRef, OwnerPromotionError> {
         self.retire_candidate_with_lost_authority(previous.promotion_id, authorship)
             .await?;
         let operation = &mut *self;
         let database = operation.database.clone();
-        let PublishedOwnerPromotionMergeHead {
-            acceptance,
-            wrapped_key,
-            transition,
-            publication,
-            candidate,
-        } = *published;
+        let publication = candidate.prepared_membership_publication()?;
         let candidate_ref = candidate.reference.clone();
-        let candidate_commit = Box::new(candidate.commit.clone());
-        let receipt_candidate = candidate.clone();
+        let candidate_commit = &candidate.commit;
         operation
             .writer
-            .publish_membership_authority(&transition, std::slice::from_ref(&wrapped_key))
+            .publish_membership_authority(
+                &publication.transition(),
+                std::slice::from_ref(&wrapped_key),
+            )
             .await
             .map_err(OwnerPromotionError::from)?;
-        if candidate_commit.control()
-            != Some(&coven_protocol::store_commit::StoreControl {
-                transition: transition.transition.clone(),
-            })
-            || !transition
-                .transition
-                .matches_head(&publication.head, &publication.head_ref)
-            || !matches!(
-                &publication.head.activation,
-                coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit, .. }
-                    if commit == &candidate_ref
-            )
-        {
-            return Err(OwnerPromotionError::Protocol(
-                "activated Owner promotion differs from its exact membership transition"
-                    .to_string(),
-            ));
-        }
         let predecessor = &candidate_commit.membership_state;
         let mut membership = operation
             .writer
@@ -812,7 +756,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             ));
         }
         membership
-            .add_entry(transition.entry.clone())
+            .add_entry(publication.entry.clone())
             .and_then(|()| membership.activate_head_ref(publication.head_ref.clone()))
             .map_err(OwnerPromotionError::from)?;
         let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
@@ -832,7 +776,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 },
             grant_id,
             ..
-        } = &transition.entry.change
+        } = &publication.entry.change
         else {
             return Err(OwnerPromotionError::Protocol(
                 "Merge Owner promotion entry does not add an Owner recovery stream".to_string(),
@@ -879,21 +823,15 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             promotion_id: previous.promotion_id,
             target: previous.target.clone(),
             state: OwnerPromotionJournalState::Finalized {
-                acceptance: *acceptance.clone(),
+                acceptance,
                 membership: membership.clone(),
-                receipt: Box::new(OwnerPromotionFinalizationReceipt {
-                    candidate: receipt_candidate.clone(),
-                    publication: publication.clone(),
-                }),
+                candidate: candidate.clone(),
             },
         };
         let journal_transition = previous.transition_to(&finalized)?;
-        let remote_objects = candidate.merge_owner_promotion_remote_objects(
-            &transition,
-            &publication,
-            &wrapped_key,
-        )?;
-        for object in [&transition.entry_ref.object, &wrapped_key.reference.object] {
+        let remote_objects = candidate
+            .merge_membership_activation_remote_objects(std::slice::from_ref(&wrapped_key))?;
+        for object in [&publication.entry_ref.object, &wrapped_key.reference.object] {
             let remote = remote_objects
                 .iter()
                 .find(|remote| remote.object() == object)
@@ -911,8 +849,6 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         let accepted = operation
             .writer
             .publish_membership_activation_with_authorship(
-                &transition,
-                &publication,
                 candidate,
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::OwnerPromotion {
                     transition: journal_transition,
@@ -938,13 +874,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         encryption: &EncryptionService,
         acceptance: &OwnerPromotionAcceptance,
         mut authorship: coven_database::OwnStreamAuthorship,
-    ) -> Result<
-        (
-            OwnerPromotionResumeOutcome,
-            coven_database::OwnStreamAuthorship,
-        ),
-        OwnerPromotionError,
-    > {
+    ) -> Result<StoreMembershipStateRef, OwnerPromotionError> {
         let acceptance = acceptance.clone();
         let database = self.database.clone();
         let existing = database
@@ -1039,27 +969,20 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance,
                     wrapped_key,
-                    transition,
-                    publication,
                     candidate,
                 } => {
-                    let pending = Box::new(PublishedOwnerPromotionMergeHead {
-                        acceptance: Box::new(acceptance),
-                        wrapped_key: Box::new(wrapped_key),
-                        transition,
-                        publication,
-                        candidate,
-                    });
-                    return Ok((
-                        OwnerPromotionResumeOutcome::PublishMergeHead { previous, pending },
-                        authorship,
-                    ));
+                    return self
+                        .activate_merge_head(
+                            &previous,
+                            acceptance,
+                            wrapped_key,
+                            candidate,
+                            &authorship,
+                        )
+                        .await;
                 }
                 OwnerPromotionJournalState::Finalized { membership, .. } => {
-                    return Ok((
-                        OwnerPromotionResumeOutcome::Complete(membership),
-                        authorship,
-                    ));
+                    return Ok(membership);
                 }
                 OwnerPromotionJournalState::Stale { reason, .. } => {
                     self.finish_retired_cleanup(previous.promotion_id, &authorship)
