@@ -547,7 +547,6 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             .validate_for(commit_ref, commit)
             .map_err(DbError::from)?;
         if verified_commit.store_root_hash() != root.store_root_hash
-            || commit.store_root_hash != root.store_root_hash
             || acceptance.commit_ref() != commit_ref
             || circle_activations.stream_activations().activating_commit() != commit_ref
             || circle_activations.stream_activations().as_slice() != commit.stream_activations()

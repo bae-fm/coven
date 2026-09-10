@@ -86,6 +86,7 @@ fn commit_parsers_require_an_author_from_the_expected_store() {
         ] {
             if author.root_ref == expected.root_ref {
                 let parsed = result.expect("accept the author's own Store");
+                assert_eq!(parsed.store_root_hash(), expected.root_ref.store_root_hash);
                 assert_eq!(parsed.reference(), &reference);
                 assert_eq!(parsed.author(), &author.registration);
             } else {

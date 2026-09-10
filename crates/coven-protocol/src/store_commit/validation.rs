@@ -130,7 +130,6 @@ pub enum StoreProtocolError {
 #[derive(Clone, Debug)]
 #[doc(hidden)]
 pub struct VerifiedStoreBatchCommit {
-    store_root_hash: ObjectHash,
     reference: StoreBatchCommitRef,
     // Verification fixes these immutable records. History checkpoints and
     // publication futures share them without copying their bodies on the stack.
@@ -160,7 +159,6 @@ impl VerifiedStoreBatchCommit {
         let value = parse_store_batch_commit(bytes, store_root_hash, &coord, author)?;
         let reference = StoreBatchCommitRef::from_commit(&value, coord, object)?;
         Ok(Self {
-            store_root_hash,
             reference,
             value: std::sync::Arc::new(value),
             author: std::sync::Arc::new(author.clone()),
@@ -176,7 +174,6 @@ impl VerifiedStoreBatchCommit {
         let value = parse_store_batch_commit(bytes, store_root_hash, &reference.coord, author)?;
         reference.verify_commit(&value)?;
         Ok(Self {
-            store_root_hash,
             reference: reference.clone(),
             value: std::sync::Arc::new(value),
             author: std::sync::Arc::new(author.clone()),
@@ -184,7 +181,7 @@ impl VerifiedStoreBatchCommit {
     }
 
     pub fn store_root_hash(&self) -> ObjectHash {
-        self.store_root_hash
+        self.value.store_root_hash
     }
 
     pub fn reference(&self) -> &StoreBatchCommitRef {
