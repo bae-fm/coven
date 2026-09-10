@@ -141,6 +141,10 @@ impl MembershipRollup {
         let rollup: Self = crate::objects::decode_protocol_object(bytes)?;
         rollup.require_version()?;
         crate::objects::verify_store_root(expected_store_root_hash, rollup.store_root_hash)?;
+        crate::objects::verify_store_root(
+            expected_store_root_hash,
+            author.store_root.store_root_hash,
+        )?;
         rollup.author_registration.verify_registration(author)?;
         rollup.validate_shape()?;
         rollup.verify_by(&author.device_signing_pubkey)?;

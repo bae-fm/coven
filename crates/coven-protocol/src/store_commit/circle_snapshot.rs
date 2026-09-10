@@ -133,6 +133,10 @@ impl CircleSnapshotMeta {
         let meta: Self = crate::objects::decode_protocol_object(bytes)?;
         meta.require_version()?;
         crate::objects::verify_store_root(expected_store_root_hash, meta.store_root_hash)?;
+        crate::objects::verify_store_root(
+            expected_store_root_hash,
+            author.store_root.store_root_hash,
+        )?;
         meta.author_registration.verify_registration(author)?;
         if meta.generation != expected.generation {
             return Err(StoreProtocolError::RelocatedSlot {
