@@ -1,5 +1,4 @@
 use super::*;
-use crate::sync::store::commit_verification::merge_history::validate_composed_snapshot_history_summary;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn authorize_retained_outbound(
@@ -244,32 +243,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         // them. Only inherited obligations can be omitted after verified absence.
         self.history_verifier
             .retain_snapshot_publication_objects(&mut summary)?;
-        // The fold above sees only the acknowledgements made inside this cut. A
-        // summary has to state each device's chain from sequence one, because a
-        // device restoring from it has no rows to walk — so walk each chain once,
-        // here, where the verifier can.
-        for chain in summary.acknowledgements.values_mut() {
-            let (reference, value) = chain
-                .latest()
-                .ok_or_else(|| {
-                    pull::StorePullError::InvalidState(
-                        "composed acknowledgement chain is empty".to_string(),
-                    )
-                })?
-                .clone();
-            let registration = self
-                .history_verifier
-                .load_registration(&reference.registration)
-                .await
-                .map_err(pull::StorePullError::Object)?;
-            chain.chain = self
-                .history_verifier
-                .load_acknowledgement_proof_chain(reference, value, &registration.value)
-                .await
-                .map_err(pull::StorePullError::from)?;
-        }
-        validate_composed_snapshot_history_summary(&summary, coverage)?;
-        Ok(summary)
+        self.history_verifier
+            .complete_snapshot_history_summary(summary, coverage)
+            .await
     }
 
     pub(crate) async fn retained_history_checkpoints(

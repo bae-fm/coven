@@ -16,6 +16,39 @@ pub(crate) struct SelectedStoreSnapshot {
 }
 
 impl<'a> MergeHistoryVerifier<'a> {
+    /// Complete retained acknowledgement evidence and validate the whole summary
+    /// before it can be published or compared with a received snapshot.
+    pub(crate) async fn complete_snapshot_history_summary(
+        &self,
+        mut summary: RetainedVerifiedMergeHistorySummary,
+        coverage: &CommitFrontier,
+    ) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
+        for chain in summary.acknowledgements.values_mut() {
+            let (reference, value) = chain
+                .latest()
+                .ok_or_else(|| {
+                    StorePullError::InvalidState(
+                        "composed acknowledgement chain is empty".to_string(),
+                    )
+                })?
+                .clone();
+            let registration = self.load_registration(&reference.registration).await?;
+            chain.chain = self
+                .load_acknowledgement_proof_chain(reference, value, &registration.value)
+                .await
+                .map_err(StorePullError::from)?;
+        }
+        summary
+            .validate_snapshot_baseline()
+            .map_err(StorePullError::Protocol)?;
+        if summary.post_state.frontier() != coverage {
+            return Err(StorePullError::InvalidState(
+                "Merge snapshot history does not exactly cover its signed frontier".to_string(),
+            ));
+        }
+        Ok(summary)
+    }
+
     async fn verify_snapshot_history_state(
         &mut self,
         frontier: &BTreeMap<protocol_membership::AuthorStreamId, StoreBatchCommitRef>,
@@ -192,30 +225,9 @@ impl<'a> MergeHistoryVerifier<'a> {
             &snapshot.meta.history_summary.reclaim,
         )
         .await?;
-        // Complete each chain the same way the publisher did, so the
-        // recomposition is comparable to the summary the snapshot carries.
-        for chain in canonical.acknowledgements.values_mut() {
-            let (reference, value) = chain
-                .latest()
-                .ok_or_else(|| {
-                    StorePullError::InvalidState(
-                        "composed acknowledgement chain is empty".to_string(),
-                    )
-                })?
-                .clone();
-            let registration = self
-                .commit_verifier
-                .load_registration(&reference.registration)
-                .await?;
-            chain.chain = self
-                .load_acknowledgement_proof_chain(reference, value, &registration.value)
-                .await
-                .map_err(StorePullError::from)?;
-        }
-        crate::sync::store::commit_verification::merge_history::validate_composed_snapshot_history_summary(
-            &canonical,
-            &snapshot.meta.coverage,
-        )?;
+        let canonical = self
+            .complete_snapshot_history_summary(canonical, &snapshot.meta.coverage)
+            .await?;
         if snapshot.meta.history_summary != canonical {
             return Err(StorePullError::InvalidState(
                 "Merge snapshot history summary differs from its exact verified cut".to_string(),

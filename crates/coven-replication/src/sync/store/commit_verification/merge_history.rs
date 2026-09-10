@@ -62,7 +62,6 @@ pub use successor::MergeHistorySuccessorEvidence;
 pub use successor::PreparedMergeHistorySuccessor;
 pub(crate) use successor::{
     compose_merge_snapshot_history_summary, compose_verified_merge_snapshot_history_summary,
-    validate_composed_snapshot_history_summary,
 };
 #[cfg(test)]
 pub(crate) use successor::{insert_latest_acknowledgement, merge_retained_merge_history};

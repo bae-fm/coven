@@ -125,7 +125,8 @@ pub(crate) struct MergedRetainedMergeHistory {
 }
 
 impl MergedRetainedMergeHistory {
-    // The caller completes acknowledgement chains before validating the summary.
+    // The caller passes this through complete_snapshot_history_summary after
+    // retaining pending operations and reclamation evidence.
     fn into_snapshot_summary(
         mut self,
         root: &StoreRootRef,
@@ -462,20 +463,4 @@ pub(crate) fn compose_verified_merge_snapshot_history_summary<'a>(
         )?;
     }
     merged.into_snapshot_summary(root, coverage, membership, state, author_ref, author)
-}
-
-/// Check a composed snapshot summary once its acknowledgement chains are whole.
-pub(crate) fn validate_composed_snapshot_history_summary(
-    summary: &RetainedVerifiedMergeHistorySummary,
-    coverage: &CommitFrontier,
-) -> Result<(), StorePullError> {
-    summary
-        .validate_snapshot_baseline()
-        .map_err(StorePullError::Protocol)?;
-    if summary.post_state.frontier() != coverage {
-        return Err(StorePullError::InvalidState(
-            "Merge snapshot history does not exactly cover its signed frontier".to_string(),
-        ));
-    }
-    Ok(())
 }
