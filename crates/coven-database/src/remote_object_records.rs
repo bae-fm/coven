@@ -211,6 +211,7 @@ pub(crate) fn index_retained_replay_owner_on(
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn load_protocol_inert_object_on(
     conn: &Connection,
     object_id: ObjectHash,
