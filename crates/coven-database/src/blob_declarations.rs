@@ -236,7 +236,7 @@ impl TableBlob {
     ///
     /// The gate a [`WriteOnce`](BlobReplacement::WriteOnce) row passes through. A
     /// changeset UPDATE marks only the columns whose values changed. The decoded row
-    /// also carries old values for unchanged columns, so write-once enforcement must
+    /// also carries unchanged primary-key values, so write-once enforcement must
     /// inspect that marker before treating its blob id as a repointing. A real repoint
     /// is refused here, where the change is read and the declaration is available.
     fn ref_from_change(
@@ -441,9 +441,9 @@ impl BlobDecls {
 
     /// The exact blob reference and declared size owned by an INSERT or UPDATE,
     /// completed from that row inside the transaction that produced the change.
-    /// The decoded change supplies the blob identity, including an unchanged id,
-    /// while the live transaction row supplies its full cloud path and size before
-    /// a later write can repoint or delete it.
+    /// An UPDATE can omit its unchanged blob-id column. The live transaction row
+    /// supplies that identity and its content facts before a later write can
+    /// repoint or delete it; an identity present in the change must still match.
     pub(crate) fn publication_blob_from_change(
         &self,
         conn: &Connection,
@@ -455,32 +455,39 @@ impl BlobDecls {
         let Some(tb) = self.tables.get(&change.table) else {
             return Ok(None);
         };
-        let Some(changed_blob) = tb.ref_from_change(&change.table, change)? else {
+        let changed_blob = tb.ref_from_change(&change.table, change)?;
+        if changed_blob.is_none()
+            && (change.op == ChangeOp::Insert || change.column_changed(tb.id_col))
+        {
             return Ok(None);
-        };
+        }
         let pk = change
             .pk()
             .ok_or_else(|| BlobDeclError::MissingPublicationPrimaryKey {
                 table: change.table.clone(),
             })?;
-        let sql = format!("SELECT * FROM {} WHERE id = ?1", quote_ident(&change.table));
-        let mut statement = conn.prepare(&sql)?;
-        let mut rows = statement.query([pk])?;
-        let row = rows
-            .next()?
-            .ok_or_else(|| BlobDeclError::MissingPublicationRow {
-                table: change.table.clone(),
-                primary_key: pk.to_string(),
-            })?;
-        let publication = publication_blob_from_row(&change.table, tb, row)?;
-        let blob = &publication.blob;
-        if blob.id != changed_blob.id {
-            return Err(BlobDeclError::PublicationBlobMismatch {
-                table: change.table.clone(),
-                primary_key: pk.to_string(),
-                changed_blob_id: changed_blob.id,
-                row_blob_id: blob.id.clone(),
-            });
+        let publication = match self.publication_blob_for_row(conn, &change.table, pk) {
+            Ok(Some(publication)) => publication,
+            Ok(None) => {
+                return Err(BlobDeclError::MissingPublicationRow {
+                    table: change.table.clone(),
+                    primary_key: pk.to_string(),
+                });
+            }
+            Err(BlobDeclError::MissingPublicationBlob { .. }) if changed_blob.is_none() => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(changed_blob) = changed_blob {
+            if publication.blob.id != changed_blob.id {
+                return Err(BlobDeclError::PublicationBlobMismatch {
+                    table: change.table.clone(),
+                    primary_key: pk.to_string(),
+                    changed_blob_id: changed_blob.id,
+                    row_blob_id: publication.blob.id.clone(),
+                });
+            }
         }
         Ok(Some(publication))
     }
@@ -725,91 +732,5 @@ fn publication_blob_from_row(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use coven_protocol::blob::{CacheFill, Provenance};
-    use coven_protocol::synced_schema::{BlobDecl, RowIdentity};
-    use rusqlite::session::Session;
-
-    fn capture_update(conn: &Connection, sql: &str) -> RowChange {
-        let mut session = Session::new(conn).expect("create session");
-        session.attach(Some("files")).expect("attach files");
-        conn.execute(sql, []).expect("update file row");
-        let mut changeset = Vec::new();
-        session
-            .changeset_strm(&mut changeset)
-            .expect("extract changeset");
-        crate::walk_changeset(&changeset)
-            .expect("walk changeset")
-            .into_iter()
-            .next()
-            .expect("captured update")
-    }
-
-    fn write_once_decl(id_column: Option<&str>) -> BlobDecl {
-        let decl =
-            BlobDecl::new("files", Provenance::HostProvided, CacheFill::CacheEager).write_once();
-        match id_column {
-            Some(column) => decl.with_id_column(column),
-            None => decl,
-        }
-    }
-
-    #[test]
-    fn unrelated_update_does_not_repoint_a_primary_key_blob() {
-        let conn = Connection::open_in_memory().expect("open connection");
-        conn.execute_batch(
-            "CREATE TABLE files (
-                 id TEXT PRIMARY KEY,
-                 title TEXT NOT NULL,
-                 size INTEGER NOT NULL,
-                 hash TEXT NOT NULL
-             );
-             INSERT INTO files VALUES ('blob-a', 'before', 1, 'hash-a');",
-        )
-        .expect("create file row");
-        let declarations = BlobDecls::from_tables(
-            &conn,
-            &[SyncedTable::new("files", RowIdentity::IndependentUuid)
-                .carries_blob(write_once_decl(None))],
-        )
-        .expect("resolve declarations");
-
-        let change = capture_update(&conn, "UPDATE files SET title = 'after'");
-
-        let blob = declarations
-            .ref_from_change(&change)
-            .expect("read unrelated update")
-            .expect("unchanged blob reference remains available");
-        assert_eq!(blob.id, "blob-a");
-    }
-
-    #[test]
-    fn changing_a_write_once_blob_column_is_rejected() {
-        let conn = Connection::open_in_memory().expect("open connection");
-        conn.execute_batch(
-            "CREATE TABLE files (
-                 id TEXT PRIMARY KEY,
-                 blob_id TEXT NOT NULL,
-                 size INTEGER NOT NULL,
-                 hash TEXT NOT NULL
-             );
-             INSERT INTO files VALUES ('row-a', 'blob-a', 1, 'hash-a');",
-        )
-        .expect("create file row");
-        let declarations = BlobDecls::from_tables(
-            &conn,
-            &[SyncedTable::new("files", RowIdentity::IndependentUuid)
-                .carries_blob(write_once_decl(Some("blob_id")))],
-        )
-        .expect("resolve declarations");
-
-        let change = capture_update(&conn, "UPDATE files SET blob_id = 'blob-b'");
-
-        assert!(matches!(
-            declarations.ref_from_change(&change),
-            Err(BlobDeclError::WriteOnceBlobRepointed { blob_id, .. })
-                if blob_id == "blob-b"
-        ));
-    }
-}
+#[path = "blob_declarations_tests.rs"]
+mod tests;
