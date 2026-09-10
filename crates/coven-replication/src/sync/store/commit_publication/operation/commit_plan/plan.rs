@@ -41,7 +41,7 @@ pub(crate) enum StoreOperationBatch {
     },
 }
 
-pub struct StoreOperationPlanCommon {
+pub struct StoreOperationCommitPlan {
     /// This device's turn to author its own next Store commit, taken when the
     /// position this plan's order extends was read. A plan is the live claim on
     /// that position: keep it through publication, or transfer it back to the
@@ -56,23 +56,11 @@ pub struct StoreOperationPlanCommon {
     device_state: super::store_commit::StoreDeviceStateRef,
     membership_authority: MembershipCoord,
     owner_grant: Option<super::membership::MembershipGrantId>,
-}
-
-pub struct StoreOperationCommitPlan {
-    common: StoreOperationPlanCommon,
     membership: MembershipChain,
     predecessor_state: super::store_commit::ResolvedStoreDeviceState,
 }
 
-impl std::ops::Deref for StoreOperationCommitPlan {
-    type Target = StoreOperationPlanCommon;
-
-    fn deref(&self) -> &Self::Target {
-        &self.common
-    }
-}
-
-impl StoreOperationPlanCommon {
+impl StoreOperationCommitPlan {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         authorship: coven_database::OwnStreamAuthorship,
@@ -85,6 +73,8 @@ impl StoreOperationPlanCommon {
         device_state: super::store_commit::StoreDeviceStateRef,
         membership_authority: MembershipCoord,
         owner_grant: Option<super::membership::MembershipGrantId>,
+        membership: MembershipChain,
+        predecessor_state: super::store_commit::ResolvedStoreDeviceState,
     ) -> Self {
         Self {
             _authorship: authorship,
@@ -97,6 +87,8 @@ impl StoreOperationPlanCommon {
             device_state,
             membership_authority,
             owner_grant,
+            membership,
+            predecessor_state,
         }
     }
 
@@ -118,7 +110,7 @@ impl StoreOperationPlanCommon {
         Ok(())
     }
 
-    fn sign_batch(
+    pub(crate) fn sign_batch(
         &self,
         write_id: coven_protocol::write::WriteId,
         batch: StoreOperationBatch,
@@ -137,23 +129,9 @@ impl StoreOperationPlanCommon {
             batch,
         )
     }
-}
 
-impl StoreOperationCommitPlan {
     pub(crate) fn into_authorship(self) -> coven_database::OwnStreamAuthorship {
-        self.common._authorship
-    }
-
-    pub(crate) fn new(
-        common: StoreOperationPlanCommon,
-        membership: MembershipChain,
-        predecessor_state: super::store_commit::ResolvedStoreDeviceState,
-    ) -> Self {
-        Self {
-            common,
-            membership,
-            predecessor_state,
-        }
+        self._authorship
     }
 
     pub(crate) fn membership(&self) -> &MembershipChain {
@@ -162,21 +140,6 @@ impl StoreOperationCommitPlan {
 
     pub(crate) fn predecessor_state(&self) -> &super::store_commit::ResolvedStoreDeviceState {
         &self.predecessor_state
-    }
-
-    pub(crate) fn sign_batch(
-        &self,
-        write_id: coven_protocol::write::WriteId,
-        batch: StoreOperationBatch,
-    ) -> Result<(StoreBatchCommit, Option<ActivatedStoreDeviceRegistration>), StoreError> {
-        self.common.sign_batch(write_id, batch)
-    }
-
-    pub(crate) fn validate_acknowledgement(
-        &self,
-        acknowledgement: &super::store_commit::StoreAck,
-    ) -> Result<(), StoreError> {
-        self.common.validate_acknowledgement(acknowledgement)
     }
 
     #[allow(clippy::too_many_arguments)]

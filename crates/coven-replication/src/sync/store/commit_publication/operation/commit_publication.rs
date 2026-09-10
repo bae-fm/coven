@@ -88,18 +88,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 ))
             })?;
         Ok(commit_plan::StoreOperationCommitPlan::new(
-            commit_plan::StoreOperationPlanCommon::new(
-                authorship,
-                Arc::clone(&self.writer),
-                root,
-                coord,
-                order,
-                publication_previous,
-                authorization.membership_state,
-                authorization.device_state_ref,
-                predecessor,
-                owner_grant,
-            ),
+            authorship,
+            Arc::clone(&self.writer),
+            root,
+            coord,
+            order,
+            publication_previous,
+            authorization.membership_state,
+            authorization.device_state_ref,
+            predecessor,
+            owner_grant,
             authorization.membership,
             authorization.device_state,
         ))
