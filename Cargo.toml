@@ -99,6 +99,12 @@ result_large_err = "allow"
 
 [profile.dev]
 incremental = true
+# Line tables are enough debuginfo for a debug build, as the test profile
+# already says: backtraces keep their file:line and every rlib shrinks
+# several-fold, which is what stops a shared target dir from filling a disk
+# when several checkouts build. Local-variable inspection under lldb is what
+# this gives up.
+debug = "line-tables-only"
 
 [profile.test]
 incremental = true
