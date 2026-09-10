@@ -281,10 +281,10 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn load_merge_commit_registrations(
         &mut self,
         commit: &StoreBatchCommit,
-        author: &StoreDeviceRegistration,
-        membership: &MembershipChain,
+        activating_author: &StoreDeviceRegistration,
+        predecessor: &MembershipChain,
         accepted_frontier: &[StoreBatchCommitRef],
-    ) -> Result<Vec<ActivatedStoreDeviceRegistration>, StorePullError> {
+    ) -> Result<Vec<ActivatedStoreDeviceRegistration>, RegistrationLoadError> {
         let recovery_nodes = commit
             .device_registrations()
             .iter()
@@ -300,37 +300,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             recovery_memberships.insert(node_ref, membership);
         }
         let accepted = VerifiedMergePredecessorHistory::new(&self.history, accepted_frontier);
-        let registrations = self
-            .load_commit_registrations(
-                commit,
-                author,
-                Some(membership),
-                accepted,
-                &recovery_memberships,
-            )
-            .await;
-        registrations.map_err(StorePullError::from)
-    }
-
-    async fn load_commit_registrations(
-        &self,
-        commit: &StoreBatchCommit,
-        activating_author: &StoreDeviceRegistration,
-        predecessor: Option<&MembershipChain>,
-        accepted: VerifiedMergePredecessorHistory<'_>,
-        recovery_memberships: &BTreeMap<OwnerRecoveryNodeRef, MembershipChain>,
-    ) -> Result<Vec<ActivatedStoreDeviceRegistration>, RegistrationLoadError> {
-        if commit.acknowledgement().is_some() {
-            self.validate_commit_acknowledgement(commit, activating_author)
-                .await?;
-        }
         if let Some(reference) = commit.reclaim_authorization() {
-            let predecessor = predecessor.ok_or_else(|| {
-                RegistrationLoadError::Invalid(
-                    "reclaim authorization activation has no exact predecessor owner authority"
-                        .to_string(),
-                )
-            })?;
             let opened = self
                 .commit_verifier
                 .load_reclaim_authorization_record(reference, &activating_author.author_pubkey)
@@ -397,12 +367,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             }?;
         }
         if let Some(reference) = commit.reclaim_receipt() {
-            let predecessor = predecessor.ok_or_else(|| {
-                RegistrationLoadError::Invalid(
-                    "reclaim receipt activation has no exact predecessor provider authority"
-                        .to_string(),
-                )
-            })?;
             let opened = self
                 .load_reclaim_receipt(reference)
                 .await
@@ -435,16 +399,18 @@ impl<'a> MergeHistoryVerifier<'a> {
             .device_join_attempt_decisions()
             .iter()
             .any(|decision| matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(_)));
-        if has_join_attempt {
-            validate_commit_join_attempts(commit, activating_author, predecessor)?;
+        if has_join_attempt && !predecessor.is_owner_now(&activating_author.author_pubkey) {
+            return Err(RegistrationLoadError::Invalid(
+                "device join attempt activation author is not an active Owner at its predecessor"
+                    .to_string(),
+            ));
         }
-        let activated_join_attempts = Box::pin(self.validate_commit_join_activations(
+        let activated_join_attempts = Self::validate_commit_join_activations(
             commit,
             activating_author,
             predecessor,
             accepted,
-        ))
-        .await?;
+        )?;
         let has_join_abandonment = commit
             .device_join_attempt_decisions()
             .iter()
@@ -459,19 +425,13 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .await
                 .map_err(RegistrationLoadError::Object)?
                 .value;
-            let predecessor = predecessor.ok_or_else(|| {
-                RegistrationLoadError::Invalid(
-                    "registration activation has no exact predecessor membership authority"
-                        .to_string(),
-                )
-            })?;
             let authority = Box::pin(self.registration_activation(
                 activated,
                 &registration,
                 activating_author,
                 predecessor,
                 &activated_join_attempts,
-                recovery_memberships,
+                &recovery_memberships,
             ))
             .await?;
             let registration = ReferencedStoreDeviceRegistration::verified(

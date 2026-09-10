@@ -13,11 +13,10 @@ impl<'a> MergeHistoryVerifier<'a> {
     /// step. Nothing else is read: an outcome file restating the owner, the
     /// grant, and the registration it activates said nothing this commit does
     /// not say itself.
-    pub(super) async fn validate_commit_join_activations(
-        &self,
+    pub(super) fn validate_commit_join_activations(
         commit: &StoreBatchCommit,
         activating_author: &StoreDeviceRegistration,
-        predecessor: Option<&MembershipChain>,
+        predecessor: &MembershipChain,
         accepted: VerifiedMergePredecessorHistory<'_>,
     ) -> Result<BTreeSet<store_commit::DeviceJoinAttemptId>, RegistrationLoadError> {
         let mut activated = BTreeSet::new();
@@ -26,11 +25,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             else {
                 continue;
             };
-            let predecessor = predecessor.ok_or_else(|| {
-                RegistrationLoadError::Invalid(
-                    "device join activation has no exact predecessor authority".to_string(),
-                )
-            })?;
             if !predecessor.is_owner_now(&activating_author.author_pubkey) {
                 return Err(RegistrationLoadError::Invalid(
                     "device join activation author is not an active Owner at its predecessor"
@@ -64,13 +58,8 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self,
         commit: &StoreBatchCommit,
         activating_author: &StoreDeviceRegistration,
-        predecessor: Option<&MembershipChain>,
+        predecessor: &MembershipChain,
     ) -> Result<(), RegistrationLoadError> {
-        let predecessor = predecessor.ok_or_else(|| {
-            RegistrationLoadError::Invalid(
-                "device join abandonment activation has no exact predecessor authority".to_string(),
-            )
-        })?;
         if !predecessor.is_owner_now(&activating_author.author_pubkey) {
             return Err(RegistrationLoadError::Invalid(
                 "device join abandonment activation author is not an active Owner".to_string(),
@@ -111,30 +100,10 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(())
     }
 
-    /// Verify the attempt this device is joining under and build the history
-    /// it has to carry.
-    ///
-    /// `installed` is the coverage of the Store snapshot the joining device has
-    /// already installed into its database — empty only when it truly starts
-    /// from nothing. Passing the real coverage is what keeps the plan buildable
-    /// at all on a store that reclaims: every commit the plan carries is read
-    /// from its package, and a package behind an acknowledged snapshot is
-    /// exactly what reclaim deletes.
-    /// Verify the commit that opened this attempt and build the history the
-    /// joining device has to carry.
-    ///
-    /// The commit is the attempt: its predecessor cut is the history the
-    /// admitting device declared this device would install from, and its
-    /// membership state is the authority that cut is read under. Both used to
-    /// be restated in a separate signed file by the same device that signed the
-    /// commit, which established nothing the commit did not.
-    ///
-    /// `installed` is the coverage of the Store snapshot the joining device has
-    /// already installed into its database — empty only when it truly starts
-    /// from nothing. Passing the real coverage is what keeps the plan buildable
-    /// at all on a store that reclaims: every commit the plan carries is read
-    /// from its package, and a package behind an acknowledged snapshot is
-    /// exactly what reclaim deletes.
+    /// Verify the commit opening this attempt and build the joining device's history.
+    /// The commit's predecessor cut names what the joining device installs, and its
+    /// membership state supplies that cut's authority. `installed` names the history
+    /// already held by the joining device, so the plan omits retired packages.
     pub(crate) async fn verify_attempt_and_prepare_device_join_bootstrap(
         &mut self,
         attempt_id: store_commit::DeviceJoinAttemptId,

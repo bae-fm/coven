@@ -65,12 +65,10 @@ pub(crate) use successor::{
 };
 #[cfg(test)]
 pub(crate) use successor::{insert_latest_acknowledgement, merge_retained_merge_history};
-pub(super) mod join_validation;
 mod membership;
 pub use membership::AcceptedMembershipAuthority;
 use membership::VerifiedPrefixMembershipActivation;
 pub(crate) mod registration;
-use join_validation::*;
 pub(crate) use registration::RegistrationLoadError;
 use registration::*;
 
