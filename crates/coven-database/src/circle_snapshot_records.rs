@@ -1,7 +1,6 @@
 use coven_protocol::circle::CircleId;
 use coven_protocol::store_commit::{
-    CircleSnapshotMeta, CircleSnapshotRef, ObjectHash, ReferencedStoreDeviceRegistration,
-    SnapshotImageRef,
+    CircleSnapshotMeta, CircleSnapshotRef, ReferencedStoreDeviceRegistration,
 };
 
 use super::*;
@@ -78,49 +77,27 @@ pub(crate) fn load_outbound_circle_snapshot_on(
     circle_id: CircleId,
 ) -> Result<Option<DurableCircleSnapshotPublication>, DbError> {
     conn.query_row(
-        "SELECT snapshot_ref, meta_prepared, image_ref, meta_bytes \
+        "SELECT snapshot_ref, meta_prepared, meta_bytes \
          FROM outbound_circle_snapshot WHERE circle_id = ?1",
         [circle_id.to_string()],
         |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, Vec<u8>>(2)?,
             ))
         },
     )
     .optional()
     .map_err(DbError::from)?
-    .map(|(reference, meta_prepared, image_reference, meta_bytes)| {
+    .map(|(reference, meta_prepared, meta_bytes)| {
         let reference: CircleSnapshotRef = serde_json::from_str(&reference)
             .map_err(|error| DbError::context("outbound Circle snapshot ref", error))?;
         let meta_prepared: PreparedExactObject =
             serde_json::from_str(&meta_prepared).map_err(|error| {
                 DbError::context("outbound prepared Circle snapshot metadata", error)
             })?;
-        let image_reference: SnapshotImageRef = serde_json::from_str(&image_reference)
-            .map_err(|error| DbError::context("outbound Circle snapshot image ref", error))?;
-        let image_bytes = crate::payload_store::read_payload_blocking(
-            conn,
-            store_dir,
-            image_reference.image_hash,
-        )
-        .map_err(|error| DbError::context("outbound Circle snapshot image", error))?;
-        let image_prepared = PreparedExactObject::new(
-            image_reference.object.clone(),
-            crate::payload_store::read_payload_blocking(
-                conn,
-                store_dir,
-                image_reference.object.stored_hash(),
-            )
-            .map_err(|error| DbError::context("outbound prepared Circle snapshot image", error))?,
-        )
-        .map_err(|error| DbError::context("outbound prepared Circle snapshot image", error))?;
-        if meta_prepared.reference() != &reference.object
-            || image_prepared.reference() != &image_reference.object
-            || ObjectHash::digest(&image_bytes) != image_reference.image_hash
-        {
+        if meta_prepared.reference() != &reference.object {
             return Err(DbError::Message(
                 "outbound Circle snapshot exact references differ from prepared bytes".to_string(),
             ));
@@ -134,14 +111,17 @@ pub(crate) fn load_outbound_circle_snapshot_on(
             author,
         )
         .map_err(|error| DbError::context("outbound Circle snapshot", error))?;
-        if &meta.author_registration != author_ref
-            || meta.circle_id != circle_id
-            || meta.bootstrap.image != image_reference
-        {
+        if &meta.author_registration != author_ref || meta.circle_id != circle_id {
             return Err(DbError::Message(
-                "outbound Circle snapshot metadata differs from its exact image".to_string(),
+                "outbound Circle snapshot differs from its local author or Circle".to_string(),
             ));
         }
+        let image = crate::snapshot_objects::load_snapshot_image_on(
+            conn,
+            store_dir,
+            &meta.bootstrap.image,
+            "Circle",
+        )?;
         Ok(DurableCircleSnapshotPublication {
             reference,
             meta: ExactProtocolObject {
@@ -149,10 +129,7 @@ pub(crate) fn load_outbound_circle_snapshot_on(
                 bytes: meta_bytes,
                 prepared: meta_prepared,
             },
-            image: PreparedProtocolObject {
-                value: image_bytes,
-                prepared: image_prepared,
-            },
+            image,
         })
     })
     .transpose()

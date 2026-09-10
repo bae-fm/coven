@@ -230,20 +230,14 @@ impl StoreSession<'_> {
         }
         tx.execute(
             "INSERT INTO outbound_store_snapshot \
-             (singleton, snapshot_ref, meta_prepared, image_ref, rollup_ref, meta_bytes, blobs) \
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+             (singleton, snapshot_ref, meta_prepared, meta_bytes, blobs) \
+             VALUES (1, ?1, ?2, ?3, ?4)",
             rusqlite::params![
                 serde_json::to_string(&reference).map_err(|error| {
                     DbError::context("serialize exact Store snapshot ref", error)
                 })?,
                 serde_json::to_string(&meta_prepared).map_err(|error| {
                     DbError::context("serialize prepared Store snapshot metadata", error)
-                })?,
-                serde_json::to_string(&meta.image).map_err(|error| {
-                    DbError::context("serialize exact Store snapshot image ref", error)
-                })?,
-                serde_json::to_string(&meta.membership_rollup).map_err(|error| {
-                    DbError::context("serialize exact membership rollup ref", error)
                 })?,
                 meta.to_bytes(),
                 serde_json::to_string(&blobs).map_err(|error| {

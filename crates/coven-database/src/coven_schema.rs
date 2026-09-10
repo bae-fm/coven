@@ -309,8 +309,6 @@ macro_rules! coven_tables {
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
     meta_prepared TEXT NOT NULL CHECK (json_valid(meta_prepared)),
-    image_ref TEXT NOT NULL CHECK (json_valid(image_ref)),
-    rollup_ref TEXT NOT NULL CHECK (json_valid(rollup_ref)),
     meta_bytes BLOB NOT NULL,
     blobs TEXT NOT NULL CHECK (json_valid(blobs))
 "
@@ -375,7 +373,6 @@ macro_rules! coven_tables {
     circle_id TEXT PRIMARY KEY,
     snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
     meta_prepared TEXT NOT NULL CHECK (json_valid(meta_prepared)),
-    image_ref TEXT NOT NULL CHECK (json_valid(image_ref)),
     meta_bytes BLOB NOT NULL
 "
         );

@@ -224,11 +224,8 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
         ("reclaimed_store_packages", "state".to_string()),
         ("row_blob_locators", "audience_authority".to_string()),
         ("outbound_store_snapshot", "snapshot_ref".to_string()),
-        ("outbound_store_snapshot", "image_ref".to_string()),
-        ("outbound_store_snapshot", "rollup_ref".to_string()),
         ("published_store_snapshot", "snapshot_ref".to_string()),
         ("outbound_circle_snapshot", "snapshot_ref".to_string()),
-        ("outbound_circle_snapshot", "image_ref".to_string()),
         ("published_circle_snapshot", "snapshot_ref".to_string()),
         ("published_circle_snapshot", "successor_slot".to_string()),
         ("published_circle_snapshot", "cut".to_string()),
@@ -389,21 +386,13 @@ fn snapshot_and_write_journals_name_payloads_instead_of_carrying_bytes() {
             "singleton",
             "snapshot_ref",
             "meta_prepared",
-            "image_ref",
-            "rollup_ref",
             "meta_bytes",
             "blobs",
         ]
     );
     assert_eq!(
         columns("outbound_circle_snapshot"),
-        [
-            "circle_id",
-            "snapshot_ref",
-            "meta_prepared",
-            "image_ref",
-            "meta_bytes",
-        ]
+        ["circle_id", "snapshot_ref", "meta_prepared", "meta_bytes"]
     );
     assert_eq!(
         columns("store_writes"),

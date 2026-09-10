@@ -61,6 +61,35 @@ pub fn validate_snapshot_image(
     }
 }
 
+/// Load the exact image named by authenticated snapshot metadata. Both Store
+/// and Circle publication retain the plaintext and upload bytes under this ref.
+pub(crate) fn load_snapshot_image_on(
+    conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    reference: &SnapshotImageRef,
+    label: &str,
+) -> Result<PreparedProtocolObject<Vec<u8>>, DbError> {
+    let value = crate::payload_store::read_payload_blocking(conn, store_dir, reference.image_hash)
+        .map_err(|error| DbError::context(format!("outbound {label} snapshot image"), error))?;
+    if ObjectHash::digest(&value) != reference.image_hash {
+        return Err(DbError::Message(format!(
+            "outbound {label} snapshot image differs from its exact hash"
+        )));
+    }
+    let stored = crate::payload_store::read_payload_blocking(
+        conn,
+        store_dir,
+        reference.object.stored_hash(),
+    )
+    .map_err(|error| {
+        DbError::context(format!("outbound prepared {label} snapshot image"), error)
+    })?;
+    let prepared = PreparedExactObject::new(reference.object.clone(), stored).map_err(|error| {
+        DbError::context(format!("outbound prepared {label} snapshot image"), error)
+    })?;
+    Ok(PreparedProtocolObject { value, prepared })
+}
+
 pub(crate) fn validate_snapshot_blob_plans_on(
     conn: &Connection,
     gates: &Gates,

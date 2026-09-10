@@ -250,7 +250,7 @@ async fn selector_keeps_semantic_and_stored_snapshot_hashes_distinct() {
 }
 
 #[tokio::test]
-async fn staged_snapshot_reuses_image_and_metadata_objects_after_restart() {
+async fn staged_snapshot_reuses_exact_objects_after_restart() {
     let directory = tempfile::tempdir().expect("snapshot database directory");
     let path = directory.path().join("store.sqlite3");
     let home = InMemoryCloudHome::new();
@@ -276,6 +276,18 @@ async fn staged_snapshot_reuses_image_and_metadata_objects_after_restart() {
     drop(db);
 
     let (reopened, reopened_store_dir) = open(&path, "snapshot-test-device");
+    let retained = store_database(&reopened)
+        .outbound_snapshot_publication()
+        .await
+        .expect("read reopened snapshot outbox")
+        .expect("snapshot remains staged after reopening");
+    assert_eq!(retained.reference, staged.reference);
+    assert_eq!(retained.meta.bytes, staged.meta.bytes);
+    assert_eq!(retained.meta.prepared, staged.meta.prepared);
+    assert_eq!(retained.image.value, staged.image.value);
+    assert_eq!(retained.image.prepared, staged.image.prepared);
+    assert_eq!(retained.rollup.bytes, staged.rollup.bytes);
+    assert_eq!(retained.rollup.prepared, staged.rollup.prepared);
     let reopened_device = crate::sync::test_helpers::TestDevice::load(
         &reopened,
         reopened_store_dir.clone(),
@@ -291,6 +303,10 @@ async fn staged_snapshot_reuses_image_and_metadata_objects_after_restart() {
         .expect("snapshot was pending");
     assert_eq!(published.snapshot_hash(), staged.reference.snapshot_hash);
     assert_eq!(published.image, staged.meta.value.image);
+    assert_eq!(
+        published.membership_rollup,
+        staged.meta.value.membership_rollup
+    );
     assert!(store_database(&reopened)
         .outbound_snapshot_publication()
         .await

@@ -156,8 +156,8 @@ impl StoreSession<'_> {
         }
         tx.execute(
             "INSERT INTO outbound_circle_snapshot \
-             (circle_id, snapshot_ref, meta_prepared, image_ref, meta_bytes) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (circle_id, snapshot_ref, meta_prepared, meta_bytes) \
+             VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
                 meta.circle_id.to_string(),
                 serde_json::to_string(&reference).map_err(|error| {
@@ -165,9 +165,6 @@ impl StoreSession<'_> {
                 })?,
                 serde_json::to_string(&meta_prepared).map_err(|error| {
                     DbError::context("serialize prepared Circle snapshot metadata", error)
-                })?,
-                serde_json::to_string(&meta.bootstrap.image).map_err(|error| {
-                    DbError::context("serialize exact Circle snapshot image ref", error)
                 })?,
                 meta.to_bytes(),
             ],
