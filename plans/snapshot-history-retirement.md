@@ -503,12 +503,14 @@ replacement effects and publication inputs. Keep original observations as the
 record of capture; record the validated replacement base with the successful
 rebase. Re-signing old bytes with different dependency references is insufficient.
 
-The automatic operation reapplies recorded edits; it does not rerun arbitrary
-application commands or invent user intent. A missing target, conflicting
-private/shared identity, invalid Circle context, unavailable required blob, or
-unsatisfied dependent edit produces a typed conflict. Report the affected
-WriteIds and relevant row or object identity through existing host error/status
-owners. Preserve the complete unresolved work for explicit host resolution.
+The automatic operation reapplies recorded edits through ordinary merge; it
+does not rerun arbitrary application commands or assign fresh timestamps.
+Same-column collisions use the captured timestamps, disjoint column edits
+survive, and deletes win over concurrent updates. A private/shared identity
+collision, invalid Circle context, unavailable required blob, or violated
+constraint produces a typed failure. Report the affected WriteIds and relevant
+row or object identity through existing host error/status owners. Preserve the
+complete unresolved work for explicit host resolution.
 
 Install the rebase result atomically with the baseline change and candidate
 replacement journal. Remote publication follows from those durable prepared
@@ -542,15 +544,17 @@ Original captured observations and changeset bytes remain immutable. Persist
 the successfully validated replacement base, replacement effects, audience
 partitions, and exact blob facts as distinct current preparation inputs.
 
-Factor session capture, routing, partitioning, and blob-fact calculation from
-the existing host capture owner. Reapply recorded sparse edits through that
-owner on the projection; never rerun arbitrary host commands or treat expanded
-audience packages as the original edit. Ordinary remote LWW/NOTFOUND omission
-is not successful rebase: missing targets, conflicting touched columns,
-private/shared identity collisions, invalid Circle context, unavailable blob
-inputs, and unsatisfied dependent edits produce typed conflicts containing
-the affected WriteIds and row or object identities. Untouched peer columns
-survive. A conflict preserves the entire unresolved before-state.
+Reuse the existing apply owner for both retained replay and snapshot rebase.
+Keep the captured audience partitions and original timestamps as publication
+inputs, including operations whose current row effect loses ordinary merge.
+Capture the actual resulting changeset separately for inverse discard at the
+replacement base. Never rerun host commands or repartition the merged rows as
+though they were a new host edit. Replaying the dependent suffix after another
+snapshot or database reopen must preserve the same ordering and winners.
+Private/shared identity collisions, invalid Circle context, unavailable blob
+inputs, and violated constraints remain typed failures containing the affected
+WriteIds and row or object identities. A failure preserves the entire unresolved
+before-state.
 
 One verified database transaction installs the baseline, resulting local
 projection, regenerated suffix inputs and ownership, and the active
@@ -777,7 +781,7 @@ boundaries; do not reconstruct the acceptance algorithm inside tests.
 | Private rows already folded out of the journal | Rows, routes, and exact blob bytes survive downloaded-image adoption. |
 | Mixed Store/Circle/Local edits and sharing transitions | Replay causality, private authority, and audience ownership match the established contract. |
 | Partial-column update rebased over an unrelated peer update | Untouched peer columns survive; captured column identity is preserved. |
-| Missing target, private/shared collision, or missing blob | Atomic conflict with affected identity; no successful publication or lost input. |
+| Missing target, private/shared collision, or missing blob | Deleted targets follow ordinary remove-wins merge; private/shared collisions and missing required blobs fail atomically without losing input. |
 | Caught-up device adopts without image download | Same baseline and resulting state as image adoption, preserving its own private data. |
 | Full-history replay versus snapshot-boundary replay | Same shared result and preserved local ordering; no post-snapshot insertion into retired history. |
 | Explicit retraction/exclusion across a retired boundary | Authorized effect remains implementable from retained state; retirement itself never withdraws accepted edits. |
@@ -1694,7 +1698,7 @@ execution of the current working tree. Paths below are relative to
 | 12 Folded private rows | `pull/publication_tests.rs::snapshot_boundaries_preserve_private_rows_and_roll_back_with_their_tail`; `pull/warm_snapshot_adoption_tests.rs::warm_snapshot_adoption_migrates_an_older_image_and_preserves_local_work` | check104; private baseline and atomic image/journal preservation. |
 | 13 Mixed audiences and sharing | `pull/write_rebase_covered_circle_tests.rs::covered_circle_restoration_survives_independent_store_package_retirement`; `pull/write_rebase_private_tests.rs::snapshot_rebase_preserves_rows_made_private_after_their_accepted_sharing`; generated sequences; `pull/write_rebase_blob_tests.rs::snapshot_rebase_retains_an_audience_move_payload_until_its_write_is_folded` | check104 audience ownership; source payload/rebase and Circle-key resealing pass117. |
 | 14 Sparse-column peer edit | `pull/write_rebase_tests.rs::snapshot_rebase_preserves_recorded_columns_and_reserved_write` | check104; untouched peer columns and immutable capture survive. |
-| 15 Missing/conflicting row or blob | `pull/write_rebase_tests.rs::snapshot_rebase_conflict_preserves_the_entire_previous_state`; `pull/write_rebase_private_tests.rs` collision cases; `snapshots/blob_capture_tests.rs::snapshot_missing_accepted_blob_preserves_publication_for_retry_after_restart` | check104; typed refusal retains input and rollback state. |
+| 15 Row arbitration, constraints or missing blob | `pull/write_rebase_tests.rs::snapshot_rebase_automatically_merges_a_newer_peer_value_and_keeps_the_write_receipt`; `snapshot_rebase_parent_delete_cannot_erase_an_unobserved_peer_child`; `pull/write_rebase_private_tests.rs` collision cases; `snapshots/blob_capture_tests.rs::snapshot_missing_accepted_blob_preserves_publication_for_retry_after_restart` | Automatic merge supersedes the earlier same-column refusal; parent/private/blob failures retain their rollback requirements. Updated rebase coverage landed in `38509b03`; check104 remains evidence for the earlier source only. |
 | 16 Local reconstruction without download | `pull/seeded_snapshot_adoption_tests.rs::seeded_delivery_restart_and_retirement_preserve_rows_blobs_and_pending_work`; opposite held-row case in `held_snapshot_adoption_tests.rs` | check104; exact predecessor/cut prerequisites and no-image assertion. |
 | 17 Full-history versus snapshot replay | Same seeded comparison, plus `pull/publication_tests.rs::snapshot_boundaries_preserve_private_rows_and_roll_back_with_their_tail` | check104; independent values, blobs, ownership and journal assertions. |
 | 18 Exclusion/control across retirement | `device_exclusion/completion_tests.rs::device_authority_completion_restarts_after_snapshot_retirement`; `device_exclusion/tests.rs::owner_finalizes_exclusion_without_remaining_device_acknowledgements`; generated withdrawal sequence | check104; existing explicit control effects remain separate from compaction. |

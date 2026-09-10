@@ -140,36 +140,57 @@ Two special cases:
   ([`MAX_FUTURE_SKEW_MS`](rustdoc:const:coven_protocol::hlc::MAX_FUTURE_SKEW_MS),
   30 days) and refuses to let a grossly-future stamp win or ratchet its clock.
 
+### Blob content
+
+A declared blob's id, plaintext size, plaintext hash, and optional cloud path
+merge as one group. When both devices change that group, the later edit wins
+with its complete set of values. An earlier blob edit survives a later metadata
+edit when the metadata writer left the blob unchanged. Other columns still
+merge independently, so changing a caption does not discard a concurrent file
+replacement.
+
+Capture includes the group's complete old and new values whenever any member
+changes, including values that stayed equal. This prevents merging one file's
+id and hash with another file's size. Metadata-only updates leave the group
+absent from their changeset. The same rules apply during ordinary pull and
+snapshot rebase.
+
 ### Constraints and foreign keys
 
-A child row can arrive in a changeset whose parent is in a different device's
-changeset, not yet applied. The child's insert violates a foreign key and is
-dropped on the first pass. Pull collects every such changeset and retries each
-once after the first pass over all devices completes, by which point the parent
-rows exist. If a changeset still violates a foreign key after the retry, it is
-logged and skipped.
+A commit waits until its exact predecessor and dependencies are materialized.
+If its resulting rows still lack a required foreign-key parent, replay rolls
+back that commit's application and keeps it pending while other ready commits
+make progress. If no progress can satisfy the dependency, the commit remains
+held or reconstruction fails. Its materialized position does not advance.
 
-Non-foreign-key constraint conflicts (a uniqueness violation, a CHECK failure)
-are different: retrying cannot make them valid, so the conflicting rows are
-omitted, the affected tables are surfaced in
-`ApplyResult::constraint_conflict_tables`, and the changeset is not retried.
+A non-foreign-key constraint conflict, such as a uniqueness violation or a
+`CHECK` failure, rejects the application and reports the affected tables.
+Installation preserves the previous state rather than committing the rows that
+happened to pass. Snapshot reconstruction and replay of the retained local
+suffix share this atomic failure boundary.
 
 ### Rebasing recorded edits
 
 When a snapshot retires an unpublished write's shared base, Coven reapplies
-the write's captured row changes against the accepted state. It preserves
-untouched peer columns and reports a typed conflict if a target disappeared,
-a touched column conflicts, or the resulting write violates a declared SQLite
-`CHECK`, `UNIQUE`, `NOT NULL`, or foreign-key constraint. Failure rolls back the
-whole rebase and retains the unresolved write and its dependent suffix.
+the write's captured row changes against the accepted state through the same
+merge used for ordinary apply. Disjoint column edits survive, same-column edits
+follow their captured timestamps, and deletes win over concurrent updates.
+Equal row identities enter that same merge. A declared SQLite `CHECK`, `UNIQUE`,
+`NOT NULL`, or foreign-key violation still produces a typed conflict, as does
+a private edit colliding with accepted shared state or an invalid captured
+Circle context. Failure rolls back the whole rebase and retains the unresolved
+write and its dependent suffix.
 
 The retained input is the transaction's net row changes, including changes
 made by application triggers to synced tables. It does not retain the original
 statements, their grouping, or assignments that left a column unchanged.
-Rebase applies those recorded effects and refreshes their timestamps without
-running the application triggers again. A captured audit row therefore keeps
-its captured values; it is not generated a second time using newer peer data.
-Ordinary host writes continue to execute their triggers.
+Rebase preserves those effects and their original timestamps without running
+the application triggers again. It replays dependent local writes in their
+captured order; another snapshot or database reopen does not make an earlier
+edit newer. Publication retains the captured operations even when merging
+omits their effect on the current rows. A captured audit row keeps its captured
+values; it is not generated a second time using newer peer data. Ordinary host
+writes continue to execute their triggers.
 
 A trigger's `RAISE` condition checks execution of a host statement. It is not
 a declarative constraint on every state obtained by combining recorded edits.
