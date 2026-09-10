@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -154,10 +155,12 @@ impl StoreDatabase {
     fn drain_host_change_journal(
         session: &mut rusqlite::session::Session<'_>,
         synced_tables: &[SyncedTable],
+        connection: &Connection,
+        blob_decls: &BlobDecls,
     ) -> Result<Vec<u8>, DbError> {
         let captured = Self::drain_host_change_journal_on(session)?;
         crate::changeset_identity::validate_captured_row_identities(&captured, synced_tables)?;
-        Ok(captured)
+        blob_decls.complete_blob_changeset(connection, &captured)
     }
 
     pub fn invert_changeset(changeset: &[u8]) -> Result<Vec<u8>, DbError> {
@@ -781,9 +784,13 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 }
             }
             let value = f(&tx)?;
-            let mut captured =
-                StoreDatabase::drain_host_change_journal(&mut journal, synced_tables)
-                    .map_err(E::from)?;
+            let mut captured = StoreDatabase::drain_host_change_journal(
+                &mut journal,
+                synced_tables,
+                &tx,
+                blob_decls,
+            )
+            .map_err(E::from)?;
             // A root the host just deleted takes its cloud transition with it,
             // in this same transaction. The rows it queued are read out of the
             // journal rather than the tables, the row being what has just
@@ -814,9 +821,13 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 if StoreDatabase::advance_moved_blob_row_stamps_on(&tx, &moves, blob_decls)
                     .map_err(E::from)?
                 {
-                    captured =
-                        StoreDatabase::drain_host_change_journal(&mut journal, synced_tables)
-                            .map_err(E::from)?;
+                    captured = StoreDatabase::drain_host_change_journal(
+                        &mut journal,
+                        synced_tables,
+                        &tx,
+                        blob_decls,
+                    )
+                    .map_err(E::from)?;
                 }
             }
             blob_decls
@@ -930,10 +941,18 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 }
             };
             let changeset_hash = match (|| -> Result<ObjectHash, DbError> {
+                let captured = StoreDatabase::drain_host_change_journal(
+                    &mut journal,
+                    synced_tables,
+                    &tx,
+                    blob_decls,
+                )?;
                 let mut changeset_writer =
                     crate::store::store_session::StoreTransaction::new(&tx, store_dir)
                         .payload_writer();
-                journal.changeset_strm(&mut changeset_writer)?;
+                changeset_writer
+                    .write_all(&captured)
+                    .map_err(|error| DbError::context("write captured changeset", error))?;
                 Ok(changeset_writer.commit()?.0)
             })() {
                 Ok(hash) => hash,

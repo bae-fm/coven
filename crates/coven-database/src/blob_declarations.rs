@@ -174,23 +174,64 @@ struct TableBlob {
     namespace: String,
     provenance: Provenance,
     fill: CacheFill,
-    /// Index of the blob-id column.
-    id_col: usize,
-    /// Index of the plaintext-size column.
-    size_col: usize,
-    /// Index of the content-hash column.
-    hash_col: usize,
+    columns: BlobColumns,
     /// Name of the blob-id column. The index reads a row top-to-bottom; the name
     /// keys a lookup the other way ([`BlobDecls::row_for_blob_in_namespace`]: which row
     /// carries a given blob id), so both directions resolve off the same declaration.
     id_col_name: String,
-    /// Index of the readable cloud-path column, if declared.
-    cloud_path_col: Option<usize>,
     /// The encryption scope, fixed per table by the declaration.
     scope: BlobScope,
     /// This table's row-repointing and readable-name policy. See
     /// [`TableBlob::blob_ref`] and [`TableBlob::ref_from_change`].
     replacement: BlobReplacement,
+}
+
+/// The declared content fields of one blob, resolved against its table schema.
+/// These fields form one merge value even when only some change in an UPDATE.
+pub(crate) struct BlobColumns {
+    id: usize,
+    size: usize,
+    hash: usize,
+    cloud_path: Option<usize>,
+}
+
+impl BlobColumns {
+    pub(crate) fn resolve(
+        table: &str,
+        declaration: &coven_protocol::synced_schema::BlobDecl,
+        columns: &[String],
+    ) -> Result<Self, BlobDeclError> {
+        let index = |name: &str| {
+            columns
+                .iter()
+                .position(|column| column == name)
+                .ok_or_else(|| BlobDeclError::MissingColumn {
+                    table: table.to_string(),
+                    column: name.to_string(),
+                })
+        };
+        Ok(Self {
+            id: index(&declaration.id_column)?,
+            size: index(&declaration.size_column)?,
+            hash: index(&declaration.hash_column)?,
+            cloud_path: declaration
+                .cloud_path_column
+                .as_deref()
+                .map(index)
+                .transpose()?,
+        })
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        [
+            Some(self.id),
+            Some(self.size),
+            Some(self.hash),
+            self.cloud_path,
+        ]
+        .into_iter()
+        .flatten()
+    }
 }
 
 impl TableBlob {
@@ -244,12 +285,12 @@ impl TableBlob {
         table: &str,
         change: &RowChange,
     ) -> Result<Option<BlobRef>, BlobDeclError> {
-        let Some(id) = change.col(self.id_col).map(str::to_string) else {
+        let Some(id) = change.col(self.columns.id).map(str::to_string) else {
             return Ok(None);
         };
         if self.replacement == BlobReplacement::WriteOnce
             && change.op == ChangeOp::Update
-            && change.column_changed(self.id_col)
+            && change.column_changed(self.columns.id)
         {
             return Err(BlobDeclError::WriteOnceBlobRepointed {
                 table: table.to_string(),
@@ -257,7 +298,8 @@ impl TableBlob {
             });
         }
         let cloud_path = self
-            .cloud_path_col
+            .columns
+            .cloud_path
             .and_then(|i| change.col(i))
             .map(str::to_string);
         self.blob_ref(table, id, self.scope.clone(), cloud_path)
@@ -273,10 +315,10 @@ impl TableBlob {
         table: &str,
         row: &rusqlite::Row<'_>,
     ) -> Result<Option<BlobRef>, BlobDeclError> {
-        let Some(id) = row.get::<_, Option<String>>(self.id_col)? else {
+        let Some(id) = row.get::<_, Option<String>>(self.columns.id)? else {
             return Ok(None);
         };
-        let cloud_path = match self.cloud_path_col {
+        let cloud_path = match self.columns.cloud_path {
             Some(i) => row.get::<_, Option<String>>(i)?,
             None => None,
         };
@@ -285,7 +327,7 @@ impl TableBlob {
     }
 
     fn size_from_row(&self, table: &str, row: &rusqlite::Row<'_>) -> Result<u64, BlobDeclError> {
-        let value = row.get::<_, i64>(self.size_col)?;
+        let value = row.get::<_, i64>(self.columns.size)?;
         u64::try_from(value).map_err(|_| BlobDeclError::InvalidSize {
             table: table.to_string(),
             value,
@@ -298,7 +340,7 @@ impl TableBlob {
         row_id: &str,
         row: &rusqlite::Row<'_>,
     ) -> Result<String, BlobDeclError> {
-        row.get::<_, Option<String>>(self.hash_col)?
+        row.get::<_, Option<String>>(self.columns.hash)?
             .ok_or_else(|| BlobDeclError::MissingHash {
                 table: table.to_string(),
                 row_id: row_id.to_string(),
@@ -348,22 +390,7 @@ impl BlobDecls {
             // Column names in declared (schema) order — the index of a name here
             // is the index a changeset reports for that column.
             let cols = session_table_columns(conn, t.name()).map_err(BlobDeclError::from)?;
-            let index_of = |column: &str| -> Result<usize, BlobDeclError> {
-                cols.iter()
-                    .position(|c| c == column)
-                    .ok_or_else(|| BlobDeclError::MissingColumn {
-                        table: t.name().to_string(),
-                        column: column.to_string(),
-                    })
-            };
-
-            let id_col = index_of(&decl.id_column)?;
-            let size_col = index_of(&decl.size_column)?;
-            let hash_col = index_of(&decl.hash_column)?;
-            let cloud_path_col = match &decl.cloud_path_column {
-                Some(c) => Some(index_of(c)?),
-                None => None,
-            };
+            let columns = BlobColumns::resolve(t.name(), decl, &cols)?;
 
             map.insert(
                 t.name().to_string(),
@@ -371,17 +398,78 @@ impl BlobDecls {
                     namespace: decl.namespace.clone(),
                     provenance: decl.provenance,
                     fill: decl.fill,
-                    id_col,
-                    size_col,
-                    hash_col,
+                    columns,
                     id_col_name: decl.id_column.clone(),
-                    cloud_path_col,
                     scope: decl.scope.clone(),
                     replacement: decl.replacement,
                 },
             );
         }
         Ok(BlobDecls { tables: map })
+    }
+
+    /// Retain complete old/new content values for an actual blob edit. Metadata
+    /// updates stay sparse, so they cannot overwrite independently edited content.
+    pub(crate) fn complete_blob_changeset(
+        &self,
+        conn: &Connection,
+        changeset: &[u8],
+    ) -> Result<Vec<u8>, crate::DbError> {
+        if self.tables.is_empty() || changeset.is_empty() {
+            return Ok(changeset.to_vec());
+        }
+        let group = crate::gate::Changegroup::new().map_err(crate::DbError::from)?;
+        unsafe {
+            group
+                .set_schema(conn.handle())
+                .map_err(crate::DbError::from)?;
+            crate::gate::for_each_change(changeset, |iter, change| {
+                let Some(blob) = self
+                    .tables
+                    .get(&change.table)
+                    .filter(|_| change.op == rusqlite::ffi::SQLITE_UPDATE)
+                else {
+                    return group.add_change(iter);
+                };
+                let (mut old, mut new, indirect) = crate::gate::update_values(iter)?;
+                let edited = blob.columns.iter().filter(|index| *index != 0).any(|index| {
+                    matches!((&old[index], &new[index]), (Some(old), Some(new)) if old != new)
+                });
+                if !edited {
+                    return group.add_change(iter);
+                }
+                let pk = change.pk().ok_or_else(|| {
+                    crate::GateError::MissingChangesetPrimaryKey(change.table.clone())
+                })?;
+                let sql = format!("SELECT * FROM {} WHERE id = ?1", quote_ident(&change.table));
+                let values = conn
+                    .query_row(&sql, [pk], |row| {
+                        blob.columns
+                            .iter()
+                            .filter(|index| *index != 0)
+                            .map(|index| {
+                                row.get::<_, rusqlite::types::Value>(index)
+                                    .map(|value| (index, value))
+                            })
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .map_err(|error| {
+                        crate::GateError::Sql(
+                            format!("capture blob content in {}", change.table),
+                            error,
+                        )
+                    })?;
+                for (index, value) in values {
+                    if old[index].is_none() && new[index].is_none() {
+                        old[index] = Some(value.clone());
+                        new[index] = Some(value);
+                    }
+                }
+                group.add_update(&change.table, &old, &new, indirect)
+            })
+            .map_err(crate::DbError::from)?;
+        }
+        group.output().map_err(crate::DbError::from)
     }
 
     /// Install connection-local guards that keep a blob cleanup intent exclusive
@@ -457,7 +545,7 @@ impl BlobDecls {
         };
         let changed_blob = tb.ref_from_change(&change.table, change)?;
         if changed_blob.is_none()
-            && (change.op == ChangeOp::Insert || change.column_changed(tb.id_col))
+            && (change.op == ChangeOp::Insert || change.column_changed(tb.columns.id))
         {
             return Ok(None);
         }

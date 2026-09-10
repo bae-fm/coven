@@ -59,8 +59,8 @@ impl RowChange {
     }
 
     /// Whether this column was written by the change. Inserts and deletes affect
-    /// every value in their row; updates mark only values present on SQLite's new
-    /// side, even though [`Self::col`] fills unchanged values from the old side.
+    /// every value in their row; updates compare typed old and new values. Explicit
+    /// equal pairs retained for a blob tuple do not mark the column changed.
     pub fn column_changed(&self, i: usize) -> bool {
         self.changed_columns.get(i).copied().unwrap_or(false)
     }

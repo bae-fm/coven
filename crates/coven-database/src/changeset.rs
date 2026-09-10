@@ -13,9 +13,9 @@ pub(crate) enum UpdateValue {
     Old,
 }
 
-enum ColumnCell {
+enum ColumnCell<'value> {
     Absent,
-    Present(Option<String>),
+    Present(ValueRef<'value>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -75,7 +75,7 @@ fn walk_with_update_values(
             .iter()
             .map(|(cell, _)| match cell {
                 ColumnCell::Absent => None,
-                ColumnCell::Present(value) => value.clone(),
+                ColumnCell::Present(value) => value_ref_to_string(*value),
             })
             .collect();
         let changed_columns = cells.iter().map(|(_, changed)| *changed).collect();
@@ -93,19 +93,23 @@ fn walk_with_update_values(
 /// Extract a column value from a changeset item following the op's old/new
 /// semantics. An absent column (unchanged in an update) reads as an
 /// `InvalidColumnIndex` error from rusqlite, which maps to `None`.
-fn extract_col(
-    item: &rusqlite::session::ChangesetItem,
+fn extract_col<'value>(
+    item: &'value rusqlite::session::ChangesetItem,
     col: usize,
     op: ChangeOp,
     update_value: UpdateValue,
-) -> Result<(ColumnCell, bool), ChangesetError> {
+) -> Result<(ColumnCell<'value>, bool), ChangesetError> {
     match op {
         ChangeOp::Insert => changeset_value(item, col, UpdateValue::New).map(|cell| (cell, true)),
         ChangeOp::Delete => changeset_value(item, col, UpdateValue::Old).map(|cell| (cell, true)),
         ChangeOp::Update => {
             let new = changeset_value(item, col, UpdateValue::New)?;
             let old = changeset_value(item, col, UpdateValue::Old)?;
-            let changed = matches!(new, ColumnCell::Present(_));
+            let changed = match (&new, &old) {
+                (ColumnCell::Present(new), ColumnCell::Present(old)) => new != old,
+                (ColumnCell::Present(_), ColumnCell::Absent) => true,
+                (ColumnCell::Absent, _) => false,
+            };
             let cell = match update_value {
                 UpdateValue::New => match new {
                     ColumnCell::Absent => old,
@@ -121,17 +125,17 @@ fn extract_col(
     }
 }
 
-fn changeset_value(
-    item: &rusqlite::session::ChangesetItem,
+fn changeset_value<'value>(
+    item: &'value rusqlite::session::ChangesetItem,
     col: usize,
     side: UpdateValue,
-) -> Result<ColumnCell, ChangesetError> {
+) -> Result<ColumnCell<'value>, ChangesetError> {
     let value = match side {
         UpdateValue::New => item.new_value(col),
         UpdateValue::Old => item.old_value(col),
     };
     match value {
-        Ok(value) => Ok(ColumnCell::Present(value_ref_to_string(value))),
+        Ok(value) => Ok(ColumnCell::Present(value)),
         Err(rusqlite::Error::InvalidColumnIndex(_)) => Ok(ColumnCell::Absent),
         Err(source) => Err(ChangesetError::Value {
             side: match side {

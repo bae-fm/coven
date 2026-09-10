@@ -45,9 +45,14 @@ use coven_protocol::synced_schema::SyncedTable;
 /// once before an apply and moved (owned) into the conflict closure, which must
 /// be `'static`.
 pub struct TableSchema {
-    updated_at_by_table: HashMap<String, usize>,
-    columns_by_table: HashMap<String, Vec<String>>,
+    tables: HashMap<String, TableColumns>,
     synced_tables: Vec<SyncedTable>,
+}
+
+struct TableColumns {
+    updated_at: usize,
+    names: Vec<String>,
+    blob: Option<crate::blob_declarations::BlobColumns>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,8 +102,7 @@ impl TableSchema {
         conn: &Connection,
         synced_tables: &[SyncedTable],
     ) -> Result<Self, DbError> {
-        let mut updated_at_by_table = HashMap::new();
-        let mut columns_by_table = HashMap::new();
+        let mut tables = HashMap::new();
 
         for synced_table in synced_tables {
             let table = synced_table.name();
@@ -107,13 +111,25 @@ impl TableSchema {
             let updated_at = updated_at.ok_or_else(|| {
                 DbError::Message(format!("synced table {table} has no _updated_at column"))
             })?;
-            updated_at_by_table.insert(table.to_string(), updated_at);
-            columns_by_table.insert(table.to_string(), columns);
+            let blob = synced_table
+                .blob()
+                .map(|declaration| {
+                    crate::blob_declarations::BlobColumns::resolve(table, declaration, &columns)
+                })
+                .transpose()
+                .map_err(DbError::from)?;
+            tables.insert(
+                table.to_string(),
+                TableColumns {
+                    updated_at,
+                    names: columns,
+                    blob,
+                },
+            );
         }
 
         Ok(TableSchema {
-            updated_at_by_table,
-            columns_by_table,
+            tables,
             synced_tables: synced_tables.to_vec(),
         })
     }
@@ -122,11 +138,22 @@ impl TableSchema {
     /// in the synced set passed to `from_db`. Incoming apply rejects an entire
     /// changeset containing an undeclared table before premerge or row arbitration.
     pub fn updated_at(&self, table: &str) -> Option<usize> {
-        self.updated_at_by_table.get(table).copied()
+        self.tables.get(table).map(|columns| columns.updated_at)
     }
 
     pub fn columns(&self, table: &str) -> Option<&[String]> {
-        self.columns_by_table.get(table).map(Vec::as_slice)
+        self.tables
+            .get(table)
+            .map(|columns| columns.names.as_slice())
+    }
+
+    pub(crate) fn blob_columns(
+        &self,
+        table: &str,
+    ) -> Option<&crate::blob_declarations::BlobColumns> {
+        self.tables
+            .get(table)
+            .and_then(|columns| columns.blob.as_ref())
     }
 
     pub fn synced_tables(&self) -> &[SyncedTable] {

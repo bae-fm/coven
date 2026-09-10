@@ -258,3 +258,140 @@ fn losing_column_merge_applies_unique_swaps_as_one_changeset() {
         }
     }
 }
+
+fn assert_blob_content_merges_as_one_value(publication_order: [usize; 2], same_content: bool) {
+    use coven_protocol::blob::{CacheFill, Provenance};
+    use coven_protocol::store_commit::ObjectHash;
+    use coven_protocol::synced_schema::BlobDecl;
+
+    let conn = Connection::open_in_memory().expect("open merge database");
+    crate::apply_coven_schema(&conn).expect("install Coven schema");
+    conn.execute_batch(
+        "CREATE TABLE files (
+             id TEXT PRIMARY KEY NOT NULL,
+             blob_id TEXT NOT NULL,
+             size INTEGER NOT NULL,
+             hash TEXT NOT NULL,
+             title TEXT NOT NULL,
+             cloud_path TEXT,
+             _updated_at TEXT NOT NULL
+         ) STRICT;",
+    )
+    .expect("create blob-bearing table");
+    conn.execute(
+        "INSERT INTO files VALUES ('one', 'base', 4, ?1, 'base title', NULL, '0000000001000-0000-base')",
+        [ObjectHash::digest(b"aaaa").to_string()],
+    )
+    .expect("insert shared base");
+    let tables = [
+        SyncedTable::new("files", RowIdentity::SharedKey).carries_blob(
+            BlobDecl::new("files", Provenance::HostProvided, CacheFill::CacheEager)
+                .with_id_column("blob_id")
+                .with_cloud_path_column("cloud_path"),
+        ),
+    ];
+    let declarations =
+        crate::BlobDecls::from_tables(&conn, &tables).expect("resolve content declaration");
+    let gates = crate::Gates::from_tables(&conn, &tables).expect("resolve publication gates");
+    let newer_hash = ObjectHash::digest(b"bbbb").to_string();
+    let older_hash = if same_content {
+        newer_hash.clone()
+    } else {
+        ObjectHash::digest(b"cccccccc").to_string()
+    };
+    let mut changesets = Vec::new();
+    for (blob_id, size, hash, title, path, stamp) in [
+        (
+            if same_content { "newer" } else { "older" },
+            if same_content { 4 } else { 8 },
+            &older_hash,
+            "independent title",
+            same_content.then_some("files/newer"),
+            "0000000002000-0000-older",
+        ),
+        (
+            "newer",
+            4,
+            &newer_hash,
+            "base title",
+            None,
+            "0000000003000-0000-newer",
+        ),
+    ] {
+        let tx = conn
+            .unchecked_transaction()
+            .expect("begin independent write");
+        let mut session = rusqlite::session::Session::new(&tx).expect("capture write");
+        session.attach(Some("files")).expect("attach blob table");
+        tx.execute(
+            "UPDATE files SET blob_id = ?1, size = ?2, hash = ?3, title = ?4, cloud_path = ?5, _updated_at = ?6",
+            rusqlite::params![blob_id, size, hash, title, path, stamp],
+        )
+        .expect("replace blob content");
+        let mut bytes = Vec::new();
+        session.changeset_strm(&mut bytes).expect("extract write");
+        let bytes = declarations
+            .complete_blob_changeset(&tx, &bytes)
+            .expect("capture complete content tuple");
+        let partitioned =
+            crate::partition_outbound(&tx, &bytes, &crate::RoutingChanges::empty(), &gates)
+                .expect("partition actual captured content");
+        assert!(partitioned.moves.is_empty());
+        let [partition] = partitioned.partitions.as_slice() else {
+            panic!("expected one Store partition")
+        };
+        changesets.push(partition.changeset.clone());
+        drop(session);
+        tx.rollback().expect("restore common base");
+    }
+    let (_temp, dir) = coven_foundation::store_dir::temp_store_dir();
+    for index in publication_order {
+        let applied = resolve_and_apply_changeset(&conn, &dir, &changesets[index], &tables, 4000)
+            .expect("apply shared blob edit");
+        assert!(applied.constraint_conflict_tables.is_empty());
+        assert!(!applied.had_fk_violations);
+    }
+    let actual: (String, i64, String, String, Option<String>, String) = conn
+        .query_row(
+            "SELECT blob_id, size, hash, title, cloud_path, _updated_at FROM files WHERE id = 'one'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .expect("read merged content and metadata");
+    assert_eq!(
+        actual,
+        (
+            "newer".into(),
+            4,
+            newer_hash,
+            "independent title".into(),
+            None,
+            "0000000003000-0000-newer".into(),
+        ),
+        "publication order {publication_order:?} must preserve one blob's content facts"
+    );
+}
+
+#[test]
+fn an_older_blob_edit_cannot_replace_part_of_newer_content() {
+    assert_blob_content_merges_as_one_value([1, 0], false);
+}
+
+#[test]
+fn a_newer_blob_edit_replaces_the_complete_older_content() {
+    assert_blob_content_merges_as_one_value([0, 1], false);
+}
+
+#[test]
+fn a_blob_tuple_must_match_the_whole_base_before_merging() {
+    assert_blob_content_merges_as_one_value([1, 0], true);
+}

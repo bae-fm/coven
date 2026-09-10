@@ -3,7 +3,7 @@ use coven_protocol::blob::{CacheFill, Provenance};
 use coven_protocol::synced_schema::{BlobDecl, RowIdentity};
 use rusqlite::session::Session;
 
-fn capture_update(conn: &Connection, sql: &str) -> RowChange {
+fn capture_update_bytes(conn: &Connection, sql: &str) -> Vec<u8> {
     let mut session = Session::new(conn).expect("create session");
     session.attach(Some("files")).expect("attach files");
     conn.execute(sql, []).expect("update file row");
@@ -11,7 +11,11 @@ fn capture_update(conn: &Connection, sql: &str) -> RowChange {
     session
         .changeset_strm(&mut changeset)
         .expect("extract changeset");
-    crate::walk_changeset(&changeset)
+    changeset
+}
+
+fn capture_update(conn: &Connection, sql: &str) -> RowChange {
+    crate::walk_changeset(&capture_update_bytes(conn, sql))
         .expect("walk changeset")
         .into_iter()
         .next()
@@ -120,15 +124,22 @@ fn metadata_publication_captures_an_unchanged_non_primary_key_blob() {
             &[SyncedTable::new("files", RowIdentity::IndependentUuid).carries_blob(declaration)],
         )
         .expect("resolve declarations");
-        let change = capture_update(
+        let bytes = capture_update_bytes(
             &conn,
             "UPDATE files SET title = 'after', _updated_at = 'stamp-b'",
         );
+        let bytes = declarations
+            .complete_blob_changeset(&conn, &bytes)
+            .expect("preserve metadata update");
+        let changes = crate::walk_changeset(&bytes).expect("decode metadata update");
+        let [change] = changes.as_slice() else {
+            panic!("expected metadata update")
+        };
         assert_eq!(change.col(1), None, "SQLite omits the unchanged blob ID");
         assert!(!change.column_changed(1));
 
         let publication = declarations
-            .publication_blob_from_change(&conn, &change)
+            .publication_blob_from_change(&conn, change)
             .expect("capture metadata publication")
             .expect("unchanged blob remains part of the publication");
         assert_eq!(publication.table, "files");
@@ -200,4 +211,67 @@ fn publication_capture_distinguishes_a_null_blob_from_an_omitted_id() {
             changed_blob_id, row_blob_id, ..
         }) if changed_blob_id == "blob-b" && row_blob_id == "blob-c"
     ));
+}
+
+#[test]
+fn completing_a_write_once_blob_edit_preserves_unchanged_identity() {
+    for id_column in ["id", "blob_id"] {
+        let conn = Connection::open_in_memory().expect("open declaration database");
+        conn.execute_batch(
+            "CREATE TABLE files (
+                 id TEXT PRIMARY KEY,
+                 blob_id TEXT NOT NULL,
+                 size INTEGER NOT NULL,
+                 hash TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             );
+             INSERT INTO files VALUES ('row-a', 'blob-a', 7, 'hash-a', 'before', 'stamp-a');",
+        )
+        .expect("create write-once blob");
+        let declaration = BlobDecl::new("files", Provenance::HostProvided, CacheFill::CacheEager)
+            .with_id_column(id_column)
+            .with_cloud_path_column("path")
+            .write_once();
+        let declarations = BlobDecls::from_tables(
+            &conn,
+            &[SyncedTable::new("files", RowIdentity::SharedKey).carries_blob(declaration)],
+        )
+        .expect("resolve declaration");
+        let raw = capture_update_bytes(
+            &conn,
+            "UPDATE files SET path = 'after', _updated_at = 'stamp-b'",
+        );
+        let bytes = declarations
+            .complete_blob_changeset(&conn, &raw)
+            .expect("capture complete tuple");
+        let changes = crate::walk_changeset(&bytes).expect("decode complete tuple");
+        let [change] = changes.as_slice() else {
+            panic!("expected one update")
+        };
+        let id_index = if id_column == "id" { 0 } else { 1 };
+        assert!(!change.column_changed(id_index));
+        assert!(!change.column_changed(2));
+        assert_eq!(change.col(2), Some("7"));
+        assert!(change.column_changed(4));
+        let captured = declarations
+            .publication_blob_from_change(&conn, change)
+            .expect("unchanged write-once identity is allowed")
+            .expect("blob is present");
+        assert_eq!(
+            captured.blob.id,
+            if id_column == "id" { "row-a" } else { "blob-a" }
+        );
+        assert_eq!(captured.blob.cloud_path.as_deref(), Some("after"));
+        unsafe {
+            crate::gate::for_each_change(&bytes, |iter, _| {
+                let (old, new, _) = crate::gate::update_values(iter)?;
+                assert_eq!(old[0], Some(rusqlite::types::Value::Text("row-a".into())));
+                assert_eq!(new[0], None, "SQLite UPDATE primary key remains Old-only");
+                assert_eq!(old[2], new[2]);
+                Ok(())
+            })
+            .expect("inspect exact update cells");
+        }
+    }
 }

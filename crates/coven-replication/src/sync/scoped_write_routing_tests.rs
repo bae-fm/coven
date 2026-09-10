@@ -392,6 +392,93 @@ async fn discarding_a_scoped_write_reverses_its_private_routing_rows() {
     assert_eq!(state, (false, false, false));
 }
 
+#[tokio::test]
+async fn discarding_a_scoped_move_restores_its_original_routing() {
+    async fn state(db: &Database) -> (String, String) {
+        let rows = db
+            .query_test_text(
+                "SELECT json_group_array(json_array(id, audience, _updated_at))
+             FROM (SELECT * FROM accounts ORDER BY id)",
+            )
+            .await;
+        let routing = db
+            .private_routing_state_for_test()
+            .await
+            .expect("read private routes and audience mirrors");
+        (rows, routing)
+    }
+
+    for destination_is_local in [true, false] {
+        let (_temp, db, _) = capture_scoped_write_then_reopen("discard-scoped-move").await;
+        let database = StoreDatabase::new(&db);
+        let destination = if destination_is_local {
+            "local".to_string()
+        } else {
+            database
+                .test_query_optional_text(
+                    "SELECT audience FROM accounts WHERE id = 'circle-account'".to_string(),
+                )
+                .await
+                .expect("read active destination Circle")
+                .expect("Circle account has an audience")
+        };
+        let before = state(&db).await;
+        let receipt = database
+            .run_host_store_write_for_test(
+                Some(EncryptionService::from_key([7; 32])),
+                None,
+                move |tx| {
+                    tx.execute(
+                        "UPDATE accounts SET audience = ?1,
+                             _updated_at = '0000000003000-0000-discard'
+                         WHERE id = 'store-account'",
+                        [&destination],
+                    )?;
+                    Ok::<_, DbError>(())
+                },
+            )
+            .await
+            .expect("capture scoped audience move");
+        assert_ne!(
+            state(&db).await,
+            before,
+            "the captured move changed the original state"
+        );
+        assert!(!database
+            .has_rebased_store_writes_for_test()
+            .await
+            .expect("check original capture remains the discard source"));
+        database
+            .set_write_status(
+                &receipt.write_id,
+                WriteStatus::Blocked(coven_protocol::write::WriteBlock::InvalidProtocolState {
+                    reason: "discard scoped audience move".to_string(),
+                }),
+            )
+            .await
+            .expect("block captured move");
+        assert_eq!(
+            database
+                .discard_blocked_write(&receipt.write_id)
+                .await
+                .expect("discard scoped audience move"),
+            BlockedWriteDiscard::Discarded(vec![receipt.write_id.clone()])
+        );
+        assert_eq!(
+            state(&db).await,
+            before,
+            "discard must restore the host row, private route, and Store mirror together"
+        );
+        assert_eq!(
+            database
+                .write_status(&receipt.write_id)
+                .await
+                .expect("read terminal discard outcome"),
+            WriteStatus::Resolved(coven_protocol::write::WriteResolution::Discarded)
+        );
+    }
+}
+
 /// A transaction whose rows are all Circle-scoped emits one package per Circle
 /// plus a Store package carrying only the audience mirror — never an empty Store
 /// package. The Store partition exists so a peer without the Circle still learns

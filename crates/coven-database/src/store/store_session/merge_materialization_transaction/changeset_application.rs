@@ -427,7 +427,7 @@ struct RowKey {
     pk: String,
 }
 
-struct ChangedColumn {
+struct UpdateColumn {
     index: usize,
     base: Value,
     incoming: Value,
@@ -436,7 +436,7 @@ struct ChangedColumn {
 struct IncomingUpdate {
     table: String,
     pk: String,
-    changed_columns: Vec<ChangedColumn>,
+    columns: Vec<UpdateColumn>,
     incoming_updated_at: Timestamp,
     incoming_updated_at_value: Value,
 }
@@ -513,24 +513,35 @@ fn incoming_update(
 
     let pk = update_pk_key(item, table)?;
 
-    let changed_columns = changed_update_columns(item, updated_at)?;
+    let columns = update_columns(item, updated_at)?;
+    if let Some(blob) = schema.blob_columns(table) {
+        let edits_blob = columns.iter().any(|column| {
+            blob.iter().any(|index| index == column.index) && column.base != column.incoming
+        });
+        if edits_blob {
+            for index in blob.iter().filter(|index| *index != 0) {
+                if !columns.iter().any(|column| column.index == index) {
+                    return Err(DbError::Message(format!(
+                        "blob UPDATE for {table} omits content column {index}"
+                    )));
+                }
+            }
+        }
+    }
 
     Ok(Some(IncomingUpdate {
         table: table.to_string(),
         pk,
-        changed_columns,
+        columns,
         incoming_updated_at,
         incoming_updated_at_value,
     }))
 }
 
-fn changed_update_columns(
-    item: &ChangesetItem,
-    updated_at: usize,
-) -> Result<Vec<ChangedColumn>, DbError> {
+fn update_columns(item: &ChangesetItem, updated_at: usize) -> Result<Vec<UpdateColumn>, DbError> {
     let op = item.op()?;
     let table = op.table_name();
-    let mut changed_columns = Vec::new();
+    let mut columns = Vec::new();
     for index in 0..op.number_of_columns() as usize {
         if index == 0 || index == updated_at {
             continue;
@@ -538,7 +549,7 @@ fn changed_update_columns(
         let base = changeset_value(item, index, UpdateValue::Old)?;
         let incoming = changeset_value(item, index, UpdateValue::New)?;
         match (base, incoming) {
-            (Some(base), Some(incoming)) => changed_columns.push(ChangedColumn {
+            (Some(base), Some(incoming)) => columns.push(UpdateColumn {
                 index,
                 base,
                 incoming,
@@ -552,7 +563,7 @@ fn changed_update_columns(
         }
     }
 
-    Ok(changed_columns)
+    Ok(columns)
 }
 
 fn prepare_losing_update(
@@ -573,12 +584,7 @@ fn prepare_losing_update(
             update.table
         ))
     })?;
-    if update
-        .changed_columns
-        .iter()
-        .any(|c| c.index >= columns.len())
-        || updated_at >= columns.len()
-    {
+    if update.columns.iter().any(|c| c.index >= columns.len()) || updated_at >= columns.len() {
         return Err(DbError::Message(format!(
             "UPDATE changeset for {} names a column outside the local schema",
             update.table
@@ -623,9 +629,23 @@ fn prepare_losing_update(
     let mut incoming = local.clone();
     let mut merged = local.clone();
     incoming[updated_at] = update.incoming_updated_at_value.clone();
-    for column in &update.changed_columns {
+    let blob = schema.blob_columns(&update.table);
+    // Content fields describe one value: an older edit can replace them only
+    // while the whole value still matches its captured base.
+    let merge_blob = blob.is_none_or(|blob| {
+        update
+            .columns
+            .iter()
+            .filter(|column| blob.iter().any(|index| index == column.index))
+            .all(|column| local[column.index] == column.base)
+    });
+    for column in &update.columns {
         incoming[column.index] = column.incoming.clone();
-        if local[column.index] == column.base {
+        let belongs_to_blob =
+            blob.is_some_and(|blob| blob.iter().any(|index| index == column.index));
+        if (belongs_to_blob && merge_blob)
+            || (!belongs_to_blob && local[column.index] == column.base)
+        {
             merged[column.index] = column.incoming.clone();
         }
     }

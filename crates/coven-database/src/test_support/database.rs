@@ -286,6 +286,20 @@ impl Database {
             .expect("commit scoped host write");
     }
 
+    pub async fn private_routing_state_for_test(&self) -> Result<String, DbError> {
+        self.test_sql(|database| {
+            database.query_row(
+                "SELECT json_array(
+                    (SELECT json_group_array(json_array(routing_id, table_name, row_id, _updated_at))
+                     FROM (SELECT * FROM _coven_row_routes ORDER BY routing_id)),
+                    (SELECT json_group_array(json_array(routing_id, circle_id, _updated_at))
+                     FROM (SELECT * FROM _coven_audience ORDER BY routing_id)))",
+                [],
+                |row| row.get(0),
+            ).map_err(DbError::from)
+        }).await
+    }
+
     pub async fn scoped_routing_state_for_test(
         &self,
         row_id: &str,

@@ -374,6 +374,7 @@ impl StoreSession<'_> {
         changeset: Vec<u8>,
     ) -> Result<(), DbError> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let changeset = self.blob_decls.complete_blob_changeset(&tx, &changeset)?;
         let base = StoreWriteBase {
             dependencies: crate::store::materialized_commit_index::materialized_frontier_on(
                 &tx, None,

@@ -95,6 +95,7 @@ pub use audience::{
     is_routing_table, store_audience_transitions, AudienceMove, AudiencePartition,
     CirclePartitionControl, CirclePartitionControlError, RoutingChanges, StoreAudienceTransitions,
 };
+pub(crate) use ffi::{for_each_change, update_values, Changegroup};
 pub use model::Gates;
 #[cfg(any(test, feature = "test-utils"))]
 pub use model::{from_tables_call_count, reset_from_tables_call_count};
