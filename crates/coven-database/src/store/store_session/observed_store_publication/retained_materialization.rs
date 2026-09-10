@@ -60,17 +60,12 @@ impl StoreRecords<'_> {
             )
         })?;
         let acceptance = match baseline {
-            Some(baseline) if baseline.exact_cut.covers_commit(commit_ref) => {
-                let RetainedReplayAuthority::InstalledSnapshot(snapshot) = &baseline.authority
-                else {
-                    return Err(DbError::Message(
-                        "genesis replay baseline covers a retained Store commit".into(),
-                    ));
-                };
+            Some(RetainedReplayBaseline {
+                authority: RetainedReplayAuthority::InstalledSnapshot(snapshot),
+                ..
+            }) if snapshot.metadata.coverage.covers_commit(commit_ref) => {
                 snapshot.validate()?;
-                if snapshot.store_root != *root
-                    || !snapshot.metadata.coverage.covers_commit(commit_ref)
-                {
+                if snapshot.store_root != *root {
                     return Err(DbError::Message(
                         "retained Store commit differs from its installed snapshot coverage".into(),
                     ));
@@ -113,7 +108,7 @@ impl StoreRecords<'_> {
             },
             &crate::store::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(
                 baseline,
-            )?,
+            ),
         )?;
         Ok(verified)
     }

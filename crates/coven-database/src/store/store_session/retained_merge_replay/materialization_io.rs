@@ -31,8 +31,7 @@ fn validate_snapshot_write_baseline(
         || installed_position < position.snapshot.publication.position
         || (installed_position == position.snapshot.publication.position
             && authority.snapshot != position.snapshot.snapshot)
-        || baseline.exact_cut != authority.metadata.coverage
-        || !snapshot_write_is_covered(position, &baseline.exact_cut)
+        || !snapshot_write_is_covered(position, baseline.coverage())
     {
         return Err(DbError::Message(
             "snapshot-covered write differs from its installed cumulative baseline".into(),
@@ -51,7 +50,7 @@ fn replay_write_is_covered(
     match status {
         WriteStatus::Published(published) => match published.as_ref() {
             PublishedWrite::Commit(position) => {
-                Ok(baseline.exact_cut.covers_commit(position.commit()))
+                Ok(baseline.coverage().covers_commit(position.commit()))
             }
             PublishedWrite::Snapshot(position) => {
                 validate_snapshot_write_baseline(position, baseline)?;

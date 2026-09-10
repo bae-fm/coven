@@ -29,7 +29,6 @@ macro_rules! coven_tables {
             retained_replay_baselines,
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    exact_cut TEXT NOT NULL CHECK (json_valid(exact_cut)),
     schema_version INTEGER NOT NULL CHECK (schema_version >= 0),
     routing_hash TEXT NOT NULL CHECK (length(routing_hash) = 64),
     image_payload_hash TEXT NOT NULL CHECK (length(image_payload_hash) = 64),

@@ -64,7 +64,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             proofs.extend(snapshot.metadata.history_summary.membership_proofs.values());
         }
         for input in &inputs {
-            if baseline.exact_cut.covers_commit(input.commit_ref()) {
+            if baseline.coverage().covers_commit(input.commit_ref()) {
                 continue;
             }
             if !coverage.covers_commit(input.commit_ref()) {

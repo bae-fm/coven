@@ -163,7 +163,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
             commit.value(),
             coven_protocol::remote_object::CandidateNonactivationProof::SnapshotRetirement {
                 snapshot: snapshot.clone(),
-                coverage: baseline.exact_cut.clone(),
+                coverage: baseline.coverage().clone(),
             },
         )
         .map_err(DbError::from)

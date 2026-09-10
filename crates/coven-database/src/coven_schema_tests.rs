@@ -195,7 +195,6 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
         ("local_store_founder_graph", "membership_graph".to_string()),
     ]);
     let byte_free = std::collections::BTreeSet::from([
-        ("retained_replay_baselines", "exact_cut".to_string()),
         ("circle_bootstrap_coverage", "control_coord".to_string()),
         ("circle_bootstrap_coverage", "activation_commit".to_string()),
         ("circle_bootstrap_coverage", "exact_cut".to_string()),
@@ -489,9 +488,9 @@ fn retained_replay_baseline_has_one_closed_active_row() {
     let insert = |singleton: i64| {
         conn.execute(
             "INSERT INTO retained_replay_baselines
-                 (singleton, exact_cut, schema_version,
+                 (singleton, schema_version,
                   routing_hash, image_payload_hash, authority_hash)
-                 VALUES (?1, '{}', 1, ?2, ?3, ?4)",
+                 VALUES (?1, 1, ?2, ?3, ?4)",
             rusqlite::params![singleton, "a".repeat(64), "b".repeat(64), "c".repeat(64)],
         )
     };

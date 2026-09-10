@@ -12,41 +12,31 @@ pub(crate) enum RetainedReplayObjectCoverage<'a> {
 }
 
 impl<'a> RetainedReplayObjectCoverage<'a> {
-    pub(crate) fn from_baseline(
-        baseline: Option<&'a RetainedReplayBaseline>,
-    ) -> Result<Self, DbError> {
+    pub(crate) fn from_baseline(baseline: Option<&'a RetainedReplayBaseline>) -> Self {
         match baseline {
             Some(RetainedReplayBaseline {
-                exact_cut,
                 authority: RetainedReplayAuthority::InstalledSnapshot(snapshot),
                 ..
-            }) => {
-                if exact_cut != &snapshot.metadata.coverage {
-                    return Err(DbError::Message(
-                        "replay object coverage differs from its installed snapshot".into(),
-                    ));
-                }
-                Ok(Self::Snapshot {
-                    coverage: exact_cut,
-                    pending_joins: snapshot
-                        .metadata
-                        .history_summary
-                        .pending_device_joins
-                        .values()
-                        .flat_map(|closure| {
-                            closure
-                                .commits
-                                .iter()
-                                .map(|commit| commit.reference.clone())
-                        })
-                        .collect(),
-                })
-            }
+            }) => Self::Snapshot {
+                coverage: &snapshot.metadata.coverage,
+                pending_joins: snapshot
+                    .metadata
+                    .history_summary
+                    .pending_device_joins
+                    .values()
+                    .flat_map(|closure| {
+                        closure
+                            .commits
+                            .iter()
+                            .map(|commit| commit.reference.clone())
+                    })
+                    .collect(),
+            },
             Some(RetainedReplayBaseline {
                 authority: RetainedReplayAuthority::Genesis(_),
                 ..
             })
-            | None => Ok(Self::Uncovered),
+            | None => Self::Uncovered,
         }
     }
 

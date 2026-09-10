@@ -196,7 +196,7 @@ impl ReplayProjection {
         let image_states =
             crate::store::store_device_state::load_covered_store_device_snapshots_on(
                 &connection,
-                &baseline.exact_cut,
+                baseline.coverage(),
             )?;
         let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
         for (reference, state) in accepted {

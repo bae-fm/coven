@@ -101,9 +101,9 @@ impl StoreTransaction<'_, '_> {
         baseline: &crate::RetainedReplayBaseline,
     ) -> Result<(), DbError> {
         let coverage =
-            crate::store::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(
-                Some(baseline),
-            )?;
+            crate::store::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(Some(
+                baseline,
+            ));
         for input in inputs {
             let reference = input.commit_ref();
             let stream_id = reference.coord.stream_id.to_string();
@@ -243,13 +243,12 @@ impl StoreTransaction<'_, '_> {
         let previous = load_replay_baseline_on(records)?.ok_or_else(|| {
             DbError::Message("checkpoint replacement has no installed replay baseline".into())
         })?;
-        if !baseline.exact_cut.covers(&previous.exact_cut) {
+        if !baseline.coverage().covers(previous.coverage()) {
             return Err(DbError::Message(
                 "received checkpoint regresses the installed replay coverage".into(),
             ));
         }
         let prepared = super::retained_replay::PreparedRetainedReplayBaseline::new(
-            baseline.exact_cut.clone(),
             baseline.schema_version,
             baseline.routing_hash,
             baseline.authority.clone(),
@@ -260,9 +259,9 @@ impl StoreTransaction<'_, '_> {
             .iter()
             .map(|input| serde_json::to_string(input.commit_ref()))
             .collect::<Result<BTreeSet<_>, _>>()?;
-        self.retire_history_outside_baseline(&baseline.exact_cut, &retained)?;
-        self.fold_settled_store_writes(&baseline.exact_cut, folded)?;
-        self.rewrite_snapshot_coverage(&baseline.exact_cut, authority.snapshot.snapshot_hash)?;
+        self.retire_history_outside_baseline(baseline.coverage(), &retained)?;
+        self.fold_settled_store_writes(baseline.coverage(), folded)?;
+        self.rewrite_snapshot_coverage(baseline.coverage(), authority.snapshot.snapshot_hash)?;
         self.transaction
             .execute("DELETE FROM retained_replay_baselines", [])?;
         let mut timings =

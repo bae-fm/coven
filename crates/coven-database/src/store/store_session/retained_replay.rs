@@ -97,8 +97,6 @@ pub(super) fn load_replay_baseline_metadata_on(
     };
     let schema_version = u32::try_from(stored.schema_version)
         .map_err(|_| DbError::Message("retained replay schema version exceeds u32".to_string()))?;
-    let parsed_exact_cut: CommitFrontier = serde_json::from_str(&stored.exact_cut)
-        .map_err(|error| DbError::context("retained replay exact cut", error))?;
     let authority_hash = stored
         .authority_hash
         .parse()
@@ -108,19 +106,15 @@ pub(super) fn load_replay_baseline_metadata_on(
         .map_err(|error| DbError::context("read retained replay authority", error))?;
     let authority: RetainedReplayAuthority = serde_json::from_slice(&authority_bytes)
         .map_err(|error| DbError::context("retained replay authority", error))?;
-    if serde_json::to_string(&parsed_exact_cut)
-        .map_err(|error| DbError::context("serialize retained replay exact cut", error))?
-        != stored.exact_cut
-        || serde_json::to_vec(&authority)
-            .map_err(|error| DbError::context("serialize retained replay authority", error))?
-            != authority_bytes
+    if serde_json::to_vec(&authority)
+        .map_err(|error| DbError::context("serialize retained replay authority", error))?
+        != authority_bytes
     {
         return Err(DbError::Message(
             "retained replay baseline metadata is not canonical".to_string(),
         ));
     }
     Ok(Some(RetainedReplayBaseline {
-        exact_cut: parsed_exact_cut,
         schema_version,
         routing_hash: stored
             .routing_hash
@@ -401,7 +395,6 @@ pub enum RetainedReplayAuthority {
 /// holds the facts without carrying either payload in its own columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetainedReplayBaseline {
-    pub exact_cut: CommitFrontier,
     pub schema_version: u32,
     pub routing_hash: ObjectHash,
     pub image_payload_hash: ObjectHash,
@@ -409,6 +402,17 @@ pub struct RetainedReplayBaseline {
 }
 
 impl RetainedReplayBaseline {
+    /// Accepted history covered by the authority this image starts from.
+    pub fn coverage(&self) -> &CommitFrontier {
+        match &self.authority {
+            RetainedReplayAuthority::Genesis(_) => {
+                static EMPTY: CommitFrontier = CommitFrontier(BTreeMap::new());
+                &EMPTY
+            }
+            RetainedReplayAuthority::InstalledSnapshot(authority) => &authority.metadata.coverage,
+        }
+    }
+
     pub fn canonical_authority_bytes(&self) -> Result<Vec<u8>, DbError> {
         serde_json::to_vec(&self.authority)
             .map_err(|error| DbError::context("serialize retained replay authority", error))
@@ -450,11 +454,6 @@ impl RetainedReplayBaseline {
     ) -> Result<(), DbError> {
         match &self.authority {
             RetainedReplayAuthority::Genesis(_) => {
-                if !self.exact_cut.0.is_empty() {
-                    return Err(DbError::Message(
-                        "genesis retained replay baseline has a non-genesis cut".to_string(),
-                    ));
-                }
                 self.validate_image_metadata(image)?;
                 let protocol_keys = protocol_state_keys(image)?;
                 let founder_membership_cursor = founder_membership_cursor_key(image)?;
@@ -496,11 +495,6 @@ impl RetainedReplayBaseline {
             }
             RetainedReplayAuthority::InstalledSnapshot(authority) => {
                 authority.validate()?;
-                if self.exact_cut != authority.metadata.coverage {
-                    return Err(DbError::Message(
-                        "snapshot retained replay cut differs from its signed metadata".to_string(),
-                    ));
-                }
                 self.validate_image_metadata(image)?;
                 let mut actual = BTreeMap::new();
                 let rows = query_mapped_rows(
@@ -534,7 +528,7 @@ impl RetainedReplayBaseline {
                         ));
                     }
                 }
-                if actual != self.exact_cut.clone().into_refs() {
+                if actual != self.coverage().clone().into_refs() {
                     return Err(DbError::Message(
                         "snapshot replay image coverage differs from its baseline".to_string(),
                     ));
@@ -555,7 +549,7 @@ impl RetainedReplayBaseline {
                     StoreRecords::new(image, store_dir),
                     &mut verified_authority,
                     &authority.store_root,
-                    &self.exact_cut,
+                    self.coverage(),
                 )?;
                 validate_replay_image_foreign_keys(image)?;
             }

@@ -17,7 +17,8 @@ impl StoreDatabase {
         let mut inputs = Vec::new();
         for encoded in records.retained_materialization_refs()? {
             let reference: StoreBatchCommitRef = serde_json::from_str(&encoded)?;
-            if baseline.exact_cut.covers_commit(&reference) || !coverage.covers_commit(&reference) {
+            if baseline.coverage().covers_commit(&reference) || !coverage.covers_commit(&reference)
+            {
                 continue;
             }
             let input = authority.retained_materialization_by_ref_on(records, &reference)?;

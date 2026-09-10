@@ -43,9 +43,11 @@ impl VerifiedStoreLookup for ReplayVerifiedStoreLookup<'_, '_> {
         records: StoreRecords<'_>,
     ) -> Result<crate::store::retained_merge_replay::RetainedReplayObjectCoverage<'_>, DbError>
     {
-        crate::store::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(Some(
-            self.cache.baseline_on(records)?,
-        ))
+        Ok(
+            crate::store::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(Some(
+                self.cache.baseline_on(records)?,
+            )),
+        )
     }
 
     fn pending_device_join_retention_on(
@@ -541,7 +543,7 @@ impl RetainedReplayCache {
             // it. Its cut is still recorded below, because the packages under
             // it stay skipped either way.
             if !baseline
-                .exact_cut
+                .coverage()
                 .covers_commit(&coverage.activation_commit)
             {
                 replay.install_circle_bootstrap(
@@ -575,7 +577,7 @@ impl RetainedReplayCache {
             .filter(|materialization| {
                 !retracted.contains(materialization.commit_ref())
                     && !baseline
-                        .exact_cut
+                        .coverage()
                         .covers_commit(materialization.commit_ref())
                     && history_cut
                         .is_none_or(|cutoff| cutoff.covers_commit(materialization.commit_ref()))
@@ -605,7 +607,7 @@ impl RetainedReplayCache {
                     )));
                 }
                 if !active_references.contains(&dependency)
-                    && !baseline.exact_cut.covers_commit(&dependency)
+                    && !baseline.coverage().covers_commit(&dependency)
                 {
                     return Err(DbError::Message(format!(
                         "surviving retained Merge commit {:?} has unretained dependency {:?}",
@@ -673,7 +675,7 @@ impl RetainedReplayCache {
                 &mut private_rows,
                 &mut replay_journal,
                 &applied,
-                &baseline.exact_cut,
+                baseline.coverage(),
                 false,
             )?;
         }
@@ -686,7 +688,7 @@ impl RetainedReplayCache {
                         .order
                         .predecessor()
                         .is_none_or(|predecessor| {
-                            replay_dependency_is_settled(predecessor, &applied, &baseline.exact_cut)
+                            replay_dependency_is_settled(predecessor, &applied, baseline.coverage())
                         });
                     let dependencies_ready = materialization
                         .commit()
@@ -694,7 +696,7 @@ impl RetainedReplayCache {
                         .dependencies()
                         .values()
                         .all(|dependency| {
-                            replay_dependency_is_settled(dependency, &applied, &baseline.exact_cut)
+                            replay_dependency_is_settled(dependency, &applied, baseline.coverage())
                         });
                     (predecessor_ready && dependencies_ready).then(|| reference.clone())
                 })
@@ -887,7 +889,7 @@ impl RetainedReplayCache {
                                 &mut private_rows,
                                 &mut replay_journal,
                                 &applied,
-                                &baseline.exact_cut,
+                                baseline.coverage(),
                                 false,
                             )?
                         };
@@ -950,7 +952,7 @@ impl RetainedReplayCache {
                 &mut private_rows,
                 &mut replay_journal,
                 &applied,
-                &baseline.exact_cut,
+                baseline.coverage(),
                 !rebase,
             )?
         };

@@ -631,9 +631,11 @@ impl VerifiedStoreLookup for VerifiedStoreAuthority {
         &mut self,
         records: crate::store::store_session::StoreRecords<'_>,
     ) -> Result<super::retained_merge_replay::RetainedReplayObjectCoverage<'_>, DbError> {
-        super::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(Some(
-            self.retained_replay_baseline_on(records)?,
-        ))
+        Ok(
+            super::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(Some(
+                self.retained_replay_baseline_on(records)?,
+            )),
+        )
     }
 
     fn pending_device_join_retention_on(
@@ -767,9 +769,11 @@ impl VerifiedStoreLookup for VerifiedStoreAuthorityTransaction {
         &mut self,
         records: crate::store::store_session::StoreRecords<'_>,
     ) -> Result<super::retained_merge_replay::RetainedReplayObjectCoverage<'_>, DbError> {
-        super::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(Some(
-            self.cache.baseline_on(records)?,
-        ))
+        Ok(
+            super::retained_merge_replay::RetainedReplayObjectCoverage::from_baseline(Some(
+                self.cache.baseline_on(records)?,
+            )),
+        )
     }
 
     fn pending_device_join_retention_on(

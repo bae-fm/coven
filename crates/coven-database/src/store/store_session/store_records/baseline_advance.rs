@@ -112,7 +112,6 @@ impl StoreTransaction<'_, '_> {
         let snapshot_reference = snapshot_authority.snapshot.clone();
         let snapshot_hash = snapshot_reference.snapshot_hash;
         let prepared = PreparedRetainedReplayBaseline::new(
-            cut.clone(),
             schema_version,
             routing_hash,
             crate::RetainedReplayAuthority::InstalledSnapshot(snapshot_authority),
@@ -133,11 +132,6 @@ impl StoreTransaction<'_, '_> {
             .map_err(DbError::from)?;
         let installed = records.install_prepared_replay_baseline(prepared, &mut timings)?;
         timings.report();
-        if installed.exact_cut != cut {
-            return Err(DbError::Message(
-                "advanced replay baseline cut differs from the snapshot it adopted".to_string(),
-            ));
-        }
 
         released_pins = released_pins
             .checked_add(self.replace_snapshot_replay_object_ownership(&installed)?)
@@ -424,6 +418,6 @@ fn advances(
 ) -> bool {
     let same_snapshot = matches!(&current.authority,
         crate::RetainedReplayAuthority::InstalledSnapshot(authority) if &authority.snapshot == snapshot);
-    cut.covers(&current.exact_cut)
-        && (!same_snapshot || cut != &current.exact_cut || consumes_writes)
+    cut.covers(current.coverage())
+        && (!same_snapshot || cut != current.coverage() || consumes_writes)
 }

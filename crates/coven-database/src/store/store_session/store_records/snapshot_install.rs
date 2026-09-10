@@ -193,7 +193,6 @@ impl StoreTransaction<'_, '_> {
             ));
         }
         let prepared = super::retained_replay::PreparedRetainedReplayBaseline::new(
-            install.authority.metadata.coverage.clone(),
             schema_version,
             routing_hash,
             crate::RetainedReplayAuthority::InstalledSnapshot(install.authority.clone()),

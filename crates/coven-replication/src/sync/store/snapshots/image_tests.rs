@@ -234,6 +234,67 @@ async fn snapshot_keeps_its_exact_device_state_tip_and_retires_earlier_reference
 }
 
 #[tokio::test]
+async fn replay_baseline_rejects_image_coverage_that_disagrees_with_valid_authority() {
+    let store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(store_dir.clone());
+    let signer = UserKeypair::generate();
+    let store = crate::sync::test_helpers::TestStore::create(
+        &source,
+        store_dir.clone(),
+        "replay-image-coverage",
+        signer.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create snapshot Store");
+    source
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
+             VALUES ('coverage', 'coverage', NULL, 1,
+                     '0000000001000-0000-owner', '2026-09-10')",
+        )
+        .await;
+    assert!(store
+        .publish_pending(&source, &store_dir)
+        .await
+        .expect("publish covered write"));
+    let device = store
+        .bind_device_in(&source, store_dir, &signer)
+        .await
+        .expect("bind snapshot publisher");
+    let database = StoreDatabase::new(&source);
+    let image_dir = tempfile::tempdir().expect("snapshot capture directory");
+    let image = database
+        .capture_snapshot_image_for_test(store.root().clone(), image_dir.path().to_path_buf(), None)
+        .await
+        .expect("capture snapshot");
+    device
+        .publish_snapshot(image, captured_coverage(&database).await)
+        .await
+        .expect("publish snapshot");
+    device
+        .stand_on_accepted_snapshot()
+        .await
+        .expect("install snapshot baseline");
+    let baseline = database
+        .replay_baseline_for_test()
+        .await
+        .expect("validate original baseline");
+    let coven_database::RetainedReplayAuthority::InstalledSnapshot(authority) = &baseline.authority
+    else {
+        panic!("snapshot publication must replace genesis");
+    };
+    authority
+        .validate()
+        .expect("signed authority remains valid");
+    assert_eq!(authority.metadata.coverage.position_count(), 1);
+    database
+        .assert_replay_baseline_rejects_altered_coverage_for_test()
+        .await
+        .expect("exercise stored image coverage validation");
+}
+
+#[tokio::test]
 async fn bootstrap_installs_the_verified_exact_store_root() {
     Box::pin(async {
         let source_store_dir = crate::sync::test_helpers::test_store_dir();
@@ -317,7 +378,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             .replay_baseline_for_test()
             .await
             .expect("load installed snapshot replay baseline");
-        assert_eq!(baseline.exact_cut, published_snapshot.coverage);
+        assert_eq!(baseline.coverage(), &published_snapshot.coverage);
         match &baseline.authority {
             coven_database::RetainedReplayAuthority::InstalledSnapshot(authority) => {
                 assert_eq!(authority.store_root, store.root());

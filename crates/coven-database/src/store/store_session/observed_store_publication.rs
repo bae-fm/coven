@@ -408,11 +408,6 @@ fn require_unobserved_genesis_publication(
             "installed Store snapshot has no publication boundary".to_string(),
         ));
     };
-    if !baseline.exact_cut.commits().is_empty() {
-        return Err(DbError::Message(
-            "only an unopened genesis history may lack its publication boundary".to_string(),
-        ));
-    }
     let has_accepted_history: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM materialized_commits)

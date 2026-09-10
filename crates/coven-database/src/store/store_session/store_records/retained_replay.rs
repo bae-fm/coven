@@ -14,7 +14,6 @@ use coven_protocol::store_commit::RetainedStoreDeviceRegistrationActivations;
 use coven_protocol::write::WriteStatus;
 
 pub(crate) struct RetainedReplayBaselineRow {
-    pub(crate) exact_cut: String,
     pub(crate) schema_version: i64,
     pub(crate) routing_hash: String,
     pub(crate) image_payload_hash: String,
@@ -35,7 +34,6 @@ pub(super) struct PreparedRetainedReplayBaseline {
 
 impl PreparedRetainedReplayBaseline {
     pub(super) fn new(
-        exact_cut: coven_protocol::store_commit::CommitFrontier,
         schema_version: u32,
         routing_hash: ObjectHash,
         authority: crate::RetainedReplayAuthority,
@@ -43,7 +41,6 @@ impl PreparedRetainedReplayBaseline {
     ) -> Self {
         Self {
             baseline: crate::RetainedReplayBaseline {
-                exact_cut,
                 schema_version,
                 routing_hash,
                 image_payload_hash: ObjectHash::digest(&image_bytes),
@@ -478,17 +475,16 @@ impl StoreRecords<'_> {
 
         self.conn
             .query_row(
-                "SELECT exact_cut, schema_version,
+                "SELECT schema_version,
                         routing_hash, image_payload_hash, authority_hash
                  FROM retained_replay_baselines WHERE singleton = 1",
                 [],
                 |row| {
                     Ok(RetainedReplayBaselineRow {
-                        exact_cut: row.get(0)?,
-                        schema_version: row.get(1)?,
-                        routing_hash: row.get(2)?,
-                        image_payload_hash: row.get(3)?,
-                        authority_hash: row.get(4)?,
+                        schema_version: row.get(0)?,
+                        routing_hash: row.get(1)?,
+                        image_payload_hash: row.get(2)?,
+                        authority_hash: row.get(3)?,
                     })
                 },
             )
@@ -512,13 +508,10 @@ impl StoreRecords<'_> {
         self.conn
             .execute(
                 "INSERT INTO retained_replay_baselines
-                 (singleton, exact_cut, schema_version,
+                 (singleton, schema_version,
                   routing_hash, image_payload_hash, authority_hash)
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+                 VALUES (1, ?1, ?2, ?3, ?4)",
                 rusqlite::params![
-                    serde_json::to_string(&baseline.exact_cut).map_err(|error| {
-                        DbError::context("serialize retained replay exact cut", error)
-                    })?,
                     i64::from(baseline.schema_version),
                     baseline.routing_hash.to_string(),
                     baseline.image_payload_hash.to_string(),
@@ -624,7 +617,6 @@ impl StoreRecords<'_> {
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         let image = crate::store::retained_replay::project_generation_zero_image(self.conn)?;
         let prepared = PreparedRetainedReplayBaseline::new(
-            coven_protocol::store_commit::CommitFrontier(Default::default()),
             schema_version,
             routing_hash,
             crate::RetainedReplayAuthority::Genesis(authority),
@@ -657,7 +649,6 @@ impl StoreRecords<'_> {
             crate::connection_io::serialize_database_image(self.conn)
         })?;
         let prepared = PreparedRetainedReplayBaseline::new(
-            authority.metadata.coverage.clone(),
             schema_version,
             routing_hash,
             crate::RetainedReplayAuthority::InstalledSnapshot(authority),
@@ -828,7 +819,7 @@ impl StoreTransaction<'_, '_> {
         // the rewind cut may seed the projection; later states must be replayed.
         let covered = crate::store::store_device_state::load_covered_store_device_snapshots_on(
             self.transaction,
-            &baseline.exact_cut,
+            baseline.coverage(),
         )?;
         let projection = crate::store::ReplayProjection::from_image(
             &baseline.image_bytes(self.transaction, self.store_dir)?,
@@ -1143,7 +1134,7 @@ impl StoreTransaction<'_, '_> {
         baseline: &crate::RetainedReplayBaseline,
     ) -> Result<u64, DbError> {
         let records = StoreRecords::new(self.transaction, self.store_dir);
-        let coverage = RetainedReplayObjectCoverage::from_baseline(Some(baseline))?;
+        let coverage = RetainedReplayObjectCoverage::from_baseline(Some(baseline));
         let mut released = 0_u64;
         for (stream, sequence, reference, expected_hash) in
             records.retained_materialization_rows()?

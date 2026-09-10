@@ -82,6 +82,41 @@ impl StoreDatabase {
         .await
     }
 
+    pub async fn assert_replay_baseline_rejects_altered_coverage_for_test(
+        &self,
+    ) -> Result<(), DbError> {
+        self.call_store(|session| {
+            let baseline = crate::StoreDatabase::load_replay_baseline_on(StoreRecords::new(
+                session.conn,
+                session.store_dir,
+            ))?;
+            let original = baseline.image_bytes(session.conn, session.store_dir)?;
+            for (sql, expected) in [
+                (
+                    "UPDATE snapshot_coverage SET seq = seq + 1",
+                    "snapshot replay coverage sequence differs from its exact reference",
+                ),
+                (
+                    "DELETE FROM snapshot_coverage",
+                    "snapshot replay image coverage differs from its baseline",
+                ),
+            ] {
+                let mut image = Connection::open_in_memory()?;
+                crate::connection_io::deserialize_database_image_into(&mut image, &original)?;
+                assert_eq!(image.execute(sql, [])?, 1, "alter the covered stream");
+                let bytes = crate::connection_io::serialize_database_image(&image)?;
+                let mut altered = baseline.clone();
+                altered.image_payload_hash = session.install_payload_for_test(&bytes)?;
+                let error = altered
+                    .validate_image(session.conn, session.store_dir)
+                    .expect_err("valid authority must not admit altered image coverage");
+                assert!(matches!(error, DbError::Message(message) if message == expected));
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn downgrade_replay_baseline_coven_schema_to_v0_for_test(
         &self,
         include_routing: bool,
