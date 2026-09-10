@@ -15,7 +15,7 @@ impl StoreRecords<'_> {
         gates: &crate::Gates,
         covered_suffix: &[crate::MergeReplayWriteEffect],
     ) -> Result<Vec<u8>, DbError> {
-        let baseline = load_generation_zero_replay_baseline_on(self)?
+        let baseline = load_replay_baseline_on(self)?
             .ok_or_else(|| DbError::Message("received snapshot has no replay image".into()))?;
         let mut image = Connection::open_in_memory()?;
         crate::connection_io::deserialize_database_image_into(
@@ -240,7 +240,7 @@ impl StoreTransaction<'_, '_> {
             ));
         };
         let records = StoreRecords::new(self.transaction, self.store_dir);
-        let previous = load_generation_zero_replay_baseline_on(records)?.ok_or_else(|| {
+        let previous = load_replay_baseline_on(records)?.ok_or_else(|| {
             DbError::Message("checkpoint replacement has no installed replay baseline".into())
         })?;
         if !baseline.exact_cut.covers(&previous.exact_cut) {

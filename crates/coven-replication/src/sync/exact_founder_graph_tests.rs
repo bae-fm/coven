@@ -380,7 +380,7 @@ async fn store_creation_installs_generation_zero_replay_baseline() {
     .await
     .expect("create Store");
     let baseline = coven_database::StoreDatabase::new(&db)
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect("Store creation installs a retained replay baseline");
 
@@ -447,7 +447,7 @@ async fn writer_migrates_the_retained_replay_image_with_the_store() {
         .expect("migrate Store and retained replay image");
     let database = coven_database::StoreDatabase::new(&reopened);
     let migrated = database
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect("migrated retained replay image loads through the production path");
     assert_ne!(migrated.image_payload_hash, old_image_hash);
@@ -493,7 +493,7 @@ async fn writer_migrates_the_retained_replay_image_with_the_host_schema() {
     .expect("create Store with retained replay baseline");
     let root = store.root();
     let old_image_hash = coven_database::StoreDatabase::new(&db)
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect("load version-one replay baseline")
         .image_payload_hash;
@@ -508,7 +508,7 @@ async fn writer_migrates_the_retained_replay_image_with_the_host_schema() {
     ));
     let reopened = open(&version_two).expect("migrate Store host schema");
     let migrated = coven_database::StoreDatabase::new(&reopened)
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect("load host-migrated replay baseline");
 
@@ -547,7 +547,7 @@ async fn generation_zero_replay_baseline_names_its_owned_payloads() {
     .expect("create Store");
     let database = coven_database::StoreDatabase::new(&db);
     let baseline = database
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect("Store creation installs a retained replay baseline");
     let authority_bytes = baseline
@@ -584,7 +584,7 @@ async fn generation_zero_replay_baseline_names_its_owned_payloads() {
         .await
         .expect("remove image payload");
     let error = database
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect_err("a baseline whose image payload is gone must not load");
     assert!(
@@ -597,7 +597,7 @@ async fn generation_zero_replay_baseline_names_its_owned_payloads() {
         .await
         .expect("restore image payload");
     database
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect("baseline loads again once its image payload is back");
 }
@@ -617,7 +617,7 @@ async fn generation_zero_replay_baseline_rejects_an_image_payload_under_the_wron
     .expect("create Store");
     let database = coven_database::StoreDatabase::new(&db);
     let baseline = database
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect("load installed replay baseline");
 
@@ -630,7 +630,7 @@ async fn generation_zero_replay_baseline_rejects_an_image_payload_under_the_wron
         .expect("replace replay image payload bytes");
 
     let error = database
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect_err("a replay image payload under the wrong hash must be rejected");
     assert!(
@@ -659,7 +659,7 @@ async fn generation_zero_replay_baseline_rejects_an_authority_payload_under_the_
     .expect("create Store");
     let database = coven_database::StoreDatabase::new(&db);
     let baseline = database
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect("load installed replay baseline");
     let authority_hash = coven_protocol::store_commit::ObjectHash::digest(
@@ -677,7 +677,7 @@ async fn generation_zero_replay_baseline_rejects_an_authority_payload_under_the_
         .expect("replace replay authority payload bytes");
 
     let error = database
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect_err("a replay authority payload under the wrong hash must be rejected");
     assert!(
@@ -704,7 +704,7 @@ async fn replacing_the_replay_authority_deletes_the_superseded_payload() {
     .expect("create Store");
     let database = coven_database::StoreDatabase::new(&db);
     let baseline = database
-        .generation_zero_replay_baseline_for_test()
+        .replay_baseline_for_test()
         .await
         .expect("Store creation installs a retained replay baseline");
     let superseded = coven_protocol::store_commit::ObjectHash::digest(
@@ -718,7 +718,7 @@ async fn replacing_the_replay_authority_deletes_the_superseded_payload() {
         .expect("check superseded authority payload"));
 
     database
-        .replace_generation_zero_replay_authority_for_test(b"{\"kind\":\"other\"}".to_vec())
+        .replace_replay_authority_for_test(b"{\"kind\":\"other\"}".to_vec())
         .await
         .expect("replace retained replay authority");
 

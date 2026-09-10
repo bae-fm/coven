@@ -176,9 +176,7 @@ async fn repeated_store_initialization_reuses_its_verified_owner_anchor() {
     .expect("create Store");
     let database = coven_database::StoreDatabase::new(&db);
     database
-        .replace_generation_zero_replay_authority_for_test(
-            b"invalid retained replay authority".to_vec(),
-        )
+        .replace_replay_authority_for_test(b"invalid retained replay authority".to_vec())
         .await
         .expect("alter durable replay authority after connection verification");
 

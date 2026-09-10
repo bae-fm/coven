@@ -1,5 +1,5 @@
 use super::clock_floor;
-use super::retained_replay::load_generation_zero_replay_baseline_on;
+use super::retained_replay::load_replay_baseline_on;
 use super::verified_store_authority::VerifiedRegistrationLookup;
 use crate::PublishedStoreSnapshot;
 use coven_foundation::store_dir::StoreDir;
@@ -795,17 +795,12 @@ impl<'store> StoreRecords<'store> {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(super) fn generation_zero_replay_baseline(
-        self,
-    ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        StoreDatabase::generation_zero_replay_baseline_on(self)
+    pub(super) fn load_replay_baseline(self) -> Result<crate::RetainedReplayBaseline, DbError> {
+        StoreDatabase::load_replay_baseline_on(self)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(super) fn replace_generation_zero_replay_authority(
-        self,
-        authority_bytes: &[u8],
-    ) -> Result<(), DbError> {
+    pub(super) fn replace_replay_authority(self, authority_bytes: &[u8]) -> Result<(), DbError> {
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let authority_hash = super::payload_store::write_payload_blocking(
             &transaction,

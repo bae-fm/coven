@@ -218,7 +218,7 @@ impl StoreTransaction<'_, '_> {
         blob_decls: &crate::BlobDecls,
         receiver_wall_ms: u64,
     ) -> Result<Option<coven_protocol::hlc::Timestamp>, DbError> {
-        let baseline = self.generation_zero_replay_baseline()?;
+        let baseline = self.load_replay_baseline()?;
         if !matches!(&baseline.authority, crate::RetainedReplayAuthority::InstalledSnapshot(authority) if &authority.store_root == root)
         {
             return Err(DbError::Message(

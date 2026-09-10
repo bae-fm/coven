@@ -20,21 +20,19 @@ impl<'storage> RestoringStore<'storage> {
     }
 
     #[cfg(test)]
-    pub(crate) async fn generation_zero_replay_baseline_for_test(
+    pub(crate) async fn replay_baseline_for_test(
         &self,
     ) -> Result<coven_database::RetainedReplayBaseline, coven_database::DbError> {
-        self.database
-            .generation_zero_replay_baseline_for_test()
-            .await
+        self.database.replay_baseline_for_test().await
     }
 
     #[cfg(test)]
-    pub(crate) async fn replace_generation_zero_replay_authority_for_test(
+    pub(crate) async fn replace_replay_authority_for_test(
         &self,
         authority_bytes: Vec<u8>,
     ) -> Result<(), coven_database::DbError> {
         self.database
-            .replace_generation_zero_replay_authority_for_test(authority_bytes)
+            .replace_replay_authority_for_test(authority_bytes)
             .await
     }
 

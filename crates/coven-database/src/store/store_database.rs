@@ -474,22 +474,18 @@ impl StoreDatabase {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn generation_zero_replay_baseline_for_test(
-        &self,
-    ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        self.call_store(|session| session.generation_zero_replay_baseline())
+    pub async fn replay_baseline_for_test(&self) -> Result<crate::RetainedReplayBaseline, DbError> {
+        self.call_store(|session| session.load_replay_baseline())
             .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn replace_generation_zero_replay_authority_for_test(
+    pub async fn replace_replay_authority_for_test(
         &self,
         authority_bytes: Vec<u8>,
     ) -> Result<(), DbError> {
-        self.call_store(move |session| {
-            session.replace_generation_zero_replay_authority(&authority_bytes)
-        })
-        .await
+        self.call_store(move |session| session.replace_replay_authority(&authority_bytes))
+            .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]

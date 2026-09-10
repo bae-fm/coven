@@ -314,7 +314,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             Some(store.root().clone()),
         );
         let baseline = installed
-            .generation_zero_replay_baseline_for_test()
+            .replay_baseline_for_test()
             .await
             .expect("load installed snapshot replay baseline");
         assert_eq!(baseline.exact_cut, published_snapshot.coverage);
@@ -338,11 +338,11 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             .expect_err("retained snapshot authority must re-open its signed metadata");
         let authority_bytes = serde_json::to_vec(&tampered).expect("serialize tampered authority");
         installed
-            .replace_generation_zero_replay_authority_for_test(authority_bytes)
+            .replace_replay_authority_for_test(authority_bytes)
             .await
             .expect("tamper retained snapshot metadata");
         installed
-            .generation_zero_replay_baseline_for_test()
+            .replay_baseline_for_test()
             .await
             .expect_err("restart must reject retained snapshot metadata with another signature");
     })

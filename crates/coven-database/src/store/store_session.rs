@@ -380,19 +380,13 @@ impl<'session> StoreSession<'session> {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(super) fn generation_zero_replay_baseline(
-        &self,
-    ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        StoreRecords::new(self.conn, self.store_dir).generation_zero_replay_baseline()
+    pub(super) fn load_replay_baseline(&self) -> Result<crate::RetainedReplayBaseline, DbError> {
+        StoreRecords::new(self.conn, self.store_dir).load_replay_baseline()
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(super) fn replace_generation_zero_replay_authority(
-        &self,
-        authority_bytes: &[u8],
-    ) -> Result<(), DbError> {
-        StoreRecords::new(self.conn, self.store_dir)
-            .replace_generation_zero_replay_authority(authority_bytes)
+    pub(super) fn replace_replay_authority(&self, authority_bytes: &[u8]) -> Result<(), DbError> {
+        StoreRecords::new(self.conn, self.store_dir).replace_replay_authority(authority_bytes)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

@@ -523,9 +523,7 @@ async fn open_store_reuses_its_verified_replay_baseline() {
     fixture.load().await;
     fixture
         .database
-        .replace_generation_zero_replay_authority_for_test(
-            b"invalid retained replay authority".to_vec(),
-        )
+        .replace_replay_authority_for_test(b"invalid retained replay authority".to_vec())
         .await
         .expect("replace retained replay authority after verification");
 

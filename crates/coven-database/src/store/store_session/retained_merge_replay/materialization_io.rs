@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::retained_replay::load_generation_zero_replay_baseline_on;
+use crate::store::retained_replay::load_replay_baseline_on;
 use crate::store::store_session::StoreRecords;
 use coven_protocol::write::{PublishedWrite, SnapshotCoveredPosition};
 
@@ -792,12 +792,11 @@ impl StoreDatabase {
         Ok(associations)
     }
 
-    pub(crate) fn generation_zero_replay_baseline_on(
+    pub(crate) fn load_replay_baseline_on(
         records: StoreRecords<'_>,
     ) -> Result<RetainedReplayBaseline, DbError> {
-        load_generation_zero_replay_baseline_on(records)?.ok_or_else(|| {
-            DbError::Message("generation-zero retained replay baseline is absent".to_string())
-        })
+        load_replay_baseline_on(records)?
+            .ok_or_else(|| DbError::Message("retained replay baseline is absent".to_string()))
     }
 
     #[cfg(any(test, feature = "test-utils"))]

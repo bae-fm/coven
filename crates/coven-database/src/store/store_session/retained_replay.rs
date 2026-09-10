@@ -77,7 +77,7 @@ pub(crate) fn migrate_retained_replay_schema_on(
     Ok(())
 }
 
-pub(crate) fn load_generation_zero_replay_baseline_on(
+pub(crate) fn load_replay_baseline_on(
     records: StoreRecords<'_>,
 ) -> Result<Option<RetainedReplayBaseline>, DbError> {
     let Some(baseline) = load_replay_baseline_metadata_on(records)? else {
@@ -140,7 +140,7 @@ pub(crate) fn install_generation_zero_replay_baseline_on(
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,
 ) -> Result<RetainedReplayBaseline, DbError> {
-    if load_generation_zero_replay_baseline_on(records)?.is_some() {
+    if load_replay_baseline_on(records)?.is_some() {
         return Err(DbError::Message(
             "retained replay baseline already exists before founder activation".to_string(),
         ));
@@ -155,7 +155,7 @@ pub(crate) fn install_snapshot_replay_baseline_on(
     authority: RetainedReplaySnapshotAuthority,
     blob_decls: &crate::BlobDecls,
 ) -> Result<RetainedReplayBaseline, DbError> {
-    if load_generation_zero_replay_baseline_on(records)?.is_some() {
+    if load_replay_baseline_on(records)?.is_some() {
         return Err(DbError::Message(
             "retained replay baseline already exists before snapshot bootstrap".to_string(),
         ));
@@ -169,7 +169,7 @@ pub(crate) fn ensure_founder_replay_baseline_on(
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,
 ) -> Result<RetainedReplayBaseline, DbError> {
-    if let Some(existing) = load_generation_zero_replay_baseline_on(records)? {
+    if let Some(existing) = load_replay_baseline_on(records)? {
         let authority_matches = match &existing.authority {
             RetainedReplayAuthority::Genesis(existing) => existing == &authority,
             RetainedReplayAuthority::InstalledSnapshot(existing) => {

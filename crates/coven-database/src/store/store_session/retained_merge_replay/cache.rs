@@ -177,7 +177,7 @@ impl RetainedReplayCache {
         records: StoreRecords<'_>,
     ) -> Result<&RetainedReplayBaseline, DbError> {
         if self.baseline.is_none() {
-            self.baseline = Some(StoreDatabase::generation_zero_replay_baseline_on(records)?);
+            self.baseline = Some(StoreDatabase::load_replay_baseline_on(records)?);
         }
         Ok(self
             .baseline
@@ -507,7 +507,7 @@ impl RetainedReplayCache {
         watched: Option<&StoreBatchCommitRef>,
     ) -> Result<crate::store::store_session::ReplayProjectionResult, DbError> {
         if self.baseline.is_none() {
-            self.baseline = Some(transaction_records.generation_zero_replay_baseline()?);
+            self.baseline = Some(transaction_records.load_replay_baseline()?);
         }
         let baseline = self
             .baseline

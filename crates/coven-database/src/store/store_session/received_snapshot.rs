@@ -84,10 +84,9 @@ impl PreparedStoreSnapshot {
                 ));
             }
             let baseline =
-                retained_replay::load_generation_zero_replay_baseline_on(source_records)?
-                    .ok_or_else(|| {
-                        DbError::Message("prepared checkpoint has no replay baseline".into())
-                    })?;
+                retained_replay::load_replay_baseline_on(source_records)?.ok_or_else(|| {
+                    DbError::Message("prepared checkpoint has no replay baseline".into())
+                })?;
             let crate::RetainedReplayAuthority::InstalledSnapshot(checkpoint) = &baseline.authority
             else {
                 return Err(DbError::Message(
@@ -229,14 +228,12 @@ impl PreparedStoreSnapshot {
                         transaction.store.transaction,
                         transaction.store.store_dir,
                     );
-                    let installed = retained_replay::load_generation_zero_replay_baseline_on(
-                        installed_records,
-                    )?
-                    .ok_or_else(|| {
-                        DbError::Message(
-                            "received checkpoint installation lost its baseline".into(),
-                        )
-                    })?;
+                    let installed = retained_replay::load_replay_baseline_on(installed_records)?
+                        .ok_or_else(|| {
+                            DbError::Message(
+                                "received checkpoint installation lost its baseline".into(),
+                            )
+                        })?;
                     if installed.authority != baseline.authority {
                         return Err(DbError::Message(
                             "received checkpoint installation changed its accepted authority"

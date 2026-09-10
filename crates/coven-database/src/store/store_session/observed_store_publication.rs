@@ -399,9 +399,9 @@ fn require_unobserved_genesis_publication(
     connection: &rusqlite::Connection,
     store_dir: &coven_foundation::store_dir::StoreDir,
 ) -> Result<(), DbError> {
-    let baseline = super::retained_replay::load_generation_zero_replay_baseline_on(
-        super::StoreRecords::new(connection, store_dir),
-    )?
+    let baseline = super::retained_replay::load_replay_baseline_on(super::StoreRecords::new(
+        connection, store_dir,
+    ))?
     .ok_or_else(|| DbError::Message("unobserved Store has no replay baseline".to_string()))?;
     let crate::RetainedReplayAuthority::Genesis(_) = &baseline.authority else {
         return Err(DbError::Message(

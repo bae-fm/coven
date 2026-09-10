@@ -742,12 +742,11 @@ impl StoreRecords<'_> {
 }
 
 impl StoreTransaction<'_, '_> {
-    pub(crate) fn generation_zero_replay_baseline(
-        self,
-    ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        StoreDatabase::generation_zero_replay_baseline_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-        )
+    pub(crate) fn load_replay_baseline(self) -> Result<crate::RetainedReplayBaseline, DbError> {
+        StoreDatabase::load_replay_baseline_on(crate::store::store_session::StoreRecords::new(
+            self.transaction,
+            self.store_dir,
+        ))
     }
 
     pub(crate) fn claimed_circle_bootstrap_coverage_refs(
