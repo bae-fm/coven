@@ -1443,6 +1443,9 @@ mod snapshot_candidates;
 #[path = "tests/acknowledgements.rs"]
 mod acknowledgements;
 
+#[path = "tests/commit_authorship.rs"]
+mod commit_authorship;
+
 /// A frontier covering nothing is covered by every frontier, including itself.
 /// The device-join bootstrap leans on this: it offers a joining device only a
 /// snapshot the attempt's bootstrap cut covers, and a snapshot that declares no
