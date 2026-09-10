@@ -80,15 +80,9 @@ impl ReplayProjection {
                 capture.attach(Some("_coven_audience"))?;
                 capture.attach(Some("_coven_row_routes"))?;
             }
-            if let Some(floor) = live.clock_floor.as_ref() {
-                live.clock.advance_past(floor);
-            }
-            let stamp = live.clock.now();
-            live.clock_floor = Some(stamp.clone());
             materializer.apply_recorded_changeset(
                 crate::ValidatedChangeset::new(host_edits, schema.clone())?,
                 &effect.write_id,
-                &stamp,
             )?;
             let mut captured = crate::capture_changeset(&mut capture)?;
             crate::validate_scoped_foreign_key_audiences(&tx, live.gates)?;

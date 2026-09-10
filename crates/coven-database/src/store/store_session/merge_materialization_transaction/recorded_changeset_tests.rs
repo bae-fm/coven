@@ -58,11 +58,7 @@ impl RecordedEditFixture {
             MergeMaterializationTransaction::from_store(
                 crate::store::store_session::StoreTransaction::new(&tx, &self.dir),
             )
-            .apply_recorded_changeset(
-                changeset,
-                &WriteId::from_generated("recorded-write".into()),
-                &Timestamp::new(4000, 0, "local".into()),
-            )
+            .apply_recorded_changeset(changeset, &WriteId::from_generated("recorded-write".into()))
         })?;
         assert!(!tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
@@ -85,7 +81,7 @@ impl RecordedEditFixture {
 }
 
 #[test]
-fn recorded_edit_preserves_unrelated_peer_column_and_uses_new_stamp() {
+fn recorded_edit_preserves_unrelated_peer_column_and_winning_stamp() {
     let fixture = RecordedEditFixture::new();
     let bytes = fixture.record("UPDATE notes SET title = 'local title', _updated_at = '0000000002000-0000-local' WHERE id = 'one'");
     fixture.conn.execute_batch("UPDATE notes SET body = 'peer body', _updated_at = '0000000003000-0000-peer' WHERE id = 'one'").unwrap();
@@ -95,7 +91,7 @@ fn recorded_edit_preserves_unrelated_peer_column_and_uses_new_stamp() {
         (
             "local title".into(),
             Some("peer body".into()),
-            "0000000004000-0000-local".into()
+            "0000000003000-0000-peer".into()
         )
     );
 }
@@ -110,67 +106,8 @@ fn recorded_edit_accepts_already_applied_value() {
     fixture.apply(&bytes).unwrap();
     assert_eq!(
         fixture.row(),
-        ("original".into(), None, "0000000004000-0000-local".into())
+        ("original".into(), None, "0000000003000-0000-peer".into())
     );
-}
-
-#[test]
-fn recorded_edit_reports_conflicts_without_committing_rows() {
-    let cases = [
-        (
-            "UPDATE notes SET title = 'local title', _updated_at = '0000000002000-0000-local' WHERE id = 'one'",
-            "DELETE FROM notes",
-            WriteRebaseConflictReason::MissingTarget,
-        ),
-        (
-            "UPDATE notes SET title = 'local title', _updated_at = '0000000002000-0000-local' WHERE id = 'one'",
-            "UPDATE notes SET title = 'peer title'",
-            WriteRebaseConflictReason::ChangedColumn {
-                column: "title".into(),
-            },
-        ),
-        (
-            "DELETE FROM notes WHERE id = 'one'",
-            "UPDATE notes SET body = 'peer body'",
-            WriteRebaseConflictReason::ChangedColumn {
-                column: "body".into(),
-            },
-        ),
-        (
-            "DELETE FROM notes WHERE id = 'one'",
-            "DELETE FROM notes",
-            WriteRebaseConflictReason::MissingTarget,
-        ),
-        (
-            "INSERT INTO notes VALUES ('two', 'local title', 'body', '0000000002000-0000-local')",
-            "INSERT INTO notes VALUES ('two', 'peer title', 'body', '0000000003000-0000-peer')",
-            WriteRebaseConflictReason::IdentityCollision,
-        ),
-    ];
-    for (edit, peer, reason) in cases {
-        let fixture = RecordedEditFixture::new();
-        let bytes = fixture.record(edit);
-        fixture.conn.execute_batch(peer).unwrap();
-        let before: Vec<(String, String, Option<String>, String)> =
-            crate::query_mapped_rows(&fixture.conn, "SELECT * FROM notes ORDER BY id", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
-            .unwrap();
-        let error = fixture.apply(&bytes).unwrap_err();
-        let DbError::WriteRebaseConflict(conflict) = error else {
-            panic!("expected typed conflict: {error}")
-        };
-        assert_eq!(conflict.write_id.as_str(), "recorded-write");
-        assert_eq!(conflict.affected_rows.len(), 1);
-        assert_eq!(conflict.affected_rows[0].table, "notes");
-        assert_eq!(conflict.reason, reason);
-        let after: Vec<(String, String, Option<String>, String)> =
-            crate::query_mapped_rows(&fixture.conn, "SELECT * FROM notes ORDER BY id", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
-            .unwrap();
-        assert_eq!(before, after);
-    }
 }
 
 #[test]
@@ -185,11 +122,14 @@ fn recorded_edit_constraint_failure_rolls_back_the_whole_write() {
         "{error}"
     );
     assert_eq!(
-        error.write_rebase_conflict().unwrap().affected_rows,
-        [coven_protocol::write::AffectedRow {
-            table: "notes".into(),
-            primary_key: "two".into(),
-        }],
+        error
+            .write_rebase_conflict()
+            .unwrap()
+            .affected_rows
+            .iter()
+            .map(|row| (row.table.as_str(), row.primary_key.as_str()))
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([("notes", "one"), ("notes", "two")]),
     );
     assert_eq!(fixture.row(), before);
     assert_eq!(
@@ -203,7 +143,7 @@ fn recorded_edit_constraint_failure_rolls_back_the_whole_write() {
 }
 
 #[test]
-fn recorded_delete_ignores_only_the_timestamp_change() {
+fn recorded_delete_wins_over_a_timestamp_change() {
     let fixture = RecordedEditFixture::new();
     let bytes = fixture.record("DELETE FROM notes WHERE id = 'one'");
     fixture
@@ -238,13 +178,11 @@ fn recorded_edit_suffix_rolls_back_an_already_applied_edit() {
             replay.apply_recorded_changeset(
                 ValidatedChangeset::new(first, fixture.schema.clone())?,
                 &WriteId::from_generated("first".into()),
-                &Timestamp::new(4000, 0, "local".into()),
             )?;
             assert_eq!(fixture.row().1.as_deref(), Some("local body"));
             replay.apply_recorded_changeset(
                 ValidatedChangeset::new(second, fixture.schema.clone())?,
                 &WriteId::from_generated("second".into()),
-                &Timestamp::new(4000, 1, "local".into()),
             )
         })?;
         tx.commit()?;
@@ -262,7 +200,7 @@ fn recorded_edit_suffix_rolls_back_an_already_applied_edit() {
 }
 
 #[test]
-fn recorded_insert_is_captured_with_the_replacement_stamp() {
+fn recorded_insert_preserves_its_captured_stamp() {
     let fixture = RecordedEditFixture::new();
     let bytes = fixture.record(
         "INSERT INTO notes VALUES ('two', 'local title', NULL, '0000000002000-0000-local')",
@@ -277,9 +215,9 @@ fn recorded_insert_is_captured_with_the_replacement_stamp() {
     assert_eq!(incoming[0].row_id, "two");
     assert_eq!(
         incoming[0].row_stamp.as_deref(),
-        Some("0000000004000-0000-local")
+        Some("0000000002000-0000-local")
     );
-    assert_ne!(actual, bytes);
+    assert_eq!(actual, bytes);
 }
 
 #[test]
@@ -316,7 +254,7 @@ fn recorded_edit_replays_unique_value_swaps_and_preserves_peer_columns() {
         (
             "second".into(),
             Some("peer body".into()),
-            "0000000004000-0000-local".into()
+            "0000000003000-0000-peer".into()
         )
     );
     let second: (String, String, String) = fixture
@@ -332,7 +270,7 @@ fn recorded_edit_replays_unique_value_swaps_and_preserves_peer_columns() {
         (
             "original".into(),
             "second body".into(),
-            "0000000004000-0000-local".into()
+            "0000000002000-0000-local".into()
         )
     );
     let children: Vec<(String, String)> = crate::query_mapped_rows(
@@ -349,27 +287,6 @@ fn recorded_edit_replays_unique_value_swaps_and_preserves_peer_columns() {
             ("child-two".into(), "two".into())
         ]
     );
-}
-
-#[test]
-fn recorded_edit_reports_replacement_stamp_constraints_without_committing() {
-    let mut fixture = RecordedEditFixture::new();
-    fixture.conn.execute_batch("ALTER TABLE notes ADD COLUMN stamp_check INTEGER CHECK(_updated_at != '0000000004000-0000-local')").unwrap();
-    fixture.schema = Arc::new(
-        TableSchema::from_db(
-            &fixture.conn,
-            &[SyncedTable::new("notes", RowIdentity::SharedKey)],
-        )
-        .unwrap(),
-    );
-    let bytes = fixture.record("UPDATE notes SET title = 'local title', _updated_at = '0000000002000-0000-local' WHERE id = 'one'");
-    let before = fixture.row();
-    let error = fixture.apply(&bytes).unwrap_err();
-    assert!(
-        matches!(error, DbError::WriteRebaseConflict(ref conflict) if matches!(conflict.reason, WriteRebaseConflictReason::Constraint { .. })),
-        "{error}"
-    );
-    assert_eq!(fixture.row(), before);
 }
 
 #[test]
@@ -413,7 +330,6 @@ fn recorded_edit_preserves_the_owners_foreign_key_deferral() {
             .apply_recorded_changeset(
                 ValidatedChangeset::new(bytes, fixture.schema.clone()).unwrap(),
                 &WriteId::from_generated("recorded-write".into()),
-                &Timestamp::new(4000, 0, "local".into()),
             )
         })
         .unwrap();
@@ -542,7 +458,7 @@ fn recorded_edit_preserves_captured_trigger_rows_without_reexecuting_host_statem
         (
             "longer".into(),
             Some("longer".into()),
-            "0000000004000-0000-local".into(),
+            "0000000003000-0000-peer".into(),
         ),
     );
     let audits: Vec<(String, String, String)> = crate::query_mapped_rows(
@@ -557,7 +473,7 @@ fn recorded_edit_preserves_captured_trigger_rows_without_reexecuting_host_statem
         [(
             "audit-1".into(),
             "four".into(),
-            "0000000004000-0000-local".into(),
+            "0000000002000-0000-local".into(),
         )],
         "the captured trigger row survives once with its captured value",
     );
@@ -568,4 +484,74 @@ fn recorded_edit_preserves_captured_trigger_rows_without_reexecuting_host_statem
         .expect_err("normal host writes still execute the validation trigger after replay");
     assert!(error.to_string().contains("combined text too long"));
     assert_eq!(fixture.row(), after);
+}
+
+#[test]
+fn recorded_edits_match_ordinary_merge_results() {
+    let cases = [
+        (
+            "UPDATE notes SET title = 'local', _updated_at = '0000000002000-0000-local'",
+            "UPDATE notes SET body = 'peer', _updated_at = '0000000003000-0000-peer'",
+        ),
+        (
+            "UPDATE notes SET title = 'local', _updated_at = '0000000002000-0000-local'",
+            "UPDATE notes SET title = 'peer', _updated_at = '0000000003000-0000-peer'",
+        ),
+        (
+            "UPDATE notes SET title = 'local', _updated_at = '0000000003000-0000-local'",
+            "UPDATE notes SET title = 'peer', _updated_at = '0000000002000-0000-peer'",
+        ),
+        (
+            "UPDATE notes SET title = 'local', _updated_at = '0000000002000-0000-local'",
+            "DELETE FROM notes",
+        ),
+        ("DELETE FROM notes", "UPDATE notes SET body = 'peer'"),
+        ("DELETE FROM notes", "DELETE FROM notes"),
+        (
+            "INSERT INTO notes VALUES ('two', 'local', NULL, '0000000002000-0000-local')",
+            "INSERT INTO notes VALUES ('two', 'peer', NULL, '0000000003000-0000-peer')",
+        ),
+    ];
+    for (edit, peer) in cases {
+        let ordinary = RecordedEditFixture::new();
+        let rebased = RecordedEditFixture::new();
+        let bytes = ordinary.record(edit);
+        for fixture in [&ordinary, &rebased] {
+            fixture.conn.execute_batch(peer).unwrap();
+        }
+        let result = resolve_and_apply_changeset(
+            &ordinary.conn,
+            &ordinary.dir,
+            &bytes,
+            ordinary.schema.synced_tables(),
+            4000,
+        )
+        .unwrap();
+        assert!(!result.had_fk_violations);
+        assert!(result.constraint_conflict_tables.is_empty());
+        rebased
+            .apply(&bytes)
+            .expect("rebase uses automatic merging");
+        let rows = |fixture: &RecordedEditFixture| {
+            crate::query_mapped_rows(
+                &fixture.conn,
+                "SELECT id, title, body, _updated_at FROM notes ORDER BY id",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            rows(&rebased),
+            rows(&ordinary),
+            "edit: {edit}; peer: {peer}"
+        );
+    }
 }
