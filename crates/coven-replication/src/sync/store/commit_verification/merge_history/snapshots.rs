@@ -42,7 +42,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     async fn verify_snapshot_authority(
         &mut self,
         snapshot: &coven_database::PublishedStoreSnapshot,
-    ) -> Result<(StoreHistoryCut, VerifiedMergeSnapshotState), StorePullError> {
+    ) -> Result<VerifiedMergeSnapshotState, StorePullError> {
         // Verification recomposes the snapshot's history summary, and the
         // composition resumes at this device's baseline. That only reaches the
         // snapshot's coverage when the coverage stands at or above the
@@ -68,8 +68,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self,
         snapshot: &coven_database::PublishedStoreSnapshot,
         state: VerifiedMergeSnapshotState,
-    ) -> Result<(StoreHistoryCut, VerifiedMergeSnapshotState), StorePullError> {
-        let frontier = &snapshot.meta.coverage.0;
+    ) -> Result<VerifiedMergeSnapshotState, StorePullError> {
         if state.common.device_state != snapshot.meta.state.devices {
             return Err(StorePullError::InvalidState(
                 "Merge snapshot device state differs from its exact verified history".to_string(),
@@ -87,7 +86,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         if self.history.baseline.snapshot().is_some_and(|installed| {
             installed.reference == snapshot.reference && installed.meta == snapshot.meta
         }) {
-            return Ok((StoreHistoryCut(frontier.clone()), state));
+            return Ok(state);
         }
         self.verify_snapshot_finalization(&state).await?;
         let mut canonical = compose_verified_merge_snapshot_history_summary(
@@ -222,7 +221,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 "Merge snapshot history summary differs from its exact verified cut".to_string(),
             ));
         }
-        Ok((StoreHistoryCut(frontier.clone()), state))
+        Ok(state)
     }
 
     // Construct receipt verification on the heap before its caller polls it.
@@ -347,7 +346,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             founder_registration: self.founder.clone(),
             snapshot: snapshot.reference.clone(),
             metadata: snapshot.meta.clone(),
-            snapshot_cut: StoreHistoryCut(snapshot.meta.coverage.commits().clone()),
             active_registrations: registrations,
         };
         authority.validate().map_err(StorePullError::Protocol)?;
@@ -375,14 +373,13 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         snapshot: &coven_database::PublishedStoreSnapshot,
     ) -> Result<coven_protocol::store_commit::RetainedReplaySnapshotAuthority, StorePullError> {
-        let (snapshot_cut, state) = self.verify_snapshot_authority(snapshot).await?;
+        let state = self.verify_snapshot_authority(snapshot).await?;
         Ok(
             coven_protocol::store_commit::RetainedReplaySnapshotAuthority {
                 store_root: self.root.reference().clone(),
                 founder_registration: self.founder.clone(),
                 snapshot: snapshot.reference.clone(),
                 metadata: snapshot.meta.clone(),
-                snapshot_cut,
                 active_registrations: state.common.active_registrations,
             },
         )

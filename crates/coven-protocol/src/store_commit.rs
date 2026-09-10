@@ -97,7 +97,7 @@ mod ordered_map_entries {
     }
 }
 
-pub const STORE_PROTOCOL_VERSION: u32 = 2;
+pub const STORE_PROTOCOL_VERSION: u32 = 3;
 
 pub(crate) const STORE_PROTOCOL_ROOT_SEMANTIC_PATH: &str = "store-v1/store-protocol-root";
 #[cfg(any(test, feature = "test-utils"))]

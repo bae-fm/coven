@@ -96,7 +96,6 @@ pub struct RetainedReplaySnapshotAuthority {
     pub founder_registration: StoreDeviceRegistrationRef,
     pub snapshot: StoreSnapshotRef,
     pub metadata: SnapshotMeta,
-    pub snapshot_cut: StoreHistoryCut,
     #[serde(with = "ordered_map_entries")]
     pub active_registrations: BTreeMap<StoreDeviceId, ReferencedStoreDeviceRegistration>,
 }
@@ -118,15 +117,6 @@ impl RetainedReplaySnapshotAuthority {
             &self.snapshot,
             author.value(),
         )?;
-        if self.metadata.store_root_hash != self.store_root.store_root_hash
-            || self.metadata.snapshot_hash() != self.snapshot.snapshot_hash
-            || self.snapshot_cut.frontier() != self.metadata.coverage
-        {
-            return Err(StoreProtocolError::Malformed(
-                "retained snapshot replay authority differs from its signed snapshot state"
-                    .to_string(),
-            ));
-        }
         let expected_active = self
             .metadata
             .state

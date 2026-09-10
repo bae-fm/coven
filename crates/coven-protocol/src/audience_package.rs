@@ -507,7 +507,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(package.to_bytes()).unwrap(),
             format!(
-                "{{\"version\":2,\"store_root_hash\":\"{root}\",\"candidate_family\":\"{}\",\"write_id\":\"write-a\",\"commit_coord\":{{\"stream_id\":\"{}\",\"sequence\":3}},\"schema_version\":8,\"audience\":\"store\",\"changeset\":[99,115],\"blob_bindings\":[]}}",
+                "{{\"version\":3,\"store_root_hash\":\"{root}\",\"candidate_family\":\"{}\",\"write_id\":\"write-a\",\"commit_coord\":{{\"stream_id\":\"{}\",\"sequence\":3}},\"schema_version\":8,\"audience\":\"store\",\"changeset\":[99,115],\"blob_bindings\":[]}}",
                 candidate_family().as_hash(),
                 AuthorStreamId::from_bytes([3; 32]),
             )

@@ -946,7 +946,7 @@ fn unknown_fields_and_versions_are_rejected() {
     .is_err());
 
     let mut value = serde_json::to_value(&fixture.commit).unwrap();
-    value["version"] = serde_json::json!(1);
+    value["version"] = serde_json::json!(2);
     assert!(matches!(
         VerifiedStoreBatchCommit::parse(
             &serde_json::to_vec(&value).unwrap(),
@@ -954,7 +954,7 @@ fn unknown_fields_and_versions_are_rejected() {
             &fixture.commit_ref,
             &fixture.registration,
         ),
-        Err(StoreProtocolError::UnsupportedVersion(1))
+        Err(StoreProtocolError::UnsupportedVersion(2))
     ));
 }
 
