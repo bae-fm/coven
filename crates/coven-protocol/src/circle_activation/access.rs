@@ -141,6 +141,10 @@ impl VerifiedCircleKeyring {
 }
 
 impl CircleEpochAccess {
+    pub fn circle_id(&self) -> CircleId {
+        self.circle_id
+    }
+
     pub fn key_fingerprint(&self) -> KeyFingerprint {
         self.key_fingerprint
     }

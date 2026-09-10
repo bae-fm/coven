@@ -17,7 +17,6 @@ use super::{StoreDatabase, StoreSession};
 /// the access authority that seals the acknowledgement, and the retained bootstrap
 /// coverage the projection was seeded from (`None` for a founder/source device).
 pub struct CircleAckPublicationInput {
-    circle_id: CircleId,
     control: CircleControlCoord,
     epoch_id: CircleEpochId,
     access: coven_protocol::circle_activation::CircleEpochAccess,
@@ -26,7 +25,7 @@ pub struct CircleAckPublicationInput {
 
 impl CircleAckPublicationInput {
     pub fn circle_id(&self) -> CircleId {
-        self.circle_id
+        self.access.circle_id()
     }
 
     pub fn control(&self) -> &CircleControlCoord {
@@ -85,7 +84,6 @@ impl StoreSession<'_> {
             let seeded_from =
                 super::retained_merge_replay::circle_bootstrap_coverage_ref_on(conn, circle_id)?;
             inputs.push(CircleAckPublicationInput {
-                circle_id,
                 control,
                 epoch_id,
                 access,
