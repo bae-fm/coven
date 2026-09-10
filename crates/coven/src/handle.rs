@@ -874,13 +874,14 @@ impl CovenHandle {
         self.blobs.evict(blob).await
     }
 
-    /// Make `(root_table, root_id)` Remote (Local → Remote): enqueue an upload per
-    /// user-provided blob from its external file and record the make_remote
-    /// intent, then return. The drain uploads each and flips the gate true on the
-    /// last; the gate flip re-emits the subtree and the cycle's inline push
-    /// uploads host-provided blobs. `pin` keeps the uploaded blobs in the cache as
-    /// pinned offline copies. Errors with [`MakeRemoteError::SyncNotReady`] when no
-    /// provider is connected.
+    /// Make `(root_table, root_id)` Remote (Local → Remote): atomically enqueue
+    /// every current blob-bearing row and record the transition intent, then
+    /// return. Both provenances use this queue: user-provided blobs read their
+    /// registered external file, and host-provided blobs read coven's local file.
+    /// Once every upload is Created, coven records the gate change and its Store
+    /// write together. Publication consumes the upload records and intent.
+    /// `pin` retains uploaded plaintext as pinned offline copies. Errors with
+    /// [`MakeRemoteError::SyncNotReady`] when no provider is connected.
     ///
     /// `refs` is the root's complete current blob set in the order the host wants
     /// uploads admitted. coven validates the set atomically before enqueueing it.
@@ -942,10 +943,13 @@ impl CovenHandle {
         self.make_remote_batch(root_table, prepared, pin).await
     }
 
-    /// Cancel an in-flight make_remote of `(root_table, root_id)`: clear its intent
-    /// and pending uploads and tombstone any blob already in the cloud. The gate
-    /// never flips, so the root stays Local. Errors with
-    /// [`MakeRemoteError::SyncNotReady`] when no provider is connected.
+    /// Cancel a make-remote transition before it reaches Publishing. The intent
+    /// becomes Cancelling; the drain deletes each retained exact object, spool,
+    /// and cached copy before retiring its upload record. The last record and
+    /// intent retire together. Cleanup failures retain the work for retry, and
+    /// the root stays Local. A Publishing transition refuses cancellation.
+    /// Cancellation can be recorded offline; the drain needs a provider
+    /// connection to carry out the cleanup.
     pub async fn cancel_make_remote(
         &self,
         root_table: &str,
@@ -985,9 +989,9 @@ impl CovenHandle {
     /// This is a read; nothing here starts or advances a transfer. Compare
     /// [`drain_uploads`](Self::drain_uploads), which does the work.
     ///
-    /// To ask whether a *root* still has a transition running, prefer
-    /// [`make_remote_progress`](Self::make_remote_progress): the queue empties
-    /// before the transition ends.
+    /// [`make_remote_progress`](Self::make_remote_progress) distinguishes a root
+    /// still uploading from one Publishing or Cancelling. Created uploads remain
+    /// queued until publication activates or cancellation cleanup completes.
     pub async fn queued_uploads(&self) -> Result<Vec<crate::QueuedUpload>, crate::DbError> {
         self.blobs.queued_uploads().await
     }
@@ -1011,10 +1015,10 @@ impl CovenHandle {
     /// The queued uploads belonging to one gated root.
     ///
     /// The filter runs in SQL, so asking about one root does not decode every
-    /// other queued upload in the store. A host answers "is anything still
-    /// waiting to upload for this row?" from whether this is empty — but see
-    /// [`make_remote_progress`](Self::make_remote_progress) for whether the
-    /// transition itself has finished, which outlasts its uploads.
+    /// other queued upload in the store. The result includes Created uploads
+    /// awaiting publication, so a nonempty result does not imply more bytes must
+    /// be sent. Use [`make_remote_progress`](Self::make_remote_progress) for the
+    /// root's transition phase, or the cloud-outbox snapshot for both together.
     pub async fn queued_uploads_for_root(
         &self,
         root_table: &str,
@@ -1059,11 +1063,11 @@ impl CovenHandle {
     /// How far the make-remote for one gated root has got, or `None` when that
     /// root has none running.
     ///
-    /// This outlasts the root's queued uploads. Once the last upload lands its
-    /// queue rows are consumed, but the transition is not finished until the
-    /// Store write publishing it activates — so a root can have no queued
-    /// uploads and still be mid-transition, reported here as
-    /// [`MakeRemoteProgress::Publishing`](crate::MakeRemoteProgress).
+    /// Once every upload is Created, the intent becomes
+    /// [`MakeRemoteProgress::Publishing`](crate::MakeRemoteProgress). Its upload
+    /// records remain queued until the Store write activates, when the records
+    /// and intent are consumed atomically. Cancelling instead retains the intent
+    /// until the drain completes the exact upload cleanup.
     pub async fn make_remote_progress(
         &self,
         root_table: &str,

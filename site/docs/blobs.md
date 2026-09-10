@@ -175,92 +175,80 @@ never the raw key bytes:
 
 ## How a blob moves out
 
-A blob reaches the cloud one of two ways, split by [provenance](#provenance).
+Blobs reach the cloud through row publication or a gated root's `make_remote`
+transition. [Provenance](#provenance) determines where local source bytes live;
+it does not decide whether a make-remote upload uses the queue.
 
-**With the changeset (host-provided).** coven owns a host-provided blob's bytes,
-in its local store or its cache, so it uploads each one before the row is
-published. A host writes the row and bytes together through
-[`CovenHandle::write`](rustdoc:method:coven::CovenHandle::write); a
-`make_remote` transition uploads any host-provided blobs before flipping the
-root's gate. If the bytes are not on disk the cycle aborts rather than publishing
-a row that points at a blob the cloud does not hold.
+**With a Store write.** The host supplies row changes and host-provided bytes
+through [`CovenHandle::write`](rustdoc:method:coven::CovenHandle::write). Publication
+prepares and uploads the required objects before publishing their Store commit. An
+unchanged blob can reuse its previously accepted exact object without local
+bytes. If required content has no usable source, the write cannot publish.
 
-**Through the upload outbox (user-provided).** A user-provided blob is the
-user's own file, often large, on a connection that can drop; the upload has to
-survive restarts and retries without re-asking the host. That is what the
-durable upload outbox is for: coven uploads the file from its path with
-progress and retry. The host starts that transition through
+**Through make-remote.** The host starts a gated root's transition with
 [`CovenHandle::make_remote`](rustdoc:method:coven::CovenHandle::make_remote):
 
 ```rust
-handle.make_remote("todos", todo_id, pin).await?;
+handle.make_remote("todos", todo_id, todo_label, pin, refs).await?;
 ```
 
-`make_remote` enqueues one upload per user-provided blob of the gated root.
-Coven persists each blob's final cloud key and [`BlobScope`](#encryption-scope),
-then resolves the scope to a key when the upload drains, long after the enqueue
-site is gone. Enqueuing an upload also cancels any pending delete of the same key
-(latest intent wins), so a re-upload is never tombstoned in the same cycle.
+Coven atomically records the root's transition intent and one upload for every
+current blob-bearing row beneath it, including both provenances. Each upload
+retains the exact row version and plaintext size/hash, its source path, and the
+pin request. A user-provided source is the registered external file; a
+host-provided source is coven's local file. Enqueueing performs no upload and
+does not yet assign the final provider object.
 
-The outbox is coven's `cloud_outbox` table, created by the handle open path. The
-host does not mutate it by hand; user-provided transitions and sync enqueue rows
-through coven, and host-provided row+blob writes go through
-`handle.write_with_blobs(...)`.
-Each row is an
-`OutboxEntry` whose
-`OutboxOperation` is an `Upload`,
-`Delete`, or `Cancel`.
+The durable `cloud_outbox` contains upload and delete operations. The host observes
+it through coven's APIs rather than mutating it. Each upload progresses through:
 
-Nothing uploads at enqueue time. The next sync cycle's
-`drain_uploads` works through
-the pending entries; for each one it:
+1. **Pending:** the drain derives the locator and protection from the queued row
+   and current upload authority, verifies the source while preparing its spool,
+   and allocates an exact provider object.
+2. **Prepared:** the exact stored reference and spool are recorded. Uploads and
+   retries use that retained object and spool, rather than choosing another
+   destination or rereading changed source bytes.
+3. **Created:** provider creation succeeded and that result is recorded. The
+   drain retires the spool, optionally pins the plaintext, and attempts to
+   finalize the root's transition. A retry resumes these steps without uploading
+   again.
 
-1. reads the local file,
-2. resolves the persisted scope to a key,
-3. seals the bytes and writes them to the entry's `cloud_key`,
-4. removes the entry on success.
+The root stays Local until all its current uploads are Created. Coven then
+records the [gate change](/docs/local-data) and its Store write together, and
+marks the intent **Publishing**. The Created upload records remain as exact
+handoffs to that write. Its publication consumes those records and the intent
+atomically; a completed byte transfer alone does not finish the transition.
 
-The drain runs before the changeset push, but the cycle does not hold the
-whole changeset back while it runs.
+The drain admits uploads in queue order up to its concurrency limit. Failed
+entries retain their state and record the failure and attempt time; other
+eligible entries can continue. The retry delay is `30s · 2^(attempt_count - 1)`,
+capped at one hour. A fresh entry is eligible immediately. When the oldest root
+being advanced finishes its uploads, the drain stops admitting more work,
+settles its active attempts, and yields for publication.
 
-Blob-before-row ordering is owned by coven, per gated root, not by a global push
-gate. `make_remote` keeps the root's [gate column](/docs/local-data) off until
-the root's blobs upload, then coven flips it on. The gate cuts the row while its
-column is off and re-emits the row's full subtree when it flips on, so a peer
-never pulls a changeset that points at a blob the cloud does not yet hold.
-Because this is per root, one slow or stuck upload holds back only its own root.
+Before Publishing, cancellation records **Cancelling** on the root's intent;
+it is not a third outbox operation. Cleanup removes each upload's exact object,
+spool, and cached copy before retiring its record. The last record and the
+cancellation intent are removed together. A cleanup failure retains the work
+for retry, and the root remains Local. Once the intent is Publishing,
+`cancel_make_remote` refuses the cancellation.
 
-The drain does not stop on a failure. A failed entry stays queued with its
-`attempt_count` bumped and `last_error`/`last_attempt_at` recorded, and the loop
-moves on, so one file the cloud keeps rejecting does not block the queue. Before
-retrying an entry the loop checks a per-entry backoff window:
-
-```
-30s · 2^(attempt_count - 1), capped at 1 hour
-```
-
-A freshly queued entry (`attempt_count == 0`) is eligible immediately. After the
-first failure the wait is 30s, then 60s, 120s, and so on up to an hourly ceiling.
-The base equals the sync loop's interval, so the first retry rides the next
-natural cycle.
-
-
-<svg class="flow" viewBox="0 0 660 128" role="img" aria-label="make_remote enqueues an outbox row; the drain seals and writes the blob; success removes the entry, failure retries with backoff">
+<svg class="flow" viewBox="0 0 660 128" role="img" aria-label="make_remote queues every row blob; uploads become Prepared then Created; Store publication consumes their records and the transition intent">
 <rect class="chip" x="15" y="44" width="140" height="30" rx="7"/>
 <text class="lbl s11" x="85" y="63" text-anchor="middle">make_remote(root)</text>
+<text class="sub" x="85" y="92" text-anchor="middle">queue every row blob</text>
 <line class="arr" x1="159" y1="59" x2="176" y2="59" marker-end="url(#fa)"/>
 <rect class="chipo" x="180" y="44" width="140" height="30" rx="7"/>
-<text class="lbl s11" x="250" y="63" text-anchor="middle">cloud_outbox row</text>
-<text class="sub" x="250" y="92" text-anchor="middle">upload · delete · cancel</text>
+<text class="lbl s11" x="250" y="63" text-anchor="middle">Pending → Prepared</text>
+<text class="sub" x="250" y="92" text-anchor="middle">verify source · retain spool</text>
 <line class="arr" x1="324" y1="59" x2="341" y2="59" marker-end="url(#fa)"/>
 <rect class="chip" x="345" y="44" width="140" height="30" rx="7"/>
-<text class="lbl s11" x="415" y="63" text-anchor="middle">drain: seal + write</text>
-<text class="sub" x="415" y="92" text-anchor="middle">retry 30s doubling, cap 1 h</text>
+<text class="lbl s11" x="415" y="63" text-anchor="middle">Created</text>
+<text class="sub" x="415" y="92" text-anchor="middle">exact object uploaded</text>
 <line class="arr" x1="489" y1="59" x2="506" y2="59" marker-end="url(#fa)"/>
 <rect class="chipo" x="510" y="44" width="140" height="30" rx="7"/>
-<path class="glyph" d="M524 56v-3a3 3 0 0 1 6 0v3"/>
-<rect class="glyphf" x="522.5" y="56" width="9" height="7" rx="1.5"/>
-<text class="lbl s11" x="588" y="63" text-anchor="middle">blob object</text>
+<text class="lbl s11" x="580" y="63" text-anchor="middle">Publish Store write</text>
+<text class="sub" x="580" y="92" text-anchor="middle">consume records + intent</text>
 </svg>
 
 ## The pull side
@@ -329,11 +317,6 @@ the blob, then deletes the tombstone. An unreferenced-but-not-yet-deleted blob i
 <circle class="glyphf" cx="540" cy="66" r="4"/>
 <text class="lbl s11" x="540" y="92" text-anchor="middle">GC verifies, deletes both</text>
 </svg>
-
-A re-upload wins over a pending deletion by construction. Enqueuing an upload drops
-a same-device pending delete row; and after a successful (re-)upload the drain
-cancels any tombstone a prior cycle (possibly another device) already wrote, so the
-GC never reclaims a blob that has just been re-uploaded.
 
 ## Cloud layout
 
@@ -428,65 +411,51 @@ operation.
 
 ## Where a blob's bytes come from
 
-coven uploads a blob from whichever local copy its [provenance](#provenance) names.
-A **host-provided** blob is data the host hands coven, which coven keeps in its own
-local store at `storage/local/<namespace>/<id>` (via
-`local_files::store`); the inline push
-reads it back to upload, then moves the copy into the [cache](/docs/cache) as the
-blob becomes Remote. A **user-provided** blob is the user's own file at a path coven
-references; `make_remote` uploads it straight from that path. Either way coven never
-reaches outside the copy it was given, and a blob whose bytes aren't present is not
-ready to publish (see [How a blob moves out](#how-a-blob-moves-out)).
+For make-remote, coven reads the source selected by the row's provenance: its own
+local file for a host-provided blob, or the registered external file for a
+user-provided blob. Preparation verifies the queued plaintext size and hash and
+records a durable upload spool. A Prepared retry reads that spool, so later edits
+to the original file cannot change the reserved upload's bytes.
+
+Store writes retain their own publication sources and exact prepared objects.
+They can reuse an accepted object or read its verified plaintext when local bytes
+are absent; readable-path changes still require a destination with the new path.
 
 ## Observing transitions and uploads
 
-The host can pass a
-[`BlobTransitionObserver`](rustdoc:trait:coven::BlobTransitionObserver) to
-watch uploads and the locality transitions. It only *reports*; coven owns flipping
-the gate and deciding when a cycle publishes. The whole observer is optional; most
-methods default to a no-op:
+Use [`CovenHandle::subscribe_cloud_outbox`](rustdoc:method:coven::CovenHandle::subscribe_cloud_outbox)
+and [`CloudOutboxLiveQuery`](rustdoc:struct:coven::CloudOutboxLiveQuery) for durable
+queue and transition status. The query returns an initial committed snapshot and
+updates after outbox or intent changes, including after reopening the app. Render
+that status together with transient progress from
+[`BlobTransitionObserver`](rustdoc:trait:coven::BlobTransitionObserver); its
+Rustdoc defines the callback signatures and defaults.
 
-```rust
-#[async_trait::async_trait]
-pub trait BlobTransitionObserver: Send + Sync {
-    async fn on_blob_upload_started(&self, blob_id: &str);
-    async fn on_blob_upload_progress(&self, blob_id: &str, bytes_done: u64, bytes_total: u64) {}
-    async fn on_blob_uploaded(&self, blob_id: &str);
-    async fn on_blob_upload_failed(&self, blob_id: &str, error: &str);
-    fn should_skip_uploads(&self) -> bool { false }
+Preparation and upload callbacks receive `&RowBlobRef`, identifying the queued
+row version and plaintext facts. Preparation reports plaintext bytes consumed;
+upload reports stored bytes sent to the provider (encrypted in an opaque home,
+plaintext in a browsable home). Progress is cumulative within each attempt and
+coalesced at a 300 ms cadence, with the final total forwarded when needed.
 
-    // make_remote / make_local completion, and make_local per-blob progress:
-    async fn on_root_made_remote(&self, root_table: &str, root_id: &str) {}
-    async fn on_root_made_local(&self, root_table: &str, root_id: &str) {}
-    async fn on_blob_materialize_progress(
-        &self, root_table: &str, root_id: &str, blob_id: &str, done: u64, total: u64,
-    ) {}
-}
-```
+`on_blob_uploaded` follows successful provider creation and the durable Created
+record. Spool cleanup, pinning, or transition finalization can still fail after
+that notification. `on_blob_upload_failed` reports attempt failures; the retained
+journal determines what retry resumes. A Created retry skips preparation and the
+upload's start, progress, and success callbacks; remaining work can still report
+an attempt failure.
+Use the durable Publishing state, rather than the upload callback, to distinguish
+completed transfers from an unfinished Store publication.
 
-The upload callbacks track attempts, not blobs. `on_blob_upload_started` fires once
-before each attempt, so a blob that fails twice then succeeds fires it three times.
-`on_blob_uploaded` fires once, when the entry leaves the queue. Notification only:
-since coven, not the host, flips the gate and breaks the drain to publish a completed
-`make_remote`. `on_blob_upload_failed` fires on each failed attempt and carries the
-error string; the entry stays queued for retry. A todos app wires these into the
-attachment's row: started shows "uploading", uploaded shows "synced", failed shows
-"will retry".
+`on_blob_materialize_progress` counts copied blobs, not bytes, during make-local.
+`on_root_made_local` follows installed local files and the database commit of their
+ownership, the gate change, and queued cloud deletions. These callbacks describe
+the current call; they are not persisted events replayed after restart. There is
+no `on_root_made_remote` callback.
 
-`on_root_made_remote` / `on_root_made_local` fire when coven *completes* a
-transition (including one resumed after a restart), so the host's row-updated event
-survives a crash rather than being lost with an in-memory flag.
-`on_blob_materialize_progress` moves a `make_local`'s per-file progress bar.
-
-`on_blob_upload_progress` reports bytes reaching the cloud between start and the
-terminal callback, so a per-file bar moves instead of jumping from 0 to 100%.
-`bytes_done` is cumulative and monotonic within one attempt, counting the encrypted
-payload (marginally larger than the plaintext). coven coalesces the per-chunk
-reports to a 300ms tick so the host is not rebuilt on every chunk, and emits one
-final call at `bytes_done == bytes_total` on success. A backend that cannot report
-sub-file progress calls it once at the end.
-
-`should_skip_uploads` is the pause switch. The drain checks it before pulling each
-entry: while it returns true the queue still accepts new entries but does not drain,
-and an upload already in flight finishes. Flip it back and the next cycle picks up
-where it left off.
+`should_skip_uploads` supplies the absolute pause state. While paused, the drain
+starts no new uploads; the host can still enqueue work. Pausing an active drain
+suspends preparation and stops upload bodies from yielding further chunks,
+retaining the same preparation or provider operation. Resume continues that
+attempt. A pausing observer also implements `wait_until_uploads_paused` and
+`wait_until_uploads_resumed`, completing each when its absolute state is reached.
+The defaults never pause and leave both waits pending.
