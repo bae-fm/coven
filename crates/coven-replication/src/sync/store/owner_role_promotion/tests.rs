@@ -750,3 +750,235 @@ async fn a_prepared_promotion_cannot_replace_its_exact_membership_head() {
         Err(coven_protocol::owner_promotion_journal::OwnerPromotionJournalError::Invariant(_))
     ));
 }
+
+#[tokio::test]
+async fn promotion_journal_rejects_an_unrelated_circle_acknowledgement() {
+    use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+    use coven_protocol::store_commit::*;
+    use coven_storage::CloudSyncObjectStorage;
+
+    let (fixture, storage) =
+        PromotionCandidate::build_with_connection("promotion-unrelated-circle-ack").await;
+    let owner = fixture
+        .store
+        .bind_device_in(
+            &fixture.owner_db,
+            fixture.owner_db_store_dir.clone(),
+            &fixture.owner,
+        )
+        .await
+        .unwrap();
+    let member = fixture
+        .store
+        .bind_device_in(
+            &fixture.member_db,
+            fixture.member_db_store_dir.clone(),
+            &fixture.member,
+        )
+        .await
+        .unwrap();
+    let circle = owner
+        .create_circle("0000000001000-0000-owner", "Promotion observer")
+        .await
+        .unwrap();
+    let frontier = owner.acknowledgement_frontier().await.unwrap();
+    owner
+        .stage_circle_acknowledgements(&frontier, "2026-07-20T00:00:01Z")
+        .await
+        .unwrap();
+    owner
+        .stage_current_acknowledgement_if_new("2026-07-20T00:00:01Z")
+        .await
+        .unwrap();
+    assert_eq!(owner.drain_acknowledgements_exact().await.unwrap(), 1);
+    let database = StoreDatabase::new(&fixture.owner_db);
+    let acknowledgement = database
+        .latest_published_circle_ack(circle)
+        .await
+        .unwrap()
+        .expect("the Circle owner published an actual acknowledgement")
+        .reference;
+    assert_eq!(
+        storage
+            .observe_exact_slot(acknowledgement.object.slot())
+            .await
+            .unwrap(),
+        Some(acknowledgement.object.clone())
+    );
+
+    let request = owner
+        .begin_owner_promotion(fixture.member_registration.clone())
+        .await
+        .unwrap();
+    let acceptance = member.accept_owner_promotion(request).await.unwrap();
+    fixture.home.fail_exact_create_before_call(1);
+    owner
+        .finalize_owner_promotion(&fixture.encryption, acceptance.clone())
+        .await
+        .expect_err("retain the real prepared promotion before upload");
+    let journal = database
+        .load_owner_promotion_journal(acceptance.request.promotion_id)
+        .await
+        .unwrap()
+        .unwrap();
+    journal
+        .validate_id(journal.promotion_id)
+        .expect("the original promotion journal is valid");
+    let mut substituted = journal.clone();
+    let OwnerPromotionJournalState::MergeHeadPrepared { candidate, .. } = &mut substituted.state
+    else {
+        panic!("promotion must retain its prepared membership head");
+    };
+    let mut publication = candidate
+        .prepared_membership_publication()
+        .expect("the actual retained candidate owns its original membership publication");
+    let registration = database
+        .activated_store_device_registration(candidate.commit.author_registration.clone())
+        .await
+        .unwrap();
+    let signer = registration.value().device_signer(&fixture.owner).unwrap();
+    assert_eq!(
+        acknowledgement.registration,
+        candidate.commit.author_registration
+    );
+    let original = candidate.commit.clone();
+    let operations = original.operations().unwrap();
+    assert!(operations.circle_acknowledgements.is_empty());
+    let commit = StoreBatchCommit::signed_operations(
+        original.store_root_hash,
+        original.write_id.clone(),
+        candidate.reference.coord.clone(),
+        original.author_registration.clone(),
+        registration.value(),
+        original.order.clone(),
+        original.publication_base.clone(),
+        original.membership_state.clone(),
+        original.device_state.clone(),
+        original.operations_membership_authority().unwrap(),
+        StoreCommitOperationsInput {
+            control: operations.control.clone(),
+            stream_activations: operations.stream_activations.clone(),
+            circle_acknowledgements: vec![acknowledgement.clone()],
+            ..StoreCommitOperationsInput::empty()
+        },
+        &signer,
+    )
+    .expect("the general batch signer permits a membership control with an acknowledgement");
+    let context = ProtocolObjectContext::signed_plaintext(
+        original.store_root_hash,
+        ProtocolObjectDomain::StoreCommit,
+    );
+    let prefix = commit_semantic_prefix(
+        commit.candidate_family(),
+        &candidate.reference.coord.stream_id.to_string(),
+        commit.seq(),
+        commit.commit_hash(),
+    );
+    let slot = storage
+        .allocate_protocol_slot(&context, &prefix, ".json")
+        .await
+        .unwrap();
+    let prepared = storage
+        .prepare_protocol_object(&context, slot, &prefix, commit.to_bytes())
+        .unwrap();
+    let verified = VerifiedStoreBatchCommit::parse_prepared(
+        &commit.to_bytes(),
+        original.store_root_hash,
+        candidate.reference.coord.clone(),
+        prepared.reference().clone(),
+        registration.value(),
+    )
+    .expect("the altered candidate has a valid signature and exact manifest");
+    candidate.common.commit = commit;
+    candidate.common.reference = verified.reference().clone();
+    assert_eq!(
+        candidate.commit.circle_acknowledgements(),
+        &[acknowledgement]
+    );
+    assert_eq!(candidate.commit.control(), original.control());
+    assert_eq!(
+        candidate.commit.operations().unwrap().stream_activations,
+        operations.stream_activations
+    );
+
+    // Rebuild the actual publication through its signing owners, so rejection
+    // cannot be attributed to a stale hash, signature, or replacement record.
+    let entry =
+        StorePublicationEntry::signed_commit(&candidate.publication.previous, &verified, &signer)
+            .unwrap();
+    let context = ProtocolObjectContext::signed_plaintext(
+        original.store_root_hash,
+        ProtocolObjectDomain::StorePublicationEntry,
+    );
+    let prefix = store_publication_entry_semantic_prefix(&entry);
+    let slot = storage
+        .allocate_protocol_slot(&context, &prefix, ".json")
+        .await
+        .unwrap();
+    let prepared_entry = storage
+        .prepare_protocol_object(&context, slot, &prefix, entry.to_bytes())
+        .unwrap();
+    let reference =
+        StorePublicationRef::from_entry(&entry, prepared_entry.reference().clone()).unwrap();
+    let replacement = StoreCurrentPublicationRecord::advance_commit(
+        &candidate.publication.previous,
+        &entry,
+        reference,
+        &verified,
+        &signer,
+    )
+    .unwrap();
+    candidate.publication.entry = entry;
+    candidate.publication.entry_object = prepared_entry.reference().clone();
+    candidate.publication.replacement = replacement;
+    candidate
+        .publication
+        .verify_commit(&verified)
+        .expect("the new publication cryptographically binds the altered candidate");
+
+    let coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit, .. } =
+        &mut publication.head.body_mut().activation
+    else {
+        panic!("promotion head must activate its Store candidate");
+    };
+    *commit = candidate.reference.clone();
+    publication.head.resign(&signer);
+    assert!(publication.head.verify(registration.value()));
+    let head_bytes = publication.head.to_bytes();
+    publication.head_ref.head_hash = publication.head.head_hash();
+    publication.head_ref.object = ExactObjectRef::new(
+        publication.head_ref.object.slot().clone(),
+        head_bytes.len() as u64,
+        ObjectHash::digest(&head_bytes),
+    );
+    candidate
+        .attach_merge_membership_proof_with(&publication, None)
+        .expect("the signed head and retained evidence bind the altered candidate");
+    candidate
+        .validate_closed_shape()
+        .expect("all candidate proof and exact byte identities remain valid");
+    candidate
+        .prepared_membership_publication()
+        .expect("the candidate derives a valid membership publication");
+
+    let encoded = serde_json::to_string(&substituted).unwrap();
+    fixture
+        .owner_db
+        .set_protocol_state(
+            &format!("owner_promotion/{}", substituted.promotion_id),
+            &encoded,
+        )
+        .await
+        .unwrap();
+    let error = database
+        .load_owner_promotion_journal(substituted.promotion_id)
+        .await
+        .expect_err("promotion owns exactly its membership control and two stream activations");
+    assert!(
+        matches!(&error,
+            coven_database::DbError::OwnerPromotionJournal(cause)
+                if matches!(cause.as_ref(), coven_protocol::owner_promotion_journal::OwnerPromotionJournalError::Invariant(_))
+        ),
+        "{error}"
+    );
+}

@@ -216,10 +216,11 @@ fn publication_matches_acceptance(
         )
 }
 
-fn merge_candidate_matches_finalization(
+fn finalization_publication(
     candidate: &PreparedStoreOperationCommit,
     acceptance: &OwnerPromotionAcceptance,
-) -> bool {
+) -> Result<PreparedMembershipPublication, OwnerPromotionJournalError> {
+    let publication = candidate.prepared_membership_publication()?;
     let OwnerPromotionAnchors {
         membership,
         recovery,
@@ -239,29 +240,25 @@ fn merge_candidate_matches_finalization(
         ),
     ];
     expected_activations.sort();
-    let Some(operations) = candidate.commit.operations() else {
-        return false;
+    let expected_operations = crate::store_commit::StoreCommitOperations {
+        acknowledgement: None,
+        circle_acknowledgements: Vec::new(),
+        control: Some(crate::store_commit::StoreControl {
+            transition: publication.transition().transition,
+        }),
+        device_join_attempt_decisions: Vec::new(),
+        provider_access_grants: Vec::new(),
+        device_registrations: Vec::new(),
+        device_exclusion_proposals: Vec::new(),
+        device_exclusion_outcomes: Vec::new(),
+        stream_activations: expected_activations,
+        circle_controls: Vec::new(),
+        store_package: None,
+        circle_packages: Vec::new(),
     };
-    candidate.commit.author_registration == acceptance.request.promoter_registration
-        && operations.acknowledgement.is_none()
-        && operations.device_join_attempt_decisions.is_empty()
-        && operations.provider_access_grants.is_empty()
-        && operations.device_registrations.is_empty()
-        && operations.device_exclusion_proposals.is_empty()
-        && operations.device_exclusion_outcomes.is_empty()
-        && operations.stream_activations == expected_activations
-        && operations.circle_controls.is_empty()
-        && operations.store_package.is_none()
-        && operations.circle_packages.is_empty()
-}
-
-fn finalization_publication(
-    candidate: &PreparedStoreOperationCommit,
-    acceptance: &OwnerPromotionAcceptance,
-) -> Result<PreparedMembershipPublication, OwnerPromotionJournalError> {
-    let publication = candidate.prepared_membership_publication()?;
     if !publication_matches_acceptance(&publication, acceptance)
-        || !merge_candidate_matches_finalization(candidate, acceptance)
+        || candidate.commit.author_registration != acceptance.request.promoter_registration
+        || candidate.commit.operations() != Some(&expected_operations)
     {
         return Err(OwnerPromotionJournalError::Invariant(
             "promotion candidate differs from its retained acceptance".into(),
