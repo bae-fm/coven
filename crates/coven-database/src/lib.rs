@@ -286,7 +286,7 @@ pub use store::{
     SnapshotPublicationPermit, StoreCommitPublicationOutcome, StoreDatabase,
     StorePublicationBoundary, StorePublicationPreparation, StoreReclaimJournalError,
     StoreRowWrites, StoreWritePreparation, StuckReclaimOperation, TableSchema, ValidatedChangeset,
-    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow, GENERATION_ZERO,
+    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use store::{resolve_and_apply_changeset, ApplyResult};

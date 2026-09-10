@@ -1,5 +1,5 @@
 use crate::*;
-use crate::{RetainedReplayAuthority, RetainedReplayGenesisAuthority, GENERATION_ZERO};
+use crate::{RetainedReplayAuthority, RetainedReplayGenesisAuthority};
 use coven_protocol::store_commit::{
     ResolvedStoreDeviceState, StoreAckRef, StoreDeviceRegistrationRef,
 };
@@ -420,8 +420,7 @@ impl StoreSession<'_> {
                     let baseline =
                         crate::store::store_session::StoreTransaction::new(&tx, store_dir)
                             .retained_replay_baseline(verified_authority)?;
-                    baseline.generation == GENERATION_ZERO
-                        && baseline.schema_version == schema_version
+                    baseline.schema_version == schema_version
                         && baseline.routing_hash == routing_hash
                         && baseline.authority
                             == RetainedReplayAuthority::Genesis(owner_authority.clone())

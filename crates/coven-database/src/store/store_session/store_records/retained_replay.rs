@@ -14,7 +14,6 @@ use coven_protocol::store_commit::RetainedStoreDeviceRegistrationActivations;
 use coven_protocol::write::WriteStatus;
 
 pub(crate) struct RetainedReplayBaselineRow {
-    pub(crate) generation: i64,
     pub(crate) exact_cut: String,
     pub(crate) schema_version: i64,
     pub(crate) routing_hash: String,
@@ -44,7 +43,6 @@ impl PreparedRetainedReplayBaseline {
     ) -> Self {
         Self {
             baseline: crate::RetainedReplayBaseline {
-                generation: crate::GENERATION_ZERO,
                 exact_cut,
                 schema_version,
                 routing_hash,
@@ -480,18 +478,17 @@ impl StoreRecords<'_> {
 
         self.conn
             .query_row(
-                "SELECT generation, exact_cut, schema_version,
+                "SELECT exact_cut, schema_version,
                         routing_hash, image_payload_hash, authority_hash
                  FROM retained_replay_baselines WHERE singleton = 1",
                 [],
                 |row| {
                     Ok(RetainedReplayBaselineRow {
-                        generation: row.get(0)?,
-                        exact_cut: row.get(1)?,
-                        schema_version: row.get(2)?,
-                        routing_hash: row.get(3)?,
-                        image_payload_hash: row.get(4)?,
-                        authority_hash: row.get(5)?,
+                        exact_cut: row.get(0)?,
+                        schema_version: row.get(1)?,
+                        routing_hash: row.get(2)?,
+                        image_payload_hash: row.get(3)?,
+                        authority_hash: row.get(4)?,
                     })
                 },
             )
@@ -515,15 +512,10 @@ impl StoreRecords<'_> {
         self.conn
             .execute(
                 "INSERT INTO retained_replay_baselines
-                 (singleton, generation, exact_cut, schema_version,
+                 (singleton, exact_cut, schema_version,
                   routing_hash, image_payload_hash, authority_hash)
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![
-                    i64::try_from(baseline.generation).map_err(|_| {
-                        DbError::Message(
-                            "retained replay generation exceeds SQLite INTEGER".to_string(),
-                        )
-                    })?,
                     serde_json::to_string(&baseline.exact_cut).map_err(|error| {
                         DbError::context("serialize retained replay exact cut", error)
                     })?,

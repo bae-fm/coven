@@ -17,8 +17,6 @@ use coven_protocol::store_commit::{
     StoreDeviceRegistrationRef, StoreRootRef,
 };
 
-pub const GENERATION_ZERO: u64 = 0;
-
 pub(crate) fn migrate_retained_replay_schema_on(
     conn: &Connection,
     store_dir: &coven_foundation::store_dir::StoreDir,
@@ -97,8 +95,6 @@ pub(super) fn load_replay_baseline_metadata_on(
     let Some(stored) = stored else {
         return Ok(None);
     };
-    let generation = u64::try_from(stored.generation)
-        .map_err(|_| DbError::Message("retained replay generation is negative".to_string()))?;
     let schema_version = u32::try_from(stored.schema_version)
         .map_err(|_| DbError::Message("retained replay schema version exceeds u32".to_string()))?;
     let parsed_exact_cut: CommitFrontier = serde_json::from_str(&stored.exact_cut)
@@ -124,7 +120,6 @@ pub(super) fn load_replay_baseline_metadata_on(
         ));
     }
     Ok(Some(RetainedReplayBaseline {
-        generation,
         exact_cut: parsed_exact_cut,
         schema_version,
         routing_hash: stored
@@ -406,7 +401,6 @@ pub enum RetainedReplayAuthority {
 /// holds the facts without carrying either payload in its own columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetainedReplayBaseline {
-    pub generation: u64,
     pub exact_cut: CommitFrontier,
     pub schema_version: u32,
     pub routing_hash: ObjectHash,
@@ -454,11 +448,6 @@ impl RetainedReplayBaseline {
         image: &Connection,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<(), DbError> {
-        if self.generation != GENERATION_ZERO {
-            return Err(DbError::Message(
-                "generation-zero retained replay baseline metadata is inconsistent".to_string(),
-            ));
-        }
         match &self.authority {
             RetainedReplayAuthority::Genesis(_) => {
                 if !self.exact_cut.0.is_empty() {

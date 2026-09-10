@@ -486,27 +486,20 @@ fn merge_materialization_requires_its_exact_retained_input() {
 fn retained_replay_baseline_has_one_closed_active_row() {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
     apply_coven_schema(&conn).expect("apply coven schema");
-    let insert = |singleton: i64, generation: i64| {
+    let insert = |singleton: i64| {
         conn.execute(
             "INSERT INTO retained_replay_baselines
-                 (singleton, generation, exact_cut, schema_version,
+                 (singleton, exact_cut, schema_version,
                   routing_hash, image_payload_hash, authority_hash)
-                 VALUES (?1, ?2, '{}', 1, ?3, ?4, ?5)",
-            rusqlite::params![
-                singleton,
-                generation,
-                "a".repeat(64),
-                "b".repeat(64),
-                "c".repeat(64)
-            ],
+                 VALUES (?1, '{}', 1, ?2, ?3, ?4)",
+            rusqlite::params![singleton, "a".repeat(64), "b".repeat(64), "c".repeat(64)],
         )
     };
 
-    insert(1, -1).expect_err("baseline generation cannot be negative");
-    insert(1, 0).expect("insert generation-zero baseline");
-    insert(1, 1).expect_err("a second active baseline must fail");
-    insert(2, 1).expect_err("the baseline key must remain the singleton");
-    insert(0, 1).expect_err("baseline generation cannot use another singleton key");
+    insert(1).expect("insert replay baseline");
+    insert(1).expect_err("a second active baseline must fail");
+    insert(2).expect_err("the baseline key must remain the singleton");
+    insert(0).expect_err("the baseline cannot use another singleton key");
 }
 
 #[test]
