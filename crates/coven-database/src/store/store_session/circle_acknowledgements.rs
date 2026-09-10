@@ -208,14 +208,8 @@ impl StoreSession<'_> {
             ack_hash: ack.ack_hash(),
             object: prepared.reference().clone(),
         };
-        let verified =
-            CircleAck::parse_at(&bytes, &registration.store_root, &reference, registration)
-                .map_err(|error| DbError::context("stage Circle acknowledgement", error))?;
-        if verified != ack {
-            return Err(DbError::Message(
-                "staged Circle acknowledgement changed during exact verification".to_string(),
-            ));
-        }
+        CircleAck::parse_at(&bytes, &registration.store_root, &reference, registration)
+            .map_err(|error| DbError::context("stage Circle acknowledgement", error))?;
         let ack_ref = serde_json::to_string(&reference).map_err(|error| {
             DbError::context("serialize exact Circle acknowledgement ref", error)
         })?;

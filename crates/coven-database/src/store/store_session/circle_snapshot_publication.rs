@@ -91,18 +91,13 @@ impl StoreSession<'_> {
             snapshot_hash: meta.snapshot_hash(),
             object: meta_prepared.reference().clone(),
         };
-        let verified = CircleSnapshotMeta::parse_at(
+        CircleSnapshotMeta::parse_at(
             &meta.to_bytes(),
             registration.store_root.store_root_hash,
             &reference,
             registration,
         )
         .map_err(|error| DbError::context("verify staged Circle snapshot metadata", error))?;
-        if verified != meta {
-            return Err(DbError::Message(
-                "staged Circle snapshot changed during exact verification".to_string(),
-            ));
-        }
         let previous = load_published_circle_snapshot_on(&tx, &authority, meta.circle_id)?;
         let (expected_generation, expected_slot) = match &previous {
             Some(previous) => (

@@ -8,7 +8,7 @@ pub(crate) fn verify_next_local_store_ack_on(
     authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
     bytes: &[u8],
     prepared: &PreparedExactObject,
-) -> Result<(StoreAckRef, StoreAck), DbError> {
+) -> Result<StoreAckRef, DbError> {
     let registration_ref = authority.reference();
     let registration = authority.value();
     let root = &registration.store_root;
@@ -65,7 +65,7 @@ pub(crate) fn verify_next_local_store_ack_on(
             "Store acknowledgement successor is outside its activated exact stream".to_string(),
         ));
     }
-    Ok((reference, ack))
+    Ok(reference)
 }
 
 pub(crate) fn store_ack_first_slot(

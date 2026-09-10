@@ -143,12 +143,7 @@ impl RetainedReplaySnapshotAuthority {
         for (device_id, registration) in &self.active_registrations {
             let bytes = registration.value().to_bytes();
             registration.reference().object.verify(&bytes)?;
-            let parsed = StoreDeviceRegistration::parse_at(&bytes, &self.store_root, *device_id)?;
-            if &parsed != registration.value() {
-                return Err(StoreProtocolError::Malformed(
-                    "retained snapshot registration is not canonical".to_string(),
-                ));
-            }
+            StoreDeviceRegistration::parse_at(&bytes, &self.store_root, *device_id)?;
             registration
                 .reference()
                 .verify_registration(registration.value())?;

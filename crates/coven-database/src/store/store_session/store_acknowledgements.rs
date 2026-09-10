@@ -100,13 +100,7 @@ impl StoreSession<'_> {
         let authority = self.local_store_authority()?;
         let bytes = ack.to_bytes();
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let (reference, verified) =
-            verify_next_local_store_ack_on(&tx, &authority, &bytes, &prepared)?;
-        if verified != ack {
-            return Err(DbError::Message(
-                "staged Store acknowledgement changed during exact verification".to_string(),
-            ));
-        }
+        let reference = verify_next_local_store_ack_on(&tx, &authority, &bytes, &prepared)?;
         let ack_ref = serde_json::to_string(&reference).map_err(|error| {
             DbError::context("serialize exact Store acknowledgement ref", error)
         })?;
@@ -163,7 +157,7 @@ impl StoreSession<'_> {
                     .to_string(),
             ));
         }
-        let (winner_reference, _) =
+        let winner_reference =
             verify_next_local_store_ack_on(&tx, &authority, &winner_bytes, &winner_prepared)?;
         let mut expected_records = candidate
             .acknowledgement_remote_objects(&outbound.ack)

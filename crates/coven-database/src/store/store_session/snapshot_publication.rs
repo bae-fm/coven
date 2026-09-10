@@ -65,18 +65,13 @@ impl StoreSession<'_> {
             snapshot_hash: meta.snapshot_hash(),
             object: meta_prepared.reference().clone(),
         };
-        let verified = SnapshotMeta::parse_at(
+        SnapshotMeta::parse_at(
             &meta.to_bytes(),
             registration.store_root.store_root_hash,
             &reference,
             registration,
         )
         .map_err(|error| DbError::context("verify staged Store snapshot metadata", error))?;
-        if verified != meta {
-            return Err(DbError::Message(
-                "staged Store snapshot changed during exact verification".to_string(),
-            ));
-        }
         publication
             .validate_snapshot_shape(&meta, &reference)
             .map_err(|error| DbError::context("verify staged Store snapshot publication", error))?;

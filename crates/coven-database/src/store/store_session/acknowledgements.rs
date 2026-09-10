@@ -184,7 +184,7 @@ impl StoreSession<'_> {
         }
         let created = match &outbound.activation {
             OutboundStoreAckActivation::AwaitingCandidate => {
-                let (verified, _) = verify_next_local_store_ack_on(
+                let verified = verify_next_local_store_ack_on(
                     &tx,
                     &authority,
                     &acknowledgement.bytes,

@@ -64,18 +64,13 @@ impl StoreSession<'_> {
                     .into(),
             ));
         }
-        let verified = StoreAck::parse_at(
+        StoreAck::parse_at(
             &latest_ack.to_bytes(),
             &root,
             &latest_ack_ref,
             activated.value(),
         )
         .map_err(DbError::from)?;
-        if verified != latest_ack {
-            return Err(DbError::Message(
-                "resumed acknowledgement head changed during exact verification".into(),
-            ));
-        }
         let recorded = load_published_store_ack_on(&tx)?;
         if let Some(recorded) = &recorded {
             if recorded.reference.registration == *record.reference()
