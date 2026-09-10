@@ -27,7 +27,7 @@ use super::{
     verified_store_authority::{VerifiedRegistrationLookup, VerifiedStoreLookup},
     StoreDatabase,
 };
-use crate::blob_records::{live_blob_row, validate_live_blob_row, validate_stored_row_binding_on};
+use crate::blob_records::{blob_row_mismatch, live_blob_row, validate_stored_row_binding_on};
 use crate::local_blob_cleanup_intents::intents_from_changes as local_blob_cleanup_intents;
 use crate::remote_object_records::validate_remote_object_on;
 use crate::PreparedMergeMaterialization;
@@ -335,9 +335,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         )
     }
 
-    /// Install only blob bindings whose exact row stamp won the enclosing
-    /// changeset. App rows, locator facts, and the materialized commit position
-    /// share this transaction and therefore commit or roll back together.
+    /// Bind surviving blob content at the merged row stamp. Another column
+    /// can supply that stamp without changing the blob. App rows, locator facts,
+    /// and the materialized commit position commit or roll back together.
     pub(crate) fn install_winning_blob_bindings(
         &self,
         gates: &crate::Gates,
@@ -372,25 +372,13 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             let Some(declaration) = table.blob() else {
                 continue;
             };
-            match winner.row_stamp.as_deref() {
-                Some(row_stamp) => conn.execute(
-                    "DELETE FROM row_blob_locators
-                     WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
-                       AND row_stamp <> ?4",
-                    rusqlite::params![
-                        winner.table,
-                        winner.row_id,
-                        declaration.id_column,
-                        row_stamp,
-                    ],
-                ),
-                None => conn.execute(
+            if winner.row_stamp.is_none() {
+                conn.execute(
                     "DELETE FROM row_blob_locators
                      WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3",
                     rusqlite::params![winner.table, winner.row_id, declaration.id_column],
-                ),
+                )?;
             }
-            .map_err(DbError::from)?;
         }
         let mut installed = 0;
         for binding in package.blob_bindings() {
@@ -422,43 +410,64 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             else {
                 continue;
             };
-            if row.stamp != binding.row_stamp() {
+            let live_audience =
+                crate::live_row_audience(conn, gates, binding.table(), binding.row_id())
+                    .map_err(|error| DbError::context("resolve merged blob row audience", error))?;
+            let live_audience = match live_audience {
+                coven_protocol::circle::Audience::Local => continue,
+                coven_protocol::circle::Audience::Store => RemoteAudience::Store,
+                coven_protocol::circle::Audience::Circle(circle_id) => {
+                    RemoteAudience::Circle(circle_id)
+                }
+            };
+            // Package row filtering already rejects rows outside this audience.
+            // Its unfiltered blob inventory must obey the same boundary.
+            if live_audience != package_audience {
                 continue;
             }
-
-            let live_audience =
-                crate::live_row_audience(conn, gates, binding.table(), binding.row_id()).map_err(
-                    |error| {
-                        DbError::context(
-                            format!(
-                                "resolve winning blob row audience for {:?}/{:?}",
-                                binding.table(),
-                                binding.row_id()
-                            ),
-                            error,
-                        )
-                    },
-                )?;
-            let live_audience = RemoteAudience::try_from(live_audience).map_err(|error| {
-                DbError::context(
-                    format!(
-                        "winning blob row {:?}/{:?} is not remote",
-                        binding.table(),
-                        binding.row_id()
-                    ),
-                    error,
+            let matches_row = |stored| {
+                crate::blob_records::live_blob_locator_matches(
+                    stored,
+                    declaration,
+                    &row,
+                    &live_audience,
                 )
-            })?;
-            if live_audience != package_audience {
-                return Err(DbError::Message(format!(
-                    "winning blob row {:?}/{:?} belongs to {:?}, but its package belongs to {:?}",
+            };
+            let source = if matches_row(binding.blob()) {
+                crate::StoreWriteRemoteBlob {
+                    authority: package.audience().clone(),
+                    stored: binding.blob().clone(),
+                }
+            } else {
+                let previous = crate::blob_records::bound_row_blob_on(
+                    conn,
                     binding.table(),
                     binding.row_id(),
-                    live_audience,
-                    package_audience
-                )));
-            }
-            validate_live_blob_row(binding, declaration, &row, &live_audience)?;
+                    binding.column(),
+                )?;
+                match previous {
+                    Some(previous) if matches_row(&previous.stored) => previous,
+                    _ if row.stamp != binding.row_stamp() => continue,
+                    _ => {
+                        // A matching row version with no surviving accepted
+                        // content is an invalid binding, not an omitted edit.
+                        return Err(blob_row_mismatch(
+                            binding.table(),
+                            binding.row_id(),
+                            binding.column(),
+                            &row.stamp,
+                        ));
+                    }
+                }
+            };
+            let binding = coven_protocol::audience_package::RowBlobLocatorBinding::new(
+                binding.table(),
+                binding.row_id(),
+                &row.stamp,
+                binding.column(),
+                source.stored,
+            )
+            .map_err(|error| DbError::context("bind merged row content", error))?;
 
             let locator = binding.blob().locator();
             let locator_hash = locator.locator_hash();
@@ -478,10 +487,21 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             )?;
             crate::blob_records::record_stored_locator_on(conn, binding.blob())?;
 
-            let audience_authority =
-                serde_json::to_string(package.audience()).map_err(|error| {
-                    DbError::context("serialize row blob audience authority", error)
-                })?;
+            let audience_authority = serde_json::to_string(&source.authority).map_err(|error| {
+                DbError::context("serialize row blob audience authority", error)
+            })?;
+            conn.execute(
+                "DELETE FROM row_blob_locators
+                 WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
+                   AND (row_stamp <> ?4 OR remote_object_id <> ?5)",
+                rusqlite::params![
+                    binding.table(),
+                    binding.row_id(),
+                    binding.column(),
+                    binding.row_stamp(),
+                    object_id.to_string()
+                ],
+            )?;
             conn.execute(
                 "INSERT INTO row_blob_locators
                  (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
@@ -497,7 +517,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 ],
             )
             .map_err(DbError::from)?;
-            validate_stored_row_binding_on(conn, binding, package.audience(), object_id)?;
+            validate_stored_row_binding_on(conn, &binding, &source.authority, object_id)?;
             installed += 1;
         }
         Ok(installed)

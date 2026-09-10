@@ -425,7 +425,7 @@ async fn exact_deletes_for_distinct_objects_remain_distinct() {
 }
 
 #[test]
-fn blob_bindings_install_only_for_exact_winning_row_stamps() {
+fn blob_bindings_follow_surviving_content_at_the_merged_row_stamp() {
     let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
     let mut conn = Connection::open_in_memory().expect("open");
     apply_coven_schema(&conn).expect("apply coven schema");
@@ -449,6 +449,10 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
         .insert_blob_row("loser", "0000000002000-0000-b", b"loser bytes")
         .expect("insert losing blob row");
 
+    DatabaseTestSql::new(&conn)
+        .insert_blob_row("merged", "0000000002000-0000-b", b"merged bytes")
+        .expect("insert content surviving under newer metadata");
+
     let package = AudiencePackage::store(
         ObjectHash::digest(b"root"),
         test_candidate_family(),
@@ -458,7 +462,8 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
         Vec::new(),
         vec![
             exact_blob_binding("winner", "0000000001000-0000-a", b"winner bytes"),
-            exact_blob_binding("loser", "0000000001000-0000-b", b"loser bytes"),
+            exact_blob_binding("loser", "0000000001000-0000-b", b"superseded bytes"),
+            exact_blob_binding("merged", "0000000001000-0000-a", b"merged bytes"),
         ],
     )
     .expect("build package");
@@ -485,7 +490,7 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
             &winning_rows,
         )
         .expect("install winning binding"),
-        1
+        2
     );
     tx.commit().expect("commit");
 
@@ -509,14 +514,22 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
         conn.query_row("SELECT count(*) FROM row_blob_locators", [], |row| row
             .get::<_, i64>(0))
             .expect("count row bindings"),
-        1,
-        "only the winning row version receives a binding"
+        2,
+        "surviving content receives a binding under its merged row stamp"
     );
+    let merged = Database::row_blob_ref_on(&conn, &gates, &tables[0], "merged")
+        .expect("resolve content preserved by column merge");
+    assert_eq!(merged.row_stamp(), "0000000002000-0000-b");
     assert_eq!(
-        conn.query_row("SELECT row_id FROM row_blob_locators", [], |row| row
-            .get::<_, String>(0))
-            .expect("read binding"),
-        "winner"
+        merged.stored(),
+        Some(
+            package
+                .blob_bindings()
+                .iter()
+                .find(|binding| binding.row_id() == "merged")
+                .unwrap()
+                .blob()
+        )
     );
     let loser = Database::row_blob_ref_on(&conn, &gates, &tables[0], "loser")
         .expect("resolve the newer row without binding it to losing content");
@@ -540,6 +553,112 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
             .locator()
             .blob_id(),
         "winner"
+    );
+}
+
+#[test]
+fn stale_store_blob_binding_does_not_attach_to_a_local_row() {
+    assert_stale_binding_respects_row_audience(coven_protocol::circle::Audience::Local);
+}
+
+#[test]
+fn stale_store_blob_binding_does_not_attach_to_another_circle_row() {
+    assert_stale_binding_respects_row_audience(coven_protocol::circle::Audience::Circle(
+        coven_protocol::circle::CircleId::from_bytes([9; 16]),
+    ));
+}
+
+fn assert_stale_binding_respects_row_audience(audience: coven_protocol::circle::Audience) {
+    let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
+    let mut conn = Connection::open_in_memory().expect("open audience binding database");
+    apply_coven_schema(&conn).expect("apply coven schema");
+    conn.execute_batch(
+        "CREATE TABLE photos (
+            id TEXT PRIMARY KEY,
+            size INTEGER NOT NULL,
+            hash TEXT NOT NULL,
+            cloud_path TEXT NOT NULL,
+            _updated_at TEXT NOT NULL,
+            audience TEXT
+        ) STRICT;",
+    )
+    .expect("create scoped photos");
+    let tables = vec![blob_binding_table().scoped_by("audience")];
+    let gates = Gates::from_tables(&conn, &tables).expect("build scoped gates");
+    let bytes = b"unchanged content in another audience";
+    conn.execute(
+        "INSERT INTO photos (id, size, hash, cloud_path, _updated_at, audience)
+         VALUES ('filtered', ?1, ?2, 'photos/filtered.bin', '0000000002000-0000-b', ?3)",
+        rusqlite::params![
+            bytes.len() as i64,
+            ObjectHash::digest(bytes).to_string(),
+            audience.column_value(),
+        ],
+    )
+    .expect("insert newer row outside the Store package audience");
+    assert_eq!(
+        crate::live_row_audience(&conn, &gates, "photos", "filtered")
+            .expect("resolve actual row audience"),
+        audience,
+    );
+    let package = AudiencePackage::store(
+        ObjectHash::digest(b"root"),
+        test_candidate_family(),
+        WriteId::from_generated("filtered-store-blob".to_string()),
+        test_commit_coord(),
+        1,
+        Vec::new(),
+        vec![exact_blob_binding(
+            "filtered",
+            "0000000001000-0000-a",
+            bytes,
+        )],
+    )
+    .expect("build older Store binding with identical content");
+    let tx = conn.transaction().expect("begin binding transaction");
+    Database::install_pulled_blob_activations_on(&tx, &package, &test_commit_ref())
+        .expect("retain accepted blob provenance");
+    // The row operation was excluded by audience filtering. The binding owner
+    // still receives the accepted package and its complete binding inventory.
+    let installed = crate::store::test_install_winning_blob_bindings(
+        &tx,
+        &store_dir,
+        &gates,
+        &tables,
+        &package,
+        &BlobActivation {
+            coord: test_commit_coord(),
+        },
+        &[],
+    )
+    .expect("a filtered row's stale binding must not abort materialization");
+    assert_eq!(installed, 0);
+    tx.commit().expect("commit unrelated accepted provenance");
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM row_blob_locators", [], |row| row
+            .get::<_, i64>(0))
+            .expect("count row bindings"),
+        0,
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM blob_locators", [], |row| row
+            .get::<_, i64>(0))
+            .expect("count accepted locator provenance"),
+        1,
+    );
+    assert_eq!(
+        crate::live_row_audience(&conn, &gates, "photos", "filtered")
+            .expect("preserve the current audience"),
+        audience,
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT _updated_at FROM photos WHERE id = 'filtered'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .expect("preserve the newer row stamp"),
+        "0000000002000-0000-b",
     );
 }
 

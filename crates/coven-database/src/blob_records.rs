@@ -90,22 +90,16 @@ pub(crate) fn live_blob_row(
     }))
 }
 
-pub(crate) fn validate_live_blob_row(
-    binding: &RowBlobLocatorBinding,
-    declaration: &coven_protocol::synced_schema::BlobDecl,
-    row: &LiveBlobRow,
-    live_audience: &RemoteAudience,
-) -> Result<(), DbError> {
-    validate_live_blob_locator(
-        binding.table(),
-        binding.row_id(),
-        binding.column(),
-        binding.row_stamp(),
-        binding.blob(),
-        declaration,
-        row,
-        live_audience,
-    )
+pub(crate) fn blob_row_mismatch(
+    table: &str,
+    row_id: &str,
+    column: &str,
+    row_stamp: &str,
+) -> DbError {
+    DbError::Message(format!(
+        "blob locator does not match winning row values for {:?}/{:?}/{:?} at {:?}",
+        table, row_id, column, row_stamp
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -119,25 +113,30 @@ pub(crate) fn validate_live_blob_locator(
     row: &LiveBlobRow,
     live_audience: &RemoteAudience,
 ) -> Result<(), DbError> {
-    let locator = stored.locator();
-    let invalid = locator.namespace() != declaration.namespace
-        || locator.blob_id() != row.blob_id
-        || locator.plaintext_size() != row.plaintext_size
-        || locator.plaintext_hash() != row.plaintext_hash
-        || &locator.audience() != live_audience
-        || locator
-            .scope()
-            .is_some_and(|scope| scope != &declaration.scope)
-        || locator
-            .cloud_path()
-            .is_some_and(|path| row.cloud_path.as_deref() != Some(path));
-    if invalid {
-        return Err(DbError::Message(format!(
-            "blob locator does not match winning row values for {:?}/{:?}/{:?} at {:?}",
-            table, row_id, column, row_stamp
-        )));
+    if !live_blob_locator_matches(stored, declaration, row, live_audience) {
+        return Err(blob_row_mismatch(table, row_id, column, row_stamp));
     }
     Ok(())
+}
+
+pub(crate) fn live_blob_locator_matches(
+    stored: &StoredBlobRef,
+    declaration: &coven_protocol::synced_schema::BlobDecl,
+    row: &LiveBlobRow,
+    live_audience: &RemoteAudience,
+) -> bool {
+    let locator = stored.locator();
+    locator.namespace() == declaration.namespace
+        && locator.blob_id() == row.blob_id
+        && locator.plaintext_size() == row.plaintext_size
+        && locator.plaintext_hash() == row.plaintext_hash
+        && &locator.audience() == live_audience
+        && locator
+            .scope()
+            .is_none_or(|scope| scope == &declaration.scope)
+        && locator
+            .cloud_path()
+            .is_none_or(|path| row.cloud_path.as_deref() == Some(path))
 }
 
 /// Index accepted blob provenance independently of whether its row version wins.
@@ -359,6 +358,28 @@ pub(crate) fn previous_row_blob_for_write_on(
         }
         return Ok(Some(handoff));
     }
+    let Some(previous) = bound_row_blob_on(conn, table, row_id, column)? else {
+        return Ok(None);
+    };
+    if !coven_protocol::blob::locator_describes_row(
+        previous.stored.locator(),
+        blob,
+        plaintext_size,
+        plaintext_hash,
+    ) {
+        return Ok(None);
+    }
+    Ok(Some(previous))
+}
+
+/// The exact accepted object already bound to this row, before or after a row
+/// merge changes its timestamp. Consumers compare its content with their row.
+pub(crate) fn bound_row_blob_on(
+    conn: &Connection,
+    table: &str,
+    row_id: &str,
+    column: &str,
+) -> Result<Option<StoreWriteRemoteBlob>, DbError> {
     let raw = conn
         .query_row(
             "SELECT row_blob_locators.audience_authority, blob_locators.remote_object_id
@@ -387,10 +408,6 @@ pub(crate) fn previous_row_blob_for_write_on(
         )));
     }
     let locator = carried_blob_locator(&remote, "prior row blob locator")?;
-    if !coven_protocol::blob::locator_describes_row(&locator, blob, plaintext_size, plaintext_hash)
-    {
-        return Ok(None);
-    }
     if locator.audience() != authority.remote_audience() {
         return Err(DbError::Message(format!(
             "prior row blob {table}/{row_id}/{column} authority differs from its locator"
