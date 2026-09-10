@@ -91,9 +91,7 @@ pub(crate) async fn materialized_reference_status(
         }
         return Ok(MaterializedCheck::Yes);
     }
-    Ok(history
-        .covered_reference_status(coverage, stream_id, reference)
-        .await)
+    Ok(history.covered_reference_status(coverage, reference).await)
 }
 
 #[derive(Debug)]

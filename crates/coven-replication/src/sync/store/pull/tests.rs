@@ -1036,7 +1036,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
 }
 
 #[tokio::test]
-async fn merge_gap_reports_the_exact_signed_predecessor() {
+async fn merge_readiness_requires_exact_predecessors_and_covered_history() {
     let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = crate::sync::test_helpers::open_test_db(source_store_dir.clone());
     let signer = coven_keys::keys::UserKeypair::generate();
@@ -1103,6 +1103,48 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
             ..
         }) if missing == second
     ));
+
+    let frontier = BTreeMap::from([(stream_id.clone(), third.clone())]);
+    let coverage = CommitFrontier::from_refs(frontier.clone()).expect("build covered frontier");
+    for reference in [&first, &third] {
+        assert!(
+            StoreDatabase::new(&target)
+                .exact_materialized_ref(&stream_id, reference.coord.sequence())
+                .await
+                .expect("read target materialized position")
+                .is_none(),
+            "the coverage check must run without an exact database row"
+        );
+        let value = source_device
+            .load_commit_for_test(reference)
+            .await
+            .expect("load covered commit");
+        let readiness = target_device
+            .pull_readiness_for_test(&coverage, &frontier, reference, value.value())
+            .await
+            .expect("check exact covered history");
+        assert!(matches!(readiness, Readiness::AlreadyMaterialized));
+
+        let mut competing = reference.clone();
+        competing.commit_hash = ObjectHash::digest(b"competing covered history");
+        let readiness = target_device
+            .pull_readiness_for_test(&coverage, &frontier, &competing, value.value())
+            .await
+            .expect("check competing covered history");
+        assert!(matches!(
+            readiness,
+            Readiness::Held(HeldStorePosition {
+                reason: HeldStorePositionReason::HashMismatch {
+                    referenced_device_id,
+                    referenced_commit,
+                    materialized_hash,
+                },
+                ..
+            }) if referenced_device_id == stream_id
+                && referenced_commit == competing
+                && materialized_hash == reference.commit_hash
+        ));
+    }
 }
 
 #[tokio::test]

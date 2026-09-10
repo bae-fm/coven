@@ -289,17 +289,9 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn covered_reference_status(
         &mut self,
         coverage: &CommitFrontier,
-        stream_id: &str,
         reference: &StoreBatchCommitRef,
     ) -> MaterializedCheck {
-        if commit_stream_id(&reference.coord) != stream_id {
-            return MaterializedCheck::Held(HeldStorePositionReason::WrongSlot(format!(
-                "commit reference stream {} differs from dependency stream {stream_id}",
-                commit_stream_id(&reference.coord)
-            )));
-        }
-        let coverage = coverage.clone().into_refs();
-        let Some(covered) = coverage.get(stream_id) else {
+        let Some(covered) = coverage.commits().get(&reference.coord.stream_id) else {
             return MaterializedCheck::Missing;
         };
         if reference.coord.sequence() > covered.coord.sequence() {
@@ -312,7 +304,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             }
             if cursor.coord.sequence() <= reference.coord.sequence() {
                 return MaterializedCheck::Held(HeldStorePositionReason::HashMismatch {
-                    referenced_device_id: stream_id.to_string(),
+                    referenced_device_id: commit_stream_id(&reference.coord),
                     referenced_commit: reference.clone(),
                     materialized_hash: cursor.commit_hash,
                 });
