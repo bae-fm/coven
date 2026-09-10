@@ -131,6 +131,7 @@ fn assert_retired(journal: &OwnerPromotionJournal, stage: PromotionStage) {
 async fn reopen(
     database: &coven_database::Database,
     source: &coven_foundation::store_dir::StoreDir,
+    host_device_id: &str,
 ) -> (
     coven_database::Database,
     coven_foundation::store_dir::StoreDir,
@@ -147,7 +148,7 @@ async fn reopen(
         test_helpers::test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
-        "test-device".into(),
+        host_device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &test_helpers::test_migrations(),
     )
@@ -379,7 +380,7 @@ async fn issuer_retirement(stage: PromotionStage, interruption: Interruption) {
             return;
         }
         drop(publishing);
-        let (reopened, directory) = reopen(&fixture.owner_db, &fixture.owner_db_store_dir).await;
+        let (reopened, directory) = reopen(&fixture.owner_db, &fixture.owner_db_store_dir, "test-device").await;
         let mut issuer = fixture
             .store
             .bind_device_in(&reopened, directory.clone(), &fixture.owner)
@@ -414,7 +415,7 @@ async fn issuer_retirement(stage: PromotionStage, interruption: Interruption) {
                 .unwrap()
                 .is_some());
             assert!(fixture.home.exact_creates().is_empty());
-            let (reopened_again, next_directory) = reopen(&reopened, &directory).await;
+            let (reopened_again, next_directory) = reopen(&reopened, &directory, "test-device").await;
             issuer = fixture
                 .store
                 .bind_device_in(&reopened_again, next_directory, &fixture.owner)
@@ -501,4 +502,143 @@ async fn issuer_retirement(stage: PromotionStage, interruption: Interruption) {
         }
     })
     .await;
+}
+
+#[tokio::test]
+async fn cross_removals_from_one_prefix_preserve_the_first_accepted_owner() {
+    Box::pin(async {
+        let (fixture, storage) =
+            PromotionCandidate::build_with_connection("cross-owner-removal").await;
+        fixture.store.promote_active_member_fixture(
+            &fixture.owner_db, fixture.owner_db_store_dir.clone(),
+            &fixture.member_db, fixture.member_db_store_dir.clone(),
+            &fixture.owner, &fixture.member, &fixture.encryption,
+        ).await.expect("activate the second Owner");
+        let issuer = fixture.store.bind_device_in(
+            &fixture.owner_db, fixture.owner_db_store_dir.clone(), &fixture.owner,
+        ).await.expect("bind the founder removal issuer");
+        let peer_storage = std::sync::Arc::new(
+            storage.connection_for_test_identity(fixture.member.clone()),
+        );
+        let peer = TestDevice::load_with_database(
+            StoreDatabase::new(&fixture.member_db), peer_storage.clone(),
+            fixture.member.clone(), fixture.member_db_store_dir.clone(),
+        ).await.expect("bind the peer removal issuer");
+        peer.pull_store().await.expect("install the promotion on the peer");
+        issuer.pull_store().await.expect("install the same accepted prefix on the founder");
+        let owner_database = StoreDatabase::new(&fixture.owner_db);
+        let peer_database = StoreDatabase::new(&fixture.member_db);
+        let base = owner_database.store_current_publication().await.unwrap();
+        assert_eq!(peer_database.store_current_publication().await.unwrap(), base);
+        let original_membership = issuer.membership_for_test().await.unwrap();
+        let owner_pubkey = keys::public_key_hex(&fixture.owner);
+        let peer_pubkey = keys::public_key_hex(&fixture.member);
+        assert!(original_membership.is_owner_now(&owner_pubkey));
+        assert!(original_membership.is_owner_now(&peer_pubkey));
+        let custody = test_helpers::TestCustody::default();
+        for (device, connection, target) in [
+            (&issuer, storage.as_ref(), peer_pubkey.as_str()),
+            (&peer, peer_storage.as_ref(), owner_pubkey.as_str()),
+        ] {
+            fixture.home.fail_exact_create_before_call(1);
+            let error = device.remove_member(
+                target, &fixture.encryption, &custody, connection, connection,
+            ).await.expect_err("retain each real removal before its first authority upload");
+            assert!(error.to_string().contains("forced failure before exact create call 1"), "{error}");
+        }
+        let owner_pending = owner_database.outbound_membership_mutation().await.unwrap()
+            .expect("founder removal is staged");
+        let peer_pending = peer_database.outbound_membership_mutation().await.unwrap()
+            .expect("peer cross-removal is staged");
+        let candidate = |pending: &coven_database::DurableMembershipMutation| {
+            let value: serde_json::Value = serde_json::from_slice(&pending.plan_bytes).unwrap();
+            assert_eq!(value["kind"], "revoke");
+            serde_json::from_value::<coven_protocol::prepared_commit::PreparedStoreOperationCommit>(
+                value["plan"]["candidate"].clone(),
+            ).expect("decode the actual staged removal candidate")
+        };
+        let losing = candidate(&owner_pending);
+        let winning = candidate(&peer_pending);
+        assert_eq!(losing.publication.previous, *base.record());
+        assert_eq!(winning.publication.previous, *base.record());
+        assert_eq!(losing.commit.membership_state, winning.commit.membership_state);
+        assert_eq!(losing.commit.device_state, winning.commit.device_state);
+        for (prepared, author, target) in [
+            (&losing, &owner_pubkey, &peer_pubkey),
+            (&winning, &peer_pubkey, &owner_pubkey),
+        ] {
+            prepared.validate_closed_shape().unwrap();
+            let publication = prepared.prepared_membership_publication().unwrap();
+            assert_eq!(&publication.entry.author_pubkey, author);
+            let coven_protocol::membership::StoreAuthorityChange::RemoveMember {
+                user_pubkey, removes, ..
+            } = &publication.entry.change else { panic!("actual removal control"); };
+            assert_eq!(user_pubkey, target);
+            assert_eq!(removes, &original_membership.active_grant_ids(target));
+            assert_eq!(removes.len(), 1);
+            assert!(storage.observe_exact_slot(publication.head_ref.object.slot()).await.unwrap().is_none());
+        }
+        assert_eq!(owner_database.store_current_publication().await.unwrap(), base);
+        assert_eq!(peer_database.store_current_publication().await.unwrap(), base);
+        peer.remove_member(
+            &owner_pubkey, &fixture.encryption, &custody,
+            peer_storage.as_ref(), peer_storage.as_ref(),
+        ).await.expect("the peer accepts its already staged cross-removal first");
+        let accepted = peer_database.store_current_publication().await.unwrap();
+        assert_ne!(accepted, base);
+        let accepted_membership = peer.membership_for_test().await.unwrap();
+        assert!(!accepted_membership.is_member_now(&owner_pubkey));
+        assert!(accepted_membership.is_owner_now(&peer_pubkey));
+        assert_eq!(accepted_membership.active_grant_ids(&peer_pubkey), original_membership.active_grant_ids(&peer_pubkey));
+        let publications = peer_database.store_publication_entries().await.unwrap();
+        assert!(publications.iter().any(|entry| matches!(&entry.value.payload,
+            coven_protocol::store_commit::StorePublicationPayload::Commit(reference) if reference == &winning.reference)));
+        assert!(!publications.iter().any(|entry| matches!(&entry.value.payload,
+            coven_protocol::store_commit::StorePublicationPayload::Commit(reference) if reference == &losing.reference)));
+        let expected_publications = publications.into_iter()
+            .map(|entry| (entry.prepared.reference().clone(), entry.bytes)).collect::<Vec<_>>();
+        fixture.home.clear_exact_creates();
+        let access_count = fixture.home.access_requests().len();
+        let error = issuer.remove_member(
+            &peer_pubkey, &fixture.encryption, &custody, storage.as_ref(), storage.as_ref(),
+        ).await.expect_err("the retired issuer cannot accept its prepared cross-removal");
+        assert!(matches!(error,
+            crate::sync::store::MembershipOpsError::Mutation(
+                crate::sync::store::MembershipMutationError::Membership(
+                    coven_protocol::membership::MembershipError::MissingConflictHeads,
+                ),
+            ),
+        ), "the unaccepted cross-removal must fail before authority upload: {error:?}");
+        assert!(fixture.home.exact_creates().is_empty());
+        assert_eq!(fixture.home.access_requests().len(), access_count);
+        assert_eq!(owner_database.outbound_membership_mutation().await.unwrap()
+            .expect("the rejected candidate remains bound to its original request").plan_bytes,
+            owner_pending.plan_bytes);
+        let root = fixture.store.root();
+        let cold = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
+            .open_pinned(storage.as_ref(), &root).await.unwrap()
+            .load_accepted_anchored_membership(&[], Some(&owner_pubkey)).await
+            .expect("the losing cross-removal cannot obstruct cold accepted authority");
+        assert_eq!(cold.head_refs(), accepted_membership.head_refs());
+        assert_eq!(cold.current_members(), accepted_membership.current_members());
+        for grant in accepted_membership.active_grant_ids(&peer_pubkey) {
+            assert_eq!(cold.active_grant(&grant), accepted_membership.active_grant(&grant));
+        }
+        assert!(!cold.contains_coord(&losing.prepared_membership_publication().unwrap().entry.coord()));
+        let (reopened, directory) = reopen(&fixture.member_db, &fixture.member_db_store_dir, &fixture.member_registration.device_id.to_string()).await;
+        let reopened_peer = TestDevice::load_with_database(
+            StoreDatabase::new(&reopened), peer_storage.clone(), fixture.member.clone(), directory,
+        ).await.expect("reopen the accepted Owner's exact database");
+        reopened_peer.pull_store().await.expect("verify shared history after the losing cross-removal");
+        let reopened_database = StoreDatabase::new(&reopened);
+        assert_eq!(reopened_database.store_current_publication().await.unwrap(), accepted);
+        assert_eq!(reopened_database.store_publication_entries().await.unwrap().into_iter()
+            .map(|entry| (entry.prepared.reference().clone(), entry.bytes)).collect::<Vec<_>>(), expected_publications);
+        let reopened_membership = reopened_peer.membership_for_test().await.unwrap();
+        assert_eq!(reopened_membership.head_refs(), accepted_membership.head_refs());
+        assert_eq!(reopened_membership.current_members(), accepted_membership.current_members());
+        for grant in accepted_membership.active_grant_ids(&peer_pubkey) {
+            assert_eq!(reopened_membership.active_grant(&grant), accepted_membership.active_grant(&grant));
+        }
+    }).await;
 }

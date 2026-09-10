@@ -667,6 +667,11 @@ async fn excluded_device_pending_authority_head_does_not_block_rooted_reads() {
 }
 
 #[tokio::test]
+async fn excluded_pending_assignment_cannot_replace_an_accepted_grant_for_the_same_member() {
+    excluded_device_authority_tail(AuthorityTail::PendingSameMember).await;
+}
+
+#[tokio::test]
 async fn excluded_pending_successor_cannot_change_its_predecessors_accepted_result() {
     excluded_device_authority_tail(AuthorityTail::ChangedPredecessor).await;
 }
@@ -674,6 +679,7 @@ async fn excluded_pending_successor_cannot_change_its_predecessors_accepted_resu
 enum AuthorityTail {
     FabricatedResult,
     Pending,
+    PendingSameMember,
     ChangedPredecessor,
 }
 
@@ -807,6 +813,53 @@ async fn excluded_device_authority_tail(tail: AuthorityTail) {
         .expect("inspect unuploaded head")
         .is_none());
 
+    if matches!(tail, AuthorityTail::PendingSameMember) {
+        let coven_protocol::membership::StoreAuthorityChange::SetMember {
+            user_pubkey,
+            role,
+            grant_id,
+            replaces,
+            ..
+        } = &publication.entry.change
+        else {
+            panic!("the staged admission must assign a member grant");
+        };
+        assert_eq!(user_pubkey, &invited);
+        assert_eq!(role.role(), MemberRole::Member);
+        assert!(replaces.is_empty());
+        founder
+            .admit_member(
+                &invited,
+                None,
+                MemberRole::Follower,
+                &fixture.encryption,
+                &root.store_root_id.to_string(),
+                "Accepted assignment for the same member",
+            )
+            .await
+            .expect("accept the peer assignment while the other admission remains unuploaded");
+        let membership = founder
+            .membership_for_test()
+            .await
+            .expect("read the accepted peer grant");
+        let grants = membership.active_grant_ids(&invited);
+        assert_eq!(grants.len(), 1);
+        assert!(!grants.contains(grant_id));
+        assert!(membership
+            .current_members()
+            .contains(&(invited.clone(), MemberRole::Follower)));
+        assert_eq!(
+            member_database
+                .outbound_membership_mutation()
+                .await
+                .expect("read the retained competing request")
+                .expect("the original request remains staged")
+                .plan_bytes,
+            mutation.plan_bytes,
+            "the peer assignment must not rewrite the pending candidate"
+        );
+    }
+
     founder
         .finalize_peer_exclusion(&fixture.member_registration)
         .await;
@@ -843,6 +896,10 @@ async fn excluded_device_authority_tail(tail: AuthorityTail) {
         .any(|entry| entry.value.payload
             == StorePublicationPayload::Commit(candidate.reference.clone())));
 
+    let accepted_membership = founder
+        .membership_for_test()
+        .await
+        .expect("read the installed accepted grant and head floor");
     let before_append = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
         .open_pinned(storage.as_ref(), &root)
         .await
@@ -852,6 +909,11 @@ async fn excluded_device_authority_tail(tail: AuthorityTail) {
         .expect("genuine accepted authority remains readable after exclusion");
     assert!(!before_append.can_write_now(&invited));
     assert!(before_append.is_owner_now(&keys::public_key_hex(&fixture.member)));
+    assert_eq!(before_append.head_refs(), accepted_membership.head_refs());
+    assert_eq!(
+        before_append.active_grant_ids(&invited),
+        accepted_membership.active_grant_ids(&invited)
+    );
 
     let registration = device
         .latest_local_store_device_registration()
@@ -1063,10 +1125,23 @@ async fn excluded_device_authority_tail(tail: AuthorityTail) {
         "the authority append did not enter the actual accepted publication history"
     );
     match result {
-        Ok(membership) => assert!(
-            !membership.can_write_now(&invited),
-            "an excluded device's fabricated acceptance result activated its new authority entry"
-        ),
+        Ok(membership) => {
+            assert!(
+                !membership.can_write_now(&invited),
+                "an excluded device's fabricated acceptance result activated its new authority entry"
+            );
+            assert_eq!(membership.head_refs(), accepted_membership.head_refs());
+            let expected_grants = accepted_membership.active_grant_ids(&invited);
+            assert_eq!(membership.active_grant_ids(&invited), expected_grants);
+            for grant in expected_grants {
+                assert_eq!(
+                    membership.active_grant(&grant),
+                    accepted_membership.active_grant(&grant),
+                    "the exact accepted grant must survive the competing pending assignment"
+                );
+            }
+            assert!(!membership.contains_coord(&publication.entry.coord()));
+        }
         Err(error) => {
             assert!(
                 publish_fabricated_result,
