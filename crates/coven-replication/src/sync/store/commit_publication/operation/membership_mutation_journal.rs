@@ -1,6 +1,5 @@
 use coven_database::DurableMembershipMutation;
 use coven_database::StoreDatabase;
-use coven_keys::encryption::EncryptionService;
 use coven_protocol::membership::{
     self, MemberRole, MembershipEntry, StoreAuthorityChange, StoreMembershipConflictResolution,
     StoreMembershipConflictResolutionRef,
@@ -10,13 +9,10 @@ use coven_protocol::membership_mutation::{
 };
 use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
 use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
-use coven_protocol::remote_object::{
-    CandidateNonactivation, ClosedRemoteObject, RemoteObjectRecord,
-};
+use coven_protocol::remote_object::{ClosedRemoteObject, RemoteObjectRecord};
 use coven_protocol::store_commit::{self, ObjectHash, StoreBatchCommitRef};
 use coven_protocol::wrapped_store_key::PreparedWrappedStoreKey;
-use coven_storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHomeJoinInfo};
-use coven_storage::CloudSyncObjectStorage;
+use coven_storage::cloud::{CloudAccessState, CloudHomeJoinInfo};
 
 use crate::sync::store::membership::MembershipMutationError;
 
@@ -89,7 +85,6 @@ pub(super) struct RevokeMutationPlan {
     pub(super) publication: PreparedMembershipActivation,
     pub(super) revokee_pubkey: String,
     pub(super) desired_access: CloudAccessState,
-    pub(super) prior_access: CloudAccessState,
     pub(super) wraps: Vec<ReplacementWrappedKey>,
     pub(super) keyring_payload: Vec<u8>,
 }
@@ -114,44 +109,18 @@ impl RevokeMutationPlan {
                 CloudAccessState::Absent { member_pubkey, .. }
                     if member_pubkey == revokee_pubkey
             )
-            && matches!(
-                &self.prior_access,
-                CloudAccessState::Present { member_pubkey, .. }
-                    if member_pubkey == revokee_pubkey
-            )
     }
 
     pub(super) fn validate_closed_shape(&self) -> Result<(), MembershipMutationError> {
         let publication = &self.publication.publication;
         publication.validate()?;
-        let (desired_member, desired_email) = match &self.desired_access {
-            CloudAccessState::Absent {
-                member_pubkey,
-                provider_account_email,
-            } => (member_pubkey, provider_account_email),
-            CloudAccessState::Present { .. } => {
-                return Err(MembershipMutationError::InvalidDurableMutation(
-                    "membership removal requests present provider access".to_string(),
-                ));
-            }
-        };
-        let (prior_member, prior_email) = match &self.prior_access {
-            CloudAccessState::Present {
-                member_pubkey,
-                provider_account_email,
-            } => (member_pubkey, provider_account_email),
-            CloudAccessState::Absent { .. } => {
-                return Err(MembershipMutationError::InvalidDurableMutation(
-                    "membership removal compensation requests absent provider access".to_string(),
-                ));
-            }
-        };
-        if desired_member != &self.revokee_pubkey
-            || prior_member != &self.revokee_pubkey
-            || desired_email != prior_email
-        {
+        if !matches!(
+            &self.desired_access,
+            CloudAccessState::Absent { member_pubkey, .. }
+                if member_pubkey == &self.revokee_pubkey
+        ) {
             return Err(MembershipMutationError::InvalidDurableMutation(
-                "membership removal access and compensation intents disagree".to_string(),
+                "membership removal access differs from its requested member".to_string(),
             ));
         }
         let StoreAuthorityChange::RemoveMember {
@@ -208,22 +177,6 @@ impl RevokeMutationPlan {
                 .collect::<Vec<_>>(),
         )
     }
-
-    pub(super) fn candidate_cleanup_objects(&self) -> Vec<ExactObjectRef> {
-        std::iter::once(self.publication.candidate.reference.object.clone())
-            .chain(std::iter::once(
-                self.publication.transition.entry_ref.object.clone(),
-            ))
-            .chain(std::iter::once(
-                self.publication.publication.head_ref.object.clone(),
-            ))
-            .chain(
-                self.wraps
-                    .iter()
-                    .map(|wrap| wrap.prepared.reference.object.clone()),
-            )
-            .collect()
-    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -247,17 +200,6 @@ impl ResolveMutationPlan {
             &self.resolution,
         )
         .map_err(MembershipMutationError::from)
-    }
-
-    pub(super) fn candidate_cleanup_objects(&self) -> (Vec<ExactObjectRef>, Vec<ExactObjectRef>) {
-        (
-            vec![
-                self.candidate.reference.object.clone(),
-                self.transition.entry_ref.object.clone(),
-                self.publication.head_ref.object.clone(),
-            ],
-            vec![self.reference.object.clone()],
-        )
     }
 
     pub(super) fn remote_objects(
@@ -366,25 +308,11 @@ pub(super) struct ReplacementWrappedKey {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum MembershipMutationProgress {
     Pending,
-    AdmissionGranted {
-        join_info: CloudHomeJoinInfo,
-    },
-    AdmissionActivated {
-        join_info: CloudHomeJoinInfo,
-    },
+    AdmissionGranted { join_info: CloudHomeJoinInfo },
+    AdmissionActivated { join_info: CloudHomeJoinInfo },
     RevokeAccessRemoved,
-    RevokeCandidateNonactivating {
-        nonactivation: CandidateNonactivation,
-    },
-    ResolutionCandidateNonactivating {
-        nonactivation: CandidateNonactivation,
-    },
-    RevokeActivated {
-        candidate: StoreBatchCommitRef,
-    },
-    ResolutionActivated {
-        candidate: StoreBatchCommitRef,
-    },
+    RevokeActivated { candidate: StoreBatchCommitRef },
+    ResolutionActivated { candidate: StoreBatchCommitRef },
 }
 
 impl MembershipMutationProgress {
@@ -395,19 +323,13 @@ impl MembershipMutationProgress {
 
 pub(super) struct MutationPersistence {
     database: StoreDatabase,
-    storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
     intent_hash: ObjectHash,
 }
 
 impl MutationPersistence {
-    pub(super) fn new(
-        database: StoreDatabase,
-        storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
-        intent_hash: ObjectHash,
-    ) -> MutationPersistence {
+    pub(super) fn new(database: StoreDatabase, intent_hash: ObjectHash) -> MutationPersistence {
         MutationPersistence {
             database,
-            storage,
             intent_hash,
         }
     }
@@ -438,102 +360,6 @@ impl MutationPersistence {
     pub(super) async fn complete(&self) -> Result<(), MembershipMutationError> {
         self.database
             .complete_membership_mutation(self.intent_hash)
-            .await?;
-        Ok(())
-    }
-
-    pub(super) async fn finish_nonactivating_revoke(
-        &self,
-        plan: &RevokeMutationPlan,
-    ) -> Result<(), MembershipMutationError> {
-        let candidate = &plan.publication.candidate;
-        let candidate_objects = plan.candidate_cleanup_objects();
-        let cleanup = self
-            .database
-            .membership_candidate_cleanup_targets(
-                self.intent_hash,
-                candidate.reference.clone(),
-                candidate_objects,
-            )
-            .await?;
-        self.finish_nonactivating_revoke_with_targets(plan, cleanup)
-            .await
-    }
-
-    async fn finish_nonactivating_revoke_with_targets(
-        &self,
-        plan: &RevokeMutationPlan,
-        cleanup: Vec<coven_database::CandidateCleanupObject>,
-    ) -> Result<(), MembershipMutationError> {
-        let candidate = &plan.publication.candidate;
-        match self
-            .storage
-            .set_member_access(plan.prior_access.clone())
-            .await?
-        {
-            CloudAccessOutcome::Present(_) => {}
-            CloudAccessOutcome::Absent(_) => {
-                return Err(MembershipMutationError::InvalidDurableMutation(
-                    "provider returned absent while restoring a nonactivated removal".to_string(),
-                ));
-            }
-        }
-        crate::sync::store::authorization::delete_candidate_cleanup_targets::<
-            MembershipMutationError,
-        >(self.storage.as_ref(), cleanup)
-        .await?;
-        let candidate_objects = plan.candidate_cleanup_objects();
-        self.database
-            .complete_nonactivating_membership_candidate_mutation(
-                self.intent_hash,
-                candidate.reference.clone(),
-                candidate_objects,
-                Vec::new(),
-                Some(
-                    EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
-                        .map_err(MembershipMutationError::Encryption)?
-                        .current_generation(),
-                ),
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub(super) async fn finish_nonactivating_resolution(
-        &self,
-        plan: &ResolveMutationPlan,
-    ) -> Result<(), MembershipMutationError> {
-        let (candidate_objects, retained) = plan.candidate_cleanup_objects();
-        let cleanup = self
-            .database
-            .membership_candidate_cleanup_targets(
-                self.intent_hash,
-                plan.candidate.reference.clone(),
-                candidate_objects.iter().chain(&retained).cloned().collect(),
-            )
-            .await?;
-        self.finish_nonactivating_resolution_with_targets(plan, cleanup)
-            .await
-    }
-
-    async fn finish_nonactivating_resolution_with_targets(
-        &self,
-        plan: &ResolveMutationPlan,
-        cleanup: Vec<coven_database::CandidateCleanupObject>,
-    ) -> Result<(), MembershipMutationError> {
-        let (candidate_objects, retained) = plan.candidate_cleanup_objects();
-        crate::sync::store::authorization::delete_candidate_cleanup_targets::<
-            MembershipMutationError,
-        >(self.storage.as_ref(), cleanup)
-        .await?;
-        self.database
-            .complete_nonactivating_membership_candidate_mutation(
-                self.intent_hash,
-                plan.candidate.reference.clone(),
-                candidate_objects,
-                retained,
-                None,
-            )
             .await?;
         Ok(())
     }

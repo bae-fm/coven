@@ -362,25 +362,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         };
         let persistence = self.membership_mutation_persistence(intent_hash);
         plan.validate_closed_shape()?;
-        if let MembershipMutationProgress::ResolutionCandidateNonactivating { nonactivation } =
-            &progress
-        {
-            if nonactivation
-                .reference()
-                .map_err(MembershipMutationError::from)?
-                != plan.candidate.reference
-            {
-                return Err(MembershipMutationError::InvalidDurableMutation(
-                    "resolution nonactivation names another candidate".to_string(),
-                )
-                .into());
-            }
-            persistence.finish_nonactivating_resolution(&plan).await?;
-            return Err(MembershipMutationError::InvalidDurableMutation(
-                "membership resolution candidate did not activate".to_string(),
-            )
-            .into());
-        }
         if let MembershipMutationProgress::ResolutionActivated { candidate } = &progress {
             if candidate != &plan.candidate.reference {
                 return Err(MembershipMutationError::InvalidDurableMutation(

@@ -514,14 +514,6 @@ impl CloudSyncRotationStateAccess for CloudSyncConnection {
             .mark_committed_mutation(generation, mutation)
     }
 
-    fn remove_candidate(
-        &self,
-        generation: u64,
-        mutation: ObjectHash,
-    ) -> Result<(), RotationStateError> {
-        self.pending_rotation.remove_candidate(generation, mutation)
-    }
-
     fn gate(&self) -> Option<RotationGate> {
         self.pending_rotation.gate()
     }

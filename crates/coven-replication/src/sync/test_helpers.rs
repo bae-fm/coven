@@ -4990,14 +4990,6 @@ where
         self.inner.mark_committed_mutation(generation, mutation)
     }
 
-    fn remove_candidate(
-        &self,
-        generation: u64,
-        mutation: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<(), coven_storage::RotationStateError> {
-        self.inner.remove_candidate(generation, mutation)
-    }
-
     fn gate(&self) -> Option<coven_protocol::objects::RotationGate> {
         self.inner.gate()
     }

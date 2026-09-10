@@ -171,10 +171,6 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             revokee_pubkey: revokee_pubkey.to_string(),
             desired_access: CloudAccessState::Absent {
                 member_pubkey: revokee_pubkey.to_string(),
-                provider_account_email: provider_account_email.clone(),
-            },
-            prior_access: CloudAccessState::Present {
-                member_pubkey: revokee_pubkey.to_string(),
                 provider_account_email,
             },
             wraps,
@@ -441,33 +437,6 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             operation.membership = validated_chain;
             return EncryptionService::from_keyring_payload(plan.keyring_payload)
                 .map_err(MembershipMutationError::Encryption);
-        }
-        if let MembershipMutationProgress::RevokeCandidateNonactivating { nonactivation } =
-            &progress
-        {
-            let candidate = &plan.publication.candidate;
-            nonactivation
-                .validate()
-                .map_err(MembershipMutationError::from)?;
-            if nonactivation
-                .reference()
-                .map_err(MembershipMutationError::from)?
-                != candidate.reference
-            {
-                return Err(MembershipMutationError::InvalidDurableMutation(
-                    "membership nonactivation names another candidate".to_string(),
-                ));
-            }
-            persistence.finish_nonactivating_revoke(&plan).await?;
-            let generation = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
-                .map_err(MembershipMutationError::Encryption)?
-                .current_generation();
-            pending_rotation
-                .remove_candidate(generation, persistence.intent_hash())
-                .map_err(MembershipMutationError::RotationState)?;
-            return Err(MembershipMutationError::InvalidDurableMutation(
-                "membership removal candidate did not activate".to_string(),
-            ));
         }
         let publication = plan.publication.publication.clone();
         let keyring = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())

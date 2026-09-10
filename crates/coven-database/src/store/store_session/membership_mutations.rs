@@ -1,10 +1,7 @@
-use super::candidate_records::candidate_cleanup_targets_on;
 use super::*;
 use crate::store::StoreSession;
 use crate::*;
-use coven_protocol::objects::ExactObjectRef;
-use coven_protocol::remote_object::RemoteObjectRecord;
-use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
+use coven_protocol::store_commit::ObjectHash;
 use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
 
@@ -404,126 +401,6 @@ impl StoreSession<'_> {
         Ok(replacement_hash)
     }
 
-    fn complete_nonactivating_membership_candidate_mutation(
-        &mut self,
-        intent_hash: ObjectHash,
-        candidate: StoreBatchCommitRef,
-        candidate_objects: Vec<ExactObjectRef>,
-        retained_authorities: Vec<ExactObjectRef>,
-        rotation_generation: Option<u64>,
-    ) -> Result<(), DbError> {
-        let conn = self.conn;
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        let mut unique = BTreeSet::new();
-        for object in &candidate_objects {
-            let object_id = remote_object_id(object);
-            if !unique.insert(object_id) {
-                return Err(DbError::Message(
-                    "nonactivating membership candidate repeats an exact object".to_string(),
-                ));
-            }
-        }
-        super::candidate_records::require_candidate_cleanup_complete_on(
-            &tx,
-            &candidate,
-            &candidate_objects,
-            "losing membership candidate cleanup is incomplete",
-        )?;
-        for object in &retained_authorities {
-            let object_id = remote_object_id(object);
-            if !unique.insert(object_id) {
-                return Err(DbError::Message(
-                    "nonactivating membership authority repeats an exact object".to_string(),
-                ));
-            }
-            let remote = tx
-                .query_row(
-                    "SELECT state FROM remote_objects WHERE object_id = ?1",
-                    [object_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(DbError::from)?
-                .map(|encoded| {
-                    serde_json::from_str::<RemoteObjectRecord>(&encoded).map_err(|error| {
-                        DbError::context(
-                            format!("parse nonactivating membership authority {object_id}"),
-                            error,
-                        )
-                    })
-                })
-                .transpose()?;
-            match remote {
-                Some(remote) => {
-                    if !remote
-                        .candidate_cleanup_complete(&candidate)
-                        .map_err(DbError::from)?
-                    {
-                        return Err(DbError::Message(format!(
-                            "membership authority {object_id} still owns its losing candidate"
-                        )));
-                    }
-                }
-                None => {
-                    let inert = load_protocol_inert_object_on(&tx, object_id)?;
-                    if inert.object_id() != object_id {
-                        return Err(DbError::Message(
-                            "protocol-inert membership authority changed exact identity"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-        super::candidate_records::delete_remote_objects_on(
-            &tx,
-            candidate_objects.iter().map(remote_object_id),
-            "losing membership",
-        )?;
-        if tx
-            .execute(
-                "DELETE FROM outbound_membership_mutation \
-                 WHERE singleton = 1 AND intent_hash = ?1",
-                [intent_hash.to_string()],
-            )
-            .map_err(DbError::from)?
-            != 1
-        {
-            return Err(DbError::Message(
-                "membership mutation changed during nonactivation completion".to_string(),
-            ));
-        }
-        if let Some(generation) = rotation_generation {
-            super::membership_rotation::remove_rotation_candidate_on(&tx, intent_hash, generation)?;
-        }
-        tx.commit().map_err(DbError::from)
-    }
-
-    fn membership_candidate_cleanup_targets(
-        &mut self,
-        intent_hash: ObjectHash,
-        candidate: &StoreBatchCommitRef,
-        objects: &[ExactObjectRef],
-    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        let conn = self.conn;
-        let exists: bool = conn
-            .query_row(
-                "SELECT EXISTS(
-                 SELECT 1 FROM outbound_membership_mutation
-                 WHERE singleton = 1 AND intent_hash = ?1
-             )",
-                [intent_hash.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
-        if !exists {
-            return Err(DbError::Message(
-                "membership mutation changed before candidate cleanup".to_string(),
-            ));
-        }
-        candidate_cleanup_targets_on(conn, candidate, objects)
-    }
-
     fn complete_membership_mutation(&mut self, intent_hash: ObjectHash) -> Result<(), DbError> {
         let conn = self.conn;
         let deleted = conn
@@ -642,38 +519,6 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         self.call_store(move |session| {
             session.update_membership_mutation_progress(intent_hash, progress_bytes)
-        })
-        .await
-    }
-
-    pub async fn complete_nonactivating_membership_candidate_mutation(
-        &self,
-        intent_hash: ObjectHash,
-        candidate: StoreBatchCommitRef,
-        candidate_objects: Vec<ExactObjectRef>,
-        retained_authorities: Vec<ExactObjectRef>,
-        rotation_generation: Option<u64>,
-    ) -> Result<(), DbError> {
-        self.call_store(move |session| {
-            session.complete_nonactivating_membership_candidate_mutation(
-                intent_hash,
-                candidate,
-                candidate_objects,
-                retained_authorities,
-                rotation_generation,
-            )
-        })
-        .await
-    }
-
-    pub async fn membership_candidate_cleanup_targets(
-        &self,
-        intent_hash: ObjectHash,
-        candidate: StoreBatchCommitRef,
-        objects: Vec<ExactObjectRef>,
-    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        self.call_store(move |session| {
-            session.membership_candidate_cleanup_targets(intent_hash, &candidate, &objects)
         })
         .await
     }

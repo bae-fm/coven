@@ -157,11 +157,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         intent_hash: coven_protocol::store_commit::ObjectHash,
     ) -> MutationPersistence {
-        MutationPersistence::new(
-            self.database.clone(),
-            std::sync::Arc::clone(self.storage),
-            intent_hash,
-        )
+        MutationPersistence::new(self.database.clone(), intent_hash)
     }
 
     pub(crate) async fn prepare_membership_transition(

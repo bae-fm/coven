@@ -8,8 +8,6 @@ pub enum RotationStateError {
     Gate(#[from] coven_protocol::objects::RotationGateError),
     #[error("rotation state lock is poisoned")]
     LockPoisoned,
-    #[error("rotation candidate gate is absent during proven nonactivation")]
-    MissingCandidateDuringNonactivation,
 }
 
 pub trait CloudSyncRotationStateAccess: Send + Sync {
@@ -19,11 +17,6 @@ pub trait CloudSyncRotationStateAccess: Send + Sync {
         mutation: ObjectHash,
     ) -> Result<(), RotationStateError>;
     fn mark_committed_mutation(
-        &self,
-        generation: u64,
-        mutation: ObjectHash,
-    ) -> Result<(), RotationStateError>;
-    fn remove_candidate(
         &self,
         generation: u64,
         mutation: ObjectHash,
@@ -75,22 +68,6 @@ impl PendingRotation {
             generation,
             mutation,
         )?);
-        Ok(())
-    }
-
-    pub fn remove_candidate(
-        &self,
-        generation: u64,
-        mutation: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<(), RotationStateError> {
-        let mut recorded = self
-            .0
-            .write()
-            .map_err(|_| RotationStateError::LockPoisoned)?;
-        let gate = recorded
-            .clone()
-            .ok_or(RotationStateError::MissingCandidateDuringNonactivation)?;
-        *recorded = gate.remove_candidate(generation, mutation)?;
         Ok(())
     }
 
@@ -163,14 +140,6 @@ impl CloudSyncRotationStateAccess for PendingRotation {
         mutation: ObjectHash,
     ) -> Result<(), RotationStateError> {
         PendingRotation::mark_committed_mutation(self, generation, mutation)
-    }
-
-    fn remove_candidate(
-        &self,
-        generation: u64,
-        mutation: ObjectHash,
-    ) -> Result<(), RotationStateError> {
-        PendingRotation::remove_candidate(self, generation, mutation)
     }
 
     fn gate(&self) -> Option<RotationGate> {
