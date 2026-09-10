@@ -518,7 +518,7 @@ pub(crate) fn validate_composed_snapshot_history_summary(
     summary
         .validate_snapshot_baseline()
         .map_err(StorePullError::Protocol)?;
-    if summary.frontier().map_err(StorePullError::Protocol)? != coverage.0 {
+    if summary.post_state.frontier() != coverage {
         return Err(StorePullError::InvalidState(
             "Merge snapshot history does not exactly cover its signed frontier".to_string(),
         ));

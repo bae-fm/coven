@@ -405,6 +405,17 @@ fn snapshot_acknowledgement_summary_rejects_mismatched_exact_commit_bounds() {
 
     let mut different_hash = reference.clone();
     different_hash.commit_hash = ObjectHash::digest(b"another publication at the same coordinate");
+    for causal_cut in [
+        BTreeMap::new(),
+        BTreeMap::from([(reference.coord.clone(), different_hash.clone())]),
+    ] {
+        let mut invalid_summary = summary.clone();
+        invalid_summary.causal_cut = causal_cut;
+        assert!(matches!(
+            invalid_summary.validate_snapshot_baseline(),
+            Err(StoreProtocolError::DeviceStateMismatch)
+        ));
+    }
     let mut future = reference.clone();
     future.coord.sequence += 1;
     let foreign_stream = AuthorStreamId::from_digest(ObjectHash::digest(b"foreign author stream"));

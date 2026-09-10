@@ -244,8 +244,9 @@ impl StoreDatabase {
             let metadata = Self::validated_installed_baseline_metadata(records, baseline)?;
             if metadata
                 .history_summary
+                .post_state
                 .frontier()
-                .map_err(|error| DbError::context("snapshot Merge checkpoint frontier", error))?
+                .commits()
                 .get(&snapshot_reference.coord.stream_id)
                 != Some(&snapshot_reference)
             {
@@ -305,13 +306,14 @@ impl StoreDatabase {
         summary
             .validate_snapshot_baseline()
             .map_err(|error| DbError::context("snapshot Merge checkpoint", error))?;
-        let frontier = summary.frontier().map_err(DbError::from)?;
         // Every stream the coverage names, not just the one a caller asked
         // about: `post_state` is the merge across the whole frontier, so
         // comparing one stream's state against it only ever agreed because the
         // stores that reached here had one stream.
         let (expected_state, state) = records.store_device_state_for_history_cut(
-            &coven_protocol::store_commit::StoreHistoryCut(frontier),
+            &coven_protocol::store_commit::StoreHistoryCut(
+                summary.post_state.frontier().commits().clone(),
+            ),
         )?;
         if summary.post_state != expected_state || authority.metadata.state.devices != state {
             return Err(DbError::Message(

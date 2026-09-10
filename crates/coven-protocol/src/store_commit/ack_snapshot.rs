@@ -281,7 +281,7 @@ impl RetainedVerifiedMergeHistorySummary {
     ) -> Result<(), StoreProtocolError> {
         self.validate_snapshot_baseline()?;
         if self.store_root_hash != store_root_hash
-            || self.frontier()? != coverage.0
+            || self.post_state.frontier() != coverage
             || self.post_state
                 != StoreDeviceStateRef::from_resolved(coverage.clone(), &state.devices)?
         {

@@ -399,11 +399,17 @@ pub struct OpenedRetainedMergeHistorySummary {
 }
 
 impl RetainedVerifiedMergeHistorySummary {
-    pub fn frontier(
-        &self,
-    ) -> Result<BTreeMap<AuthorStreamId, StoreBatchCommitRef>, StoreProtocolError> {
+    pub fn validate_shape(&self) -> Result<(), StoreProtocolError> {
+        require_version(self.version)?;
+        self.reclaim.validate()?;
+        self.membership_floor.validate()?;
         let mut frontier = BTreeMap::new();
-        for reference in self.causal_cut.values() {
+        for (coord, reference) in &self.causal_cut {
+            if coord != &reference.coord {
+                return Err(StoreProtocolError::Malformed(
+                    "Merge history causal cut contains a mismatched coordinate".to_string(),
+                ));
+            }
             let stream_id = reference.coord.stream_id;
             let sequence = reference.coord.sequence;
             match frontier.entry(stream_id) {
@@ -417,22 +423,7 @@ impl RetainedVerifiedMergeHistorySummary {
                 }
             }
         }
-        Ok(frontier)
-    }
-
-    pub fn validate_shape(&self) -> Result<(), StoreProtocolError> {
-        require_version(self.version)?;
-        self.reclaim.validate()?;
-        self.membership_floor.validate()?;
-        for (coord, reference) in &self.causal_cut {
-            if coord != &reference.coord {
-                return Err(StoreProtocolError::Malformed(
-                    "Merge history causal cut contains a mismatched coordinate".to_string(),
-                ));
-            }
-        }
-        let expected_frontier = CommitFrontier(self.frontier()?);
-        if self.post_state.frontier() != &expected_frontier {
+        if self.post_state.frontier() != &CommitFrontier(frontier) {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         for (stream, reference) in &self.last_non_acknowledgement_commits {

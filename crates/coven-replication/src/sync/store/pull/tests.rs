@@ -99,7 +99,7 @@ async fn one_retained_checkpoint() -> (
     let summary = meta.history_summary.clone();
     let post_state = database
         .store_device_state_for_history_cut(&StoreHistoryCut(
-            summary.frontier().expect("derive checkpoint frontier"),
+            summary.post_state.frontier().commits().clone(),
         ))
         .await
         .expect("resolve checkpoint state")
