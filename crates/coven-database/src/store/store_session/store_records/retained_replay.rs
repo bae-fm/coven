@@ -23,7 +23,7 @@ pub(crate) struct RetainedReplayBaselineRow {
 pub(crate) struct SnapshotRetentionRows {
     pub(crate) exclusion_activations: Vec<(String, String)>,
     pub(crate) circle_bootstraps: Vec<(String, String, String)>,
-    pub(crate) materialization_refs: Vec<String>,
+    pub(crate) materialization_refs: BTreeSet<String>,
 }
 
 pub(super) struct PreparedRetainedReplayBaseline {
@@ -159,12 +159,7 @@ impl StoreRecords<'_> {
                 ))
             },
         )?;
-        let materializations = crate::query_mapped_rows(
-            self.conn,
-            "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
-            [],
-            |row| row.get::<_, String>(0),
-        )?;
+        let materializations = self.retained_materialization_refs()?;
         Ok(SnapshotRetentionRows {
             exclusion_activations: exclusions,
             circle_bootstraps: bootstraps,
@@ -1225,12 +1220,7 @@ impl StoreTransaction<'_, '_> {
         // The checkpoint owns its exact tips. Other states survive only while
         // an independently retained materialization consumes their exact refs.
         let mut required = cut.commits().values().cloned().collect::<BTreeSet<_>>();
-        let retained = crate::query_mapped_rows(
-            conn,
-            "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
-            [],
-            |row| row.get::<_, String>(0),
-        )?;
+        let retained = StoreRecords::new(conn, self.store_dir).retained_materialization_refs()?;
         for encoded in retained {
             let reference: coven_protocol::store_commit::StoreBatchCommitRef =
                 serde_json::from_str(&encoded).map_err(|error| {
