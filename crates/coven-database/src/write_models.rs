@@ -77,7 +77,6 @@ pub(crate) enum ReplayJournal<'a> {
 pub(crate) struct SettledStoreWrite {
     pub ordinal: i64,
     pub write_id: WriteId,
-    pub fold: SettledWriteFold,
     pub status: coven_protocol::write::WriteStatus,
     pub observed: StoreWriteBase,
     pub changeset_hash: ObjectHash,
@@ -92,38 +91,6 @@ pub(crate) struct RetainedStoreWriteManifest {
     pub changeset_hash: String,
     pub prepared: Option<String>,
     pub input_hash: ObjectHash,
-}
-
-/// What a baseline at some cut has to do with one settled write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SettledWriteFold {
-    /// Local-only. The image takes its rows, and the journal keeps nothing:
-    /// local-only is the whole of what could ever be said about the write, and
-    /// its caller was told that when it committed. A row missing from the
-    /// journal therefore means exactly this, which is how the status of one is
-    /// still answerable afterwards.
-    LocalOnly,
-    /// Published, at a commit the cut covers. The image takes its local rows;
-    /// the row stays as this device's record of where the write landed, which
-    /// is the one answer that has to survive an advance now that the
-    /// per-position index does not.
-    Published,
-    /// Discarded or retracted. Its rows were reversed, so the image must not
-    /// put them back, and the row stays as the record of that.
-    Reversed,
-}
-
-impl SettledWriteFold {
-    /// Whether the baseline image has to state this write's local rows.
-    pub(crate) fn states_local_rows(self) -> bool {
-        matches!(self, Self::LocalOnly | Self::Published)
-    }
-
-    /// Whether the journal keeps the write's receipt — its id and status —
-    /// after the image has absorbed everything else about it.
-    pub(crate) fn keeps_receipt(self) -> bool {
-        !matches!(self, Self::LocalOnly)
-    }
 }
 
 #[derive(Clone, Copy)]

@@ -380,8 +380,8 @@ impl StoreDatabase {
             let status: WriteStatus = serde_json::from_str(&row.status).map_err(|error| {
                 DbError::context(format!("settled write {} status", row.write_id), error)
             })?;
-            let fold = match status.clone() {
-                WriteStatus::LocalOnly => crate::SettledWriteFold::LocalOnly,
+            match &status {
+                WriteStatus::LocalOnly | WriteStatus::Resolved(_) => {}
                 WriteStatus::Published(published) => {
                     let covered = match published.as_ref() {
                         PublishedWrite::Commit(position) => cut.covers_commit(position.commit()),
@@ -392,9 +392,7 @@ impl StoreDatabase {
                     if !covered {
                         break;
                     }
-                    crate::SettledWriteFold::Published
                 }
-                WriteStatus::Resolved(_) => crate::SettledWriteFold::Reversed,
                 WriteStatus::Pending
                 | WriteStatus::Publishing
                 | WriteStatus::Blocked(_)
@@ -406,7 +404,9 @@ impl StoreDatabase {
             )?;
             let observed = CommitFrontier::from_refs(base.dependencies.clone())
                 .map_err(|error| DbError::context("settled write observed frontier", error))?;
-            if fold.states_local_rows() && !cut.covers(&observed) {
+            if matches!(status, WriteStatus::LocalOnly | WriteStatus::Published(_))
+                && !cut.covers(&observed)
+            {
                 break;
             }
             let changeset_hash = row.changeset_hash.parse::<ObjectHash>().map_err(|error| {
@@ -419,7 +419,6 @@ impl StoreDatabase {
             settled.push(crate::SettledStoreWrite {
                 ordinal: row.ordinal,
                 write_id: WriteId::from_generated(row.write_id),
-                fold,
                 status,
                 observed: base,
                 changeset_hash,
@@ -489,8 +488,8 @@ impl StoreDatabase {
                     row.write_id
                 )));
             }
-            let write = match (settled.fold, status) {
-                (crate::SettledWriteFold::LocalOnly, WriteStatus::LocalOnly) => {
+            let write = match status {
+                WriteStatus::LocalOnly => {
                     let (effect, observed) = Self::retained_write_effect_on(
                         records,
                         settled.write_id.clone(),
@@ -500,7 +499,7 @@ impl StoreDatabase {
                     )?;
                     MergeReplayWrite::LocalOnly { effect, observed }
                 }
-                (crate::SettledWriteFold::Published, WriteStatus::Published(published)) => {
+                WriteStatus::Published(published) => {
                     let (effect, observed) = Self::retained_write_effect_on(
                         records,
                         settled.write_id.clone(),
@@ -519,11 +518,9 @@ impl StoreDatabase {
                         }
                     }
                 }
-                (crate::SettledWriteFold::Reversed, WriteStatus::Resolved(_)) => {
-                    MergeReplayWrite::Consumed {
-                        write_id: settled.write_id.clone(),
-                    }
-                }
+                WriteStatus::Resolved(_) => MergeReplayWrite::Consumed {
+                    write_id: settled.write_id.clone(),
+                },
                 _ => {
                     return Err(DbError::Message(format!(
                         "folded write {} changed status during baseline capture",

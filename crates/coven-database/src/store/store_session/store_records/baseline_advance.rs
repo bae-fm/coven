@@ -290,13 +290,16 @@ impl StoreTransaction<'_, '_> {
                 [write_id.as_str()],
             )
             .map_err(DbError::from)?;
-            let statement = if settled.fold.keeps_receipt() {
+            let statement = if matches!(
+                settled.status,
+                coven_protocol::write::WriteStatus::LocalOnly
+            ) {
+                "DELETE FROM store_writes WHERE write_id = ?1"
+            } else {
                 "UPDATE store_writes
                  SET affected_rows = NULL, changeset_hash = NULL,
                      base = NULL, blob_facts = NULL, rebased = NULL
                  WHERE write_id = ?1"
-            } else {
-                "DELETE FROM store_writes WHERE write_id = ?1"
             };
             let touched = conn
                 .execute(statement, [write_id.as_str()])

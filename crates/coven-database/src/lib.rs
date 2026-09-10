@@ -311,7 +311,7 @@ pub use write_models::{
     StoreWriteRouting,
 };
 pub(crate) use write_models::{
-    MergeReplayWrite, MergeReplayWriteEffect, ReplayJournal, SettledStoreWrite, SettledWriteFold,
+    MergeReplayWrite, MergeReplayWriteEffect, ReplayJournal, SettledStoreWrite,
 };
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
