@@ -241,9 +241,9 @@ impl StoreDatabase {
                     "snapshot Merge checkpoint coordinate contains another commit".to_string(),
                 ));
             }
-            let opened = Self::open_installed_baseline_history_summary(records, baseline)?;
-            if opened
-                .summary
+            let metadata = Self::validated_installed_baseline_metadata(records, baseline)?;
+            if metadata
+                .history_summary
                 .frontier()
                 .map_err(|error| DbError::context("snapshot Merge checkpoint frontier", error))?
                 .get(&snapshot_reference.coord.stream_id)
@@ -253,7 +253,12 @@ impl StoreDatabase {
                     "snapshot Merge checkpoint is absent from its signed frontier".to_string(),
                 ));
             }
-            return Ok(crate::RetainedMergeHistoryCheckpoint::Snapshot(opened));
+            return Ok(crate::RetainedMergeHistoryCheckpoint::Snapshot(
+                coven_protocol::store_commit::OpenedRetainedMergeHistorySummary {
+                    summary: metadata.history_summary.clone(),
+                    post_state: metadata.state.devices.clone(),
+                },
+            ));
         }
         let (stored_ref, input_hash) =
             records.retained_materialization_identity(&stream, sequence_sql)?;
@@ -281,22 +286,22 @@ impl StoreDatabase {
         )
     }
 
-    /// The signed history summary the installed baseline rests on, opened
+    /// The signed metadata the installed baseline rests on, checked
     /// against the device state this database holds at its coverage.
     ///
     /// This is the authority that stands in for everything under the coverage:
     /// a walk that stops at the baseline resumes its composition from here
     /// rather than from the retired commits behind it.
-    pub(crate) fn open_installed_baseline_history_summary(
+    pub(crate) fn validated_installed_baseline_metadata<'baseline>(
         records: StoreRecords<'_>,
-        baseline: &RetainedReplayBaseline,
-    ) -> Result<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
+        baseline: &'baseline RetainedReplayBaseline,
+    ) -> Result<&'baseline coven_protocol::store_commit::SnapshotMeta, DbError> {
         let RetainedReplayAuthority::InstalledSnapshot(authority) = &baseline.authority else {
             return Err(DbError::Message(
                 "snapshot Merge checkpoint has genesis replay authority".to_string(),
             ));
         };
-        let summary = authority.metadata.history_summary.clone();
+        let summary = &authority.metadata.history_summary;
         summary
             .validate_snapshot_baseline()
             .map_err(|error| DbError::context("snapshot Merge checkpoint", error))?;
@@ -308,17 +313,12 @@ impl StoreDatabase {
         let (expected_state, state) = records.store_device_state_for_history_cut(
             &coven_protocol::store_commit::StoreHistoryCut(frontier),
         )?;
-        if summary.post_state != expected_state {
+        if summary.post_state != expected_state || authority.metadata.state.devices != state {
             return Err(DbError::Message(
                 "snapshot Merge checkpoint state differs from its signed reference".to_string(),
             ));
         }
-        Ok(
-            coven_protocol::store_commit::OpenedRetainedMergeHistorySummary {
-                post_state: state,
-                summary,
-            },
-        )
+        Ok(&authority.metadata)
     }
 
     pub(crate) fn open_retained_merge_history_checkpoint_on(

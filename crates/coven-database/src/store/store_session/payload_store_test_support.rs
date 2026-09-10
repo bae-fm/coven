@@ -117,6 +117,35 @@ impl StoreDatabase {
         .await
     }
 
+    pub async fn assert_installed_baseline_rejects_altered_coverage_for_test(
+        &self,
+    ) -> Result<(), DbError> {
+        self.call_store(|session| {
+            let original = session.installed_replay_baseline()?;
+            assert_eq!(original.coverage().position_count(), 1);
+            let connection = session.conn;
+            let transaction = connection.unchecked_transaction()?;
+            assert_eq!(transaction.execute("DELETE FROM snapshot_coverage", [])?, 1);
+            let altered = session.installed_replay_baseline();
+            transaction.rollback()?;
+            let error = altered.expect_err("live coverage must match its installed authority");
+            assert!(matches!(error, DbError::Message(message)
+                if message == "installed snapshot coverage differs from its replay authority"));
+            let restored = session.installed_replay_baseline()?;
+            assert_eq!(restored.coverage(), original.coverage());
+            assert_eq!(
+                restored
+                    .covered_states()
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+                original
+                    .covered_states()
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            );
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn downgrade_replay_baseline_coven_schema_to_v0_for_test(
         &self,
         include_routing: bool,

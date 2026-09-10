@@ -72,7 +72,7 @@ impl VerifiedMergeMembershipPrefix {
             match checkpoint {
                 coven_database::RetainedMergeHistoryCheckpoint::Snapshot(checkpoint) => {
                     prefix.insert_snapshot_summary(
-                        checkpoint,
+                        &checkpoint.summary,
                         checkpoint.summary.post_state.frontier(),
                     )?;
                 }
@@ -87,20 +87,19 @@ impl VerifiedMergeMembershipPrefix {
         Ok(prefix)
     }
 
-    fn insert_snapshot_summary(
+    pub(super) fn insert_snapshot_summary(
         &mut self,
-        checkpoint: &OpenedRetainedMergeHistorySummary,
+        checkpoint: &RetainedVerifiedMergeHistorySummary,
         frontier: &CommitFrontier,
     ) -> Result<(), StorePullError> {
         self.commits.extend(
             checkpoint
-                .summary
                 .causal_cut
                 .values()
                 .filter(|reference| frontier.covers_commit(reference))
                 .cloned(),
         );
-        for proof in checkpoint.summary.membership_proofs.values() {
+        for proof in checkpoint.membership_proofs.values() {
             if frontier.covers_commit(&proof.commit) {
                 self.insert_retained_proof(proof)?;
             }
@@ -216,15 +215,16 @@ pub(crate) fn verified_merge_membership_prefix(
         .iter()
         .any(|reference| history.superseded(reference))
     {
-        let summary = history.baseline.history_summary().ok_or_else(|| {
+        let snapshot = history.baseline.snapshot().ok_or_else(|| {
             StorePullError::InvalidState(
                 "snapshot-covered membership prefix has no retained history summary".to_string(),
             )
         })?;
+        let summary = &snapshot.meta.history_summary;
         let mut frontier = CommitFrontier(BTreeMap::new());
         for reference in &closure {
             if history.superseded(reference)
-                && summary.summary.causal_cut.get(&reference.coord) != Some(reference)
+                && summary.causal_cut.get(&reference.coord) != Some(reference)
             {
                 return Err(StorePullError::InvalidState(
                     "snapshot-covered membership predecessor has no exact accepted reference"

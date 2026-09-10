@@ -28,7 +28,7 @@ impl MergeHistoryVerifier<'_> {
                 }
                 if self.history.superseded(&cursor) {
                     let baseline = &self.history.baseline;
-                    let Some(opened) = baseline.history_summary() else {
+                    let Some(snapshot) = baseline.snapshot() else {
                         return Err(StorePullError::InvalidState(
                             "retired acknowledgement interval has no verified summary".into(),
                         ));
@@ -38,8 +38,11 @@ impl MergeHistoryVerifier<'_> {
                     if baseline.coverage().0.get(stream) != Some(&cursor) {
                         return Ok(false);
                     }
-                    if let Some(meaningful) =
-                        opened.summary.last_non_acknowledgement_commits.get(stream)
+                    if let Some(meaningful) = snapshot
+                        .meta
+                        .history_summary
+                        .last_non_acknowledgement_commits
+                        .get(stream)
                     {
                         let Some(known) = known else {
                             return Ok(false);

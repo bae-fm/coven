@@ -62,9 +62,10 @@ async fn assert_snapshot_membership_prefix() {
         .expect("open the installed verified baseline");
     assert!(baseline.stands_on(&snapshot.reference));
     let proof = baseline
-        .history_summary()
+        .snapshot()
         .expect("snapshot retains its membership authority")
-        .summary
+        .meta
+        .history_summary
         .membership_proofs
         .values()
         .find(|proof| {

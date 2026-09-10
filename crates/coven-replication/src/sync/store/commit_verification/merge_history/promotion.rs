@@ -186,17 +186,13 @@ impl<'a> MergeHistoryVerifier<'a> {
         request
             .verify(&root, &promoter.value)
             .map_err(StorePullError::Protocol)?;
-        if let Some(proof) = self
-            .history
-            .baseline
-            .history_summary()
-            .and_then(|baseline| {
-                baseline
-                    .summary
-                    .pending_owner_promotions
-                    .get(&request.promotion_id)
-            })
-        {
+        if let Some(proof) = self.history.baseline.snapshot().and_then(|baseline| {
+            baseline
+                .meta
+                .history_summary
+                .pending_owner_promotions
+                .get(&request.promotion_id)
+        }) {
             if proof.request()? != request {
                 return Err(StorePullError::InvalidState(
                     "promotion id names another retained request".into(),
@@ -290,13 +286,14 @@ impl<'a> MergeHistoryVerifier<'a> {
             .baseline
             .covers(&acceptance.activation.commit)
         {
-            let baseline = self.history.baseline.history_summary().ok_or_else(|| {
+            let baseline = self.history.baseline.snapshot().ok_or_else(|| {
                 StorePullError::InvalidState(
                     "covered request has no installed snapshot authority".into(),
                 )
             })?;
             let proof = baseline
-                .summary
+                .meta
+                .history_summary
                 .pending_owner_promotions
                 .get(&request.promotion_id)
                 .ok_or_else(|| {
@@ -311,9 +308,11 @@ impl<'a> MergeHistoryVerifier<'a> {
                     "promotion acceptance differs from its exact retained request result".into(),
                 ));
             }
-            let prefix = VerifiedMergeMembershipPrefix::from_retained(&[
-                coven_database::RetainedMergeHistoryCheckpoint::Snapshot(baseline.clone()),
-            ])?;
+            let mut prefix = VerifiedMergeMembershipPrefix::default();
+            prefix.insert_snapshot_summary(
+                &baseline.meta.history_summary,
+                baseline.meta.history_summary.post_state.frontier(),
+            )?;
             let membership = self
                 .load_membership_at_verified_prefix(&request.predecessor_membership.heads, &prefix)
                 .await?;

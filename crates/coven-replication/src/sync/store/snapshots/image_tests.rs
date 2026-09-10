@@ -289,6 +289,10 @@ async fn replay_baseline_rejects_image_coverage_that_disagrees_with_valid_author
         .expect("signed authority remains valid");
     assert_eq!(authority.metadata.coverage.position_count(), 1);
     database
+        .assert_installed_baseline_rejects_altered_coverage_for_test()
+        .await
+        .expect("exercise live coverage validation against cached authority");
+    database
         .assert_replay_baseline_rejects_altered_coverage_for_test()
         .await
         .expect("exercise stored image coverage validation");

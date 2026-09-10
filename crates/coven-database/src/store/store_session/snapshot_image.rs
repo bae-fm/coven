@@ -346,17 +346,7 @@ impl SnapshotDatabaseImage {
                 "snapshot image carries a device state outside its exact accepted history".into(),
             ));
         }
-        Ok(InstalledReplayBaseline::new(
-            coverage,
-            states,
-            Some(
-                coven_protocol::store_commit::OpenedRetainedMergeHistorySummary {
-                    summary: snapshot.meta.history_summary.clone(),
-                    post_state: state,
-                },
-            ),
-            Some(snapshot),
-        ))
+        Ok(InstalledReplayBaseline::from_snapshot(snapshot, states))
     }
 
     pub fn path(&self) -> &Path {

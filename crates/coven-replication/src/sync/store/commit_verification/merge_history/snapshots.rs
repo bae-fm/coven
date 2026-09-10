@@ -97,7 +97,13 @@ impl<'a> MergeHistoryVerifier<'a> {
             &state.common.device_state,
             &snapshot.meta.author_registration,
             author.value(),
-            self.history.baseline.history_summary().cloned(),
+            self.history
+                .baseline
+                .snapshot()
+                .map(|snapshot| OpenedRetainedMergeHistorySummary {
+                    summary: snapshot.meta.history_summary.clone(),
+                    post_state: snapshot.meta.state.devices.clone(),
+                }),
             state
                 .commit_refs
                 .iter()
@@ -296,45 +302,38 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         snapshot: coven_database::PublishedStoreSnapshot,
     ) -> Result<coven_protocol::store_commit::RetainedReplaySnapshotAuthority, StorePullError> {
-        let baseline = coven_database::InstalledReplayBaseline::new(
-            snapshot.meta.coverage.clone(),
-            BTreeMap::new(),
-            Some(OpenedRetainedMergeHistorySummary {
-                summary: snapshot.meta.history_summary.clone(),
-                post_state: snapshot.meta.state.devices.clone(),
-            }),
-            Some(snapshot.clone()),
-        );
-        let opened = baseline.history_summary().ok_or_else(|| {
-            StorePullError::InvalidState("accepted snapshot has no replay summary".into())
-        })?;
         let membership =
             membership::AcceptedMembershipActivation::new(&self.root, &self.commit_verifier)
                 .load_snapshot_membership(&snapshot.meta)
                 .await?;
         // The candidate summary is checked only after its membership authority
         // is established from independently discovered, accepted head results.
-        let prefix = VerifiedMergeMembershipPrefix::from_retained(&[
-            coven_database::RetainedMergeHistoryCheckpoint::Snapshot(opened.clone()),
-        ])?;
+        let mut prefix = VerifiedMergeMembershipPrefix::default();
+        prefix.insert_snapshot_summary(
+            &snapshot.meta.history_summary,
+            snapshot.meta.history_summary.post_state.frontier(),
+        )?;
         prefix.validate_complete_membership(&membership)?;
         self.verify_retained_owner_promotions(
-            &opened.summary,
+            &snapshot.meta.history_summary,
             &prefix,
             &snapshot.meta.publication_predecessor,
         )
         .await?;
-        self.verify_retained_device_joins(&opened.summary, &opened.post_state)
-            .await?;
+        self.verify_retained_device_joins(
+            &snapshot.meta.history_summary,
+            &snapshot.meta.state.devices,
+        )
+        .await?;
 
         verify_merge_membership_state_ref(
             &snapshot.meta.state.membership,
             &membership,
-            &opened.post_state,
+            &snapshot.meta.state.devices,
         )?;
         let registrations = self
             .commit_verifier
-            .load_active_registrations(&opened.post_state)
+            .load_active_registrations(&snapshot.meta.state.devices)
             .await?;
         let author = registrations
             .get(&snapshot.meta.author_registration.device_id)
@@ -354,7 +353,10 @@ impl<'a> MergeHistoryVerifier<'a> {
         authority.validate().map_err(StorePullError::Protocol)?;
         // This changes the verifier's read floor only. Live rows and their replay
         // retention remain owned by the database installation transaction.
-        self.admit_installed_baseline(baseline)?;
+        self.admit_installed_baseline(coven_database::InstalledReplayBaseline::from_snapshot(
+            snapshot,
+            BTreeMap::new(),
+        ))?;
         Ok(authority)
     }
 

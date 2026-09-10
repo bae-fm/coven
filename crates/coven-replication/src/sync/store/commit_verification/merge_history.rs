@@ -404,16 +404,17 @@ impl<'a> MergeHistoryVerifier<'a> {
         // verifies a snapshot. The owner signed those chains into the snapshot
         // this baseline stands on: covered positions resolve to the coverage,
         // here as everywhere else.
-        if let Some(summary) = baseline.history_summary() {
-            for proof in summary.summary.membership_proofs.values() {
+        if let Some(snapshot) = baseline.snapshot() {
+            let summary = &snapshot.meta.history_summary;
+            for proof in summary.membership_proofs.values() {
                 self.membership_objects().remember_retained_proof(proof)?;
             }
-            for reference in summary.summary.causal_cut.values() {
+            for reference in summary.causal_cut.values() {
                 self.accepted_publications
                     .entry(reference.clone())
                     .or_insert(AcceptedStoreCommitEvidence::SnapshotCovered);
             }
-            for chain in summary.summary.acknowledgements.values() {
+            for chain in summary.acknowledgements.values() {
                 for (reference, value) in chain.chain.values() {
                     self.commit_verifier
                         .remember_acknowledgement(reference, value)
@@ -716,7 +717,7 @@ impl VerifiedMergeHistory {
             }))
             .map_err(StorePullError::Protocol);
         }
-        let baseline = self.baseline.history_summary().ok_or_else(|| {
+        let baseline = self.baseline.snapshot().ok_or_else(|| {
             StorePullError::InvalidState("Merge history has an unresolved predecessor state".into())
         })?;
         let mut pending = frontier.commits().values().cloned().collect::<Vec<_>>();
@@ -744,7 +745,7 @@ impl VerifiedMergeHistory {
             ));
         }
         ResolvedStoreDeviceState::merge(
-            std::iter::once(baseline.post_state.clone()).chain(
+            std::iter::once(baseline.meta.state.devices.clone()).chain(
                 frontier
                     .commits()
                     .values()

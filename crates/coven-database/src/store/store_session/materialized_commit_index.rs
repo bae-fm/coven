@@ -115,33 +115,34 @@ impl StoreSession<'_> {
     ) -> Result<crate::InstalledReplayBaseline, DbError> {
         let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let coverage = self.snapshot_coverage_frontier()?;
+        let baseline = self
+            .verified_store_authority
+            .retained_replay_baseline_on(records)?;
+        if &coverage != baseline.coverage() {
+            return Err(DbError::Message(
+                "installed snapshot coverage differs from its replay authority".into(),
+            ));
+        }
         let covered_states =
             crate::store::store_device_state::load_covered_store_device_snapshots_on(
                 self.conn, &coverage,
             )?;
-        let baseline = self
-            .verified_store_authority
-            .retained_replay_baseline_on(records)?;
-        let (summary, snapshot) = match &baseline.authority {
-            crate::RetainedReplayAuthority::InstalledSnapshot(authority) => (
-                Some(
-                    crate::StoreDatabase::open_installed_baseline_history_summary(
-                        records, baseline,
-                    )?,
-                ),
-                Some(crate::PublishedStoreSnapshot {
-                    reference: authority.snapshot.clone(),
-                    meta: authority.metadata.clone(),
-                }),
-            ),
-            crate::RetainedReplayAuthority::Genesis(_) => (None, None),
-        };
-        Ok(crate::InstalledReplayBaseline::new(
-            coverage,
-            covered_states,
-            summary,
-            snapshot,
-        ))
+        match &baseline.authority {
+            crate::RetainedReplayAuthority::InstalledSnapshot(authority) => {
+                let metadata =
+                    crate::StoreDatabase::validated_installed_baseline_metadata(records, baseline)?;
+                Ok(crate::InstalledReplayBaseline::from_snapshot(
+                    crate::PublishedStoreSnapshot {
+                        reference: authority.snapshot.clone(),
+                        meta: metadata.clone(),
+                    },
+                    covered_states,
+                ))
+            }
+            crate::RetainedReplayAuthority::Genesis(_) => {
+                Ok(crate::InstalledReplayBaseline::default())
+            }
+        }
     }
 
     fn store_device_state_for_history_cut(

@@ -735,20 +735,17 @@ impl MergeHistoryVerifier<'_> {
         authorization: &coven_protocol::reclaim::ReclaimAuthorizationRef,
         activation: &StoreBatchCommitRef,
     ) -> bool {
-        self.history
-            .baseline
-            .history_summary()
-            .is_some_and(|baseline| {
-                baseline
-                    .summary
-                    .reclaim
-                    .authorizations
-                    .get(&authorization.authorization_hash)
-                    .is_some_and(|retained| {
-                        &retained.authorization == authorization
-                            && &retained.activation == activation
-                    })
-            })
+        self.history.baseline.snapshot().is_some_and(|baseline| {
+            baseline
+                .meta
+                .history_summary
+                .reclaim
+                .authorizations
+                .get(&authorization.authorization_hash)
+                .is_some_and(|retained| {
+                    &retained.authorization == authorization && &retained.activation == activation
+                })
+        })
     }
 
     pub(crate) async fn load_snapshot_metadata(

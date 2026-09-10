@@ -7,8 +7,14 @@ impl MergeHistoryVerifier<'_> {
     ) -> Option<store_commit::device_join_exchange::DeviceJoinBootstrapClosure> {
         self.history
             .baseline
-            .history_summary()
-            .and_then(|baseline| baseline.summary.pending_device_joins.get(activation))
+            .snapshot()
+            .and_then(|baseline| {
+                baseline
+                    .meta
+                    .history_summary
+                    .pending_device_joins
+                    .get(activation)
+            })
             .cloned()
     }
 

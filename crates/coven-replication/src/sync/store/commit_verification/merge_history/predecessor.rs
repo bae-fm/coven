@@ -109,8 +109,8 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         &self,
         expected: coven_protocol::store_commit::DeviceJoinAttemptId,
     ) -> Result<bool, StorePullError> {
-        if let Some(baseline) = self.history.baseline.history_summary() {
-            for (reference, closure) in &baseline.summary.pending_device_joins {
+        if let Some(baseline) = self.history.baseline.snapshot() {
+            for (reference, closure) in &baseline.meta.history_summary.pending_device_joins {
                 let opening = closure.verified_commit(reference)?;
                 if opening
                     .device_join_attempt_decisions()
@@ -132,19 +132,15 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         &self,
         authorization: &coven_protocol::reclaim::ReclaimAuthorizationRef,
     ) -> Result<bool, StorePullError> {
-        if self
-            .history
-            .baseline
-            .history_summary()
-            .is_some_and(|baseline| {
-                baseline
-                    .summary
-                    .reclaim
-                    .authorizations
-                    .get(&authorization.authorization_hash)
-                    .is_some_and(|accepted| &accepted.authorization == authorization)
-            })
-        {
+        if self.history.baseline.snapshot().is_some_and(|baseline| {
+            baseline
+                .meta
+                .history_summary
+                .reclaim
+                .authorizations
+                .get(&authorization.authorization_hash)
+                .is_some_and(|accepted| &accepted.authorization == authorization)
+        }) {
             return Ok(true);
         }
         self.find(None, |_, commit| {
@@ -161,12 +157,13 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         package: &coven_protocol::reclaim::AudienceBlobBindingPackage,
         activation: &StoreBatchCommitRef,
     ) -> Result<bool, RegistrationLoadError> {
-        let Some(baseline) = self.history.baseline.history_summary() else {
+        let Some(baseline) = self.history.baseline.snapshot() else {
             return Ok(false);
         };
         let id = coven_protocol::remote_object::remote_object_id(package.object());
         if !baseline
-            .summary
+            .meta
+            .history_summary
             .reclaim
             .packages
             .get(&id)
