@@ -266,24 +266,18 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
                                 .to_string(),
                         ));
                     }
-                    if let Some(prepared) = self
-                        .prepare_snapshot_replay_baseline_advance(
+                    if let Some((_, changes_publication_base)) = self
+                        .advance_snapshot_replay_baseline(
                             &authority.store_root,
                             &authority,
+                            schema_version,
+                            sync_routing_hash,
                             routing_encryption,
                         )
                         .map_err(|error| {
                             DbError::context("received snapshot baseline advance", error)
                         })?
                     {
-                        let changes_publication_base = prepared.changes_publication_base;
-                        self.store.advance_snapshot_replay_baseline(
-                            self.authority, &authority.store_root, schema_version,
-                            sync_routing_hash, authority.clone(), prepared, self.blob_decls, self.synced_tables,
-                        ).map_err(|error| DbError::context("received snapshot baseline installation", error))?.ok_or_else(|| DbError::Message(
-                            "prepared Store snapshot no longer advances the replay baseline".to_string(),
-                        ))?;
-                        self.authority.forget_superseded_replay_baseline();
                         if changes_publication_base {
                             rebased_snapshot =
                                 Some(coven_protocol::store_commit::AcceptedStoreSnapshotRef {

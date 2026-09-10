@@ -13,15 +13,16 @@ use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StorePackage
 pub mod journal;
 
 impl VerifiedStoreTransaction<'_, '_, '_, '_> {
-    pub(super) fn prepare_snapshot_replay_baseline_advance(
+    /// Decide, reconstruct and install a replay baseline in this transaction.
+    /// The returned boolean says whether unpublished writes need a new publication base.
+    pub(super) fn advance_snapshot_replay_baseline(
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
         snapshot_authority: &coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+        schema_version: u32,
+        routing_hash: ObjectHash,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-    ) -> Result<
-        Option<crate::store::materialization_models::PreparedSnapshotReplayBaselineAdvance>,
-        DbError,
-    > {
+    ) -> Result<Option<(crate::AdvancedReplayBaseline, bool)>, DbError> {
         let cut = &snapshot_authority.metadata.coverage;
         if !crate::store::store_session::replay_baseline_advances_on(
             crate::store::store_session::StoreRecords::new(
@@ -61,14 +62,19 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
             snapshot_authority.snapshot.snapshot_hash,
             routing_encryption,
         )?;
-        Ok(Some(
-            crate::store::materialization_models::PreparedSnapshotReplayBaselineAdvance {
-                changes_publication_base,
-                expected_current_cut: current_cut,
-                image,
-                folded,
-            },
-        ))
+        let advanced = self.store.install_advanced_replay_baseline(
+            self.authority,
+            root,
+            schema_version,
+            routing_hash,
+            snapshot_authority.clone(),
+            image,
+            &folded,
+            self.blob_decls,
+            self.synced_tables,
+        )?;
+        self.authority.forget_superseded_replay_baseline();
+        Ok(Some((advanced, changes_publication_base)))
     }
 }
 
@@ -143,28 +149,55 @@ impl StoreSession<'_> {
         let schema_version = self.schema_version;
         let routing_hash = self.sync_routing_hash;
         self.verified_store_transaction(|transaction| {
-            let current = super::observed_store_publication::load_store_current_publication_on(transaction.store.transaction)?;
-            let accepted = current.record().latest_snapshot().filter(|accepted| accepted.snapshot == snapshot_authority.snapshot).ok_or_else(|| DbError::Message("replay baseline must adopt the current accepted snapshot".to_string()))?;
-            let Some(prepared) = transaction.prepare_snapshot_replay_baseline_advance(root, &snapshot_authority, routing_encryption)? else {
+            let current = super::observed_store_publication::load_store_current_publication_on(
+                transaction.store.transaction,
+            )?;
+            let accepted = current
+                .record()
+                .latest_snapshot()
+                .filter(|accepted| accepted.snapshot == snapshot_authority.snapshot)
+                .ok_or_else(|| {
+                    DbError::Message(
+                        "replay baseline must adopt the current accepted snapshot".to_string(),
+                    )
+                })?;
+            let Some((advanced, changes_publication_base)) = transaction
+                .advance_snapshot_replay_baseline(
+                    root,
+                    &snapshot_authority,
+                    schema_version,
+                    routing_hash,
+                    routing_encryption,
+                )?
+            else {
                 return Ok(StoreTransactionOutcome::Rollback(None));
             };
-            let changes_publication_base = prepared.changes_publication_base;
-            let advanced = transaction.store.advance_snapshot_replay_baseline(
-                transaction.authority, root, schema_version, routing_hash,
-                snapshot_authority, prepared, transaction.blob_decls, transaction.synced_tables,
-            )?;
-            if advanced.is_some() {
-                transaction.authority.forget_superseded_replay_baseline();
-                let routing_key = if transaction.gates.has_scoped_graph() {
-                    let encryption = routing_encryption.ok_or_else(|| DbError::Message("scoped write rebase requires Store routing encryption".to_string()))?;
-                    Some(coven_protocol::circle::derive_row_routing_key(encryption, root.store_root_hash)?)
-                } else { None };
-                if changes_publication_base {
-                    transaction.rebase_unpublished_store_writes(accepted, routing_key.as_ref(), membership)?;
-                }
-                super::observed_store_publication::retire_store_publication_prefix_before_snapshot_on(transaction.store, transaction.authority, &accepted.publication)?;
+            let routing_key = if transaction.gates.has_scoped_graph() {
+                let encryption = routing_encryption.ok_or_else(|| {
+                    DbError::Message(
+                        "scoped write rebase requires Store routing encryption".to_string(),
+                    )
+                })?;
+                Some(coven_protocol::circle::derive_row_routing_key(
+                    encryption,
+                    root.store_root_hash,
+                )?)
+            } else {
+                None
+            };
+            if changes_publication_base {
+                transaction.rebase_unpublished_store_writes(
+                    accepted,
+                    routing_key.as_ref(),
+                    membership,
+                )?;
             }
-            Ok(StoreTransactionOutcome::Commit(advanced))
+            super::observed_store_publication::retire_store_publication_prefix_before_snapshot_on(
+                transaction.store,
+                transaction.authority,
+                &accepted.publication,
+            )?;
+            Ok(StoreTransactionOutcome::Commit(Some(advanced)))
         })
     }
 

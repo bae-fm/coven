@@ -698,13 +698,6 @@ pub struct VerifiedStoreSnapshotAuthority {
     authority: RetainedReplaySnapshotAuthority,
 }
 
-pub(crate) struct PreparedSnapshotReplayBaselineAdvance {
-    pub(crate) changes_publication_base: bool,
-    pub(crate) expected_current_cut: coven_protocol::store_commit::CommitFrontier,
-    pub(crate) image: Vec<u8>,
-    pub(crate) folded: Vec<crate::SettledStoreWrite>,
-}
-
 impl VerifiedStoreSnapshotAuthority {
     pub fn from_authority(
         authority: RetainedReplaySnapshotAuthority,

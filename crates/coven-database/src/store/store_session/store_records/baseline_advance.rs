@@ -56,59 +56,27 @@ impl StoreTransaction<'_, '_> {
     /// what replay rewinds to, so an image that will not open must fail while
     /// the old baseline is still the committed one.
     ///
-    /// Returns `None` when the snapshot does not advance this device's cut,
-    /// which is the ordinary case on every cycle after the first.
+    /// The verified transaction has selected the advancing snapshot and captured
+    /// its image before calling this installation step.
     ///
     /// The whole operation is one transaction on purpose. Advancing the cut is
     /// what licenses retiring the rows, and retiring the rows is what makes the
     /// cut worth advancing; committing either alone leaves a device that either
     /// cannot rewind or cannot reclaim.
-    pub(crate) fn advance_snapshot_replay_baseline(
+    pub(crate) fn install_advanced_replay_baseline(
         self,
         authority: &mut dyn VerifiedStoreLookup,
         root: &StoreRootRef,
         schema_version: u32,
         routing_hash: ObjectHash,
         snapshot_authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
-        prepared: crate::store::materialization_models::PreparedSnapshotReplayBaselineAdvance,
+        image: Vec<u8>,
+        folded: &[crate::SettledStoreWrite],
         blob_decls: &crate::BlobDecls,
         synced_tables: &[coven_protocol::synced_schema::SyncedTable],
-    ) -> Result<Option<AdvancedReplayBaseline>, DbError> {
-        let crate::store::materialization_models::PreparedSnapshotReplayBaselineAdvance {
-            changes_publication_base: _,
-            expected_current_cut,
-            image,
-            folded,
-        } = prepared;
+    ) -> Result<AdvancedReplayBaseline, DbError> {
         let records = StoreRecords::new(self.transaction, self.store_dir);
-        let installed_cut = CommitFrontier::from_refs(
-            crate::store::materialized_commit_index::materialized_frontier_on(
-                self.transaction,
-                None,
-            )?,
-        )
-        .map_err(DbError::from)?;
-        if installed_cut != expected_current_cut {
-            return Err(DbError::Message(
-                "replay baseline capture is stale against the installed Store frontier".to_string(),
-            ));
-        }
         let cut = snapshot_authority.metadata.coverage.clone();
-        let Some(current) =
-            crate::store::retained_replay::load_replay_baseline_metadata_on(records)?
-        else {
-            return Err(DbError::Message(
-                "advancing a replay baseline requires an installed baseline".to_string(),
-            ));
-        };
-        if !advances(
-            &snapshot_authority.snapshot,
-            &cut,
-            &current,
-            !folded.is_empty(),
-        ) {
-            return Ok(None);
-        }
         let snapshot_reference = snapshot_authority.snapshot.clone();
         let snapshot_hash = snapshot_reference.snapshot_hash;
         let prepared = PreparedRetainedReplayBaseline::new(
@@ -122,7 +90,7 @@ impl StoreTransaction<'_, '_> {
 
         let (retired_commits, mut released_pins) =
             self.retire_superseded_history(authority, root, &cut)?;
-        let folded_writes = self.fold_settled_store_writes(&cut, &folded)?;
+        let folded_writes = self.fold_settled_store_writes(&cut, folded)?;
         self.rewrite_snapshot_coverage(&cut, snapshot_hash)?;
 
         let mut timings =
@@ -138,11 +106,11 @@ impl StoreTransaction<'_, '_> {
             .ok_or_else(|| DbError::Message("released replay pin count exceeds u64".into()))?;
 
         self.retain_snapshot_device_states(authority, root, cut.clone().into_refs())?;
-        Ok(Some(AdvancedReplayBaseline {
+        Ok(AdvancedReplayBaseline {
             retired_commits,
             released_pins,
             folded_writes,
-        }))
+        })
     }
 
     /// Drop the retained materializations at or under `cut` that the baseline
@@ -358,9 +326,8 @@ impl StoreTransaction<'_, '_> {
 
 /// Whether adopting the snapshot would change this device's replay baseline.
 ///
-/// Asked before the image is rebuilt, because rebuilding it replays the whole
-/// retained history. The transaction that adopts the result asks again, and
-/// that answer is the authoritative one.
+/// Public preflight and the adopting transaction share this decision. The
+/// transaction checks before rebuilding the image from retained history.
 pub(crate) fn replay_baseline_advances_on(
     records: StoreRecords<'_>,
     snapshot: &coven_protocol::store_commit::StoreSnapshotRef,
