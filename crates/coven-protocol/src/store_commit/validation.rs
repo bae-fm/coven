@@ -519,27 +519,13 @@ pub(super) fn validate_commit_predecessor_states(
     if membership.recovery() != devices.recovery() {
         return Err(StoreProtocolError::OwnerRecoveryMismatch);
     }
-    validate_recovery_cursors(membership.recovery())?;
-    validate_recovery_cursors(devices.recovery())?;
-    {
-        let mut expected = order.dependencies.clone();
-        if let Some(predecessor) = &order.predecessor {
-            if expected
-                .insert(predecessor.coord.stream_id, predecessor.clone())
-                .is_some_and(|dependency| dependency != *predecessor)
-            {
-                return Err(StoreProtocolError::Malformed(
-                    "Merge predecessor disagrees with the same-stream dependency".to_string(),
-                ));
-            }
-        }
-        if devices.frontier() != &CommitFrontier(expected) {
-            return Err(StoreProtocolError::Malformed(
-                "Store device state names a different Merge predecessor cut".to_string(),
-            ));
-        }
-        Ok(())
+    let expected = order.predecessor_cut()?;
+    if devices.frontier().commits() != expected.commits() {
+        return Err(StoreProtocolError::Malformed(
+            "Store device state names a different Merge predecessor cut".to_string(),
+        ));
     }
+    Ok(())
 }
 
 pub(crate) fn validate_commit_frontier(

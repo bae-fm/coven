@@ -596,7 +596,9 @@ impl StoreCommitOrder {
                 .insert(predecessor.coord.stream_id, predecessor.clone())
                 .is_some_and(|existing| existing != *predecessor)
             {
-                return Err(StoreProtocolError::JoinAttemptMismatch);
+                return Err(StoreProtocolError::Malformed(
+                    "Merge predecessor disagrees with the same-stream dependency".to_string(),
+                ));
             }
         }
         Ok(StoreHistoryCut(cut))

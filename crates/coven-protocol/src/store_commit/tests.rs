@@ -1446,6 +1446,9 @@ mod acknowledgements;
 #[path = "tests/commit_authorship.rs"]
 mod commit_authorship;
 
+#[path = "tests/predecessor_states.rs"]
+mod predecessor_states;
+
 #[path = "tests/artifact_authorship.rs"]
 mod artifact_authorship;
 
