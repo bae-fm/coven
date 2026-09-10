@@ -8,30 +8,24 @@ mod pending_device_join;
 #[serde(deny_unknown_fields)]
 pub struct MembershipCausalFloor {
     pub effective_coordinates: Vec<MembershipCoord>,
-    pub resolutions: Vec<StoreMembershipConflictResolutionRef>,
 }
 
 impl MembershipCausalFloor {
     pub fn from_membership(membership: &crate::membership::MembershipChain) -> Self {
         Self {
             effective_coordinates: membership.effective_frontier(),
-            resolutions: membership.resolution_refs().to_vec(),
         }
     }
 
     pub fn advance(
         &mut self,
         coordinate: crate::membership::MembershipCoord,
-        resolutions: &[StoreMembershipConflictResolutionRef],
     ) -> Result<(), StoreProtocolError> {
         let stream = coordinate.stream_key();
         self.effective_coordinates
             .retain(|current| current.stream_key() != stream);
         self.effective_coordinates.push(coordinate);
         self.effective_coordinates.sort();
-        self.resolutions.extend_from_slice(resolutions);
-        self.resolutions.sort();
-        self.resolutions.dedup();
         self.validate()
     }
 
@@ -39,12 +33,6 @@ impl MembershipCausalFloor {
         self.effective_coordinates
             .iter()
             .all(|coordinate| membership.effectively_contains_coord(coordinate))
-            && self.resolutions.iter().all(|reference| {
-                membership
-                    .resolution_refs()
-                    .binary_search(reference)
-                    .is_ok()
-            })
     }
 
     fn validate(&self) -> Result<(), StoreProtocolError> {
@@ -52,7 +40,6 @@ impl MembershipCausalFloor {
             .effective_coordinates
             .windows(2)
             .any(|pair| pair[0] >= pair[1])
-            || self.resolutions.windows(2).any(|pair| pair[0] >= pair[1])
         {
             return Err(StoreProtocolError::Malformed(
                 "Merge history membership floor is not canonical".to_string(),
@@ -313,8 +300,6 @@ pub struct RetainedMergeMembershipProof {
     pub entry_value: MembershipEntry,
     pub head: MembershipHeadRef,
     pub head_value: AuthorHead,
-    pub resolution: Option<StoreMembershipConflictResolutionRef>,
-    pub resolution_value: Option<StoreMembershipConflictResolution>,
 }
 
 /// The proof values introduced by one verified Merge commit and retained with
@@ -383,27 +368,6 @@ impl RetainedMergeCommitEvidence {
                 .head
                 .object
                 .verify(&serde_json::to_vec(&proof.head_value)?)?;
-            match (
-                &proof.entry_value.change,
-                &proof.resolution,
-                &proof.resolution_value,
-            ) {
-                (
-                    crate::membership::StoreAuthorityChange::ResolutionActivation { resolution },
-                    Some(reference),
-                    Some(value),
-                ) if resolution == reference
-                    && value.store_root_hash == commit.store_root_hash
-                    && value.resolution_ref(reference.object.clone()) == *reference
-                    && value.verify_signature() =>
-                {
-                    reference.object.verify(&serde_json::to_vec(value)?)?;
-                }
-                (crate::membership::StoreAuthorityChange::ResolutionActivation { .. }, _, _)
-                | (_, Some(_), _)
-                | (_, _, Some(_)) => return Err(StoreProtocolError::DeviceStateMismatch),
-                _ => {}
-            }
         }
         Ok(())
     }
@@ -624,27 +588,6 @@ impl RetainedVerifiedMergeHistorySummary {
                 .head
                 .object
                 .verify(&serde_json::to_vec(&proof.head_value)?)?;
-            match (
-                &proof.entry_value.change,
-                &proof.resolution,
-                &proof.resolution_value,
-            ) {
-                (
-                    crate::membership::StoreAuthorityChange::ResolutionActivation { resolution },
-                    Some(reference),
-                    Some(value),
-                ) if resolution == reference
-                    && value.store_root_hash == self.store_root_hash
-                    && value.resolution_ref(reference.object.clone()) == *reference
-                    && value.verify_signature() =>
-                {
-                    reference.object.verify(&serde_json::to_vec(value)?)?;
-                }
-                (crate::membership::StoreAuthorityChange::ResolutionActivation { .. }, _, _)
-                | (_, Some(_), _)
-                | (_, _, Some(_)) => return Err(StoreProtocolError::DeviceStateMismatch),
-                _ => {}
-            }
         }
         Ok(())
     }

@@ -4,7 +4,6 @@
 //! chain from the storage, perform the operation, and upload the results.
 
 use coven_keys::keys::KeyError;
-use coven_protocol::membership::MembershipConflict;
 use coven_protocol::objects::StorageError;
 use coven_protocol::objects::StoreObjectError;
 use coven_storage::CloudHomeJoinInfo;
@@ -70,8 +69,6 @@ pub enum MembershipOpsError {
     NoFounderChainForAdmission,
     #[error("membership chain has no founder")]
     ChainHasNoFounder,
-    #[error("membership has an unresolved semantic conflict: {0:?}")]
-    SemanticConflict(Box<MembershipConflict>),
     #[error("sharing requires an encrypted cloud home")]
     NotEncryptedHome,
 }

@@ -1237,23 +1237,13 @@ mod test_device {
                 .await
         }
 
-        pub async fn prepare_conflict_resolution_plan_for_test(
-            &self,
-            candidate_membership_heads: &[coven_protocol::membership::MembershipHeadRef],
-        ) -> Result<(), crate::sync::store::StoreError> {
-            self.store
-                .prepare_conflict_resolution_plan_for_test(candidate_membership_heads)
-                .await
-        }
-
         pub async fn load_membership_at_exact_heads_for_test(
             &self,
             heads: &[coven_protocol::membership::MembershipHeadRef],
-            resolutions: &[coven_protocol::membership::StoreMembershipConflictResolutionRef],
         ) -> Result<coven_protocol::membership::MembershipChain, crate::sync::store::StoreError>
         {
             self.store
-                .load_membership_at_exact_heads_for_test(heads, resolutions)
+                .load_membership_at_exact_heads_for_test(heads)
                 .await
         }
 

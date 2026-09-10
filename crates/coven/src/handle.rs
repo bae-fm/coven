@@ -1142,12 +1142,6 @@ impl CovenHandle {
         self.membership.members().await
     }
 
-    pub async fn membership_conflict(
-        &self,
-    ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
-        self.membership.conflict().await
-    }
-
     pub async fn start_device_pairing(
         &self,
     ) -> Result<crate::DevicePairingHost, crate::StartDevicePairingError> {
@@ -1261,13 +1255,6 @@ impl CovenHandle {
         role: MemberRole,
     ) -> Result<coven_replication::sync::MemberAdmission, SyncError> {
         self.membership.admit(public_key_hex, None, role).await
-    }
-
-    pub async fn resolve_membership_conflict(
-        &self,
-        choice: &crate::MembershipConflictChoice,
-    ) -> Result<(), SyncError> {
-        self.membership.resolve_conflict(choice).await
     }
 
     /// Propose excluding one Store device and return the code that identifies

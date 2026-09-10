@@ -800,10 +800,6 @@ pub(crate) fn mark_reusable_retained_authority_uploaded_on(
         coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
             ownership,
         } => ownership.pending.contains(candidate) || ownership.activated.contains(candidate),
-        coven_protocol::remote_object::RetainedAuthorityObjectState::CleanupPending { .. }
-        | coven_protocol::remote_object::RetainedAuthorityObjectState::AbsentVerified { .. } => {
-            false
-        }
     };
     if !owns_candidate {
         return Err(DbError::Message(format!(

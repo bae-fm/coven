@@ -154,17 +154,6 @@ impl LocalStoreWriter {
         head.verify(self.registration.value())
     }
 
-    pub(crate) fn attach_merge_membership_proof(
-        &self,
-        candidate: &mut crate::sync::store::commit_publication::operation::commit_plan::PreparedStoreOperationCommit,
-        publication: &coven_protocol::membership_mutation::PreparedMembershipPublication,
-        resolution: Option<&coven_protocol::membership::StoreMembershipConflictResolution>,
-    ) -> Result<(), crate::sync::store::StoreError> {
-        candidate
-            .attach_merge_membership_proof_with(publication, resolution)
-            .map_err(crate::sync::store::StoreError::from)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign_owner_promotion_request(
         &self,

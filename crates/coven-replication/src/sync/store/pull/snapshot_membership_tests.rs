@@ -111,12 +111,7 @@ async fn assert_snapshot_membership_prefix() {
         VerifiedMergePrefixHeadStatus::Included,
     );
     let membership = history
-        .load_membership_at_verified_prefix(
-            &snapshot.meta.state.membership.heads,
-            &snapshot.meta.state.membership.resolutions,
-            &prefix,
-            None,
-        )
+        .load_membership_at_verified_prefix(&snapshot.meta.state.membership.heads, &prefix)
         .await
         .expect("resolve membership from the snapshot prefix");
     assert!(membership.is_owner_now(&public_key_hex(&member_identity)));

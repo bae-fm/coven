@@ -141,7 +141,7 @@ pub struct CircleControlValue {
     pub order: MergeCircleControlOrder,
     pub state: CircleControlState,
     pub author_authority: MergeCircleOwnerAuthorityRef,
-    pub membership_authority: MembershipGrantCreationAuthority,
+    pub membership_authority: MembershipCoord,
 }
 
 /// The wire body of one Circle control. Every field here is signed.
@@ -224,7 +224,7 @@ impl CircleControlBody {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn membership_authority(&self) -> &MembershipGrantCreationAuthority {
+    pub fn membership_authority(&self) -> &MembershipCoord {
         &self.value.membership_authority
     }
 }

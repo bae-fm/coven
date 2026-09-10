@@ -109,7 +109,6 @@ pub fn founder_entry_for_creation(
             seq: 1,
             previous_hash: None,
             dependencies: Vec::new(),
-            resolution_dependencies: Vec::new(),
             created_at: created_at.to_string(),
             change: StoreAuthorityChange::Founder {
                 creation_id,
@@ -145,19 +144,5 @@ pub fn founder_entry(
 }
 
 pub fn verify_membership_entry(entry: &MembershipEntry) -> bool {
-    let activation_position_is_valid = match &entry.change {
-        StoreAuthorityChange::ResolutionActivation { .. } => causal_grants::starts_author_stream(
-            entry.seq,
-            entry.previous_hash,
-            &entry.coord().stream_key(),
-            entry.dependencies.iter().map(MembershipCoord::stream_key),
-        ),
-        _ => true,
-    };
-    activation_position_is_valid
-        && entry
-            .resolution_dependencies
-            .windows(2)
-            .all(|pair| pair[0] < pair[1])
-        && entry.verify_by(&entry.author_pubkey).is_ok()
+    entry.verify_by(&entry.author_pubkey).is_ok()
 }

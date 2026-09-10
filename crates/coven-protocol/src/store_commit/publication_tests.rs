@@ -93,11 +93,7 @@ fn verified_fixture_commit() -> (
             },
             membership_state,
             device_state,
-            StoreOperationMembershipAuthority {
-                predecessor: crate::membership::MembershipGrantCreationAuthority::Entry(
-                    founder.coord(),
-                ),
-            },
+            founder.coord(),
             StoreCommitOperationsInput {
                 acknowledgement: Some(acknowledgement),
                 ..StoreCommitOperationsInput::empty()

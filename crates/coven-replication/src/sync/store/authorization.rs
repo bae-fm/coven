@@ -560,40 +560,7 @@ impl Store {
             .await
             .map_err(StoreError::from)
             .map_err(membership::MembershipOpsError::from)?;
-        authorization.members(Some(&self.identity.public_key()))
-    }
-
-    #[doc(hidden)]
-    pub async fn membership_conflict(
-        &self,
-    ) -> Result<
-        Option<coven_protocol::membership::MembershipConflictInfo>,
-        membership::MembershipOpsError,
-    > {
-        let authorization = self
-            .authorize()
-            .await
-            .map_err(StoreError::from)
-            .map_err(membership::MembershipOpsError::from)?;
-        Ok(authorization.membership_conflict(Some(&self.identity.public_key())))
-    }
-
-    pub(crate) async fn resolve_membership_conflict(
-        &self,
-        choice: &coven_protocol::membership::MembershipConflictChoice,
-        created_at: &str,
-    ) -> Result<
-        coven_protocol::membership::StoreMembershipConflictResolutionRef,
-        membership::MembershipOpsError,
-    > {
-        let mut authorization = self
-            .authorize_writer()
-            .await
-            .map_err(StoreError::from)
-            .map_err(membership::MembershipOpsError::from)?;
-        authorization
-            .resolve_membership_conflict(choice, created_at)
-            .await
+        Ok(authorization.members(Some(&self.identity.public_key())))
     }
 
     #[doc(hidden)]

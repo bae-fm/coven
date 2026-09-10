@@ -9,8 +9,7 @@ pub(crate) struct StoreOperationSigningContext {
     pub(super) publication_base: coven_protocol::store_commit::StorePublicationBase,
     pub(super) membership_state: coven_protocol::circle_control::StoreMembershipStateRef,
     pub(super) device_state: coven_protocol::store_commit::StoreDeviceStateRef,
-    pub(super) membership_authority:
-        coven_protocol::store_commit::StoreOperationMembershipAuthority,
+    pub(super) membership_authority: coven_protocol::membership::MembershipCoord,
 }
 
 mod circle_signing;
@@ -42,10 +41,7 @@ impl LocalStoreWriter {
     pub(crate) fn local_membership(
         &self,
         membership: &coven_protocol::membership::MembershipChain,
-    ) -> Result<
-        coven_protocol::membership::LocalStoreMembership,
-        coven_protocol::membership::MembershipError,
-    > {
+    ) -> coven_protocol::membership::LocalStoreMembership {
         coven_protocol::membership::LocalStoreMembership::from_membership(
             membership,
             Some(&self.identity),
@@ -122,25 +118,6 @@ impl LocalStoreWriter {
             .await
     }
 
-    pub(super) async fn authorize_retained_conflict_resolution(
-        &self,
-        history: &super::AuthorizedStoreHistory<'_>,
-        order: &coven_protocol::store_commit::StoreCommitOrder,
-        membership_heads: &[coven_protocol::membership::MembershipHeadRef],
-    ) -> Result<
-        crate::sync::store::merge_conflict::MergeConflictResolutionAuthorization,
-        super::pull::StorePullError,
-    > {
-        history
-            .authorize_retained_conflict_resolution(
-                order,
-                membership_heads,
-                self.registration.reference(),
-                &self.registration.value().author_pubkey,
-            )
-            .await
-    }
-
     pub(super) async fn prepare_merge_snapshot_history_summary(
         &self,
         history: &super::AuthorizedStoreHistory<'_>,
@@ -208,64 +185,6 @@ impl LocalStoreWriter {
             self.registration.reference(),
             grant,
             domain,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn sign_conflict_resolution(
-        &self,
-        chain: &coven_protocol::membership::MembershipChain,
-        store_root_hash: coven_protocol::store_commit::ObjectHash,
-        selection: coven_protocol::membership::MembershipConflictSelection,
-        replacement_grant: coven_protocol::membership::MembershipGrantId,
-        membership: coven_protocol::store_commit::GrantStreamAnchor,
-        recovery: coven_protocol::store_commit::GrantStreamAnchor,
-        device_state: coven_protocol::store_commit::StoreDeviceStateRef,
-    ) -> Result<
-        coven_protocol::membership::StoreMembershipConflictResolution,
-        crate::sync::store::membership::MembershipMutationError,
-    > {
-        let acceptance = coven_protocol::store_commit::OwnerConflictResolutionAcceptance::signed(
-            store_root_hash,
-            replacement_grant,
-            self.registration.reference().clone(),
-            membership.clone(),
-            recovery,
-            device_state,
-            self.registration.value(),
-            &self.identity,
-        )
-        .map_err(crate::sync::store::membership::MembershipMutationError::from)?;
-        chain
-            .signed_conflict_resolution(
-                store_root_hash,
-                selection,
-                membership,
-                acceptance,
-                &self.identity,
-            )
-            .map_err(crate::sync::store::membership::MembershipMutationError::from)
-    }
-
-    pub(super) fn sign_conflict_resolution_activation(
-        &self,
-        chain: &coven_protocol::membership::MembershipChain,
-        store_root_hash: coven_protocol::store_commit::ObjectHash,
-        stream_id: coven_protocol::membership::AuthorStreamId,
-        reference: coven_protocol::membership::StoreMembershipConflictResolutionRef,
-        resolution: &coven_protocol::membership::StoreMembershipConflictResolution,
-        created_at: String,
-    ) -> Result<
-        coven_protocol::membership::MembershipEntry,
-        coven_protocol::membership::MembershipError,
-    > {
-        chain.signed_resolution_activation_in_stream(
-            store_root_hash,
-            &self.identity,
-            stream_id,
-            reference,
-            resolution,
-            created_at,
         )
     }
 

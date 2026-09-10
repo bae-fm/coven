@@ -58,7 +58,7 @@ impl LocalStoreWriter {
         candidate_family: coven_protocol::store_commit::CandidateFamilyId,
         metadata_stamp: &str,
         store_membership: coven_protocol::circle_control::StoreMembershipStateRef,
-        membership_authority: coven_protocol::membership::MembershipGrantCreationAuthority,
+        membership_authority: coven_protocol::membership::MembershipCoord,
         store_members: Vec<(String, coven_protocol::membership::MemberRole)>,
         close_control: &coven_protocol::circle::PreparedCircleControl,
         current_roster: &coven_protocol::circle::CircleMaterializedRoster,
@@ -302,7 +302,7 @@ impl LocalStoreWriter {
         publication_base: coven_protocol::store_commit::StorePublicationBase,
         membership_state: coven_protocol::circle_control::StoreMembershipStateRef,
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
-        membership_authority: coven_protocol::store_commit::StoreOperationMembershipAuthority,
+        membership_authority: coven_protocol::membership::MembershipCoord,
         circle_reference: coven_protocol::store_commit::CircleControlRef,
         stream_activations: Vec<coven_protocol::store_commit::StreamActivation>,
     ) -> Result<

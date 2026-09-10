@@ -45,7 +45,7 @@ impl PullHistory<'_, '_> {
         };
         let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
             &self.database;
-        let local = LocalStoreMembership::from_membership(membership, identity)?;
+        let local = LocalStoreMembership::from_membership(membership, identity);
         let circles = if local.allows_circle_access() {
             let identity = identity.ok_or_else(|| {
                 StorePullError::InvalidState(

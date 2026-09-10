@@ -84,7 +84,6 @@ impl<'a> MembershipPublicationSigner<'a> {
                 author_registration: self.registration.reference().clone(),
                 entry: entry_ref,
                 predecessor: predecessor.clone(),
-                resolutions: entry.resolution_dependencies.clone(),
                 successor: coven_protocol::store_commit::SuccessorLink {
                     activation: coven_protocol::store_commit::StreamActivation::grant_authorized(
                         store_root_hash,

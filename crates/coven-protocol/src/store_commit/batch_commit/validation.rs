@@ -9,7 +9,7 @@ pub(super) fn validate_commit_envelope(
     order: &StoreCommitOrder,
     membership_state: &StoreMembershipStateRef,
     device_state: &StoreDeviceStateRef,
-    membership_authority: Option<&MembershipGrantCreationAuthority>,
+    membership_authority: Option<&MembershipCoord>,
     signer: &UserKeypair,
 ) -> Result<(), StoreProtocolError> {
     author_registration.verify_registration(author)?;
@@ -27,7 +27,7 @@ pub(super) fn validate_commit_envelope(
         ));
     }
     if let Some(authority) = membership_authority {
-        validate_membership_authority(authority)?;
+        validate_membership_coord(authority)?;
     }
     crate::objects::verify_store_root(store_root_hash, author.store_root.store_root_hash)?;
     Ok(())
@@ -628,13 +628,11 @@ impl StoreBatchCommit {
         }
         validate_commit_body(self.store_root_hash, &self.body, &self.author_registration)?;
         if matches!(self.body, StoreCommitBody::Operations(_)) {
-            validate_operation_membership_authority(
-                self.membership_authority.as_ref().ok_or_else(|| {
-                    StoreProtocolError::Malformed(
-                        "operations commit omits membership authority".to_string(),
-                    )
-                })?,
-            )?;
+            validate_membership_coord(self.membership_authority.as_ref().ok_or_else(|| {
+                StoreProtocolError::Malformed(
+                    "operations commit omits membership authority".to_string(),
+                )
+            })?)?;
         }
         if let StoreCommitBody::AbandonCandidates { manifests } = &self.body {
             validate_candidate_abandonment(
@@ -664,7 +662,7 @@ impl StoreBatchCommit {
             &self.device_state,
         )?;
         if let Some(authority) = self.membership_authority.as_ref() {
-            validate_membership_authority(authority)?;
+            validate_membership_coord(authority)?;
         }
         validate_parsed_control(self, author)?;
         self.verify_by(&author.device_signing_pubkey)?;
@@ -692,9 +690,7 @@ impl StoreBatchCommit {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn operations_membership_authority(
-        &self,
-    ) -> Result<StoreOperationMembershipAuthority, StoreProtocolError> {
+    pub fn operations_membership_authority(&self) -> Result<MembershipCoord, StoreProtocolError> {
         if self.operations().is_none() {
             return Err(StoreProtocolError::Malformed(
                 "Store commit does not carry operations".to_string(),
@@ -705,7 +701,7 @@ impl StoreBatchCommit {
                 "operations commit omits its predecessor membership grant authority".to_string(),
             )
         })?;
-        validate_operation_membership_authority(&predecessor)?;
-        Ok(StoreOperationMembershipAuthority { predecessor })
+        validate_membership_coord(&predecessor)?;
+        Ok(predecessor)
     }
 }

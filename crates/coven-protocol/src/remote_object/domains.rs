@@ -353,9 +353,7 @@ pub enum RetainedAuthorityObjectDomain {
     MergeMembershipWrappedStoreKey {
         reference: crate::wrapped_store_key::WrappedStoreKeyRef,
     },
-    StoreMembershipResolution {
-        reference: crate::membership::StoreMembershipConflictResolutionRef,
-    },
+
     ProviderAccessGrant {
         reference: crate::provider::StoreMemberProviderAccessGrantRef,
     },

@@ -388,7 +388,7 @@ async fn missing_membership_head_is_rejected() {
 
     fixture
         .device
-        .load_membership_at_exact_heads_for_test(&[], &[])
+        .load_membership_at_exact_heads_for_test(&[])
         .await
         .expect_err("a founder entry without its exact signed head is uncommitted");
 }
@@ -433,69 +433,6 @@ async fn complete_chain_still_validates() {
     fixture.admit_member(&member, MemberRole::Member).await;
 
     assert!(fixture.load().await.can_write_now(&pubkey_hex(&member)));
-}
-
-#[tokio::test]
-async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomically() {
-    let fixture = MergeFixture::new("store-membership-conflict-boundary").await;
-    let storage = Arc::new(coven_storage::CloudSyncConnection::new(
-        fixture.home.clone(),
-        CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-        coven_storage::BlobPathScheme::Hashed,
-        &fixture.store_id,
-        fixture.owner.clone(),
-    ));
-    let store = crate::sync::store::Store::load(
-        fixture.database.clone(),
-        storage,
-        fixture.store_dir.clone(),
-        fixture.owner.clone(),
-        Some(coven_keys::encryption::EncryptionService::from_key(
-            [42; 32],
-        )),
-    )
-    .await
-    .expect("load Store owner");
-    assert!(store
-        .membership_conflict()
-        .await
-        .expect("read membership conflict")
-        .is_none());
-
-    let chain = fixture.load().await;
-    let choice = coven_protocol::membership::MembershipConflictChoice::new(
-        "foreign-choice".to_string(),
-        Vec::new(),
-        coven_protocol::store_commit::ObjectHash::digest(b"foreign conflict"),
-        coven_protocol::membership::MembershipConflictSelection::RevocationBranch {
-            heads: vec![chain
-                .head_refs()
-                .first()
-                .expect("founder membership head")
-                .clone()],
-        },
-    );
-    let result = store
-        .resolve_membership_conflict(&choice, "2026-07-22T00:00:00Z")
-        .await;
-
-    assert!(
-        matches!(
-            &result,
-            Err(MembershipOpsError::Mutation(
-                MembershipMutationError::Membership(
-                    coven_protocol::membership::MembershipError::InvalidConflictResolution
-                )
-            ))
-        ),
-        "foreign conflict choice returned {result:?}"
-    );
-    assert!(fixture
-        .database
-        .outbound_membership_mutation()
-        .await
-        .expect("read membership mutation journal")
-        .is_none());
 }
 
 #[tokio::test]
@@ -669,7 +606,7 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
 
     fixture
         .device
-        .load_membership_at_exact_heads_for_test(&[relocated_ref], &[])
+        .load_membership_at_exact_heads_for_test(&[relocated_ref])
         .await
         .expect_err("a membership head relocated outside its grant anchor must fail");
 }

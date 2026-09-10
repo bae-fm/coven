@@ -55,7 +55,6 @@ impl StoreCreationDescriptor {
             || founder.seq != 1
             || founder.previous_hash.is_some()
             || !founder.dependencies.is_empty()
-            || !founder.resolution_dependencies.is_empty()
             || founder.provider_admin.is_some()
             || !verify_membership_entry(founder)
         {

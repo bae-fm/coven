@@ -98,7 +98,7 @@ impl LocalStoreWriter {
         publication_base: coven_protocol::store_commit::StorePublicationBase,
         membership_state: coven_protocol::circle_control::StoreMembershipStateRef,
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
-        membership_authority: coven_protocol::store_commit::StoreOperationMembershipAuthority,
+        membership_authority: coven_protocol::membership::MembershipCoord,
         operations: coven_protocol::store_commit::StoreCommitOperationsInput<'_>,
     ) -> Result<
         coven_protocol::store_commit::StoreBatchCommit,
@@ -253,7 +253,6 @@ impl LocalStoreWriter {
         &self,
         store_root_hash: coven_protocol::store_commit::ObjectHash,
         streams: Vec<coven_protocol::store_commit::MembershipRollupStream>,
-        resolutions: Vec<coven_protocol::store_commit::MembershipRollupResolution>,
     ) -> Result<
         coven_protocol::store_commit::MembershipRollup,
         coven_protocol::store_commit::StoreProtocolError,
@@ -262,7 +261,6 @@ impl LocalStoreWriter {
             store_root_hash,
             self.registration.reference().clone(),
             streams,
-            resolutions,
             &self.device_signer,
         )
     }

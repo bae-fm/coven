@@ -144,7 +144,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     });
                 }
             }
-            let membership_authority = &plan.membership_authority().predecessor;
+            let membership_authority = plan.membership_authority();
             let membership_state = plan.membership_state();
             let resolved_devices = plan.predecessor_state();
             let candidate_family = plan.candidate_family(&write_id);

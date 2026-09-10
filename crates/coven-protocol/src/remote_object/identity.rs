@@ -451,26 +451,6 @@ pub(super) fn validate_retained_authority_identity(
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
-        RetainedAuthorityObjectDomain::StoreMembershipResolution { reference } => {
-            let resolution: crate::membership::StoreMembershipConflictResolution =
-                serde_json::from_slice(canonical_semantic_bytes)?;
-            let expected_key = format!(
-                "{}.json",
-                crate::store_commit::membership_resolution_semantic_prefix(
-                    reference.conflict_hash,
-                    &reference.resolver_pubkey,
-                    reference.resolution_hash,
-                )
-            );
-            if resolution.conflict_hash != reference.conflict_hash
-                || resolution.resolver_pubkey != reference.resolver_pubkey
-                || resolution.resolution_hash() != reference.resolution_hash
-                || reference.object != identity.object
-                || reference.object.slot().logical_key() != expected_key
-            {
-                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-            }
-        }
         RetainedAuthorityObjectDomain::ProviderAccessGrant { reference } => {
             let grant: crate::provider::StoreMemberProviderAccessGrant =
                 serde_json::from_slice(canonical_semantic_bytes)?;

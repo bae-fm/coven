@@ -190,7 +190,6 @@ fn publication_matches_acceptance(
     let expected_replacements =
         std::collections::BTreeSet::from([acceptance.request.member_grant.clone()]);
     publication.head.body.author_registration == acceptance.request.promoter_registration
-        && publication.head.body.resolutions == entry.resolution_dependencies
         && entry.author_owner_grant == acceptance.request.promoter_owner_grant
         && entry.stream_id == *author_stream
         && entry.seq == *seq

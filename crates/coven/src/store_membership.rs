@@ -28,15 +28,6 @@ impl StoreMembership {
         self.sync.members().await
     }
 
-    pub(crate) async fn conflict(
-        &self,
-    ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
-        if !self.sync.is_command_configured() {
-            return Err(SyncError::NotConfigured);
-        }
-        self.sync.membership_conflict().await
-    }
-
     pub(crate) async fn admit(
         &self,
         public_key_hex: &str,
@@ -52,14 +43,6 @@ impl StoreMembership {
     pub(crate) async fn remove(&self, public_key_hex: &str) -> Result<(), SyncError> {
         let _mutation = self.mutations.lock().await;
         self.sync.remove_store_member(public_key_hex).await
-    }
-
-    pub(crate) async fn resolve_conflict(
-        &self,
-        choice: &crate::MembershipConflictChoice,
-    ) -> Result<(), SyncError> {
-        let _mutation = self.mutations.lock().await;
-        self.sync.resolve_membership_conflict(choice).await
     }
 
     pub(crate) async fn propose_device_exclusion(

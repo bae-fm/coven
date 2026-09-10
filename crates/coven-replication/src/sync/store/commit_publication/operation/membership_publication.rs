@@ -205,8 +205,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
             | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin
-            | StoreAuthorityChange::ResolutionActivation { .. } => &[],
+            | StoreAuthorityChange::ProviderAdmin => &[],
         };
         let prepare_exact = |reference: &coven_protocol::objects::ExactObjectRef| -> Result<
             (ClosedRemoteObject, PreparedExactObject),

@@ -25,7 +25,6 @@ pub enum ProtectedObjectDomain {
     StoreMembershipEntry,
     StoreMembershipHead,
     StoreMembershipHeadAcceptance,
-    StoreMembershipResolution,
     StoreWrappedKey,
     StorePackage,
     CircleControl,
@@ -350,14 +349,7 @@ impl ProtectedObjectDomain {
                 }]),
                 extension: ".json",
             },
-            Self::StoreMembershipResolution => ProtocolObjectMetadata {
-                aad_label: b"store-membership-resolution",
-                path: ProtocolPathRule::Exact(&[ExactPathShape {
-                    component_count: 6,
-                    fixed_components: &[(0, "store-v1"), (1, "membership"), (2, "resolutions")],
-                }]),
-                extension: ".json",
-            },
+
             Self::StoreWrappedKey => ProtocolObjectMetadata {
                 aad_label: b"store-wrapped-key",
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
@@ -587,8 +579,6 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipHead);
     pub const StoreMembershipHeadAcceptance: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipHeadAcceptance);
-    pub const StoreMembershipResolution: SignedStoreProtocolObjectDomain =
-        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipResolution);
     pub const StoreWrappedKey: RecipientSealedProtocolObjectDomain =
         RecipientSealedProtocolObjectDomain(ProtectedObjectDomain::StoreWrappedKey);
     pub const CircleAccessLeaf: RecipientSealedProtocolObjectDomain =

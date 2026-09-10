@@ -41,13 +41,7 @@ impl AuthorizedReclaim<'_, '_> {
                 "snapshot retirement aliases current accepted authority".into(),
             ));
         }
-        let coven_protocol::membership::MembershipStatus::Resolved(resolved) =
-            plan.membership().status()
-        else {
-            return Err(StoreReclaimError::Authorization(
-                "snapshot retirement requires resolved membership".into(),
-            ));
-        };
+        let resolved = plan.membership().resolved();
         if plan.owner_grant().is_none()
             || plan
                 .effective_provider_admin_grant(resolved.provider_admin.combined_state())

@@ -445,75 +445,6 @@ impl OwnerPromotionAcceptanceBody {
     }
 }
 
-/// The wire body of an owner's acceptance of a resolved conflict. Every field
-/// here is signed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OwnerConflictResolutionAcceptanceBody {
-    pub store_root_hash: ObjectHash,
-    pub owner_grant: MembershipGrantId,
-    pub owner_registration: StoreDeviceRegistrationRef,
-    pub provider: ProviderDeviceBinding,
-    pub membership: GrantStreamAnchor,
-    pub recovery: GrantStreamAnchor,
-    pub device_state: StoreDeviceStateRef,
-}
-
-impl SignedBody for OwnerConflictResolutionAcceptanceBody {
-    const DOMAIN: &'static [u8] = b"coven.owner-conflict-resolution-acceptance.v1\0";
-}
-
-pub type OwnerConflictResolutionAcceptance = Signed<OwnerConflictResolutionAcceptanceBody>;
-
-impl OwnerConflictResolutionAcceptance {
-    #[allow(clippy::too_many_arguments)]
-    pub fn signed(
-        store_root_hash: ObjectHash,
-        owner_grant: MembershipGrantId,
-        owner_registration: StoreDeviceRegistrationRef,
-        membership: GrantStreamAnchor,
-        recovery: GrantStreamAnchor,
-        device_state: StoreDeviceStateRef,
-        registration: &StoreDeviceRegistration,
-        signer: &UserKeypair,
-    ) -> Result<Self, StoreProtocolError> {
-        let body = OwnerConflictResolutionAcceptanceBody {
-            store_root_hash,
-            owner_grant,
-            owner_registration,
-            provider: registration.provider.clone(),
-            membership,
-            recovery,
-            device_state,
-        };
-        body.validate_shape(registration)?;
-        let device_signer = registration.device_signer(signer)?;
-        Ok(Signed::sign(body, &device_signer))
-    }
-
-    pub fn verify(&self, registration: &StoreDeviceRegistration) -> Result<(), StoreProtocolError> {
-        self.body().validate_shape(registration)?;
-        self.verify_by(&registration.device_signing_pubkey)
-    }
-}
-
-impl OwnerConflictResolutionAcceptanceBody {
-    fn validate_shape(
-        &self,
-        registration: &StoreDeviceRegistration,
-    ) -> Result<(), StoreProtocolError> {
-        self.owner_registration.verify_registration(registration)?;
-        if registration.store_root.store_root_hash != self.store_root_hash
-            || registration.provider != self.provider
-            || !matches!(self.membership, GrantStreamAnchor::StoreMembership { .. })
-            || !matches!(self.recovery, GrantStreamAnchor::OwnerRecovery { .. })
-        {
-            return Err(StoreProtocolError::OwnerRecoveryMismatch);
-        }
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateObjectManifest {
@@ -682,16 +613,5 @@ impl StoreCommitOperationsInput<'_> {
             store_package: None,
             circle_packages: &[],
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreOperationMembershipAuthority {
-    pub predecessor: MembershipGrantCreationAuthority,
-}
-
-impl StoreOperationMembershipAuthority {
-    pub(super) fn into_commit_authority(self) -> MembershipGrantCreationAuthority {
-        self.predecessor
     }
 }

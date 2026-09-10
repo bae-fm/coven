@@ -159,7 +159,6 @@ async fn a_conflicting_admission_preserves_the_accepted_grant_and_pull_access() 
         .membership_for_test()
         .await
         .expect("accepted membership");
-    assert!(membership.conflict().is_none());
     assert_eq!(membership.active_grant_ids(&target_pubkey), original_grants);
     assert!(membership.current_members().contains(&(
         target_pubkey,

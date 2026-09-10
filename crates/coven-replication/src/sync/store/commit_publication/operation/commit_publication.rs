@@ -97,7 +97,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 publication_previous,
                 authorization.membership_state,
                 authorization.device_state_ref,
-                coven_protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
+                predecessor,
                 owner_grant,
             ),
             authorization.membership,
@@ -108,63 +108,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) fn membership_authority(
         &self,
         membership: &coven_protocol::membership::MembershipChain,
-    ) -> Result<coven_protocol::store_commit::StoreOperationMembershipAuthority, StoreError> {
+    ) -> Result<coven_protocol::membership::MembershipCoord, StoreError> {
         let writer = self.writer.author_pubkey();
         let predecessor = membership.write_grant_authority(&writer).ok_or_else(|| {
             StoreError::Preparation(crate::sync::store::StorePreparationError::Gate(format!(
                 "Store writer {writer} has no active membership grant"
             )))
         })?;
-        Ok(coven_protocol::store_commit::StoreOperationMembershipAuthority { predecessor })
-    }
-
-    pub(crate) async fn prepare_conflict_resolution_plan(
-        &mut self,
-        candidate_membership_heads: &[coven_protocol::membership::MembershipHeadRef],
-    ) -> Result<MergeConflictResolutionCommitPlan, StoreError> {
-        let authorship = self.database.author_own_stream().await;
-        let root = self.store_root().clone();
-        let stream_id = self.announcement_stream_id();
-        self.prepare_publication_boundary().await?;
-        let base = authorship.local_commit_base(stream_id).await?;
-        let (authorship, state) = base.into_parts();
-        let (previous, frontier, _membership, publication) = state.into_parts();
-        let publication_previous = publication.require_observed()?.clone();
-        if publication_previous.record().store_root_hash != root.store_root_hash {
-            return Err(StoreError::InvalidOutbound(
-                "Store publication boundary belongs to another Store root".to_string(),
-            ));
-        }
-        let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(frontier)
-            .map_err(StoreError::from)?;
-        let seq = commit_plan::next_store_sequence(previous.as_ref())?;
-        let coord = coven_protocol::store_commit::StoreCommitCoord {
-            stream_id,
-            sequence: seq,
-        };
-        let order = coven_protocol::store_commit::StoreCommitOrder {
-            seq,
-            predecessor: previous,
-            dependencies: dependencies.0,
-        };
-        let authorization = self
-            .writer
-            .authorize_retained_conflict_resolution(
-                &self.history,
-                &order,
-                candidate_membership_heads,
-            )
-            .await
-            .map_err(StoreError::from)?;
-        Ok(MergeConflictResolutionCommitPlan::new(
-            authorship,
-            Arc::clone(&self.writer),
-            root,
-            coord,
-            order,
-            publication_previous,
-            authorization,
-        ))
+        Ok(predecessor)
     }
 
     pub(crate) async fn activate_uploaded(
@@ -373,18 +324,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             // A competing publication may have refreshed this chain while the
             // candidate kept its original predecessor. Extend the current chain.
             let mut membership = self.membership.clone();
-            if let (Some(reference), Some(resolution)) =
-                (&proof.resolution, &proof.resolution_value)
-            {
-                if !membership.resolution_refs().contains(reference) {
-                    membership
-                        .apply_resolutions(
-                            root.store_root_hash,
-                            &[(reference.clone(), resolution.clone())],
-                        )
-                        .map_err(MembershipMutationError::from)?;
-                }
-            }
             membership = membership
                 .with_exact_entry(&proof.entry_value)
                 .map_err(MembershipMutationError::from)?;

@@ -20,18 +20,12 @@ impl MergeHistoryVerifier<'_> {
             .await?;
         let prefix = self.verified_membership_prefix(frontier.commits().values().cloned())?;
         let mut heads = known_heads.to_vec();
-        let mut resolutions = BTreeSet::new();
-        self.extend_membership_cut_from_history(frontier.commits(), &mut heads, &mut resolutions)?;
+        self.extend_membership_cut_from_history(frontier.commits(), &mut heads)?;
         let heads = protocol_membership::MembershipFloor::from_heads(heads)
             .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
         let membership = self
             .project_membership_to_verified_prefix(&heads.0, &prefix)
             .await?;
-        if membership.resolution_refs() != resolutions.into_iter().collect::<Vec<_>>() {
-            return Err(StorePullError::InvalidState(
-                "current membership differs from its accepted resolution cut".into(),
-            ));
-        }
         prefix.validate_complete_membership(&membership)?;
         Ok(membership)
     }
@@ -57,48 +51,14 @@ impl MergeHistoryVerifier<'_> {
             .membership_proof
             .as_ref()
             .map(|proof| proof.entry_value.clone());
-        let pending_resolution = candidate
-            .membership_control
-            .as_ref()
-            .and_then(|control| control.conflict_resolution.clone());
         let mut head_refs = commit.value().membership_state.heads.clone();
-        let mut resolutions = commit
-            .value()
-            .membership_state
-            .resolutions
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        self.extend_membership_cut_from_history(&frontier, &mut head_refs, &mut resolutions)?;
+        self.extend_membership_cut_from_history(&frontier, &mut head_refs)?;
         let heads = protocol_membership::MembershipFloor::from_heads(head_refs)
             .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
-        if let Some(pending) = &pending_resolution {
-            if prefix.verifies_conflict_resolution(pending.reference()) {
-                return Err(StorePullError::InvalidState(
-                    "Store publication repeats an accepted membership resolution".to_string(),
-                ));
-            }
-            resolutions.remove(pending.reference());
-        }
-        let mut membership = self
-            .load_membership_at_verified_prefix(
-                &heads.0,
-                &resolutions.into_iter().collect::<Vec<_>>(),
-                &prefix,
-                None,
-            )
+        let membership = self
+            .load_membership_at_verified_prefix(&heads.0, &prefix)
             .await?;
         prefix.validate_complete_membership(&membership)?;
-        if let Some(pending) = &pending_resolution {
-            let resolution = self
-                .membership_objects()
-                .load_resolution(pending.reference())
-                .await?;
-            membership.apply_resolutions(
-                self.root.reference().store_root_hash,
-                &[(pending.reference().clone(), resolution.value)],
-            )?;
-        }
         if !membership_authorizes(Some(&membership), commit.value(), commit.author()) {
             return Err(StorePullError::InvalidState(
                 "Store publication author lacks current membership authority".to_string(),
@@ -132,14 +92,6 @@ impl MergeHistoryVerifier<'_> {
         // Immutable candidates may be accepted after intervening device controls.
         // Validate their transitions against the actual accepted predecessor.
         operations.apply_to(state.clone())?;
-        if pending_resolution.is_some() {
-            self.verify_canonical_owner_registration(
-                &state,
-                &commit.author().author_pubkey,
-                &commit.value().author_registration,
-            )
-            .await?;
-        }
         Ok(protocol_membership::MembershipFloor(
             membership.head_refs().to_vec(),
         ))
@@ -149,11 +101,9 @@ impl MergeHistoryVerifier<'_> {
         &self,
         frontier: &BTreeMap<protocol_membership::AuthorStreamId, StoreBatchCommitRef>,
         head_refs: &mut Vec<protocol_membership::MembershipHeadRef>,
-        resolutions: &mut BTreeSet<protocol_membership::StoreMembershipConflictResolutionRef>,
     ) -> Result<(), StorePullError> {
         if let Some(snapshot) = self.history.baseline.snapshot() {
             head_refs.extend(snapshot.meta.state.membership.heads.iter().cloned());
-            resolutions.extend(snapshot.meta.state.membership.resolutions.iter().cloned());
         }
         let closure = verified_merge_commit_closure(&self.history, frontier.values().cloned())?;
         for prior in closure
@@ -169,18 +119,8 @@ impl MergeHistoryVerifier<'_> {
                     .iter()
                     .cloned(),
             );
-            resolutions.extend(
-                prior
-                    .verified
-                    .value()
-                    .membership_state
-                    .resolutions
-                    .iter()
-                    .cloned(),
-            );
             if let Some(proof) = &prior.history_evidence.membership_proof {
                 head_refs.push(proof.head.clone());
-                resolutions.extend(proof.head_value.body.resolutions.iter().cloned());
             }
         }
         Ok(())

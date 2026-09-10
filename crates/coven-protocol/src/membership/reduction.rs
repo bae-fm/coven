@@ -2,16 +2,8 @@ use super::*;
 
 pub(super) fn validate_membership_retirement_barriers(
     entries: &[MembershipEntry],
-    checkpoint: Option<&MembershipResolutionCheckpoint>,
 ) -> Result<(), MembershipError> {
     for (index, entry) in entries.iter().enumerate() {
-        if checkpoint.is_some_and(|checkpoint| {
-            checkpoint.raw_heads.iter().any(|head| {
-                head.stream_key() == entry.coord().stream_key() && entry.seq <= head.seq
-            })
-        }) {
-            continue;
-        }
         let (retired, barriers) = match &entry.change {
             StoreAuthorityChange::SetMember {
                 replaces,
@@ -27,8 +19,7 @@ pub(super) fn validate_membership_retirement_barriers(
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
             | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin
-            | StoreAuthorityChange::ResolutionActivation { .. } => continue,
+            | StoreAuthorityChange::ProviderAdmin => continue,
         };
         if retired != &barriers.keys().cloned().collect::<BTreeSet<_>>() {
             let barrier_grants = barriers.keys().cloned().collect::<BTreeSet<_>>();
@@ -45,13 +36,7 @@ pub(super) fn validate_membership_retirement_barriers(
             .filter(|candidate| included.contains(&candidate.coord()))
             .cloned()
             .collect::<Vec<_>>();
-        let reduced = match checkpoint {
-            Some(checkpoint) => reduce_store_membership_from_checkpoint(&causal_past, checkpoint)?,
-            None => reduce_store_membership(&causal_past)?,
-        };
-        let CausalGrantStatus::Resolved(reduced) = reduced else {
-            return Err(MembershipError::Conflict);
-        };
+        let reduced = reduce_store_membership(&causal_past)?;
         for (grant, barrier) in barriers {
             let Some(record) = reduced.grants.get(grant).and_then(GrantState::active) else {
                 return Err(MembershipError::InvalidOwnerRevocationBarrier {
@@ -86,7 +71,6 @@ pub(super) fn validate_membership_retirement_barriers(
 
 pub(super) fn validate_membership_wrapped_keys(
     entries: &[MembershipEntry],
-    checkpoint: Option<&MembershipResolutionCheckpoint>,
 ) -> Result<(), MembershipError> {
     for (index, entry) in entries.iter().enumerate() {
         let included = causal_grants::history_closure(entries, &entry.dependencies);
@@ -115,8 +99,7 @@ pub(super) fn validate_membership_wrapped_keys(
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
             | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin
-            | StoreAuthorityChange::ResolutionActivation { .. } => continue,
+            | StoreAuthorityChange::ProviderAdmin => continue,
         };
         let (removed_pubkey, wrapped_keys) = references;
         let rotation_generation = wrapped_keys.first().map(|reference| reference.generation);
@@ -136,20 +119,7 @@ pub(super) fn validate_membership_wrapped_keys(
             .filter(|candidate| included.contains(&candidate.coord()))
             .cloned()
             .collect::<Vec<_>>();
-        let precedes_checkpoint = checkpoint.is_some_and(|checkpoint| {
-            checkpoint.raw_heads.iter().any(|head| {
-                head.stream_key() == entry.coord().stream_key() && entry.seq <= head.seq
-            })
-        });
-        let reduced = match (checkpoint, precedes_checkpoint) {
-            (Some(checkpoint), false) => {
-                reduce_store_membership_from_checkpoint(&causal_past, checkpoint)?
-            }
-            (None, _) | (Some(_), true) => reduce_store_membership(&causal_past)?,
-        };
-        let CausalGrantStatus::Resolved(reduced) = reduced else {
-            return Err(MembershipError::InvalidWrappedKeys(index));
-        };
+        let reduced = reduce_store_membership(&causal_past)?;
         let expected_recipients = reduced
             .grants
             .values()
@@ -186,8 +156,7 @@ pub(super) fn membership_causal_generation(
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
             | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin
-            | StoreAuthorityChange::ResolutionActivation { .. } => &[],
+            | StoreAuthorityChange::ProviderAdmin => &[],
         })
         .map(|reference| reference.generation)
         .max()
@@ -196,43 +165,16 @@ pub(super) fn membership_causal_generation(
 
 pub(super) fn reduce_store_membership(
     entries: &[MembershipEntry],
-) -> Result<CausalGrantStatus<MembershipCoord, StoreAssignment>, MembershipError> {
+) -> Result<causal_grants::ReducedGrants<MembershipCoord, StoreAssignment>, MembershipError> {
     let normalized = normalize_store_membership(entries);
-    causal_grants::reduce(&normalized).map_err(map_store_causal_error)
-}
-
-pub(super) fn reduce_store_membership_from_checkpoint(
-    entries: &[MembershipEntry],
-    checkpoint: &MembershipResolutionCheckpoint,
-) -> Result<CausalGrantStatus<MembershipCoord, StoreAssignment>, MembershipError> {
-    let suffix = causal_grants::entries_beyond_checkpoint(entries, &checkpoint.raw_heads)
-        .cloned()
-        .collect::<Vec<_>>();
-    let normalized = normalize_store_membership(&suffix);
-    let seeds = causal_grants::map_checkpoint_grants(
-        &checkpoint.grants,
-        |record| causal_grants::CausalSeedGrant {
-            member_pubkey: record.member_pubkey.clone(),
-            assignment: StoreAssignment {
-                role: record.role.clone(),
-                provider_account_email: record.provider_account_email.clone(),
-            },
-        },
-        || (),
-    );
-    causal_grants::reduce_from_checkpoint(
-        &normalized,
-        &checkpoint.raw_heads,
-        &checkpoint.effective_frontier,
-        &seeds,
-        &checkpoint.included,
-    )
-    .map_err(map_store_causal_error)
+    match causal_grants::reduce(&normalized).map_err(map_store_causal_error)? {
+        CausalGrantStatus::Resolved(reduced) => Ok(reduced),
+        CausalGrantStatus::Conflict(_) => Err(MembershipError::Conflict),
+    }
 }
 
 pub(super) fn validate_provider_admin_controls(
     entries: &[MembershipEntry],
-    checkpoint: Option<&MembershipResolutionCheckpoint>,
 ) -> Result<(), MembershipError> {
     for (index, entry) in entries.iter().enumerate() {
         let Some(crate::provider::ProviderAdminMembershipChange { owner_barriers, .. }) =
@@ -246,13 +188,7 @@ pub(super) fn validate_provider_admin_controls(
             .filter(|candidate| included.contains(&candidate.coord()))
             .cloned()
             .collect::<Vec<_>>();
-        let reduced = match checkpoint {
-            Some(checkpoint) => reduce_store_membership_from_checkpoint(&causal_past, checkpoint)?,
-            None => reduce_store_membership(&causal_past)?,
-        };
-        let CausalGrantStatus::Resolved(reduced) = reduced else {
-            return Err(MembershipError::InvalidProviderAdminChange(index));
-        };
+        let reduced = reduce_store_membership(&causal_past)?;
         let expected = reduced
             .grants
             .iter()
@@ -355,9 +291,6 @@ pub(super) fn normalize_store_membership(
                 | StoreAuthorityChange::DeviceRegistrationActivation { .. }
                 | StoreAuthorityChange::DeviceExclusionProposal { .. }
                 | StoreAuthorityChange::DeviceExclusionOutcome { .. } => CausalChange::Control,
-                StoreAuthorityChange::ResolutionActivation { .. } => {
-                    CausalChange::ResolutionActivation
-                }
             };
             CausalEntry {
                 coord: entry.coord(),
@@ -369,38 +302,8 @@ pub(super) fn normalize_store_membership(
         .collect()
 }
 
-pub(super) fn map_store_grants(
-    grants: BTreeMap<
-        MembershipGrantId,
-        causal_grants::GrantRecord<MembershipCoord, StoreAssignment>,
-    >,
-    checkpoint: Option<
-        &BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
-    >,
-) -> Result<BTreeMap<MembershipGrantId, MembershipGrantRecord>, MembershipError> {
-    grants
-        .into_iter()
-        .map(|(grant, record)| -> Result<_, MembershipError> {
-            let creation_authority =
-                membership_creation_authority(&grant, record.creation, checkpoint)?;
-            Ok((
-                grant,
-                MembershipGrantRecord {
-                    member_pubkey: record.member_pubkey,
-                    role: record.assignment.role,
-                    provider_account_email: record.assignment.provider_account_email,
-                    creation_authority,
-                },
-            ))
-        })
-        .collect()
-}
-
 pub(super) fn resolved_store_membership(
     reduced: &causal_grants::ReducedGrants<MembershipCoord, StoreAssignment>,
-    checkpoint: Option<
-        &BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
-    >,
     provider_admin: crate::provider::ProviderAdminResolution,
     entries: &[MembershipEntry],
 ) -> Result<ResolvedStoreMembership, MembershipError> {
@@ -408,10 +311,7 @@ pub(super) fn resolved_store_membership(
         .grants
         .iter()
         .map(|(grant, state)| -> Result<_, MembershipError> {
-            Ok((
-                grant.clone(),
-                map_store_grant_state(grant, state, checkpoint, entries)?,
-            ))
+            Ok((grant.clone(), map_store_grant_state(grant, state, entries)?))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     let state_hash = store_membership_state_hash(&grants, &provider_admin);
@@ -428,9 +328,6 @@ pub(super) fn map_store_grant_state(
         causal_grants::GrantRecord<MembershipCoord, StoreAssignment>,
         causal_grants::CausalGrantRetirement<MembershipCoord>,
     >,
-    checkpoint: Option<
-        &BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
-    >,
     entries: &[MembershipEntry],
 ) -> Result<GrantState<MembershipGrantRecord, MembershipGrantRetirement>, MembershipError> {
     let causal_record = state.record();
@@ -438,23 +335,17 @@ pub(super) fn map_store_grant_state(
         member_pubkey: causal_record.member_pubkey.clone(),
         role: causal_record.assignment.role.clone(),
         provider_account_email: causal_record.assignment.provider_account_email.clone(),
-        creation_authority: membership_creation_authority(
-            grant,
-            causal_record.creation.clone(),
-            checkpoint,
-        )?,
+        creation_authority: membership_creation_authority(grant, causal_record.creation.clone())?,
     };
     causal_grants::try_map_grant_state(
         state,
         record,
-        checkpoint
-            .and_then(|grants| grants.get(grant))
-            .and_then(GrantState::retirements),
+        None,
         || MembershipError::MissingCheckpointRetirementEvidence {
             grant: grant.clone(),
         },
         |coord, _owner_barrier| {
-            Ok(MembershipGrantRetirement::Entry {
+            Ok(MembershipGrantRetirement {
                 authority: coord.clone(),
                 barrier: membership_retirement_barrier(entries, coord, grant).ok_or_else(|| {
                     MembershipError::MissingRetirementBarrier {
@@ -486,8 +377,7 @@ pub(super) fn membership_retirement_barrier(
         | StoreAuthorityChange::DeviceRegistrationActivation { .. }
         | StoreAuthorityChange::DeviceExclusionProposal { .. }
         | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-        | StoreAuthorityChange::ProviderAdmin
-        | StoreAuthorityChange::ResolutionActivation { .. } => return None,
+        | StoreAuthorityChange::ProviderAdmin => return None,
     };
     barriers.get(grant).cloned()
 }
@@ -495,20 +385,14 @@ pub(super) fn membership_retirement_barrier(
 pub(super) fn membership_creation_authority(
     grant: &MembershipGrantId,
     creation: causal_grants::CausalGrantCreation<MembershipCoord>,
-    checkpoint: Option<
-        &BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
-    >,
-) -> Result<MembershipGrantCreationAuthority, MembershipError> {
+) -> Result<MembershipCoord, MembershipError> {
     match creation {
-        causal_grants::CausalGrantCreation::Entry(coord) => {
-            Ok(MembershipGrantCreationAuthority::Entry(coord))
-        }
-        causal_grants::CausalGrantCreation::Checkpoint => checkpoint
-            .and_then(|grants| grants.get(grant))
-            .ok_or_else(|| MembershipError::MissingCheckpointGrant {
+        causal_grants::CausalGrantCreation::Entry(coord) => Ok(coord),
+        causal_grants::CausalGrantCreation::Checkpoint => {
+            Err(MembershipError::MissingCheckpointGrant {
                 grant: grant.clone(),
             })
-            .map(|state| state.record().creation_authority.clone()),
+        }
     }
 }
 
@@ -535,55 +419,6 @@ pub(super) fn store_membership_state_hash(
             provider_admin,
         })
         .expect("Store membership state serialization cannot fail"),
-    )
-}
-
-pub(super) fn membership_assignment_conflict_hash(
-    heads: &[MembershipHeadRef],
-    member_pubkey: &str,
-    conflicting_grants: &BTreeMap<
-        MembershipGrantId,
-        causal_grants::GrantRecord<MembershipCoord, StoreAssignment>,
-    >,
-) -> ObjectHash {
-    #[derive(Serialize)]
-    struct Conflict<'a> {
-        domain: &'static str,
-        heads: &'a [MembershipHeadRef],
-        member_pubkey: &'a str,
-        conflicting_grant_ids: Vec<&'a MembershipGrantId>,
-    }
-    ObjectHash::digest(
-        &serde_json::to_vec(&Conflict {
-            domain: "coven.store-membership-assignment-conflict.v1",
-            heads,
-            member_pubkey,
-            conflicting_grant_ids: conflicting_grants.keys().collect(),
-        })
-        .expect("Store membership conflict serialization cannot fail"),
-    )
-}
-
-pub(super) fn membership_revocation_conflict_hash(
-    heads: &[MembershipHeadRef],
-    cyclic_sources: &[MembershipCoord],
-    involved_owner_grants: &BTreeSet<MembershipGrantId>,
-) -> ObjectHash {
-    #[derive(Serialize)]
-    struct Conflict<'a> {
-        domain: &'static str,
-        heads: &'a [MembershipHeadRef],
-        cyclic_sources: &'a [MembershipCoord],
-        involved_owner_grants: &'a BTreeSet<MembershipGrantId>,
-    }
-    ObjectHash::digest(
-        &serde_json::to_vec(&Conflict {
-            domain: "coven.store-membership-revocation-conflict.v1",
-            heads,
-            cyclic_sources,
-            involved_owner_grants,
-        })
-        .expect("Store membership revocation conflict serialization cannot fail"),
     )
 }
 

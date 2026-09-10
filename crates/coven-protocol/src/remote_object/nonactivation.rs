@@ -1,28 +1,5 @@
 use super::*;
 
-pub(super) enum UploadedRetainedNonactivation {
-    Cleanup(Vec<CandidateNonactivation>),
-    Inert(Vec<CandidateNonactivation>),
-    Retain(CandidateOwnership),
-}
-
-pub(super) fn uploaded_retained_nonactivation_disposition(
-    domain: &RetainedAuthorityObjectDomain,
-    ownership: CandidateOwnership,
-) -> UploadedRetainedNonactivation {
-    if !ownership.pending.is_empty() || !ownership.activated.is_empty() {
-        return UploadedRetainedNonactivation::Retain(ownership);
-    }
-    if matches!(
-        domain,
-        RetainedAuthorityObjectDomain::StoreMembershipResolution { .. }
-    ) {
-        UploadedRetainedNonactivation::Cleanup(ownership.nonactivated)
-    } else {
-        UploadedRetainedNonactivation::Inert(ownership.nonactivated)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateNonactivation {
@@ -124,7 +101,7 @@ pub enum CandidateNonactivationProof {
     AuthorityRetirement {
         publication: crate::store_commit::StorePublicationRef,
         coverage: crate::store_commit::CommitFrontier,
-        creation: crate::membership::MembershipGrantCreationAuthority,
+        creation: crate::membership::MembershipCoord,
         retirement: crate::membership::MembershipGrantRetirement,
     },
     SnapshotRetirement {

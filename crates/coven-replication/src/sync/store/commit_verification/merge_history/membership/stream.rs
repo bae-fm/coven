@@ -135,7 +135,6 @@ impl MembershipActivationAuthority<'_, '_> {
         let mut predecessor: Option<MembershipHeadRef> = None;
         let mut entries = Vec::new();
         let mut heads = Vec::new();
-        let mut resolutions = BTreeMap::new();
         let mut reached_cursor = cursor.is_none();
         let mut reached_tail = true;
 
@@ -180,11 +179,6 @@ impl MembershipActivationAuthority<'_, '_> {
                 .load_membership_entry(&head.body.entry)
                 .await
                 .map_err(map_membership_object_error)?;
-            if loaded_entry.value.resolution_dependencies != head.body.resolutions {
-                return Err(AnchoredChainError::LoadFailed(format!(
-                    "membership head {coord:?} carries a resolution cut different from its entry"
-                )));
-            }
             let acceptance = acceptances.pop().expect("one result for each read head");
             if !self
                 .validate_head_activation(&reference, &head, &loaded_entry.value, acceptance)
@@ -197,16 +191,6 @@ impl MembershipActivationAuthority<'_, '_> {
                 }
                 reached_tail = false;
                 break;
-            }
-            for resolution_ref in &head.body.resolutions {
-                if !resolutions.contains_key(resolution_ref) {
-                    let resolution = self
-                        .load_membership_resolution(resolution_ref)
-                        .await
-                        .map_err(map_membership_object_error)?
-                        .value;
-                    resolutions.insert(resolution_ref.clone(), resolution);
-                }
             }
             if cursor == Some(&reference) {
                 reached_cursor = true;
@@ -224,10 +208,6 @@ impl MembershipActivationAuthority<'_, '_> {
                 "membership head successor chain regressed below its durable cursor".to_string(),
             ));
         }
-        Ok(ExactMembershipStream {
-            entries,
-            heads,
-            resolutions,
-        })
+        Ok(ExactMembershipStream { entries, heads })
     }
 }

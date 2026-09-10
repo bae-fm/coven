@@ -231,7 +231,7 @@ impl PreparedStoreOperationCommit {
                 _ => {
                     return Err(PreparedCommitError::Invariant(
                         "Merge membership mutation graph contains another change".to_string(),
-                    ))
+                    ));
                 }
             };
         if expected_wraps.len() != wraps.len()
@@ -245,55 +245,6 @@ impl PreparedStoreOperationCommit {
             ));
         }
         self.close_merge_membership_remote_objects(&publication, wraps, Vec::new())
-    }
-
-    pub fn prepared_membership_resolution(
-        &self,
-    ) -> Result<
-        crate::objects::PreparedProtocolObject<
-            super::membership::StoreMembershipConflictResolution,
-        >,
-        PreparedCommitError,
-    > {
-        let publication = self.prepared_membership_publication()?;
-        let super::membership::StoreAuthorityChange::ResolutionActivation {
-            resolution: reference,
-        } = &publication.entry.change
-        else {
-            return Err(PreparedCommitError::Invariant(
-                "Store candidate does not activate a membership resolution".into(),
-            ));
-        };
-        let value = self
-            .history_evidence
-            .membership_proof
-            .as_ref()
-            .and_then(|proof| proof.resolution_value.as_ref())
-            .ok_or_else(|| {
-                PreparedCommitError::Invariant(
-                    "Store resolution activation lacks its prepared authority proof".into(),
-                )
-            })?
-            .clone();
-        let prepared = crate::membership_mutation::prepare_exact_object(&reference.object, &value)?;
-        Ok(crate::objects::PreparedProtocolObject { value, prepared })
-    }
-
-    pub fn merge_membership_resolution_remote_objects(
-        &self,
-    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
-        let publication = self.prepared_membership_publication()?;
-        let resolution = self.prepared_membership_resolution()?;
-        let reference = resolution
-            .value
-            .resolution_ref(resolution.prepared.reference().clone());
-        let authority = crate::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
-            reference,
-            resolution.prepared.stored_bytes(),
-            resolution.prepared.stored_bytes(),
-            self.reference.clone(),
-        )?;
-        self.close_merge_membership_remote_objects(&publication, &[], vec![authority])
     }
 
     fn close_merge_membership_remote_objects(
@@ -468,10 +419,9 @@ impl PreparedStoreOperationCommit {
         Ok(objects)
     }
 
-    pub fn attach_merge_membership_proof_with(
+    pub fn attach_merge_membership_proof(
         &mut self,
         publication: &PreparedMembershipPublication,
-        resolution_value: Option<&super::membership::StoreMembershipConflictResolution>,
     ) -> Result<(), PreparedCommitError> {
         publication.validate().map_err(PreparedCommitError::from)?;
         let reference = self.common.reference.clone();
@@ -488,27 +438,6 @@ impl PreparedStoreOperationCommit {
                 "Merge membership proof differs from its signed Store transition".to_string(),
             ));
         }
-        let resolution = match &publication.entry.change {
-            super::membership::StoreAuthorityChange::ResolutionActivation { resolution } => {
-                let value = resolution_value.ok_or_else(|| {
-                    PreparedCommitError::Invariant(
-                        "Merge resolution activation lacks its exact resolution proof".to_string(),
-                    )
-                })?;
-                if value.resolution_ref(resolution.object.clone()) != *resolution {
-                    return Err(PreparedCommitError::Invariant(
-                        "Merge resolution proof differs from its exact reference".to_string(),
-                    ));
-                }
-                (Some(resolution.clone()), Some(value.clone()))
-            }
-            _ if resolution_value.is_none() => (None, None),
-            _ => {
-                return Err(PreparedCommitError::Invariant(
-                    "non-resolution membership proof carries a resolution".to_string(),
-                ))
-            }
-        };
         self.history_evidence.membership_proof = Some(Box::new(
             super::store_commit::RetainedMergeMembershipProof {
                 commit: reference,
@@ -517,8 +446,6 @@ impl PreparedStoreOperationCommit {
                 entry_value: publication.entry.clone(),
                 head: publication.head_ref.clone(),
                 head_value: publication.head.clone(),
-                resolution: resolution.0,
-                resolution_value: resolution.1,
             },
         ));
         self.validate_closed_shape()?;

@@ -1,7 +1,5 @@
 use crate::sync::store::membership::AnchoredChainError;
-use coven_protocol::membership::{
-    MembershipChain, MembershipHeadRef, StoreMembershipConflictResolutionRef,
-};
+use coven_protocol::membership::{MembershipChain, MembershipHeadRef};
 use coven_protocol::store_commit::{
     OwnerPromotionAcceptance, OwnerPromotionRequest, StoreDeviceRegistration,
     StoreDeviceRegistrationRef,
@@ -105,10 +103,7 @@ impl<'operation, 'storage> OwnerPromotionHistory<'operation, 'storage> {
     pub(crate) async fn load_membership(
         &mut self,
         heads: &[MembershipHeadRef],
-        resolutions: &[StoreMembershipConflictResolutionRef],
     ) -> Result<MembershipChain, AnchoredChainError> {
-        self.history
-            .load_membership_at_exact_heads(heads, resolutions)
-            .await
+        self.history.load_membership_at_exact_heads(heads).await
     }
 }

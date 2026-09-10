@@ -20,7 +20,6 @@ mod error;
 mod founder_creation;
 mod host_write;
 mod membership;
-mod merge_conflict;
 mod reclaim;
 use commit_publication::operation::commit_plan;
 pub(crate) mod owner_role_promotion;

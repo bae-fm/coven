@@ -237,24 +237,16 @@ impl<'a> MergeHistoryVerifier<'a> {
                     &self.history,
                     commit_predecessor_references(&commit),
                 )?;
-                let pending_resolution =
-                    Box::pin(self.verify_resolution_activation_acceptance(&commit)).await?;
-                let cached_membership = if pending_resolution.is_none() {
-                    self.cached_verified_membership(
-                        &commit.membership_state,
-                        &verified_membership_prefix,
-                    )
-                } else {
-                    None
-                };
+                let cached_membership = self.cached_verified_membership(
+                    &commit.membership_state,
+                    &verified_membership_prefix,
+                );
                 let membership = match cached_membership {
                     Some(membership) => membership,
                     None => self
                         .load_membership_at_verified_prefix(
                             &commit.membership_state.heads,
-                            &commit.membership_state.resolutions,
                             &verified_membership_prefix,
-                            pending_resolution.as_ref(),
                         )
                         .await
                         .map_err(StorePullError::MembershipChain)?,
@@ -309,13 +301,12 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .map_err(StorePullError::from)?;
                 let membership_control =
                     if let Some(store_commit::StoreControl { transition }) = commit.control() {
-                        let (activations, conflict_resolution) =
+                        let activations =
                             Box::pin(self.verify_membership_control_with_retained_history(
                                 &reference,
                                 &commit,
                                 &membership,
                                 &predecessor_state,
-                                pending_resolution.as_ref(),
                             ))
                             .await?;
                         Some(VerifiedMergeMembershipControl {
@@ -324,7 +315,6 @@ impl<'a> MergeHistoryVerifier<'a> {
                                 commit: reference.clone(),
                                 transition: transition.clone(),
                             },
-                            conflict_resolution,
                         })
                     } else {
                         None
@@ -369,8 +359,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 history_evidence
                     .validate_for(&reference, &commit)
                     .map_err(StorePullError::Protocol)?;
-                let membership_to_remember =
-                    pending_resolution.is_none().then(|| membership.clone());
+                let membership_to_remember = membership.clone();
                 self.history.commits.insert(
                     reference,
                     VerifiedMergeHistoryCommit {
@@ -384,9 +373,10 @@ impl<'a> MergeHistoryVerifier<'a> {
                         history_evidence,
                     },
                 );
-                if let Some(membership) = membership_to_remember {
-                    self.remember_verified_membership(verified_membership_prefix, membership);
-                }
+                self.remember_verified_membership(
+                    verified_membership_prefix,
+                    membership_to_remember,
+                );
             }
             Ok(())
         })

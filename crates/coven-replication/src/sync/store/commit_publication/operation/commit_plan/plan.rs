@@ -54,7 +54,7 @@ pub struct StoreOperationPlanCommon {
     publication_previous: coven_database::ObservedStorePublication,
     membership_state: super::circle_control::StoreMembershipStateRef,
     device_state: super::store_commit::StoreDeviceStateRef,
-    membership_authority: StoreOperationMembershipAuthority,
+    membership_authority: MembershipCoord,
     owner_grant: Option<super::membership::MembershipGrantId>,
 }
 
@@ -83,7 +83,7 @@ impl StoreOperationPlanCommon {
         publication_previous: coven_database::ObservedStorePublication,
         membership_state: super::circle_control::StoreMembershipStateRef,
         device_state: super::store_commit::StoreDeviceStateRef,
-        membership_authority: StoreOperationMembershipAuthority,
+        membership_authority: MembershipCoord,
         owner_grant: Option<super::membership::MembershipGrantId>,
     ) -> Self {
         Self {
@@ -224,7 +224,7 @@ impl StoreOperationCommitPlan {
         &self.membership_state
     }
 
-    pub(crate) fn membership_authority(&self) -> &StoreOperationMembershipAuthority {
+    pub(crate) fn membership_authority(&self) -> &MembershipCoord {
         &self.membership_authority
     }
 

@@ -30,7 +30,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         if public_key_hex == self.writer.author_pubkey() {
             return Err(crate::sync::store::membership::MembershipOpsError::SelfAdmission);
         }
-        self.resolved_membership()?;
         let root = self.store_root().clone();
         let database = self.database.clone();
         let _mutation = database.membership_mutation_permit().await;
@@ -42,7 +41,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             self.refresh_membership_publication()
                 .await
                 .map_err(MembershipMutationError::from)?;
-            self.resolved_membership()?;
             if self.membership.is_member_now(public_key_hex) {
                 let wrapped_key = Self::accepted_admission_key(
                     &self.membership,
@@ -491,7 +489,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let publication = self
             .finish_store_membership_transition(transition, candidate.reference.clone())
             .await?;
-        self.attach_membership_proof(&mut candidate, &publication)?;
+        candidate
+            .attach_merge_membership_proof(&publication)
+            .map_err(crate::sync::store::StoreError::from)?;
         let plan = AdmissionMutationPlan {
             candidate: Box::new(candidate),
             wrapped_key,

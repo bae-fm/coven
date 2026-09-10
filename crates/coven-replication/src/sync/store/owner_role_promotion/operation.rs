@@ -595,8 +595,9 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .finish_store_membership_transition(transition, candidate.reference.clone())
             .await
             .map_err(OwnerPromotionError::from)?;
-        self.writer
-            .attach_merge_membership_proof(&mut candidate, &publication, None)
+        candidate
+            .attach_merge_membership_proof(&publication)
+            .map_err(crate::sync::store::StoreError::from)
             .map_err(OwnerPromotionError::from)?;
         Ok(OwnerPromotionJournal {
             promotion_id: journal.promotion_id,
@@ -731,18 +732,12 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         let mut membership = operation
             .writer
             .owner_promotion_history()
-            .load_membership(&predecessor.heads, &predecessor.resolutions)
+            .load_membership(&predecessor.heads)
             .await
             .map_err(OwnerPromotionError::from)?;
-        let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
-        else {
-            return Err(OwnerPromotionError::Protocol(
-                "Owner promotion predecessor membership is conflicted".to_string(),
-            ));
-        };
+        let resolved = membership.resolved();
         let exact_predecessor = StoreMembershipStateRef::from_parts(
             membership.head_refs().to_vec(),
-            membership.resolution_refs().to_vec(),
             candidate_commit.device_state.recovery().to_vec(),
             resolved.state_hash,
         )
@@ -757,12 +752,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .add_entry(publication.entry.clone())
             .and_then(|()| membership.activate_head_ref(publication.head_ref.clone()))
             .map_err(OwnerPromotionError::from)?;
-        let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
-        else {
-            return Err(OwnerPromotionError::Protocol(
-                "finalized Owner promotion produced conflicted membership".to_string(),
-            ));
-        };
+        let resolved = membership.resolved();
         let coven_protocol::membership::StoreAuthorityChange::SetMember {
             user_pubkey,
             role:
@@ -803,7 +793,6 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         });
         let membership = StoreMembershipStateRef::from_parts(
             membership.head_refs().to_vec(),
-            membership.resolution_refs().to_vec(),
             recovery,
             resolved.state_hash,
         )

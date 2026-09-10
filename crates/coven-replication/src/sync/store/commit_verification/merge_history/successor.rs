@@ -221,17 +221,6 @@ pub(crate) fn merge_retained_merge_history(
             .effective_coordinates
             .iter()
             .any(|coordinate| !membership.effectively_contains_coord(coordinate))
-            || predecessor
-                .summary
-                .membership_floor
-                .resolutions
-                .iter()
-                .any(|reference| {
-                    membership
-                        .resolution_refs()
-                        .binary_search(reference)
-                        .is_err()
-                })
         {
             return Err(StorePullError::InvalidState(
                 "Merge successor membership omits its retained causal floor".to_string(),

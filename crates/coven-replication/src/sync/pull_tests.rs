@@ -550,8 +550,6 @@ impl PullTestStoreOps for TestStore {
         let graph =
             PreparedPullCommit::prepare(self, cloud_storage, name, sequence, changeset, signer)
                 .await;
-        let authority =
-            authority.map(coven_protocol::membership::MembershipGrantCreationAuthority::Entry);
         if graph.commit.membership_authority == authority {
             assert_eq!(
                 self.complete_uploaded_changeset_for_test(name)
@@ -836,7 +834,7 @@ impl<'storage> PreparedPullCommit<'storage> {
     fn sign_commit_with_package(
         &self,
         schema_version: u32,
-        membership_authority: coven_protocol::store_commit::StoreOperationMembershipAuthority,
+        membership_authority: MembershipCoord,
         package_bytes: &[u8],
         package_object: coven_protocol::objects::ExactObjectRef,
     ) -> coven_protocol::store_commit::StoreBatchCommit {
@@ -1090,7 +1088,7 @@ impl<'storage> PreparedPullCommit<'storage> {
     async fn resign_commit(
         &self,
         schema_version: u32,
-        membership_authority: Option<coven_protocol::membership::MembershipGrantCreationAuthority>,
+        membership_authority: Option<MembershipCoord>,
     ) -> coven_protocol::store_commit::StoreBatchCommit {
         let package = self
             .commit
@@ -1124,7 +1122,7 @@ impl<'storage> PreparedPullCommit<'storage> {
         };
         let mut commit = self.sign_commit_with_package(
             schema_version,
-            coven_protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
+            predecessor,
             &package_bytes,
             package.object.clone(),
         );
@@ -5575,12 +5573,10 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
     assert_eq!(
         graph.commit.membership_authority,
         Some(
-            coven_protocol::membership::MembershipGrantCreationAuthority::Entry(
-                chain
-                    .founder_coord()
-                    .cloned()
-                    .expect("founder grant coordinate")
-            )
+            chain
+                .founder_coord()
+                .cloned()
+                .expect("founder grant coordinate")
         )
     );
     let mut unsigned: serde_json::Value = serde_json::from_slice(&graph.commit.to_bytes()).unwrap();
@@ -6595,12 +6591,10 @@ async fn pull_rejects_and_surfaces_a_changeset_with_an_invalid_signature() {
     assert_eq!(
         graph.commit.membership_authority,
         Some(
-            coven_protocol::membership::MembershipGrantCreationAuthority::Entry(
-                chain
-                    .founder_coord()
-                    .cloned()
-                    .expect("founder grant coordinate")
-            )
+            chain
+                .founder_coord()
+                .cloned()
+                .expect("founder grant coordinate")
         )
     );
     let mut forged: serde_json::Value = serde_json::from_slice(&graph.commit.to_bytes()).unwrap();

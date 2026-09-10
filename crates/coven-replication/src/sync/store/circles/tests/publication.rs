@@ -1920,12 +1920,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         coven_protocol::store_commit::StorePublicationBase::Genesis,
         successor_commit.membership_state.clone(),
         successor_commit.device_state.clone(),
-        coven_protocol::store_commit::StoreOperationMembershipAuthority {
-            predecessor: successor_commit
-                .membership_authority
-                .clone()
-                .expect("successor Circle commit carries membership authority"),
-        },
+        successor_commit
+            .membership_authority
+            .clone()
+            .expect("successor Circle commit carries membership authority"),
         coven_protocol::store_commit::StoreCommitOperationsInput {
             stream_activations: successor_commit.stream_activations().to_vec(),
             circle_controls: successor_commit.circle_controls().to_vec(),

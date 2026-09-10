@@ -52,9 +52,7 @@ pub use circle::{
     CircleOperationBlock, CircleOperationId, CircleOperationInfo, CircleOperationKind,
     CircleOperationState, CircleRole, CircleState,
 };
-pub use membership::{
-    MemberInfo, MemberRole, MembershipConflictChoice, MembershipConflictInfo, MembershipCoord,
-};
+pub use membership::{MemberInfo, MemberRole, MembershipCoord};
 pub use provider::{
     CloudKitAcceptedShare, CrossPrincipalProbeReceipt, ExactSlotProbeReceipt,
     ProviderAccessLocator, ProviderAccessWithdrawal, ProviderAdminChange, ProviderAdminGrantId,

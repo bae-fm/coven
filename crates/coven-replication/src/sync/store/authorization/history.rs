@@ -30,9 +30,7 @@ pub(crate) struct AuthorizedStoreHistory<'storage> {
 }
 
 use coven_protocol::circle_control::StoreMembershipStateRef;
-use coven_protocol::membership::{
-    AuthorStreamId, MembershipChain, MembershipHeadRef, MembershipStatus,
-};
+use coven_protocol::membership::{AuthorStreamId, MembershipChain, MembershipHeadRef};
 use coven_protocol::store_commit::{
     ResolvedStoreDeviceState, StoreBatchCommitRef, StoreDeviceRegistrationRef, StoreDeviceStateRef,
     StoreRootRef,

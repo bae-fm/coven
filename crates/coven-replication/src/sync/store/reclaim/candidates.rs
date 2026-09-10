@@ -130,12 +130,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         }
 
         let plan = self.writer.prepare_plan().await?;
-        let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
-        else {
-            return Err(StoreReclaimError::Authorization(
-                "provider execution requires resolved Store membership".to_string(),
-            ));
-        };
+        let resolved = membership.resolved();
         let provider_admin = resolved.provider_admin.combined_state().clone();
         let provider_admin_grant = plan
             .effective_provider_admin_grant(&provider_admin)

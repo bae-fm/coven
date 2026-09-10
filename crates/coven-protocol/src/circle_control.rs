@@ -12,8 +12,8 @@ use super::circle_roster::{
     CircleRosterChain, CircleRosterEntry, CircleRosterError, CircleRosterHead, CircleRosterHeadRef,
     CircleRosterStateRef, MergeCircleRosterStateRef, ResolvedCircleRoster,
 };
-use super::membership::{MemberRole, MembershipGrantCreationAuthority, MembershipGrantId};
-use super::membership::{MembershipHeadRef, StoreMembershipConflictResolutionRef};
+use super::membership::MembershipHeadRef;
+use super::membership::{MemberRole, MembershipCoord, MembershipGrantId};
 use super::store_commit::{
     CommitFrontier, ObjectHash, OwnerRecoveryCursor, Signed, SignedBody, SnapshotImageRef,
     StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef,
@@ -146,7 +146,6 @@ pub struct CircleControlCoordError;
 #[serde(deny_unknown_fields)]
 pub struct StoreMembershipStateRef {
     pub heads: Vec<MembershipHeadRef>,
-    pub resolutions: Vec<StoreMembershipConflictResolutionRef>,
     pub recovery: Vec<OwnerRecoveryCursor>,
     pub state_hash: ObjectHash,
 }
@@ -156,14 +155,9 @@ impl StoreMembershipStateRef {
         membership: &crate::membership::MembershipChain,
         recovery: Vec<OwnerRecoveryCursor>,
     ) -> Result<Self, super::store_commit::StoreProtocolError> {
-        let crate::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
-            return Err(super::store_commit::StoreProtocolError::Malformed(
-                "Store membership state is conflicted".to_string(),
-            ));
-        };
+        let resolved = membership.resolved();
         Self::from_parts(
             membership.head_refs().to_vec(),
-            membership.resolution_refs().to_vec(),
             recovery,
             resolved.state_hash,
         )
@@ -171,16 +165,13 @@ impl StoreMembershipStateRef {
 
     pub fn from_parts(
         mut heads: Vec<MembershipHeadRef>,
-        mut resolutions: Vec<StoreMembershipConflictResolutionRef>,
         recovery: Vec<OwnerRecoveryCursor>,
         membership_state_hash: ObjectHash,
     ) -> Result<Self, super::store_commit::StoreProtocolError> {
         heads.sort();
-        resolutions.sort();
         let recovery = super::store_commit::canonical_recovery_cursors(recovery)?;
         Ok(Self {
             heads,
-            resolutions,
             state_hash: membership_state_ref_hash(membership_state_hash, &recovery),
             recovery,
         })
@@ -196,9 +187,7 @@ impl StoreMembershipStateRef {
 
     pub fn validate_shape(&self) -> Result<(), super::store_commit::StoreProtocolError> {
         super::store_commit::validate_recovery_cursors(self.recovery())?;
-        if self.heads.windows(2).any(|pair| pair[0] >= pair[1])
-            || self.resolutions.windows(2).any(|pair| pair[0] >= pair[1])
-        {
+        if self.heads.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(super::store_commit::StoreProtocolError::Malformed(
                 "Store membership state reference is not canonical".to_string(),
             ));

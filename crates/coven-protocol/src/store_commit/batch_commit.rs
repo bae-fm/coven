@@ -5,8 +5,7 @@ use super::operation_refs::{
     validate_device_registration_refs, validate_provider_access_refs,
 };
 use super::validation::{
-    validate_commit_order, validate_commit_predecessor_states, validate_membership_authority,
-    validate_operation_membership_authority,
+    validate_commit_order, validate_commit_predecessor_states, validate_membership_coord,
 };
 use super::*;
 
@@ -20,7 +19,7 @@ pub struct StoreBatchCommitBody {
     pub publication_base: StorePublicationBase,
     pub membership_state: StoreMembershipStateRef,
     pub device_state: StoreDeviceStateRef,
-    pub membership_authority: Option<MembershipGrantCreationAuthority>,
+    pub membership_authority: Option<MembershipCoord>,
     pub candidate_objects: CandidateObjectManifest,
     pub body: StoreCommitBody,
 }

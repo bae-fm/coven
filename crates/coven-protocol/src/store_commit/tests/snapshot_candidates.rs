@@ -11,7 +11,6 @@ fn metadata(
         fixture.root_ref.store_root_hash,
         fixture.registration_ref.clone(),
         Vec::new(),
-        Vec::new(),
         &signer,
     )
     .expect("sign membership rollup");
@@ -69,7 +68,6 @@ fn metadata(
                     .iter()
                     .map(|head| head.coord.clone())
                     .collect(),
-                resolutions: membership.resolutions,
             },
             registrations: BTreeMap::from([(
                 fixture.registration.device_id,

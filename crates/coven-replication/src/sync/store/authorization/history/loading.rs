@@ -34,10 +34,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         membership: &MembershipChain,
     ) -> Result<
-        (
-            Vec<coven_protocol::store_commit::MembershipRollupStream>,
-            Vec<coven_protocol::store_commit::MembershipRollupResolution>,
-        ),
+        Vec<coven_protocol::store_commit::MembershipRollupStream>,
         crate::sync::store::membership::AnchoredChainError,
     > {
         let owner = self
@@ -122,16 +119,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let verified_membership_activations = self
             .history_verifier
             .verified_membership_prefix(pull::commit_predecessor_references(commit))?;
-        let pending_resolution = self
-            .history_verifier
-            .verify_resolution_activation_acceptance(commit)
-            .await?;
         let predecessor_membership = self
             .history_verifier
             .load_predecessor_membership_at_verified_prefix(
                 &commit.membership_state,
                 &verified_membership_activations,
-                pending_resolution.as_ref(),
             )
             .await
             .map_err(pull::StorePullError::from)?;
@@ -146,10 +138,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 commit,
                 &predecessor_membership,
                 &predecessor_state,
-                pending_resolution.as_ref(),
             )
             .await
-            .map(|(activations, _)| activations)
     }
 
     pub(crate) async fn load_local_device_operations(

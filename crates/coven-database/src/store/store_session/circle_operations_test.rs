@@ -93,9 +93,7 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
                 },
             )
             .expect("bind initial device state"),
-            store_commit::StoreOperationMembershipAuthority {
-                predecessor: membership_authority.clone(),
-            },
+            membership_authority.clone(),
             store_commit::StoreCommitOperationsInput {
                 circle_controls: vec![reference.clone()],
                 ..store_commit::StoreCommitOperationsInput::empty()
@@ -224,9 +222,7 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
                 },
             )
             .expect("bind second device state"),
-            store_commit::StoreOperationMembershipAuthority {
-                predecessor: control.value.membership_authority().clone(),
-            },
+            control.value.membership_authority().clone(),
             store_commit::StoreCommitOperationsInput {
                 circle_controls: vec![second_reference.clone()],
                 ..store_commit::StoreCommitOperationsInput::empty()

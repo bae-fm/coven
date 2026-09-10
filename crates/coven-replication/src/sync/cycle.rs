@@ -910,13 +910,6 @@ impl SyncComponents {
         self.store.members().await
     }
 
-    pub(crate) async fn membership_conflict(
-        &self,
-    ) -> Result<Option<coven_protocol::MembershipConflictInfo>, super::store::MembershipOpsError>
-    {
-        self.store.membership_conflict().await
-    }
-
     pub(crate) async fn restore_membership(
         &self,
     ) -> Result<super::store::authorization::StoreRestoreMembership, super::store::MembershipOpsError>
@@ -1192,16 +1185,6 @@ impl SyncComponents {
                 self.storage.as_ref(),
             )
             .await
-    }
-
-    pub(crate) async fn resolve_membership_conflict(
-        &self,
-        choice: &coven_protocol::membership::MembershipConflictChoice,
-    ) -> Result<(), super::store::MembershipOpsError> {
-        self.store
-            .resolve_membership_conflict(choice, &self.database.stamp())
-            .await?;
-        Ok(())
     }
 
     pub(crate) async fn create_circle(

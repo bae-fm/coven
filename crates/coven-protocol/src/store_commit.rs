@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::membership::{
     verify_membership_entry, AuthorHead, AuthorStreamId, MembershipCoord, MembershipEntry,
-    MembershipEntryRef, MembershipGrantCreationAuthority, MembershipGrantId, MembershipHeadRef,
-    StoreAuthorityChange, StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
+    MembershipEntryRef, MembershipGrantId, MembershipHeadRef, StoreAuthorityChange,
 };
 use crate::circle::{
     AccessLeafId, CircleBootstrapCoverageRef, CircleBootstrapRef, CircleControlCoord,
@@ -98,7 +97,7 @@ mod ordered_map_entries {
     }
 }
 
-pub const STORE_PROTOCOL_VERSION: u32 = 1;
+pub const STORE_PROTOCOL_VERSION: u32 = 2;
 
 pub(crate) const STORE_PROTOCOL_ROOT_SEMANTIC_PATH: &str = "store-v1/store-protocol-root";
 #[cfg(any(test, feature = "test-utils"))]

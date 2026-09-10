@@ -24,14 +24,6 @@ pub struct MembershipRollupHead {
     pub predecessor_acceptance: Option<crate::membership::MembershipHeadAcceptance>,
 }
 
-/// One conflict resolution the carried heads depend on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MembershipRollupResolution {
-    pub resolution: StoreMembershipConflictResolutionRef,
-    pub resolution_value: StoreMembershipConflictResolution,
-}
-
 /// One author stream's heads, in sequence order from the stream's anchor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,7 +48,7 @@ pub struct MembershipRollupStream {
 /// bytes, keys them by the slot and the content address they claim, and then
 /// runs the identical anchored-chain walk it would have run over its own
 /// reads — same signature checks, same predecessor linkage, same Store-commit
-/// activation for authority changes, same conflict-resolution layering. A
+/// activation for authority changes. A
 /// rollup that is stale costs the reader the tail it does not cover; a rollup
 /// that is wrong is refused here and the reader walks the provider exactly as
 /// it did before.
@@ -71,7 +63,6 @@ pub struct MembershipRollupBody {
     pub store_root_hash: ObjectHash,
     pub author_registration: StoreDeviceRegistrationRef,
     pub streams: Vec<MembershipRollupStream>,
-    pub resolutions: Vec<MembershipRollupResolution>,
 }
 
 impl SignedBody for MembershipRollupBody {
@@ -85,7 +76,6 @@ impl MembershipRollup {
         store_root_hash: ObjectHash,
         author_registration: StoreDeviceRegistrationRef,
         streams: Vec<MembershipRollupStream>,
-        resolutions: Vec<MembershipRollupResolution>,
         device_signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         let rollup = Signed::sign(
@@ -93,7 +83,6 @@ impl MembershipRollup {
                 store_root_hash,
                 author_registration,
                 streams,
-                resolutions,
             },
             device_signer,
         );
@@ -106,7 +95,7 @@ impl MembershipRollup {
     /// author's signature, and sits at the coordinate its stream claims.
     ///
     /// This is deliberately not the whole of membership verification — grant
-    /// authority, predecessor linkage across a conflict layer, and Store-commit
+    /// authority, exact predecessor linkage, and Store-commit
     /// activation are decided by the walk that consumes these bytes, over the
     /// same code path that decides them for bytes read off the provider. What
     /// this establishes is that the rollup is a faithful carrier: every object
@@ -139,21 +128,7 @@ impl MembershipRollup {
                 carried.validate_at(stream, sequence)?;
             }
         }
-        for carried in &self.resolutions {
-            let value = &carried.resolution_value;
-            if value.store_root_hash != self.store_root_hash
-                || !value.verify_signature()
-                || value.resolution_ref(carried.resolution.object.clone()) != carried.resolution
-            {
-                return Err(StoreProtocolError::Malformed(
-                    "membership rollup carries an unauthentic conflict resolution".to_string(),
-                ));
-            }
-            carried
-                .resolution
-                .object
-                .verify(&serde_json::to_vec(value)?)?;
-        }
+
         Ok(())
     }
 
@@ -222,7 +197,7 @@ impl MembershipRollupHead {
             _ => {
                 return Err(StoreProtocolError::Malformed(
                     "membership rollup omits or adds a predecessor acceptance".into(),
-                ))
+                ));
             }
         }
         self.head

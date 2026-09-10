@@ -1,23 +1,5 @@
 use super::*;
 
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct VerifiedMergeConflictResolutionActivation {
-    pub(super) reference: protocol_membership::StoreMembershipConflictResolutionRef,
-}
-
-impl VerifiedMergeConflictResolutionActivation {
-    pub(crate) fn reference(&self) -> &protocol_membership::StoreMembershipConflictResolutionRef {
-        &self.reference
-    }
-
-    pub(crate) fn verifies(
-        &self,
-        reference: &protocol_membership::StoreMembershipConflictResolutionRef,
-    ) -> bool {
-        &self.reference == reference
-    }
-}
-
 pub(crate) struct VerifiedOwnerPromotionRequestActivation {
     activation: store_commit::OwnerPromotionRequestActivation,
 }
@@ -119,12 +101,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             }
             let request = proof.request()?;
             let membership = self
-                .load_membership_at_verified_prefix(
-                    &request.predecessor_membership.heads,
-                    &request.predecessor_membership.resolutions,
-                    prefix,
-                    None,
-                )
+                .load_membership_at_verified_prefix(&request.predecessor_membership.heads, prefix)
                 .await?;
             let promoter = self
                 .commit_verifier
@@ -149,109 +126,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(())
     }
 
-    pub(crate) async fn verify_resolution_activation_acceptance(
-        &self,
-        commit: &StoreBatchCommit,
-    ) -> Result<Option<VerifiedMergeConflictResolutionActivation>, StorePullError> {
-        let root = self.root.reference();
-        let Some(store_commit::StoreControl { transition }) = commit.control() else {
-            return Ok(None);
-        };
-        let entry = self
-            .commit_verifier
-            .membership_objects()
-            .load_entry(&transition.body.entry)
-            .await?;
-        let protocol_membership::StoreAuthorityChange::ResolutionActivation { resolution } =
-            &entry.value.change
-        else {
-            return Ok(None);
-        };
-        if entry.value.coord() != transition.body.entry.coord {
-            return Err(StorePullError::InvalidState(
-                "Merge resolution activation differs from its exact transition".to_string(),
-            ));
-        }
-        let value = self
-            .commit_verifier
-            .membership_objects()
-            .load_resolution(resolution)
-            .await?;
-        let registration = self
-            .commit_verifier
-            .load_registration(&commit.author_registration)
-            .await?;
-        let acceptance = &value.value.replacement_acceptance;
-        let mut expected_activations = vec![
-            store_commit::StreamActivation::grant_authorized(
-                root.store_root_hash,
-                acceptance.owner_registration.clone(),
-                value.value.replacement_grant.clone(),
-                acceptance.membership.clone(),
-            ),
-            store_commit::StreamActivation::grant_authorized(
-                root.store_root_hash,
-                acceptance.owner_registration.clone(),
-                value.value.replacement_grant.clone(),
-                acceptance.recovery.clone(),
-            ),
-        ];
-        expected_activations.sort();
-        if acceptance.owner_registration != commit.author_registration
-            || registration.value.author_pubkey != value.value.resolver_pubkey
-            || entry.value.author_pubkey != value.value.resolver_pubkey
-            || transition.body.author_registration != commit.author_registration
-            || commit.stream_activations() != expected_activations
-        {
-            return Err(StorePullError::InvalidState(
-                "Merge resolution activation differs from its accepted Owner authority".to_string(),
-            ));
-        }
-        self.verify_owner_conflict_acceptance_at_tips(
-            acceptance,
-            &value.value.resolver_pubkey,
-            commit_predecessor_references(commit),
-        )
-        .await?;
-        Ok(Some(VerifiedMergeConflictResolutionActivation {
-            reference: resolution.clone(),
-        }))
-    }
-
-    async fn verify_owner_conflict_acceptance_at_tips(
-        &self,
-        acceptance: &store_commit::OwnerConflictResolutionAcceptance,
-        resolver_pubkey: &str,
-        allowed_tips: impl IntoIterator<Item = StoreBatchCommitRef>,
-    ) -> Result<(), StorePullError> {
-        let registration = self
-            .commit_verifier
-            .load_registration(&acceptance.owner_registration)
-            .await?;
-        acceptance
-            .verify(&registration.value)
-            .map_err(StorePullError::Protocol)?;
-        let state = merge_device_state_from_verified_history(
-            &acceptance.device_state,
-            &self.history,
-            allowed_tips,
-        )?;
-        if !device_state_has_active_registration(&state, &acceptance.owner_registration) {
-            return Err(StorePullError::InvalidState(
-                "conflict-resolution Owner registration is not active at its exact device state"
-                    .to_string(),
-            ));
-        }
-        self.commit_verifier
-            .verify_canonical_owner_registration(
-                &state,
-                resolver_pubkey,
-                &acceptance.owner_registration,
-            )
-            .await?;
-        Ok(())
-    }
-
     pub(crate) async fn verify_owner_recovery_activation(
         &self,
         commit: &StoreBatchCommit,
@@ -264,17 +138,6 @@ impl<'a> MergeHistoryVerifier<'a> {
     > {
         self.commit_verifier
             .verify_owner_recovery_activation(commit)
-            .await
-    }
-
-    pub(crate) async fn verify_canonical_owner_registration(
-        &self,
-        state: &ResolvedStoreDeviceState,
-        owner_pubkey: &str,
-        selected: &StoreDeviceRegistrationRef,
-    ) -> Result<(), StorePullError> {
-        self.commit_verifier
-            .verify_canonical_owner_registration(state, owner_pubkey, selected)
             .await
     }
 
@@ -422,73 +285,69 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await?;
         request.verify(self.root.reference(), &promoter.value)?;
         acceptance.verify(&candidate.value)?;
-        let (membership, predecessor_state) =
-            if self.history.baseline.covers(&acceptance.activation.commit) {
-                let baseline = self.history.baseline.history_summary().ok_or_else(|| {
+        let (membership, predecessor_state) = if self
+            .history
+            .baseline
+            .covers(&acceptance.activation.commit)
+        {
+            let baseline = self.history.baseline.history_summary().ok_or_else(|| {
+                StorePullError::InvalidState(
+                    "covered request has no installed snapshot authority".into(),
+                )
+            })?;
+            let proof = baseline
+                .summary
+                .pending_owner_promotions
+                .get(&request.promotion_id)
+                .ok_or_else(|| {
                     StorePullError::InvalidState(
-                        "covered request has no installed snapshot authority".into(),
+                        "snapshot has no continuing authority for this promotion request".into(),
                     )
                 })?;
-                let proof = baseline
-                    .summary
-                    .pending_owner_promotions
-                    .get(&request.promotion_id)
-                    .ok_or_else(|| {
-                        StorePullError::InvalidState(
-                            "snapshot has no continuing authority for this promotion request"
-                                .into(),
-                        )
-                    })?;
-                if proof.request()? != request.as_ref()
-                    || *proof.publication.value != acceptance.activation
-                {
-                    return Err(StorePullError::InvalidState(
-                        "promotion acceptance differs from its exact retained request result"
-                            .into(),
-                    ));
-                }
-                let prefix = VerifiedMergeMembershipPrefix::from_retained(&[
-                    coven_database::RetainedMergeHistoryCheckpoint::Snapshot(baseline.clone()),
-                ])?;
-                let membership = self
-                    .load_membership_at_verified_prefix(
-                        &request.predecessor_membership.heads,
-                        &request.predecessor_membership.resolutions,
-                        &prefix,
-                        None,
-                    )
-                    .await?;
-                (membership, proof.predecessor_state.clone())
-            } else {
-                let verified = self
-                    .history
-                    .commits
-                    .get(&acceptance.activation.commit)
-                    .ok_or_else(|| {
-                        StorePullError::InvalidState(
+            if proof.request()? != request.as_ref()
+                || *proof.publication.value != acceptance.activation
+            {
+                return Err(StorePullError::InvalidState(
+                    "promotion acceptance differs from its exact retained request result".into(),
+                ));
+            }
+            let prefix = VerifiedMergeMembershipPrefix::from_retained(&[
+                coven_database::RetainedMergeHistoryCheckpoint::Snapshot(baseline.clone()),
+            ])?;
+            let membership = self
+                .load_membership_at_verified_prefix(&request.predecessor_membership.heads, &prefix)
+                .await?;
+            (membership, proof.predecessor_state.clone())
+        } else {
+            let verified = self
+                .history
+                .commits
+                .get(&acceptance.activation.commit)
+                .ok_or_else(|| {
+                    StorePullError::InvalidState(
                         "Owner-promotion request activation is absent from its verified history"
                             .into(),
                     )
-                    })?;
-                if self
-                    .accepted_publication(&acceptance.activation.commit)
-                    .map(coven_database::AcceptedStoreCommitPublication::reference)
-                    != Some(&acceptance.activation.publication)
-                    || verified.verified.value().owner_promotion_request() != Some(request)
-                {
-                    return Err(StorePullError::InvalidState(
-                        "Owner-promotion request is not activated by its exact Store publication"
-                            .into(),
-                    ));
-                }
-                acceptance
-                    .activation
-                    .validate_for_request_commit(verified.verified.value())?;
-                (
-                    verified.predecessor_membership.clone(),
-                    verified.predecessor_state.clone(),
-                )
-            };
+                })?;
+            if self
+                .accepted_publication(&acceptance.activation.commit)
+                .map(coven_database::AcceptedStoreCommitPublication::reference)
+                != Some(&acceptance.activation.publication)
+                || verified.verified.value().owner_promotion_request() != Some(request)
+            {
+                return Err(StorePullError::InvalidState(
+                    "Owner-promotion request is not activated by its exact Store publication"
+                        .into(),
+                ));
+            }
+            acceptance
+                .activation
+                .validate_for_request_commit(verified.verified.value())?;
+            (
+                verified.predecessor_membership.clone(),
+                verified.predecessor_state.clone(),
+            )
+        };
         verify_promotion_request_predecessor(
             request,
             &promoter.value,
@@ -497,18 +356,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             &predecessor_state,
         )?;
         Ok(membership)
-    }
-
-    pub(crate) async fn verify_owner_conflict_acceptance(
-        &mut self,
-        acceptance: &store_commit::OwnerConflictResolutionAcceptance,
-        resolver_pubkey: &str,
-    ) -> Result<(), StorePullError> {
-        let frontier = acceptance.device_state.frontier();
-        let tips = frontier.commits().values().cloned().collect::<Vec<_>>();
-        self.verify_refs(tips.clone()).await?;
-        self.verify_owner_conflict_acceptance_at_tips(acceptance, resolver_pubkey, tips)
-            .await
     }
 }
 

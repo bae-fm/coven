@@ -208,8 +208,8 @@ fn candidate_release_rejects_other_candidates_and_membership_authority() {
             Err(RemoteObjectRecordError::CandidateOwnerMismatch)
         ));
     }
-    let (reference, canonical) = test_membership_resolution();
-    let authority = test_membership_resolution_record(reference, canonical, candidate.clone())
+    let (reference, canonical) = test_membership_entry();
+    let authority = test_membership_entry_record(reference, canonical, candidate.clone())
         .expect("prepare membership authority");
     assert!(matches!(
         authority.release_pending_candidate(&candidate),

@@ -6,7 +6,7 @@ impl MembershipActivationAuthority<'_, '_> {
         &mut self,
         cursors: &[MembershipHeadRef],
         owner_pubkey: Option<&str>,
-    ) -> Result<(MembershipChain, TraversedMembership), AnchoredChainError> {
+    ) -> Result<(MembershipChain, Vec<TraversedMembershipStream>), AnchoredChainError> {
         let root = self.root().clone();
         let root_value = self.verified_root().clone();
         if let Some(owner) = owner_pubkey {
@@ -67,14 +67,13 @@ impl MembershipActivationAuthority<'_, '_> {
             stream_id: founder_stream,
             heads: zip_traversed_heads(&founder_loaded),
         }];
-        let mut resolutions = founder_loaded.resolutions;
 
         loop {
             // A later entry on a known stream may depend on a peer stream
             // introduced by an earlier entry. Discover those exact anchors
             // before asking the causal reducer to validate the complete graph.
             // Pending heads never enter `traversed`, so they cannot add streams.
-            let pending = referenced_membership_streams(&traversed, &resolutions)?
+            let pending = referenced_membership_streams(&traversed)?
                 .into_iter()
                 .filter(|(stream, _)| !discovered.contains(stream))
                 .collect::<Vec<_>>();
@@ -83,13 +82,7 @@ impl MembershipActivationAuthority<'_, '_> {
                     .iter()
                     .map(|(reference, _)| reference.clone())
                     .collect::<Vec<_>>();
-                let resolution_refs = resolutions.keys().cloned().collect::<Vec<_>>();
-                let chain = Box::pin(self.load_anchored_chain_at_exact_heads(
-                    &exact_heads,
-                    &resolution_refs,
-                    None,
-                ))
-                .await?;
+                let chain = Box::pin(self.load_anchored_chain_at_exact_heads(&exact_heads)).await?;
                 let activated = chain.activated_membership_streams();
                 if consumed_cursors.len() != cursors.len()
                     || cursors.iter().any(|cursor| {
@@ -125,13 +118,7 @@ impl MembershipActivationAuthority<'_, '_> {
                         .validate(commit_verifier, root, &chain, &traversed)
                         .await?;
                 }
-                return Ok((
-                    chain,
-                    TraversedMembership {
-                        streams: traversed,
-                        resolutions: resolutions.into_iter().collect(),
-                    },
-                ));
+                return Ok((chain, traversed));
             }
 
             for (stream, anchor) in pending {
@@ -155,7 +142,6 @@ impl MembershipActivationAuthority<'_, '_> {
                     stream_id: stream.stream_id,
                     heads: zip_traversed_heads(&loaded),
                 });
-                resolutions.extend(loaded.resolutions);
                 if let Some(latest) = loaded.heads.last().cloned() {
                     latest_heads.push(latest);
                     latest_heads.sort_by_key(|(reference, _)| reference.coord.stream_key());
@@ -167,11 +153,10 @@ impl MembershipActivationAuthority<'_, '_> {
 }
 
 /// References used to discover objects, before the complete graph decides
-/// which granting entries remain effective. The entries and resolutions stay
-/// in the traversal for that final authority check.
+/// which granting entries remain effective. The entries stay in the traversal
+/// for that final authority check.
 fn referenced_membership_streams(
     streams: &[TraversedMembershipStream],
-    resolutions: &BTreeMap<StoreMembershipConflictResolutionRef, StoreMembershipConflictResolution>,
 ) -> Result<BTreeMap<MembershipStreamKey, GrantStreamAnchor>, AnchoredChainError> {
     let mut anchors = BTreeMap::new();
     let grants = streams
@@ -186,14 +171,7 @@ fn referenced_membership_streams(
             } => Some((user_pubkey.as_str(), grant_id, anchor)),
             _ => None,
         });
-    let replacements = resolutions.values().map(|resolution| {
-        (
-            resolution.resolver_pubkey.as_str(),
-            &resolution.replacement_grant,
-            &resolution.replacement_membership,
-        )
-    });
-    for (author, grant, anchor) in grants.chain(replacements) {
+    for (author, grant, anchor) in grants {
         let stream = MembershipStreamKey::from_anchor(author, grant, anchor).ok_or_else(|| {
             AnchoredChainError::LoadFailed(
                 "membership grant does not name its exact Store author stream".into(),

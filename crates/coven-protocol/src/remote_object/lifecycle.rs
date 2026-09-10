@@ -32,16 +32,6 @@ impl RemoteObjectRecord {
                 record.state.validate()?;
             }
             Self::RetainedAuthority(record) => {
-                if matches!(
-                    record.state,
-                    RetainedAuthorityObjectState::CleanupPending { .. }
-                        | RetainedAuthorityObjectState::AbsentVerified { .. }
-                ) && !matches!(
-                    record.identity.domain,
-                    RetainedAuthorityObjectDomain::StoreMembershipResolution { .. }
-                ) {
-                    return Err(RemoteObjectRecordError::DomainMismatch);
-                }
                 record.state.validate()?;
             }
             Self::SharedLiveSet(record) => {
@@ -362,10 +352,6 @@ impl RemoteObjectRecord {
                     };
                 }
                 RetainedAuthorityObjectState::UploadedVerified { .. } => {}
-                RetainedAuthorityObjectState::CleanupPending { .. }
-                | RetainedAuthorityObjectState::AbsentVerified { .. } => {
-                    return Err(RemoteObjectRecordError::InvalidUploadTransition);
-                }
             },
             Self::SharedLiveSet(record) => match &record.state {
                 OwnedObjectState::Prepared { ownership } => {
@@ -535,30 +521,14 @@ impl RemoteObjectRecord {
                         return Ok(None);
                     }
                     ownership.nonactivated.push(nonactivation);
-                    match uploaded_retained_nonactivation_disposition(
-                        &record.identity.domain,
-                        ownership,
-                    ) {
-                        UploadedRetainedNonactivation::Cleanup(former_candidates) => {
-                            record.state =
-                                RetainedAuthorityObjectState::CleanupPending { former_candidates };
-                        }
-                        UploadedRetainedNonactivation::Inert(former_candidates) => {
-                            return ProtocolInertObject::new(
-                                record.identity.clone(),
-                                former_candidates,
-                            )
-                            .map(Some);
-                        }
-                        UploadedRetainedNonactivation::Retain(ownership) => {
-                            record.state =
-                                RetainedAuthorityObjectState::UploadedVerified { ownership };
-                        }
+                    if ownership.pending.is_empty() && ownership.activated.is_empty() {
+                        return ProtocolInertObject::new(
+                            record.identity.clone(),
+                            ownership.nonactivated,
+                        )
+                        .map(Some);
                     }
-                }
-                RetainedAuthorityObjectState::CleanupPending { former_candidates }
-                | RetainedAuthorityObjectState::AbsentVerified { former_candidates } => {
-                    ensure_candidate_nonactivation(former_candidates, &candidate)?;
+                    record.state = RetainedAuthorityObjectState::UploadedVerified { ownership };
                 }
             },
             Self::SharedLiveSet(record) => match &mut record.state {
@@ -602,10 +572,6 @@ impl RemoteObjectRecord {
             | Self::CandidateExclusive(CandidateObjectRecord {
                 state: CandidateObjectState::CleanupPending { .. },
                 ..
-            })
-            | Self::RetainedAuthority(RetainedAuthorityRecord {
-                state: RetainedAuthorityObjectState::CleanupPending { .. },
-                ..
             }) => Some(self.object()),
             _ => None,
         }
@@ -631,17 +597,8 @@ impl RemoteObjectRecord {
                 CandidateObjectState::AbsentVerified { .. } => {}
                 _ => return Err(RemoteObjectRecordError::InvalidCleanupTransition),
             },
-            Self::RetainedAuthority(record) => match &record.state {
-                RetainedAuthorityObjectState::CleanupPending { former_candidates } => {
-                    record.state = RetainedAuthorityObjectState::AbsentVerified {
-                        former_candidates: former_candidates.clone(),
-                    };
-                }
-                RetainedAuthorityObjectState::AbsentVerified { .. } => {}
-                _ => return Err(RemoteObjectRecordError::InvalidCleanupTransition),
-            },
-            Self::SharedLiveSet(_) => {
-                return Err(RemoteObjectRecordError::InvalidCleanupTransition)
+            Self::RetainedAuthority(_) | Self::SharedLiveSet(_) => {
+                return Err(RemoteObjectRecordError::InvalidCleanupTransition);
             }
         }
         self.validate()
@@ -684,10 +641,6 @@ impl RemoteObjectRecord {
                     Ok(!ownership.pending.contains(candidate)
                         && !ownership.activated.contains(candidate)
                         && contains(&ownership.nonactivated)?)
-                }
-                RetainedAuthorityObjectState::CleanupPending { .. } => Ok(false),
-                RetainedAuthorityObjectState::AbsentVerified { former_candidates } => {
-                    contains(former_candidates)
                 }
             },
             Self::SharedLiveSet(record) => match &record.state {

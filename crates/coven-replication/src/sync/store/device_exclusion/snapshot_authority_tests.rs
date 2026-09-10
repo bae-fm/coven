@@ -552,7 +552,6 @@ async fn assert_device_snapshot_claim_rejected(claim: DeviceSnapshotClaim) {
         root.store_root_hash,
         peer_ref.clone(),
         rollup_streams,
-        original_rollup.resolutions.clone(),
         &peer_signer,
     )
     .expect("sign the unchanged membership rollup with the candidate author");

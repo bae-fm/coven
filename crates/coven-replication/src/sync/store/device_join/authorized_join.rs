@@ -46,18 +46,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
     /// Every provider-administrator grant this device itself holds.
     fn provider_admin_grants(
         &self,
-    ) -> Result<
-        std::collections::BTreeMap<ProviderAdminGrantId, ProviderAdminGrantRecord>,
-        DeviceJoinError,
-    > {
-        let coven_protocol::membership::MembershipStatus::Resolved(resolved) =
-            self.membership.status()
-        else {
-            return Err(DeviceJoinError::MembershipConflict);
-        };
-        Ok(self
-            .local_writer
-            .provider_administrator_grants(resolved.provider_admin.combined_state()))
+    ) -> std::collections::BTreeMap<ProviderAdminGrantId, ProviderAdminGrantRecord> {
+        self.local_writer.provider_administrator_grants(
+            self.membership.resolved().provider_admin.combined_state(),
+        )
     }
 
     fn join_history(&mut self) -> DeviceJoinHistory<'_, 'storage> {
@@ -119,7 +111,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .await
             .map_err(crate::sync::store::StoreError::from)?;
         candidate
-            .attach_merge_membership_proof_with(&publication, None)
+            .attach_merge_membership_proof(&publication)
             .map_err(crate::sync::store::StoreError::from)?;
         self.stage_owner_publication(previous, operation, candidate)
             .await
@@ -258,7 +250,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         // device holding none cannot grant the joiner storage access and so
         // cannot make the offer at all.
         let provider_admin = self
-            .provider_admin_grants()?
+            .provider_admin_grants()
             .into_values()
             .next()
             .ok_or(DeviceJoinError::ProviderAdministratorRequired)?;
@@ -302,7 +294,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &self,
         grant_id: &ProviderAdminGrantId,
     ) -> Result<ProviderAdminGrantRecord, DeviceJoinError> {
-        self.provider_admin_grants()?
+        self.provider_admin_grants()
             .remove(grant_id)
             .ok_or(DeviceJoinError::ProviderAdministratorRequired)
     }

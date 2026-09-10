@@ -119,25 +119,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .map_err(MembershipMutationError::from)
     }
 
-    pub(crate) fn attach_merge_membership_proof(
-        &self,
-        candidate: &mut commit_plan::PreparedStoreOperationCommit,
-        publication: &PreparedMembershipPublication,
-        resolution: Option<&membership::StoreMembershipConflictResolution>,
-    ) -> Result<(), StoreError> {
-        self.writer
-            .attach_merge_membership_proof(candidate, publication, resolution)
-    }
-
-    pub(super) fn attach_membership_proof(
-        &self,
-        candidate: &mut commit_plan::PreparedStoreOperationCommit,
-        publication: &PreparedMembershipPublication,
-    ) -> Result<(), MembershipMutationError> {
-        self.attach_merge_membership_proof(candidate, publication, None)
-            .map_err(MembershipMutationError::from)
-    }
-
     pub(super) async fn set_membership_access(
         &self,
         state: coven_storage::cloud::CloudAccessState,

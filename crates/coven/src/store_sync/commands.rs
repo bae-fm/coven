@@ -15,22 +15,6 @@ impl StoreSync {
         }
     }
 
-    pub(crate) async fn membership_conflict(
-        &self,
-    ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        self.ensure_command_authority().await?;
-        let authority = installed_command_authority!(self);
-        match authority {
-            CommandAuthority::Connected(sync) => {
-                sync.membership_conflict().await.map_err(Into::into)
-            }
-            CommandAuthority::CommandOnly(store) => {
-                store.membership_conflict().await.map_err(Into::into)
-            }
-        }
-    }
-
     pub(crate) async fn restore_membership(
         &self,
     ) -> Result<coven_replication::sync::store::StoreRestoreMembership, SyncError> {
@@ -77,17 +61,6 @@ impl StoreSync {
             .remove_member(public_key_hex)
             .await
             .map(drop)
-            .map_err(Into::into)
-    }
-
-    pub(crate) async fn resolve_membership_conflict(
-        &self,
-        choice: &crate::MembershipConflictChoice,
-    ) -> Result<(), SyncError> {
-        active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .resolve_membership_conflict(choice)
-            .await
             .map_err(Into::into)
     }
 

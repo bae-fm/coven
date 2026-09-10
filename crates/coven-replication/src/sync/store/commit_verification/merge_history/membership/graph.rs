@@ -15,22 +15,6 @@ pub(super) struct LoadedExactMembershipGraph {
 }
 
 impl LoadedExactMembershipGraph {
-    pub(super) fn head_refs(&self) -> Vec<MembershipHeadRef> {
-        self.heads
-            .iter()
-            .map(|(reference, _)| reference.clone())
-            .collect()
-    }
-
-    pub(super) fn resolution_cut(&self) -> Vec<StoreMembershipConflictResolutionRef> {
-        self.heads
-            .iter()
-            .flat_map(|(_, head)| head.body.resolutions.iter().cloned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect()
-    }
-
     pub(super) fn validate_stream_anchors(
         &self,
         root: &StoreRootRef,
@@ -65,53 +49,6 @@ impl LoadedExactMembershipGraph {
                     "membership head carries another grant stream activation".to_string(),
                 ));
             }
-        }
-        Ok(())
-    }
-
-    pub(super) fn add_exact_suffix(
-        &self,
-        chain: &mut MembershipChain,
-    ) -> Result<(), AnchoredChainError> {
-        let mut pending = self
-            .entries
-            .iter()
-            .filter(|(coord, _)| !chain.contains_coord(coord))
-            .map(|(coord, entry)| (coord.clone(), entry.clone()))
-            .collect::<BTreeMap<_, _>>();
-        while !pending.is_empty() {
-            let next = pending.iter().find_map(|(coord, entry)| {
-                let dependencies_loaded = entry
-                    .dependencies
-                    .iter()
-                    .all(|dependency| chain.contains_coord(dependency));
-                let predecessor_loaded = entry.previous_hash.is_none()
-                    || self.entries.keys().any(|candidate| {
-                        candidate.author_pubkey == coord.author_pubkey
-                            && candidate.author_owner_grant == coord.author_owner_grant
-                            && candidate.stream_id == coord.stream_id
-                            && candidate.seq.checked_add(1) == Some(coord.seq)
-                            && Some(candidate.entry_hash) == entry.previous_hash
-                            && chain.contains_coord(candidate)
-                    });
-                (dependencies_loaded && predecessor_loaded).then(|| coord.clone())
-            });
-            let Some(coord) = next else {
-                return Err(AnchoredChainError::LoadFailed(
-                    "membership resolution suffix has an unresolved causal predecessor".to_string(),
-                ));
-            };
-            let entry = pending
-                .remove(&coord)
-                .expect("selected membership resolution suffix entry remains pending");
-            chain
-                .add_entry_at(coord, entry)
-                .map_err(AnchoredChainError::from)?;
-        }
-        for (reference, _) in &self.heads {
-            chain
-                .activate_head_ref(reference.clone())
-                .map_err(AnchoredChainError::from)?;
         }
         Ok(())
     }
@@ -203,25 +140,6 @@ pub(super) enum MembershipProjectionStatus {
     OutsidePrefix,
 }
 
-fn membership_resolution_activations(
-    graph: &LoadedExactMembershipGraph,
-) -> Result<BTreeMap<StoreMembershipConflictResolutionRef, MembershipCoord>, AnchoredChainError> {
-    let mut activations = BTreeMap::new();
-    for node in graph.path_heads.values() {
-        if let StoreAuthorityChange::ResolutionActivation { resolution } = &node.entry.change {
-            if activations
-                .insert(resolution.clone(), node.reference.coord.clone())
-                .is_some()
-            {
-                return Err(AnchoredChainError::LoadFailed(
-                    "membership resolution has multiple candidate activation heads".to_string(),
-                ));
-            }
-        }
-    }
-    Ok(activations)
-}
-
 fn membership_projection_activation_status(
     graph: &LoadedExactMembershipGraph,
     prefix: &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
@@ -265,7 +183,6 @@ fn membership_projection_activation_status(
 
 fn membership_projection_dependencies(
     graph: &LoadedExactMembershipGraph,
-    resolution_activations: &BTreeMap<StoreMembershipConflictResolutionRef, MembershipCoord>,
     coord: &MembershipCoord,
 ) -> Result<Vec<MembershipCoord>, AnchoredChainError> {
     let node = graph.path_heads.get(coord).ok_or_else(|| {
@@ -273,7 +190,7 @@ fn membership_projection_dependencies(
             "membership projection dependency is absent from its candidate graph".to_string(),
         )
     })?;
-    let mut dependencies = node
+    let dependencies = node
         .head
         .body
         .predecessor_head()
@@ -281,32 +198,12 @@ fn membership_projection_dependencies(
         .map(|reference| reference.coord.clone())
         .chain(node.entry.dependencies.iter().cloned())
         .collect::<Vec<_>>();
-    for resolution in &node.entry.resolution_dependencies {
-        let introduced_here = matches!(
-            &node.entry.change,
-            StoreAuthorityChange::ResolutionActivation { resolution: introduced }
-                if introduced == resolution
-        );
-        if !introduced_here {
-            dependencies.push(
-                resolution_activations
-                    .get(resolution)
-                    .ok_or_else(|| {
-                        AnchoredChainError::LoadFailed(
-                            "membership resolution lacks its candidate activation head".to_string(),
-                        )
-                    })?
-                    .clone(),
-            );
-        }
-    }
     Ok(dependencies)
 }
 
 pub(super) fn membership_projection_statuses(
     graph: &LoadedExactMembershipGraph,
     prefix: &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
-    resolution_activations: &BTreeMap<StoreMembershipConflictResolutionRef, MembershipCoord>,
 ) -> Result<BTreeMap<MembershipCoord, MembershipProjectionStatus>, AnchoredChainError> {
     let mut statuses = BTreeMap::new();
     let mut visiting = BTreeSet::new();
@@ -320,27 +217,12 @@ pub(super) fn membership_projection_statuses(
                 continue;
             }
             if expanded {
-                let node = graph.path_heads.get(&coord).ok_or_else(|| {
-                    AnchoredChainError::LoadFailed(
-                        "membership projection dependency is absent from its candidate graph"
-                            .to_string(),
-                    )
-                })?;
-                let dependencies =
-                    membership_projection_dependencies(graph, resolution_activations, &coord)?;
+                let dependencies = membership_projection_dependencies(graph, &coord)?;
                 let status = if dependencies.iter().any(|dependency| {
                     statuses.get(dependency) == Some(&MembershipProjectionStatus::OutsidePrefix)
                 }) {
                     MembershipProjectionStatus::OutsidePrefix
                 } else {
-                    for resolution in &node.entry.resolution_dependencies {
-                        if !prefix.verifies_conflict_resolution(resolution) {
-                            return Err(AnchoredChainError::LoadFailed(
-                                "in-prefix membership resolution lacks its verified Store authority"
-                                    .to_string(),
-                            ));
-                        }
-                    }
                     MembershipProjectionStatus::Included
                 };
                 visiting.remove(&coord);
@@ -358,8 +240,7 @@ pub(super) fn membership_projection_statuses(
                 statuses.insert(coord, MembershipProjectionStatus::OutsidePrefix);
                 continue;
             }
-            let dependencies =
-                membership_projection_dependencies(graph, resolution_activations, &coord)?;
+            let dependencies = membership_projection_dependencies(graph, &coord)?;
             stack.push((coord, true));
             for dependency in dependencies.into_iter().rev() {
                 if !statuses.contains_key(&dependency) {
@@ -374,15 +255,8 @@ pub(super) fn membership_projection_statuses(
 pub(super) fn project_membership_cut_to_store_prefix(
     graph: &LoadedExactMembershipGraph,
     prefix: &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
-) -> Result<
-    (
-        Vec<MembershipHeadRef>,
-        Vec<StoreMembershipConflictResolutionRef>,
-    ),
-    AnchoredChainError,
-> {
-    let resolution_activations = membership_resolution_activations(graph)?;
-    let statuses = membership_projection_statuses(graph, prefix, &resolution_activations)?;
+) -> Result<Vec<MembershipHeadRef>, AnchoredChainError> {
+    let statuses = membership_projection_statuses(graph, prefix)?;
     let mut projected = Vec::new();
     for (candidate, _) in &graph.heads {
         let mut current = Some(candidate);
@@ -418,22 +292,7 @@ pub(super) fn project_membership_cut_to_store_prefix(
     }
     projected.sort_by_key(|reference| reference.coord.stream_key());
     validate_membership_floor(&projected).map_err(AnchoredChainError::InvalidFloor)?;
-    let resolutions = projected
-        .iter()
-        .map(|reference| {
-            graph.path_heads.get(&reference.coord).ok_or_else(|| {
-                AnchoredChainError::LoadFailed(
-                    "projected membership head is absent from its exact candidate path".to_string(),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flat_map(|node| node.head.body.resolutions.iter().cloned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    Ok((projected, resolutions))
+    Ok(projected)
 }
 
 pub(super) fn exact_membership_chain_from_graph(
@@ -492,8 +351,7 @@ pub(super) fn validate_owner_grant_records(
             | StoreAuthorityChange::ProviderAdmin
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ResolutionActivation { .. } => {}
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => {}
         }
     }
     Ok(())

@@ -43,14 +43,14 @@ trust. Membership changes are therefore signed records. A
 [`MembershipEntry`](rustdoc:type:coven_protocol::membership::MembershipEntry)
 signs a [`MembershipEntryBody`](rustdoc:struct:coven_protocol::membership::MembershipEntryBody):
 the Store id, author and Owner grant, stream coordinate, previous-entry hash,
-observed dependencies, resolution dependencies, display timestamp, and
+observed dependencies, display timestamp, and
 [`StoreAuthorityChange`](rustdoc:enum:coven_protocol::membership::StoreAuthorityChange).
-The change records a grant, removal, device exclusion proposal or outcome,
-provider administrator control, or conflict resolution activation.
+The change records a grant, removal, device registration activation, device
+exclusion proposal or outcome, or provider administrator control.
 
 The signature covers the complete body.
 [`verify_membership_entry`](rustdoc:fn:coven_protocol::membership::verify_membership_entry)
-checks its signature and canonical resolution dependencies.
+checks the signature against the entry author.
 
 The `created_at` value is an HLC string used for display ordering, not to authorize
 anything. It is author-supplied and therefore spoofable, so no access decision
@@ -121,13 +121,16 @@ need to rediscover all membership objects on every sync.
 
 Validation binds the founder entry to the pinned Store root, checks exact
 references and signatures, follows predecessor and dependency links, and
-applies the grant and conflict-resolution rules. Store-activated controls also
-require their accepted publication evidence and the issuer's device authority.
+checks each grant change against the authority at its accepted publication
+predecessor. Store-activated controls also require their accepted publication
+evidence and the issuer's device authority.
 A newly signed registration does not establish its own activation.
 
-Role changes are membership controls too. The current role comes from the
-verified causal reduction, including removals and conflict resolutions, rather
-than whichever signed role assignment a reader happened to load last.
+Role changes are membership controls too. The current role comes from verified
+grants and removals in accepted publication order. A candidate must name the
+accepted grant state it follows; an intervening grant change prevents accepting
+the earlier candidate. An issuer whose grant has been removed cannot accept its
+earlier candidate. Readers reject conflicting membership authority.
 
 ## Roles
 

@@ -144,9 +144,6 @@ impl PreparedMembershipPublication {
             membership::StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => {
                 objects.extend(wrapped_keys.iter().map(|key| key.object.clone()));
             }
-            membership::StoreAuthorityChange::ResolutionActivation { resolution } => {
-                objects.push(resolution.object.clone());
-            }
             membership::StoreAuthorityChange::Founder { .. }
             | membership::StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | membership::StoreAuthorityChange::DeviceExclusionProposal { .. }
@@ -219,7 +216,6 @@ impl PreparedMembershipTransition {
             || !binds_exact_object(&self.entry_ref.object, &self.entry)
             || self.entry_ref.object.slot().logical_key() != entry_key
             || self.transition.body.entry != self.entry_ref
-            || self.transition.body.resolutions != self.entry.resolution_dependencies
             || self.transition.head_slot.logical_key() != head_key
             || self.transition.body.successor.next_slot.logical_key() != successor_key
         {

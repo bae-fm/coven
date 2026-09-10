@@ -952,7 +952,7 @@ async fn promotion_journal_rejects_an_unrelated_circle_acknowledgement() {
         ObjectHash::digest(&head_bytes),
     );
     candidate
-        .attach_merge_membership_proof_with(&publication, None)
+        .attach_merge_membership_proof(&publication)
         .expect("the signed head and retained evidence bind the altered candidate");
     candidate
         .validate_closed_shape()

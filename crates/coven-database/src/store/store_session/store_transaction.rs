@@ -57,20 +57,10 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         let baseline = authority.retained_replay_baseline_on(records)?.clone();
         let inputs = authority.retained_replay_inputs_on(records, &root)?;
         let mut heads = Vec::new();
-        let mut resolutions = BTreeSet::new();
         let mut entries = BTreeSet::new();
         let mut proofs = Vec::new();
         if let crate::RetainedReplayAuthority::InstalledSnapshot(snapshot) = &baseline.authority {
             heads.extend(snapshot.metadata.state.membership.heads.iter().cloned());
-            resolutions.extend(
-                snapshot
-                    .metadata
-                    .state
-                    .membership
-                    .resolutions
-                    .iter()
-                    .cloned(),
-            );
             proofs.extend(snapshot.metadata.history_summary.membership_proofs.values());
         }
         for input in &inputs {
@@ -83,7 +73,6 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
                 ));
             }
             heads.extend(input.commit().membership_state.heads.iter().cloned());
-            resolutions.extend(input.commit().membership_state.resolutions.iter().cloned());
             if let Some(proof) = &input.history_evidence().membership_proof {
                 proofs.push(proof.as_ref());
             }
@@ -96,8 +85,6 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
                 // the creation-owned Founder entry without a receipt of its own.
                 entries.insert(predecessor.coord.clone());
             }
-            resolutions.extend(proof.head_value.body.resolutions.iter().cloned());
-            resolutions.extend(proof.resolution.iter().cloned());
         }
         entries.extend(heads.iter().map(|head| head.coord.clone()));
         let heads = MembershipFloor::from_heads(heads).map_err(|error| {
@@ -110,15 +97,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             .iter()
             .map(|entry| entry.coord())
             .collect::<BTreeSet<_>>();
-        if actual_entries != entries
-            || membership.head_refs() != heads.0.as_slice()
-            || membership
-                .resolution_refs()
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-                != resolutions
-        {
+        if actual_entries != entries || membership.head_refs() != heads.0.as_slice() {
             return Err(DbError::Message(
                 "accepted membership verification membership differs from accepted history".into(),
             ));

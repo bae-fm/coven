@@ -67,22 +67,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self.history.verified_root_object().value
     }
 
-    pub(super) fn resolved_membership(
-        &self,
-    ) -> Result<
-        &coven_protocol::membership::MembershipChain,
-        crate::sync::store::membership::MembershipOpsError,
-    > {
-        match self.membership.conflict() {
-            Some(conflict) => Err(
-                crate::sync::store::membership::MembershipOpsError::SemanticConflict(Box::new(
-                    conflict.clone(),
-                )),
-            ),
-            None => Ok(&self.membership),
-        }
-    }
-
     pub(crate) async fn prepare_wrapped_key(
         &self,
         recipient: &str,
@@ -327,10 +311,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         membership: &coven_protocol::membership::MembershipChain,
     ) -> Result<
-        (
-            Vec<coven_protocol::store_commit::MembershipRollupStream>,
-            Vec<coven_protocol::store_commit::MembershipRollupResolution>,
-        ),
+        Vec<coven_protocol::store_commit::MembershipRollupStream>,
         crate::sync::store::membership::AnchoredChainError,
     > {
         self.history.membership_rollup_parts(membership).await

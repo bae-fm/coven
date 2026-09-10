@@ -111,8 +111,6 @@ pub enum StoreProtocolError {
         seq: u64,
         entry_hash: String,
     },
-    #[error("invalid Store membership resolution authority for resolver {0:?}")]
-    InvalidMembershipResolutionAuthority(String),
     #[error("Store package length exceeds the platform address space")]
     PackageTooLarge,
     #[error("Store package length is {actual}, expected {expected}")]
@@ -445,14 +443,6 @@ pub fn membership_head_slot_prefix(
     )
 }
 
-pub fn membership_resolution_semantic_prefix(
-    conflict_hash: ObjectHash,
-    resolver: &str,
-    resolution_hash: ObjectHash,
-) -> String {
-    format!("store-v1/membership/resolutions/{conflict_hash}/{resolver}/{resolution_hash}")
-}
-
 pub fn membership_rollup_semantic_prefix(
     metadata_slot: &ObjectSlot,
     rollup_hash: ObjectHash,
@@ -600,7 +590,7 @@ pub(super) fn validate_ack_state(
     Ok(())
 }
 
-fn validate_membership_coord(coord: &MembershipCoord) -> Result<(), StoreProtocolError> {
+pub(super) fn validate_membership_coord(coord: &MembershipCoord) -> Result<(), StoreProtocolError> {
     if coord.seq == 0 || coord.author_pubkey.is_empty() {
         return Err(StoreProtocolError::InvalidMembershipCoordinate {
             author: coord.author_pubkey.clone(),
@@ -611,33 +601,6 @@ fn validate_membership_coord(coord: &MembershipCoord) -> Result<(), StoreProtoco
         });
     }
     Ok(())
-}
-
-pub(super) fn validate_membership_authority(
-    authority: &MembershipGrantCreationAuthority,
-) -> Result<(), StoreProtocolError> {
-    match authority {
-        MembershipGrantCreationAuthority::Entry(coord) => validate_membership_coord(coord),
-        MembershipGrantCreationAuthority::ConflictResolution(reference) => {
-            let resolver = hex::decode(&reference.resolver_pubkey).map_err(|_| {
-                StoreProtocolError::InvalidMembershipResolutionAuthority(
-                    reference.resolver_pubkey.clone(),
-                )
-            })?;
-            if resolver.len() != coven_keys::keys::SIGN_PUBLICKEYBYTES {
-                return Err(StoreProtocolError::InvalidMembershipResolutionAuthority(
-                    reference.resolver_pubkey.clone(),
-                ));
-            }
-            Ok(())
-        }
-    }
-}
-
-pub(super) fn validate_operation_membership_authority(
-    authority: &MembershipGrantCreationAuthority,
-) -> Result<(), StoreProtocolError> {
-    validate_membership_authority(authority)
 }
 
 impl From<coven_foundation::object_hash::InvalidObjectHash> for StoreProtocolError {

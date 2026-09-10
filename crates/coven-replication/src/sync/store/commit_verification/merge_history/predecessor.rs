@@ -6,12 +6,9 @@ pub(crate) fn predecessor_verifies_owner(
     owner_pubkey: &str,
     owner_grant: &coven_protocol::membership::MembershipGrantId,
 ) -> bool {
-    let MembershipStatus::Resolved(resolved) = predecessor.status() else {
-        return false;
-    };
+    let resolved = predecessor.resolved();
     StoreMembershipStateRef::from_parts(
         predecessor.head_refs().to_vec(),
-        predecessor.resolution_refs().to_vec(),
         membership.recovery().to_vec(),
         resolved.state_hash,
     )
@@ -21,11 +18,8 @@ pub(crate) fn predecessor_verifies_owner(
 
 pub(super) fn predecessor_provider_admin_state(
     predecessor: &MembershipChain,
-) -> Option<&provider::ProviderAdminState> {
-    let MembershipStatus::Resolved(resolved) = predecessor.status() else {
-        return None;
-    };
-    Some(resolved.provider_admin.combined_state())
+) -> &provider::ProviderAdminState {
+    predecessor.resolved().provider_admin.combined_state()
 }
 
 pub(super) fn predecessor_verifies_provider_administrator(
@@ -34,9 +28,7 @@ pub(super) fn predecessor_verifies_provider_administrator(
     executor: &StoreDeviceRegistrationRef,
     expected: &provider::ProviderAdminGrantRecord,
 ) -> bool {
-    let Some(state) = predecessor_provider_admin_state(predecessor) else {
-        return false;
-    };
+    let state = predecessor_provider_admin_state(predecessor);
     state.authorizes(grant_id, executor) && state.records().get(grant_id) == Some(expected)
 }
 
@@ -45,8 +37,7 @@ pub(super) fn predecessor_verifies_provider_administrator_grant(
     grant_id: &provider::ProviderAdminGrantId,
     executor: &StoreDeviceRegistrationRef,
 ) -> bool {
-    predecessor_provider_admin_state(predecessor)
-        .is_some_and(|state| state.authorizes(grant_id, executor))
+    predecessor_provider_admin_state(predecessor).authorizes(grant_id, executor)
 }
 
 /// What a search of a commit's predecessor history found.

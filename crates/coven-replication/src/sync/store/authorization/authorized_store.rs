@@ -105,122 +105,11 @@ impl<'storage> AuthorizedStore<'storage> {
         self.history.circles().discard_operation(operation_id).await
     }
 
-    fn resolved_membership(
-        &self,
-    ) -> Result<&MembershipChain, crate::sync::store::membership::MembershipOpsError> {
-        match self.membership.conflict() {
-            Some(conflict) => Err(
-                crate::sync::store::membership::MembershipOpsError::SemanticConflict(Box::new(
-                    conflict.clone(),
-                )),
-            ),
-            None => Ok(&self.membership),
-        }
-    }
-
     pub(super) fn members(
         &self,
         user_pubkey: Option<&[u8]>,
-    ) -> Result<
-        Vec<coven_protocol::membership::MemberInfo>,
-        crate::sync::store::membership::MembershipOpsError,
-    > {
-        Ok(member_info(
-            self.resolved_membership()?.current_members(),
-            user_pubkey,
-        ))
-    }
-
-    pub(super) fn membership_conflict(
-        &self,
-        user_pubkey: Option<&[u8]>,
-    ) -> Option<coven_protocol::membership::MembershipConflictInfo> {
-        match self.membership.status() {
-            coven_protocol::membership::MembershipStatus::Resolved(_) => None,
-            coven_protocol::membership::MembershipStatus::Conflict(
-                coven_protocol::membership::MembershipConflict::ConcurrentMemberAssignments {
-                    conflict_hash,
-                    member_pubkey,
-                    conflicting_grants,
-                    grants,
-                    ..
-                },
-            ) => Some(
-                coven_protocol::membership::MembershipConflictInfo::ConcurrentMemberAssignments {
-                    id: conflict_hash.to_string(),
-                    member_pubkey: member_pubkey.clone(),
-                    choices: conflicting_grants
-                        .iter()
-                        .map(|(selected_grant, selected_record)| {
-                            let selection = coven_protocol::membership::MembershipConflictSelection::MemberAssignment {
-                                grant: selected_grant.clone(),
-                            };
-                            let members = member_info(
-                                grants
-                                    .iter()
-                                    .filter_map(|(grant, state)| {
-                                        (!conflicting_grants.contains_key(grant))
-                                            .then(|| state.active())
-                                            .flatten()
-                                            .map(|record| {
-                                                (
-                                                    record.member_pubkey.clone(),
-                                                    record.role.role(),
-                                                )
-                                            })
-                                    })
-                                    .chain(std::iter::once((
-                                        selected_record.member_pubkey.clone(),
-                                        selected_record.role.role(),
-                                    )))
-                                    .collect(),
-                                user_pubkey,
-                            );
-                            coven_protocol::membership::MembershipConflictChoice::new(
-                                membership_conflict_choice_id(&selection),
-                                members,
-                                *conflict_hash,
-                                selection,
-                            )
-                        })
-                        .collect(),
-                },
-            ),
-            coven_protocol::membership::MembershipStatus::Conflict(
-                coven_protocol::membership::MembershipConflict::RevocationCycle {
-                    conflict_hash,
-                    maximal_valid_branches,
-                    ..
-                },
-            ) => Some(
-                coven_protocol::membership::MembershipConflictInfo::RevocationCycle {
-                    id: conflict_hash.to_string(),
-                    choices: maximal_valid_branches
-                        .iter()
-                        .map(|branch| {
-                            let selection = coven_protocol::membership::MembershipConflictSelection::RevocationBranch {
-                                heads: branch.heads.clone(),
-                            };
-                            let members = member_info(
-                                branch
-                                    .active_grants()
-                                    .map(|(_, record)| {
-                                        (record.member_pubkey.clone(), record.role.role())
-                                    })
-                                    .collect(),
-                                user_pubkey,
-                            );
-                            coven_protocol::membership::MembershipConflictChoice::new(
-                                membership_conflict_choice_id(&selection),
-                                members,
-                                *conflict_hash,
-                                selection,
-                            )
-                        })
-                        .collect(),
-                },
-            ),
-        }
+    ) -> Vec<coven_protocol::membership::MemberInfo> {
+        member_info(self.membership.current_members(), user_pubkey)
     }
 
     pub(super) fn restore_membership(
@@ -360,16 +249,6 @@ impl<'storage> AuthorizedStore<'storage> {
             )
             .await
     }
-}
-
-fn membership_conflict_choice_id(
-    selection: &coven_protocol::membership::MembershipConflictSelection,
-) -> String {
-    let selection_bytes =
-        serde_json::to_vec(selection).expect("membership conflict selections always serialize");
-    let mut bytes = b"coven.membership-conflict-choice.v1\0".to_vec();
-    bytes.extend(selection_bytes);
-    coven_protocol::store_commit::ObjectHash::digest(&bytes).to_string()
 }
 
 fn member_info(

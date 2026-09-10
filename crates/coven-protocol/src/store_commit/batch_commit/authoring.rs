@@ -99,11 +99,10 @@ impl StoreBatchCommit {
         publication_base: StorePublicationBase,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: StoreOperationMembershipAuthority,
+        membership_authority: MembershipCoord,
         request: OwnerPromotionRequest,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        let membership_authority = membership_authority.into_commit_authority();
         validate_commit_envelope(
             store_root_hash,
             &coord,
@@ -198,11 +197,10 @@ impl StoreBatchCommit {
         publication_base: StorePublicationBase,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: StoreOperationMembershipAuthority,
+        membership_authority: MembershipCoord,
         input: StoreCommitOperationsInput<'_>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        let membership_authority = membership_authority.into_commit_authority();
         validate_commit_envelope(
             store_root_hash,
             &coord,
@@ -336,7 +334,7 @@ impl StoreBatchCommit {
         publication_base: StorePublicationBase,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
+        membership_authority: Option<MembershipCoord>,
         body: StoreCommitBody,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {

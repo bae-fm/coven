@@ -338,10 +338,6 @@ impl StoreSession<'_> {
                     ..
                 },
             ) => before == after && old_email == new_email && old_role == new_role,
-            (
-                StoreAuthorityChange::ResolutionActivation { resolution: before },
-                StoreAuthorityChange::ResolutionActivation { resolution: after },
-            ) => before == after,
             _ => false,
         };
         if !same_request {

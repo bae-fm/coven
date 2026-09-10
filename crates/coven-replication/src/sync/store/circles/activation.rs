@@ -76,7 +76,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let state = &control.value.access_epoch().store_membership;
         let chain = self
             .history
-            .load_membership_at_exact_heads(&state.heads, &state.resolutions)
+            .load_membership_at_exact_heads(&state.heads)
             .await
             .map_err(CircleOperationError::from)?;
         verify_loaded_control_membership(control, chain)
@@ -90,12 +90,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let state = &control.value.access_epoch().store_membership;
         let chain = self
             .history
-            .load_membership_at_verified_prefix(
-                &state.heads,
-                &state.resolutions,
-                verified_activations,
-                None,
-            )
+            .load_membership_at_verified_prefix(&state.heads, verified_activations)
             .await
             .map_err(CircleOperationError::from)?;
         verify_loaded_control_membership(control, chain)
@@ -186,17 +181,9 @@ fn verify_loaded_control_membership(
             "Store membership does not authorize circle control author".to_string(),
         ));
     }
-    let membership_state_hash = match chain.status() {
-        coven_protocol::membership::MembershipStatus::Resolved(resolved) => resolved.state_hash,
-        coven_protocol::membership::MembershipStatus::Conflict(_) => {
-            return Err(CircleOperationError::InvalidState(
-                "Store membership state has an unresolved conflict".to_string(),
-            ));
-        }
-    };
+    let membership_state_hash = chain.resolved().state_hash;
     let expected_state = coven_protocol::circle::StoreMembershipStateRef::from_parts(
         state.heads.clone(),
-        state.resolutions.clone(),
         state.recovery.clone(),
         membership_state_hash,
     )

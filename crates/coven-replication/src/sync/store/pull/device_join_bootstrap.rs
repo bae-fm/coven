@@ -59,9 +59,7 @@ impl PullHistory<'_, '_> {
                 StorePullError::context("read device join bootstrap coverage", error)
             })?;
         let local_store_membership =
-            LocalStoreMembership::from_membership(membership, Some(identity))
-                .map_err(StorePullMembershipError::State)
-                .map_err(StorePullError::Membership)?;
+            LocalStoreMembership::from_membership(membership, Some(identity));
         let routing_key = if self.has_scoped_graph() {
             let encryption = routing_encryption.ok_or_else(|| {
                 StorePullError::InvalidState(

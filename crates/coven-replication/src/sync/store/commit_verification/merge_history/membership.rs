@@ -1,8 +1,7 @@
 use crate::sync::store::membership::AnchoredChainError;
 use coven_protocol::membership::{
     validate_membership_floor, AuthorHead, MembershipChain, MembershipCoord, MembershipEntry,
-    MembershipGrantId, MembershipHeadRef, StoreAuthorityChange, StoreMembershipConflictResolution,
-    StoreMembershipConflictResolutionRef,
+    MembershipGrantId, MembershipHeadRef, StoreAuthorityChange,
 };
 use coven_protocol::objects::StorageError;
 use coven_protocol::objects::StoreObjectError;
@@ -34,96 +33,69 @@ pub(crate) struct TraversedMembershipStream {
     pub(crate) heads: Vec<(MembershipHeadRef, AuthorHead, MembershipEntry)>,
 }
 
-pub(crate) struct TraversedMembership {
-    pub(crate) streams: Vec<TraversedMembershipStream>,
-    pub(crate) resolutions: Vec<(
-        StoreMembershipConflictResolutionRef,
-        StoreMembershipConflictResolution,
-    )>,
-}
-
-impl TraversedMembership {
-    /// The published form of what the walk read.
-    pub(crate) async fn into_rollup_parts(
-        self,
-        verifier: &crate::sync::store::commit_verification::commit::StoreCommitVerifier<'_>,
-    ) -> Result<
-        (
-            Vec<coven_protocol::store_commit::MembershipRollupStream>,
-            Vec<coven_protocol::store_commit::MembershipRollupResolution>,
-        ),
-        AnchoredChainError,
-    > {
-        let mut streams = Vec::new();
-        for stream in self.streams {
-            if stream.heads.is_empty() {
-                continue;
-            }
-            let mut heads = Vec::with_capacity(stream.heads.len());
-            for (index, (reference, head, entry)) in stream.heads.iter().enumerate() {
-                let predecessor_acceptance = match &head.body.predecessor {
-                    Some(previous) => {
-                        let (_, previous_head, _) = index
-                            .checked_sub(1)
-                            .and_then(|previous| stream.heads.get(previous))
-                            .ok_or_else(|| {
-                                AnchoredChainError::LoadFailed(
-                                    "traversed membership predecessor is absent".into(),
+/// The published form of what the walk read.
+pub(crate) async fn membership_rollup_streams(
+    traversed: Vec<TraversedMembershipStream>,
+    verifier: &crate::sync::store::commit_verification::commit::StoreCommitVerifier<'_>,
+) -> Result<Vec<coven_protocol::store_commit::MembershipRollupStream>, AnchoredChainError> {
+    let mut streams = Vec::new();
+    for stream in traversed {
+        if stream.heads.is_empty() {
+            continue;
+        }
+        let mut heads = Vec::with_capacity(stream.heads.len());
+        for (index, (reference, head, entry)) in stream.heads.iter().enumerate() {
+            let predecessor_acceptance = match &head.body.predecessor {
+                Some(previous) => {
+                    let (_, previous_head, _) = index
+                        .checked_sub(1)
+                        .and_then(|previous| stream.heads.get(previous))
+                        .ok_or_else(|| {
+                            AnchoredChainError::LoadFailed(
+                                "traversed membership predecessor is absent".into(),
+                            )
+                        })?;
+                    previous
+                        .verify_head(previous_head)
+                        .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+                    match previous.acceptance() {
+                        Some(object) => Some(
+                            verifier
+                                .membership_objects()
+                                .load_head_acceptance_at(
+                                    previous.head(),
+                                    previous_head,
+                                    Some(object),
                                 )
-                            })?;
-                        previous
-                            .verify_head(previous_head)
-                            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
-                        match previous.acceptance() {
-                            Some(object) => Some(
-                                verifier
-                                    .membership_objects()
-                                    .load_head_acceptance_at(
-                                        previous.head(),
-                                        previous_head,
-                                        Some(object),
-                                    )
-                                    .await?
-                                    .value,
-                            ),
-                            None => None,
-                        }
+                                .await?
+                                .value,
+                        ),
+                        None => None,
                     }
-                    None => None,
-                };
-                heads.push(coven_protocol::store_commit::MembershipRollupHead {
-                    entry: head.body.entry.clone(),
-                    head: reference.clone(),
-                    head_value: head.clone(),
-                    entry_value: entry.clone(),
-                    predecessor_acceptance,
-                });
-            }
-            streams.push(coven_protocol::store_commit::MembershipRollupStream {
-                author_pubkey: stream.author_pubkey,
-                author_owner_grant: stream.author_owner_grant,
-                stream_id: stream.stream_id,
-                heads,
+                }
+                None => None,
+            };
+            heads.push(coven_protocol::store_commit::MembershipRollupHead {
+                entry: head.body.entry.clone(),
+                head: reference.clone(),
+                head_value: head.clone(),
+                entry_value: entry.clone(),
+                predecessor_acceptance,
             });
         }
-        let resolutions = self
-            .resolutions
-            .into_iter()
-            .map(
-                |(reference, value)| coven_protocol::store_commit::MembershipRollupResolution {
-                    resolution: reference,
-                    resolution_value: value,
-                },
-            )
-            .collect();
-        Ok((streams, resolutions))
+        streams.push(coven_protocol::store_commit::MembershipRollupStream {
+            author_pubkey: stream.author_pubkey,
+            author_owner_grant: stream.author_owner_grant,
+            stream_id: stream.stream_id,
+            heads,
+        });
     }
+    Ok(streams)
 }
 
 struct ExactMembershipStream {
     entries: Vec<(MembershipCoord, MembershipEntry)>,
     heads: Vec<(MembershipHeadRef, AuthorHead)>,
-    resolutions: BTreeMap<StoreMembershipConflictResolutionRef, StoreMembershipConflictResolution>,
 }
 
 type LoadedMembershipGraphFuture<'a> = Pin<
@@ -133,9 +105,6 @@ type LoadedMembershipGraphFuture<'a> = Pin<
             + 'a,
     >,
 >;
-
-type LayeredMembershipFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<MembershipChain, AnchoredChainError>> + Send + 'a>>;
 
 enum MembershipActivationAuthority<'operation, 'storage> {
     History {
@@ -222,7 +191,6 @@ impl<'operation, 'storage> AcceptedMembershipActivation<'operation, 'storage> {
         snapshot: &coven_protocol::store_commit::SnapshotMeta,
     ) -> Result<MembershipChain, crate::sync::store::StorePullError> {
         let exact_heads = &snapshot.state.membership.heads;
-        let resolutions = &snapshot.state.membership.resolutions;
         let predecessor = &snapshot.publication_predecessor;
         // Discover from root-owned successor slots before accepting the image's
         // chosen heads. An absent acceptance result is an unfinished authority
@@ -237,7 +205,6 @@ impl<'operation, 'storage> AcceptedMembershipActivation<'operation, 'storage> {
         for selected in exact_heads {
             if !device_authority.contains(&selected.coord)
                 || !traversed
-                    .streams
                     .iter()
                     .flat_map(|stream| &stream.heads)
                     .any(|(rooted, _, _)| rooted == selected)
@@ -249,10 +216,7 @@ impl<'operation, 'storage> AcceptedMembershipActivation<'operation, 'storage> {
                 .into());
             }
         }
-        let membership = self
-            .authority
-            .load_at_exact_heads(exact_heads, resolutions, None)
-            .await?;
+        let membership = self.authority.load_at_exact_heads(exact_heads).await?;
         let MembershipActivationAuthority::AcceptedHeads {
             root,
             commit_verifier,
@@ -261,7 +225,7 @@ impl<'operation, 'storage> AcceptedMembershipActivation<'operation, 'storage> {
         else {
             unreachable!("accepted membership authority has one construction state")
         };
-        for stream in &traversed.streams {
+        for stream in &traversed {
             for (reference, head, _) in &stream.heads {
                 if !device_authority.contains(&reference.coord) {
                     continue;
@@ -309,7 +273,7 @@ impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
         &mut self,
         cursors: &[MembershipHeadRef],
         owner_pubkey: Option<&str>,
-    ) -> Result<(MembershipChain, TraversedMembership), AnchoredChainError> {
+    ) -> Result<(MembershipChain, Vec<TraversedMembershipStream>), AnchoredChainError> {
         self.authority
             .load_exact_anchored_chain(cursors, owner_pubkey)
             .await
@@ -318,11 +282,8 @@ impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
     pub(super) async fn load_at_exact_heads(
         &mut self,
         exact_heads: &[MembershipHeadRef],
-        exact_resolutions: &[StoreMembershipConflictResolutionRef],
     ) -> Result<MembershipChain, AnchoredChainError> {
-        self.authority
-            .load_at_exact_heads(exact_heads, exact_resolutions, None)
-            .await
+        self.authority.load_at_exact_heads(exact_heads).await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -350,7 +311,6 @@ impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
                 .as_ref()
                 .map(|reference: &MembershipHeadRef| reference.coord.entry_hash);
             entry.dependencies.clear();
-            entry.resolution_dependencies.clear();
             node.reference.coord = node.entry.coord();
             let head = node.head.body_mut();
             head.body.entry.coord = node.reference.coord.clone();
@@ -371,7 +331,6 @@ impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
         let statuses = graph::membership_projection_statuses(
             &graph,
             &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix::default(),
-            &BTreeMap::new(),
         )
         .expect("project deep predecessor path");
 
@@ -400,14 +359,8 @@ impl<'operation, 'storage> VerifiedPrefixMembershipActivation<'operation, 'stora
     pub(super) async fn load_at_exact_heads(
         &mut self,
         exact_heads: &[MembershipHeadRef],
-        exact_resolutions: &[StoreMembershipConflictResolutionRef],
-        pending_resolution: Option<
-            &crate::sync::store::commit_verification::merge_history::VerifiedMergeConflictResolutionActivation,
-        >,
     ) -> Result<MembershipChain, AnchoredChainError> {
-        self.authority
-            .load_at_exact_heads(exact_heads, exact_resolutions, pending_resolution)
-            .await
+        self.authority.load_at_exact_heads(exact_heads).await
     }
 
     pub(super) async fn project(
@@ -423,11 +376,10 @@ impl<'operation, 'storage> VerifiedPrefixMembershipActivation<'operation, 'stora
             .authority
             .load_exact_membership_graph_objects(candidate_heads)
             .await?;
-        let (heads, resolutions) =
-            graph::project_membership_cut_to_store_prefix(&candidate, &prefix)?;
+        let heads = graph::project_membership_cut_to_store_prefix(&candidate, &prefix)?;
         let projected = self
             .authority
-            .load_anchored_chain_at_exact_heads(&heads, &resolutions, None)
+            .load_anchored_chain_at_exact_heads(&heads)
             .await?;
         prefix
             .validate_complete_membership(&projected)
@@ -444,17 +396,8 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
     async fn load_at_exact_heads(
         &mut self,
         exact_heads: &[MembershipHeadRef],
-        exact_resolutions: &[StoreMembershipConflictResolutionRef],
-        pending_resolution: Option<
-            &crate::sync::store::commit_verification::merge_history::VerifiedMergeConflictResolutionActivation,
-        >,
     ) -> Result<MembershipChain, AnchoredChainError> {
-        Box::pin(self.load_anchored_chain_at_exact_heads(
-            exact_heads,
-            exact_resolutions,
-            pending_resolution,
-        ))
-        .await
+        Box::pin(self.load_anchored_chain_at_exact_heads(exact_heads)).await
     }
 
     fn load_exact_membership_graph_objects<'a>(
@@ -550,169 +493,11 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         })
     }
 
-    fn load_layered_membership_chain<'a>(
-        &'a mut self,
-        graph: graph::LoadedExactMembershipGraph,
-        exact_resolutions: &'a [StoreMembershipConflictResolutionRef],
-        provider_admin: &'a coven_protocol::provider::ProviderAdminState,
-        pending_resolution: Option<
-            &'a crate::sync::store::commit_verification::merge_history::VerifiedMergeConflictResolutionActivation,
-        >,
-    ) -> LayeredMembershipFuture<'a> {
-        Box::pin(async move {
-            let root = self.root().clone();
-            let exact_heads = graph.head_refs();
-            if exact_resolutions.is_empty() {
-                if !graph.resolution_cut().is_empty() {
-                    return Err(AnchoredChainError::LoadFailed(
-                        "membership signed heads name a nonempty resolution cut".to_string(),
-                    ));
-                }
-                return graph::exact_membership_chain_from_graph(
-                    &root,
-                    graph,
-                    provider_admin.clone(),
-                );
-            }
-
-            let mut resolutions = BTreeMap::new();
-            for reference in exact_resolutions {
-                let value = Box::pin(self.load_membership_resolution(reference))
-                    .await
-                    .map_err(map_membership_object_error)?
-                    .value;
-                match &mut *self {
-                    MembershipActivationAuthority::VerifiedPrefix { activations, .. } => {
-                        let verified_by_prefix =
-                            activations.verifies_conflict_resolution(reference);
-                        let verified_by_pending =
-                            pending_resolution.is_some_and(|pending| pending.verifies(reference));
-                        if !verified_by_prefix && !verified_by_pending {
-                            return Err(AnchoredChainError::LoadFailed(
-                                "membership conflict resolution is absent from its verified Store authority"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                    MembershipActivationAuthority::AcceptedHeads { .. } => {
-                        // The exact activation head's accepted result establishes
-                        // publication. The graph below verifies the resolver's
-                        // predecessor authority and exact resolution cut.
-                    }
-                    MembershipActivationAuthority::History { history, .. } => {
-                        Box::pin(history.verify_owner_conflict_acceptance(
-                            &value.replacement_acceptance,
-                            &value.resolver_pubkey,
-                        ))
-                        .await
-                        .map_err(AnchoredChainError::from)?;
-                    }
-                }
-                resolutions.insert(reference.clone(), value);
-            }
-
-            let target_cut = exact_resolutions.iter().cloned().collect::<BTreeSet<_>>();
-            let mut activation_counts = BTreeMap::<_, usize>::new();
-            for entry in graph.entries.values() {
-                if let StoreAuthorityChange::ResolutionActivation { resolution } = &entry.change {
-                    if entry.resolution_dependencies == exact_resolutions {
-                        *activation_counts.entry(resolution.clone()).or_default() += 1;
-                    }
-                }
-            }
-            if let Some(pending) = pending_resolution {
-                *activation_counts
-                    .entry(pending.reference().clone())
-                    .or_default() += 1;
-            }
-            if activation_counts.values().any(|count| *count != 1) {
-                return Err(AnchoredChainError::LoadFailed(
-                    "membership resolution has multiple exact activations".to_string(),
-                ));
-            }
-            let activated_here = activation_counts.keys().cloned().collect::<BTreeSet<_>>();
-            if !activated_here.is_subset(&target_cut) || activated_here.is_empty() {
-                return Err(AnchoredChainError::LoadFailed(
-                    "membership resolution cut has no exact activation layer".to_string(),
-                ));
-            }
-
-            let first_resolution = resolutions
-                .get(
-                    activated_here
-                        .first()
-                        .expect("activation layer is nonempty"),
-                )
-                .expect("activated resolution belongs to the exact cut");
-            let conflict_heads = &first_resolution.conflicting_heads;
-            if activated_here.iter().any(|reference| {
-                resolutions.get(reference).is_none_or(|resolution| {
-                    resolution.conflict_hash != first_resolution.conflict_hash
-                        || resolution.conflicting_heads != *conflict_heads
-                })
-            }) {
-                return Err(AnchoredChainError::LoadFailed(
-                    "membership activation layer combines different conflicts".to_string(),
-                ));
-            }
-            let conflict_graph = self.load_exact_membership_graph(conflict_heads).await?;
-            let prior_cut = conflict_graph.resolution_cut();
-            let prior_set = prior_cut.iter().cloned().collect::<BTreeSet<_>>();
-            let introduced = target_cut
-                .difference(&prior_set)
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            if activated_here != introduced {
-                return Err(AnchoredChainError::LoadFailed(
-                    "membership resolution activations differ from the introduced cut".to_string(),
-                ));
-            }
-            let mut chain = self
-                .load_layered_membership_chain(conflict_graph, &prior_cut, provider_admin, None)
-                .await?;
-            let introduced_resolutions = introduced
-                .iter()
-                .map(|reference| {
-                    resolutions
-                        .get(reference)
-                        .cloned()
-                        .map(|value| (reference.clone(), value))
-                        .ok_or_else(|| {
-                            AnchoredChainError::LoadFailed(
-                                "introduced membership resolution is absent from its exact cut"
-                                    .to_string(),
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            chain
-                .apply_resolutions(root.store_root_hash, &introduced_resolutions)
-                .map_err(AnchoredChainError::from)?;
-            graph.add_exact_suffix(&mut chain)?;
-            graph.validate_stream_anchors(&root, &chain)?;
-            if chain.head_refs() != exact_heads || chain.resolution_refs() != exact_resolutions {
-                return Err(AnchoredChainError::LoadFailed(
-                    "membership resolution reconstruction differs from its exact state".to_string(),
-                ));
-            }
-            Ok(chain)
-        })
-    }
-
     async fn load_anchored_chain_at_exact_heads(
         &mut self,
         exact_heads: &[MembershipHeadRef],
-        exact_resolutions: &[StoreMembershipConflictResolutionRef],
-        pending_resolution: Option<
-            &crate::sync::store::commit_verification::merge_history::VerifiedMergeConflictResolutionActivation,
-        >,
     ) -> Result<MembershipChain, AnchoredChainError> {
         validate_membership_floor(exact_heads).map_err(AnchoredChainError::InvalidFloor)?;
-        if !exact_resolutions.windows(2).all(|pair| pair[0] < pair[1]) {
-            return Err(AnchoredChainError::LoadFailed(
-                "membership resolution cut is not canonical".to_string(),
-            ));
-        }
         let root = self.root().clone();
         let root_value = self.verified_root().clone();
         let owner_pubkey = root_value.descriptor.founder_pubkey.clone();
@@ -731,14 +516,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             &root_value.descriptor.founder_provider_admin,
         );
         let graph = Box::pin(self.load_exact_membership_graph(exact_heads)).await?;
-        let chain = self
-            .load_layered_membership_chain(
-                graph,
-                exact_resolutions,
-                &provider_admin,
-                pending_resolution,
-            )
-            .await?;
+        let chain = graph::exact_membership_chain_from_graph(&root, graph, provider_admin)?;
         if !chain.is_founded_by(&owner_pubkey) {
             return Err(AnchoredChainError::FounderMismatch {
                 founder: chain.founder_pubkey().map(str::to_string),
@@ -878,11 +656,6 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             .load_membership_entry(&head.body.entry)
             .await
             .map_err(map_membership_object_error)?;
-        if loaded_entry.value.resolution_dependencies != head.body.resolutions {
-            return Err(AnchoredChainError::LoadFailed(
-                "membership head and selected entry carry different resolution cuts".to_string(),
-            ));
-        }
         Ok(graph::LoadedExactMembershipHead {
             reference: reference.clone(),
             head,
@@ -911,35 +684,6 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                 commit_verifier
                     .membership_objects()
                     .load_entry(reference)
-                    .await
-            }
-        }
-    }
-
-    async fn load_membership_resolution(
-        &self,
-        reference: &StoreMembershipConflictResolutionRef,
-    ) -> Result<
-        coven_protocol::objects::VerifiedObject<StoreMembershipConflictResolution>,
-        StoreObjectError,
-    > {
-        match self {
-            Self::History { history } => {
-                history
-                    .commit_verifier
-                    .membership_objects()
-                    .load_resolution(reference)
-                    .await
-            }
-            Self::VerifiedPrefix {
-                commit_verifier, ..
-            }
-            | Self::AcceptedHeads {
-                commit_verifier, ..
-            } => {
-                commit_verifier
-                    .membership_objects()
-                    .load_resolution(reference)
                     .await
             }
         }
@@ -1100,7 +844,6 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
 
         if let Some(fetched) = heads.freshly_fetched() {
             let mut entries = Vec::new();
-            let mut resolutions = Vec::new();
             for read in fetched.values() {
                 let Ok(head) =
                     coven_protocol::objects::decode_protocol_object::<AuthorHead>(&read.bytes)
@@ -1108,16 +851,13 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                     continue;
                 };
                 entries.push(head.body.entry.clone());
-                resolutions.extend(head.body.resolutions.iter().cloned());
             }
-            self.prefetch_membership_head_dependencies(entries, resolutions)
-                .await;
+            self.prefetch_membership_head_dependencies(entries).await;
         }
         Ok(heads.reads().clone())
     }
 
-    /// Read the entry each prefetched head selects, and the resolutions each
-    /// names, into the verifier's object memo so the walk finds them in memory.
+    /// Read each prefetched head's entry into the verifier's object memo.
     ///
     /// Content-addressed reads by reference, so a hit still runs every check
     /// the walk would have run — this decides when the bytes are fetched, not
@@ -1133,7 +873,6 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
     async fn prefetch_membership_head_dependencies(
         &self,
         entries: Vec<coven_protocol::membership::MembershipEntryRef>,
-        resolutions: Vec<StoreMembershipConflictResolutionRef>,
     ) {
         use futures_util::StreamExt;
 
@@ -1141,13 +880,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         let entries = futures_util::stream::iter(entries)
             .map(|reference| async move { self.load_membership_entry(&reference).await.map(drop) })
             .buffer_unordered(width);
-        let resolutions =
-            futures_util::stream::iter(resolutions)
-                .map(|reference| async move {
-                    self.load_membership_resolution(&reference).await.map(drop)
-                })
-                .buffer_unordered(width);
-        for read in entries.chain(resolutions).collect::<Vec<_>>().await {
+        for read in entries.collect::<Vec<_>>().await {
             if let Err(error) = read {
                 tracing::debug!(%error, "speculative membership object read did not land");
             }

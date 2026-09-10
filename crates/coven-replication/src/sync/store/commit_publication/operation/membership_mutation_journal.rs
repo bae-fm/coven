@@ -20,7 +20,6 @@ use crate::sync::store::membership::MembershipMutationError;
 pub(super) enum MembershipMutationPlan {
     Admission(AdmissionMutationPlan),
     Revoke(RevokeMutationPlan),
-    Resolve(Box<PreparedStoreOperationCommit>),
 }
 
 impl MembershipMutationPlan {
@@ -145,7 +144,6 @@ pub(super) enum MembershipMutationProgress {
     AdmissionActivated { join_info: CloudHomeJoinInfo },
     RevokeAccessRemoved,
     RevokeActivated { candidate: StoreBatchCommitRef },
-    ResolutionActivated { candidate: StoreBatchCommitRef },
 }
 
 impl MembershipMutationProgress {

@@ -36,10 +36,7 @@ pub fn test_circle_activation(label: &str, active: bool) -> TestCircleActivation
         PreparedCircleTransition, StoreMembershipStateRef,
     };
     use crate::circle_activation::{VerifiedCircleAccess, VerifiedCircleActive};
-    use crate::membership::{
-        MemberRole, MembershipChain, MembershipGrantCreationAuthority, MembershipHeadRef,
-        MembershipStatus,
-    };
+    use crate::membership::{MemberRole, MembershipChain, MembershipHeadRef};
     use crate::objects::ExactObjectRef;
     use crate::objects::ObjectSlot;
     use crate::store_commit::{
@@ -114,22 +111,16 @@ pub fn test_circle_activation(label: &str, active: bool) -> TestCircleActivation
     let founder_coord = founder.coord();
     let chain =
         MembershipChain::from_entries(vec![founder.clone()]).expect("found test membership");
-    let MembershipStatus::Resolved(resolved) = chain.status() else {
-        panic!("founder membership must resolve")
-    };
+    let resolved = chain.resolved();
     let head = MembershipHeadRef {
         coord: founder_coord.clone(),
         head_hash: ObjectHash::digest(format!("{label} membership head").as_bytes()),
         object: exact_object(&format!("{label}/membership-head"), b"test membership head"),
     };
-    let membership = StoreMembershipStateRef::from_parts(
-        vec![head],
-        Vec::new(),
-        Vec::new(),
-        resolved.state_hash,
-    )
-    .expect("valid test membership reference");
-    let membership_authority = MembershipGrantCreationAuthority::Entry(founder_coord);
+    let membership =
+        StoreMembershipStateRef::from_parts(vec![head], Vec::new(), resolved.state_hash)
+            .expect("valid test membership reference");
+    let membership_authority = founder_coord;
     let candidate_family = CandidateFamilyId::from_hash(ObjectHash::digest(
         format!("{label} candidate family").as_bytes(),
     ));

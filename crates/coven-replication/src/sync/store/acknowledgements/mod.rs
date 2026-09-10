@@ -222,8 +222,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                 self.writer.store_root().clone(),
                 snapshot.verified,
                 routing_encryption.cloned(),
-                self.local_writer
-                    .local_membership(self.writer.membership())?,
+                self.local_writer.local_membership(self.writer.membership()),
             )
             .await?)
     }

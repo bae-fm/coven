@@ -605,7 +605,7 @@ async fn cross_removals_from_one_prefix_preserve_the_first_accepted_owner() {
         assert!(matches!(error,
             crate::sync::store::MembershipOpsError::Mutation(
                 crate::sync::store::MembershipMutationError::Membership(
-                    coven_protocol::membership::MembershipError::MissingConflictHeads,
+                    coven_protocol::membership::MembershipError::Conflict,
                 ),
             ),
         ), "the unaccepted cross-removal must fail before authority upload: {error:?}");

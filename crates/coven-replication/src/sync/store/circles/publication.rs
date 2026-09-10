@@ -504,14 +504,6 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         commit: &StoreBatchCommit,
         author: &StoreDeviceRegistration,
     ) -> Result<CurrentMergeAuthority, CircleOperationError> {
-        if let Some(conflict) = self.writer.membership().conflict() {
-            return Err(CircleOperationError::InvalidState(
-                crate::sync::store::membership::MembershipOpsError::SemanticConflict(Box::new(
-                    conflict.clone(),
-                ))
-                .to_string(),
-            ));
-        }
         if self.writer.store_root().store_root_hash != commit.store_root_hash {
             return Err(CircleOperationError::InvalidState(
                 "Circle commit names a different Store root".to_string(),
@@ -522,13 +514,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 "Circle commit has no Store membership authority".to_string(),
             )
         })?;
-        let coven_protocol::membership::MembershipStatus::Resolved(resolved) =
-            self.writer.membership().status()
-        else {
-            return Err(CircleOperationError::InvalidState(
-                "current Store membership is conflicted".to_string(),
-            ));
-        };
+        let resolved = self.writer.membership().resolved();
         let mut matching = resolved.grants.iter().filter(|(_, state)| {
             let record = state.record();
             record.member_pubkey == author.author_pubkey

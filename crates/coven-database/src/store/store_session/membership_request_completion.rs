@@ -85,7 +85,7 @@ impl MembershipRequestCompletion {
                 ))
             }
         };
-        if membership.conflict().is_some() || !resolved {
+        if !resolved {
             return Err(DbError::Message(failure.into()));
         }
         Ok(())

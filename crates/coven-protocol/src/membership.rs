@@ -10,15 +10,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::causal_grants::{
-    self, CausalAssignment, CausalChange, CausalCoordinate, CausalEntry, CausalGrantConflict,
-    CausalGrantError, CausalGrantStatus, GrantRetirements, GrantState, OwnerGrantBarrier,
+    self, CausalAssignment, CausalChange, CausalCoordinate, CausalEntry, CausalGrantError,
+    CausalGrantStatus, GrantState, OwnerGrantBarrier,
 };
 pub use super::causal_grants::{AuthorStreamId, MembershipGrantId};
 use super::store_commit::{
-    GrantStreamAnchor, ObjectHash, OwnerConflictResolutionAcceptance, OwnerPromotionAcceptance,
-    OwnerPromotionFinalization, OwnerRecoveryCursor, Signed, SignedBody, StoreBatchCommitRef,
-    StoreCreationId, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef,
-    StoreRootRef, SuccessorLink,
+    GrantStreamAnchor, ObjectHash, OwnerPromotionAcceptance, OwnerPromotionFinalization,
+    OwnerRecoveryCursor, Signed, SignedBody, StoreBatchCommitRef, StoreCreationId,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreRootRef,
+    SuccessorLink,
 };
 #[cfg(any(test, feature = "test-utils"))]
 use super::store_commit::{
@@ -26,10 +26,6 @@ use super::store_commit::{
     OwnerPromotionRequestActivation, OwnerPromotionRequestBody, OwnerRecoveryNodeRef,
     OwnerRecoveryPosition,
 };
-// Only this module's own tests build a conflict-resolution acceptance body; the
-// `test-utils` fixtures above do not.
-#[cfg(test)]
-use super::store_commit::OwnerConflictResolutionAcceptanceBody;
 use super::wrapped_store_key::WrappedStoreKeyRef;
 use crate::objects::ExactObjectRef;
 use coven_keys::keys::{self, UserKeypair};
@@ -37,7 +33,6 @@ use coven_keys::keys::{self, UserKeypair};
 mod authoring;
 mod authority;
 mod chain;
-mod conflict;
 mod entry;
 mod head_acceptance;
 mod head_predecessor;
@@ -49,12 +44,6 @@ pub use head_acceptance::{
     MembershipHeadAcceptanceBody, MembershipHeadAcceptanceIssuer,
 };
 
-pub use conflict::{
-    derive_store_resolution_grant, resolve_store_membership_conflict, MembershipConflict,
-    MembershipConflictSelection, MembershipStatus, StoreMembershipConflictResolution,
-    StoreMembershipConflictResolutionBody, StoreMembershipConflictResolutionRef,
-};
-pub use conflict::{MembershipConflictChoice, MembershipConflictInfo};
 pub use entry::{
     derive_founder_stream_id, derive_grant_id, founder_entry_for_creation, verify_membership_entry,
 };
@@ -64,7 +53,6 @@ use reduction::*;
 
 const MEMBERSHIP_ENTRY_DOMAIN: &[u8] = b"coven.store-membership-entry.v1\0";
 const MEMBERSHIP_HEAD_DOMAIN: &[u8] = b"coven.store-membership-head.v1\0";
-const MEMBERSHIP_RESOLUTION_DOMAIN: &[u8] = b"coven.store-membership-conflict-resolution.v1\0";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MemberRole {
@@ -87,9 +75,6 @@ pub enum OwnerRecoveryAnchorRef {
     },
     Promotion {
         acceptance: Box<OwnerPromotionAcceptance>,
-    },
-    ConflictResolution {
-        acceptance: Box<OwnerConflictResolutionAcceptance>,
     },
 }
 
@@ -175,9 +160,6 @@ pub enum StoreAuthorityChange {
         outcome: super::store_commit::StoreDeviceExclusionOutcomeRef,
     },
     ProviderAdmin,
-    ResolutionActivation {
-        resolution: StoreMembershipConflictResolutionRef,
-    },
 }
 
 impl StoreAuthorityChange {
@@ -189,8 +171,7 @@ impl StoreAuthorityChange {
             | Self::DeviceRegistrationActivation { .. }
             | Self::DeviceExclusionProposal { .. }
             | Self::DeviceExclusionOutcome { .. }
-            | Self::ProviderAdmin
-            | Self::ResolutionActivation { .. } => None,
+            | Self::ProviderAdmin => None,
         }
     }
 }
@@ -327,7 +308,6 @@ pub struct MembershipEntryBody {
     pub seq: u64,
     pub previous_hash: Option<ObjectHash>,
     pub dependencies: Vec<MembershipCoord>,
-    pub resolution_dependencies: Vec<StoreMembershipConflictResolutionRef>,
     pub created_at: String,
     pub change: StoreAuthorityChange,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -380,7 +360,6 @@ pub struct MembershipHeadBody {
     pub author_registration: StoreDeviceRegistrationRef,
     pub entry: MembershipEntryRef,
     pub predecessor: Option<MembershipHeadPredecessor>,
-    pub resolutions: Vec<StoreMembershipConflictResolutionRef>,
     pub successor: SuccessorLink,
 }
 
@@ -584,20 +563,14 @@ pub enum MembershipError {
     PrunedAuthorStream,
     #[error("membership author stream exhausted its sequence space")]
     SequenceExhausted,
-    #[error("membership resolution activation entry {0} is invalid")]
-    InvalidResolutionActivation(usize),
-    #[error("membership resolution activation requires a fresh persisted author stream")]
-    ResolutionActivationRequiresFreshStream,
     #[error("provider administrator control entry {0} is invalid")]
     InvalidProviderAdminChange(usize),
-    #[error("membership has an unresolved semantic conflict")]
+    #[error("membership graph contains conflicting authority")]
     Conflict,
     #[error("membership entry {coord:?} was prepared against different accepted authority")]
     PublicationPredecessorChanged { coord: Box<MembershipCoord> },
-    #[error("membership conflict is missing its exact signed raw heads")]
-    MissingConflictHeads,
-    #[error("membership conflict resolution does not name exact validated conflict evidence")]
-    InvalidConflictResolution,
+    #[error("membership is missing its exact signed heads")]
+    MissingExactHeads,
     #[error("provider administrator history is invalid: {0}")]
     ProviderAdmin(#[from] super::provider::ProviderAdminReducerError),
 }
@@ -609,43 +582,19 @@ pub struct MembershipGrantRecord {
     pub role: StoreMembershipRoleGrant,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_account_email: Option<String>,
-    pub creation_authority: MembershipGrantCreationAuthority,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MembershipGrantCreationAuthority {
-    Entry(MembershipCoord),
-    ConflictResolution(StoreMembershipConflictResolutionRef),
+    pub creation_authority: MembershipCoord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MembershipGrantRetirement {
-    Entry {
-        authority: MembershipCoord,
-        barrier: MergeMembershipGrantRetirementBarrier,
-    },
-    ConflictResolution {
-        authority: StoreMembershipConflictResolutionRef,
-        barrier: MergeMembershipGrantRetirementBarrier,
-    },
+#[serde(deny_unknown_fields)]
+pub struct MembershipGrantRetirement {
+    pub authority: MembershipCoord,
+    pub barrier: MergeMembershipGrantRetirementBarrier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedStoreMembership {
-    pub grants:
-        BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
-    pub provider_admin: super::provider::ProviderAdminResolution,
-    pub state_hash: ObjectHash,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreMembershipBranch {
-    pub heads: Vec<MembershipHeadRef>,
-    pub effective_frontier: Vec<MembershipCoord>,
     pub grants:
         BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
     pub provider_admin: super::provider::ProviderAdminResolution,
@@ -664,42 +613,14 @@ impl ResolvedStoreMembership {
     }
 }
 
-impl StoreMembershipBranch {
-    pub fn active_grants(
-        &self,
-    ) -> impl Iterator<Item = (&MembershipGrantId, &MembershipGrantRecord)> {
-        causal_grants::active_grants(&self.grants)
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct CausalState {
-    grants:
-        BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
-}
-
 #[derive(Debug, Clone)]
 pub struct MembershipChain {
     entries: Vec<MembershipEntry>,
     coords: Vec<MembershipCoord>,
-    state: CausalState,
     included: BTreeSet<MembershipCoord>,
-    status: Option<MembershipStatus>,
+    resolved: ResolvedStoreMembership,
     head_refs: Vec<MembershipHeadRef>,
-    resolution_checkpoint: Option<MembershipResolutionCheckpoint>,
     provider_admin_genesis: super::provider::ProviderAdminState,
-}
-
-#[derive(Debug, Clone)]
-struct MembershipResolutionCheckpoint {
-    raw_heads: Vec<MembershipCoord>,
-    effective_frontier: Vec<MembershipCoord>,
-    grants:
-        BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
-    grant_anchors: BTreeMap<MembershipGrantId, GrantStreamAnchor>,
-    included: BTreeSet<MembershipCoord>,
-    resolutions: Vec<StoreMembershipConflictResolutionRef>,
-    provider_admin: super::provider::ProviderAdminState,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -752,12 +673,10 @@ impl MembershipChain {}
 impl AuthorHead {
     pub fn signed(
         store_id: String,
-        mut body: MembershipHeadBody,
+        body: MembershipHeadBody,
         activation: MembershipHeadActivation,
         device_signer: &UserKeypair,
     ) -> Self {
-        body.resolutions.sort();
-        body.resolutions.dedup();
         Signed::sign(
             AuthorHeadBody {
                 store_id,
@@ -770,14 +689,9 @@ impl AuthorHead {
 
     pub fn verify(&self, registration: &StoreDeviceRegistration) -> bool {
         self.body
-            .resolutions
-            .windows(2)
-            .all(|pair| pair[0] < pair[1])
-            && self
-                .body
-                .author_registration
-                .verify_registration(registration)
-                .is_ok()
+            .author_registration
+            .verify_registration(registration)
+            .is_ok()
             && registration.author_pubkey == self.body.entry.coord.author_pubkey
             && self.body.successor.predecessor
                 == self
@@ -815,10 +729,9 @@ impl LocalStoreMembership {
     pub fn from_membership(
         membership: &MembershipChain,
         identity: Option<&coven_keys::keys::UserKeypair>,
-    ) -> Result<Self, crate::membership::MembershipError> {
-        membership.ensure_resolved()?;
+    ) -> Self {
         let Some(identity) = identity else {
-            return Ok(Self::IdentityNotSupplied);
+            return Self::IdentityNotSupplied;
         };
         let identity = coven_keys::keys::public_key_hex(identity);
         if membership
@@ -826,11 +739,11 @@ impl LocalStoreMembership {
             .iter()
             .any(|(member, _)| member == &identity)
         {
-            Ok(Self::Current)
+            Self::Current
         } else if membership.contains_member_history(&identity) {
-            Ok(Self::Removed)
+            Self::Removed
         } else {
-            Ok(Self::NotYetMember)
+            Self::NotYetMember
         }
     }
 

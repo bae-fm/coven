@@ -91,12 +91,6 @@ pub enum RetainedAuthorityObjectState {
     UploadedVerified {
         ownership: CandidateOwnership,
     },
-    CleanupPending {
-        former_candidates: Vec<CandidateNonactivation>,
-    },
-    AbsentVerified {
-        former_candidates: Vec<CandidateNonactivation>,
-    },
 }
 
 impl RetainedAuthorityObjectState {
@@ -104,10 +98,6 @@ impl RetainedAuthorityObjectState {
         match self {
             Self::Prepared { ownership } => ownership.validate(),
             Self::UploadedVerified { ownership } => ownership.validate(),
-            Self::CleanupPending { former_candidates }
-            | Self::AbsentVerified { former_candidates } => {
-                validate_nonactivations(former_candidates)
-            }
         }
     }
 }

@@ -1,14 +1,11 @@
 use super::StoreCommitVerifier;
 use coven_protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipGrantId, MembershipHeadRef,
-    StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
 };
 use coven_protocol::objects::{
     ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError, VerifiedObject,
 };
-use coven_protocol::store_commit::{
-    membership_entry_semantic_prefix, membership_resolution_semantic_prefix, StoreProtocolError,
-};
+use coven_protocol::store_commit::{membership_entry_semantic_prefix, StoreProtocolError};
 use coven_storage::run_blocking_object_verification;
 
 pub(crate) struct StoreMembershipObjectVerifier<'operation, 'storage> {
@@ -26,17 +23,10 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
         &self,
         proof: &coven_protocol::store_commit::RetainedMergeMembershipProof,
     ) -> Result<(), StoreProtocolError> {
-        let mut objects = vec![
+        let objects = [
             (&proof.entry.object, serde_json::to_vec(&proof.entry_value)?),
             (&proof.head.object, serde_json::to_vec(&proof.head_value)?),
         ];
-        match (&proof.resolution, &proof.resolution_value) {
-            (Some(reference), Some(value)) => {
-                objects.push((&reference.object, serde_json::to_vec(value)?));
-            }
-            (None, None) => {}
-            _ => return Err(StoreProtocolError::DeviceStateMismatch),
-        }
         for (object, bytes) in &objects {
             object.verify(bytes)?;
         }
@@ -80,46 +70,6 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
                         ));
                     }
                     Ok(entry)
-                },
-            )
-            .await
-    }
-
-    pub(crate) async fn load_resolution(
-        &self,
-        reference: &StoreMembershipConflictResolutionRef,
-    ) -> Result<VerifiedObject<StoreMembershipConflictResolution>, StoreObjectError> {
-        let semantic_prefix = membership_resolution_semantic_prefix(
-            reference.conflict_hash,
-            &reference.resolver_pubkey,
-            reference.resolution_hash,
-        );
-        let context = ProtocolObjectContext::signed_plaintext(
-            self.commit_verifier.store_root_hash(),
-            ProtocolObjectDomain::StoreMembershipResolution,
-        );
-        let expected = reference.clone();
-        let store_root_hash = self.commit_verifier.store_root_hash();
-        self.commit_verifier
-            .load_exact_object(
-                &context,
-                &reference.object,
-                &semantic_prefix,
-                reference.resolution_hash,
-                move |bytes| {
-                    let resolution: StoreMembershipConflictResolution =
-                        coven_protocol::objects::decode_protocol_object(bytes)?;
-                    if resolution.store_root_hash != store_root_hash
-                        || resolution.conflict_hash != expected.conflict_hash
-                        || resolution.resolver_pubkey != expected.resolver_pubkey
-                        || resolution.resolution_hash() != expected.resolution_hash
-                        || !resolution.verify_signature()
-                    {
-                        return Err(StoreProtocolError::Malformed(
-                            "exact membership resolution differs from its reference".to_string(),
-                        ));
-                    }
-                    Ok(resolution)
                 },
             )
             .await

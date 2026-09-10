@@ -617,17 +617,8 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         let snapshot = selected.snapshot;
         let authority = selected.verified;
         let heads = &membership_floor.0;
-        let mut resolutions = std::collections::BTreeSet::new();
-        for reference in heads {
-            let head = history_verifier
-                .load_exact_membership_head(reference)
-                .await
-                .map_err(SnapshotError::from)?;
-            resolutions.extend(head.body.resolutions.iter().cloned());
-        }
-        let resolutions = resolutions.into_iter().collect::<Vec<_>>();
         let membership = history_verifier
-            .load_membership_at_exact_heads(heads, &resolutions)
+            .load_membership_at_exact_heads(heads)
             .await
             .map_err(SnapshotError::from)?;
         if snapshot.meta.schema_version > binary_schema_version {
@@ -738,8 +729,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 coven_protocol::membership::LocalStoreMembership::from_membership(
                     &membership,
                     Some(&restorer_identity),
-                )
-                .map_err(crate::sync::store::pull::StorePullError::MembershipProtocol)?;
+                );
             let circle_installs = if local_membership.allows_circle_access() {
                 let routing_key = routing_encryption
                     .map(|encryption| {

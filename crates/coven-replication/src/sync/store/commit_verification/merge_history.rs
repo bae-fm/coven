@@ -7,7 +7,7 @@ use coven_database::VerifiedStoreSnapshotAuthority;
 use coven_database::{DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan};
 use coven_protocol::circle_activation::VerifiedCircleActivations;
 use coven_protocol::circle_control::StoreMembershipStateRef;
-use coven_protocol::membership::{MembershipChain, MembershipStatus};
+use coven_protocol::membership::MembershipChain;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::objects::{StoreObjectError, VerifiedObject};
 use coven_protocol::store_commit::{
@@ -53,9 +53,7 @@ pub(crate) use membership_control::{
     VerifiedMergeMembershipHeadActivation, VerifiedMergePrefixHeadStatus,
 };
 pub(crate) use predecessor::{predecessor_verifies_owner, VerifiedMergePredecessorHistory};
-pub(crate) use promotion::{
-    VerifiedMergeConflictResolutionActivation, VerifiedOwnerPromotionRequestActivation,
-};
+pub(crate) use promotion::VerifiedOwnerPromotionRequestActivation;
 pub(crate) use publication::{
     AcceptedStoreSnapshot, StorePublicationReplayInstallation, VerifiedStorePublication,
 };
@@ -105,7 +103,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             .rev()
             .find(|verified| {
                 verified.membership.head_refs() == state.heads
-                    && verified.membership.resolution_refs() == state.resolutions
                     && authority.extends(&verified.authority)
             })
             .map(|verified| verified.membership.clone())
@@ -118,7 +115,6 @@ impl<'a> MergeHistoryVerifier<'a> {
     ) {
         if self.verified_memberships.iter().any(|verified| {
             verified.membership.head_refs() == membership.head_refs()
-                && verified.membership.resolution_refs() == membership.resolution_refs()
                 && authority.extends(&verified.authority)
         }) {
             return;
@@ -575,9 +571,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             None => self
                 .load_membership_at_verified_prefix(
                     &membership_state.heads,
-                    &membership_state.resolutions,
                     &verified_membership_activations,
-                    None,
                 )
                 .await
                 .map_err(StorePullError::MembershipChain)?,
@@ -631,33 +625,6 @@ fn verified_merge_commit_closure(
         pending.extend(commit_predecessor_references(verified.verified.value()));
     }
     Ok(closure)
-}
-
-fn merge_device_state_from_verified_history(
-    reference: &StoreDeviceStateRef,
-    history: &VerifiedMergeHistory,
-    allowed_tips: impl IntoIterator<Item = StoreBatchCommitRef>,
-) -> Result<ResolvedStoreDeviceState, StorePullError> {
-    let frontier = reference.frontier();
-    let allowed = verified_merge_commit_closure(history, allowed_tips)?;
-    if frontier
-        .commits()
-        .values()
-        .any(|reference| !allowed.contains(reference))
-    {
-        return Err(StorePullError::InvalidState(
-            "Merge device state names a commit outside its causal predecessor history".to_string(),
-        ));
-    }
-    let state = history.state_at_frontier(frontier)?;
-    let expected = StoreDeviceStateRef::from_resolved(frontier.clone(), &state)
-        .map_err(StorePullError::Protocol)?;
-    if &expected != reference {
-        return Err(StorePullError::InvalidState(
-            "Merge device-state reference differs from its verified history".to_string(),
-        ));
-    }
-    Ok(state)
 }
 
 #[derive(Clone)]

@@ -93,14 +93,8 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     let state = plan.membership_state();
 
     assert_eq!(state.heads, before_removal.head_refs());
-    assert_eq!(state.resolutions, before_removal.resolution_refs());
     assert_ne!(state.heads, candidate.head_refs());
-    assert_eq!(
-        plan.membership_authority().clone(),
-        StoreOperationMembershipAuthority {
-            predecessor: predecessor_authority,
-        }
-    );
+    assert_eq!(plan.membership_authority().clone(), predecessor_authority);
     assert_eq!(
         plan.owner_grant().cloned(),
         before_removal.active_owner_grant(&writer_pubkey)
@@ -302,22 +296,18 @@ async fn merge_outbound_authorization_excludes_membership_accepted_after_its_pre
         authorization.membership.head_refs(),
         before_admission.head_refs()
     );
-    assert_eq!(
-        authorization.membership.resolution_refs(),
-        before_admission.resolution_refs(),
-    );
     assert!(!authorization.membership.can_write_now(&new_member_pubkey));
 }
 
 #[tokio::test]
-async fn conflict_resolution_preparation_rejects_a_tampered_local_device_projection() {
+async fn operation_preparation_rejects_a_tampered_local_device_projection() {
     let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
     let owner = UserKeypair::generate();
     let store = TestStore::create(
         &owner_db,
         owner_db_store_dir.clone(),
-        "conflict-resolution-remote-device-authority",
+        "operation-remote-device-authority",
         owner.clone(),
         crate::sync::test_helpers::test_cloud_home(),
     )
@@ -325,10 +315,6 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
     .expect("create Merge Store");
     let device = store
         .open_into(&owner_db, owner_db_store_dir.clone())
-        .await
-        .expect("load exact founder membership");
-    let chain = device
-        .membership_for_test()
         .await
         .expect("load exact founder membership");
     let changeset = open_test_db(crate::sync::test_helpers::test_store_dir())
@@ -355,10 +341,7 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         .await
         .expect("tamper local Store device projection");
 
-    let error = match device
-        .prepare_conflict_resolution_plan_for_test(chain.head_refs())
-        .await
-    {
+    let error = match device.prepare_store_operation_plan_for_test().await {
         Ok(_) => panic!("tampered retained Store device state must fail"),
         Err(error) => error,
     };

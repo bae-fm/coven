@@ -62,7 +62,8 @@ retained publication interval select the accepted snapshot.
 A joining or restoring device needs verified membership authority before it can
 open the Store keyring. Each Store snapshot therefore names a signed plaintext
 membership rollup alongside its encrypted image. The rollup carries exact
-membership heads, entries, and resolutions for the snapshot's membership state.
+membership heads, entries, and exact predecessor acceptance results for the
+snapshot's membership state.
 
 Those objects remain subject to signature, linkage, grant, and accepted-control
 verification. The reader starts from its pinned Store root and required

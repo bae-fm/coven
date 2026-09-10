@@ -158,24 +158,6 @@ impl RemoteObjectRecord {
         )
     }
 
-    pub fn candidate_activated_store_membership_resolution(
-        reference: crate::membership::StoreMembershipConflictResolutionRef,
-        canonical_semantic_bytes: &[u8],
-        stored_bytes: &[u8],
-        candidate: StoreBatchCommitRef,
-    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
-        let semantic_hash = ObjectHash::digest(canonical_semantic_bytes);
-        let object = reference.object.clone();
-        Self::candidate_activated_retained_authority(
-            RetainedAuthorityObjectDomain::StoreMembershipResolution { reference },
-            semantic_hash,
-            object,
-            canonical_semantic_bytes,
-            stored_bytes,
-            candidate,
-        )
-    }
-
     pub fn candidate_activated_provider_access_grant(
         reference: crate::provider::StoreMemberProviderAccessGrantRef,
         canonical_signed_bytes: &[u8],

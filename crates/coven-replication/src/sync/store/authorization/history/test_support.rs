@@ -88,10 +88,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn load_membership_at_exact_heads_for_test(
         &mut self,
         heads: &[MembershipHeadRef],
-        resolutions: &[coven_protocol::membership::StoreMembershipConflictResolutionRef],
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
         self.history_verifier
-            .load_membership_at_exact_heads(heads, resolutions)
+            .load_membership_at_exact_heads(heads)
             .await
     }
 

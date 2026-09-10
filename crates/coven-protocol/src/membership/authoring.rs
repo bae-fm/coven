@@ -1,140 +1,6 @@
-use super::conflict::conflict_retirement_barriers;
 use super::*;
 
 impl MembershipChain {
-    pub(crate) fn resolved_with(
-        &self,
-        store_root_hash: ObjectHash,
-        resolutions: &[(
-            StoreMembershipConflictResolutionRef,
-            StoreMembershipConflictResolution,
-        )],
-    ) -> Result<ResolvedStoreMembership, MembershipError> {
-        match self.status() {
-            MembershipStatus::Resolved(resolved) if resolutions.is_empty() => Ok(resolved.clone()),
-            MembershipStatus::Conflict(conflict) => {
-                resolve_store_membership_conflict(store_root_hash, conflict, resolutions)
-            }
-            MembershipStatus::Resolved(_) => Err(MembershipError::InvalidConflictResolution),
-        }
-    }
-
-    pub fn signed_conflict_resolution(
-        &self,
-        store_root_hash: ObjectHash,
-        selection: MembershipConflictSelection,
-        replacement_membership: GrantStreamAnchor,
-        replacement_acceptance: OwnerConflictResolutionAcceptance,
-        signer: &UserKeypair,
-    ) -> Result<StoreMembershipConflictResolution, MembershipError> {
-        let MembershipStatus::Conflict(conflict) = self.status() else {
-            return Err(MembershipError::Conflict);
-        };
-        let resolver_pubkey = keys::public_key_hex(signer);
-        let (conflict_hash, heads, retired_owner_grants, records, effective_frontier) =
-            match (conflict, &selection) {
-                (
-                    MembershipConflict::ConcurrentMemberAssignments {
-                        conflict_hash,
-                        heads,
-                        effective_frontier,
-                        conflicting_grants,
-                        uncontested_grants,
-                        grants,
-                        ..
-                    },
-                    MembershipConflictSelection::MemberAssignment { grant },
-                ) => {
-                    if !conflicting_grants.contains_key(grant) {
-                        return Err(MembershipError::InvalidConflictResolution);
-                    }
-                    let retired = uncontested_grants
-                        .iter()
-                        .filter_map(|(grant, record)| {
-                            (record.member_pubkey == resolver_pubkey && record.role.is_owner())
-                                .then_some(grant.clone())
-                        })
-                        .collect::<BTreeSet<_>>();
-                    if retired.is_empty() {
-                        return Err(MembershipError::SignerIsNotOwner(resolver_pubkey));
-                    }
-                    (
-                        conflict_hash,
-                        heads,
-                        retired,
-                        grants
-                            .iter()
-                            .map(|(grant, state)| (grant.clone(), state.record().clone()))
-                            .collect(),
-                        effective_frontier.clone(),
-                    )
-                }
-                (
-                    MembershipConflict::RevocationCycle {
-                        conflict_hash,
-                        heads,
-                        involved_owner_grants,
-                        maximal_valid_branches,
-                        ..
-                    },
-                    MembershipConflictSelection::RevocationBranch {
-                        heads: selected_heads,
-                    },
-                ) => {
-                    let branch = maximal_valid_branches
-                        .iter()
-                        .find(|branch| branch.heads == *selected_heads)
-                        .ok_or(MembershipError::InvalidConflictResolution)?;
-                    let resolver_grants = branch
-                        .active_grants()
-                        .filter_map(|(grant, record)| {
-                            (record.member_pubkey == resolver_pubkey && record.role.is_owner())
-                                .then_some(grant.clone())
-                        })
-                        .collect::<BTreeSet<_>>();
-                    if resolver_grants.is_empty() {
-                        return Err(MembershipError::SignerIsNotOwner(resolver_pubkey));
-                    }
-                    let mut retired = involved_owner_grants.clone();
-                    retired.extend(resolver_grants);
-                    let records = maximal_valid_branches
-                        .iter()
-                        .flat_map(|branch| branch.grants.iter())
-                        .map(|(grant, state)| (grant.clone(), state.record().clone()))
-                        .collect();
-                    let mut frontier = maximal_valid_branches
-                        .iter()
-                        .flat_map(|branch| branch.effective_frontier.iter().cloned())
-                        .collect::<Vec<_>>();
-                    frontier.sort();
-                    frontier.dedup();
-                    (conflict_hash, heads, retired, records, frontier)
-                }
-                _ => return Err(MembershipError::InvalidConflictResolution),
-            };
-        let replacement_grant = derive_store_resolution_grant(conflict_hash, &resolver_pubkey);
-        let retirement_barriers = conflict_retirement_barriers(
-            records,
-            effective_frontier,
-            &replacement_acceptance.device_state,
-        )?;
-        Ok(Signed::sign(
-            StoreMembershipConflictResolutionBody {
-                store_root_hash,
-                conflict_hash: *conflict_hash,
-                conflicting_heads: heads.clone(),
-                retired_owner_grants,
-                retirement_barriers,
-                resolver_pubkey,
-                selection,
-                replacement_grant,
-                replacement_membership,
-                replacement_acceptance,
-            },
-            signer,
-        ))
-    }
-
     /// Sign a change at the complete observed authority frontier. The chain
     /// reducer checks the change against the signer's active Owner grant.
     pub fn signed_change_in_stream(
@@ -144,7 +10,6 @@ impl MembershipChain {
         change: StoreAuthorityChange,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
-        self.ensure_resolved()?;
         let author = keys::public_key_hex(signer);
         let author_grant = self
             .active_owner_grant(&author)
@@ -162,7 +27,6 @@ impl MembershipChain {
                 seq,
                 previous_hash,
                 dependencies: self.effective_frontier(),
-                resolution_dependencies: self.resolution_refs().to_vec(),
                 created_at,
                 change,
                 provider_admin: None,
@@ -280,7 +144,7 @@ impl MembershipChain {
             || expected_seq != requested_seq
             || expected_previous_hash != requested_previous_hash
             || self
-                .state
+                .resolved()
                 .grants
                 .contains_key(&request.intended_owner_grant)
         {
@@ -353,7 +217,7 @@ impl MembershipChain {
         if removes.is_empty() {
             return Err(MembershipError::NotAMember(user_pubkey));
         }
-        let retains_owner = self.state.grants.iter().any(|(grant, state)| {
+        let retains_owner = self.resolved().grants.iter().any(|(grant, state)| {
             !removes.contains(grant) && state.active().is_some_and(|record| record.role.is_owner())
         });
         if !retains_owner {
@@ -373,67 +237,6 @@ impl MembershipChain {
             },
             created_at,
         )
-    }
-
-    pub fn signed_resolution_activation_in_stream(
-        &self,
-        store_root_hash: ObjectHash,
-        signer: &UserKeypair,
-        stream_id: AuthorStreamId,
-        reference: StoreMembershipConflictResolutionRef,
-        resolution: &StoreMembershipConflictResolution,
-        created_at: String,
-    ) -> Result<MembershipEntry, MembershipError> {
-        self.ensure_resolved()?;
-        let MembershipStatus::Resolved(resolved_before) = self.status() else {
-            unreachable!("ensure_resolved accepted a conflict")
-        };
-        let author = keys::public_key_hex(signer);
-        if !resolution.verify_signature()
-            || resolution.store_root_hash != store_root_hash
-            || reference.resolver_pubkey != author
-            || !self.resolution_refs().contains(&reference)
-            || self.active_owner_grant(&author) != Some(resolution.replacement_grant.clone())
-        {
-            return Err(MembershipError::InvalidConflictResolution);
-        }
-        let author_grant = resolution.replacement_grant.clone();
-        if self
-            .raw_stream_tip(&author, &author_grant, stream_id)
-            .is_some()
-        {
-            return Err(MembershipError::ResolutionActivationRequiresFreshStream);
-        }
-        let entry = Signed::sign(
-            MembershipEntryBody {
-                store_id: self
-                    .store_id()
-                    .expect("validated chain has a store id")
-                    .to_string(),
-                author_pubkey: author,
-                author_owner_grant: author_grant,
-                stream_id,
-                seq: 1,
-                previous_hash: None,
-                dependencies: self.effective_frontier(),
-                resolution_dependencies: self.resolution_refs().to_vec(),
-                created_at,
-                change: StoreAuthorityChange::ResolutionActivation {
-                    resolution: reference,
-                },
-                provider_admin: None,
-            },
-            signer,
-        );
-        let mut candidate = self.clone();
-        candidate.add_entry(entry.clone())?;
-        let MembershipStatus::Resolved(resolved_after) = candidate.status() else {
-            return Err(MembershipError::InvalidConflictResolution);
-        };
-        if resolved_after.state_hash != resolved_before.state_hash {
-            return Err(MembershipError::InvalidConflictResolution);
-        }
-        Ok(entry)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -532,10 +335,7 @@ impl MembershipChain {
             promotion_id,
             &user_pubkey,
         );
-        let membership_state_hash = match self.status() {
-            MembershipStatus::Resolved(state) => state.state_hash,
-            MembershipStatus::Conflict(_) => return Err(MembershipError::InvalidOwnerPromotion),
-        };
+        let membership_state_hash = self.resolved().state_hash;
         let object = |name: &str| {
             let slot = crate::objects::ObjectSlot::logical(format!(
                 "test/owner-promotion/{promotion_id:?}/{name}.json"
@@ -582,7 +382,6 @@ impl MembershipChain {
             member_registration: registration("member"),
             intended_owner_grant: intended_owner_grant.clone(),
             predecessor_membership: crate::circle_control::StoreMembershipStateRef::from_parts(
-                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 membership_state_hash,
@@ -703,7 +502,7 @@ impl MembershipChain {
         let mut recovery = removes
             .iter()
             .filter_map(|grant| {
-                self.state
+                self.resolved()
                     .grants
                     .get(grant)
                     .and_then(GrantState::active)

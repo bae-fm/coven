@@ -730,10 +730,7 @@ fn fixture() -> Fixture {
             .expect("founder device state ref");
     let membership = crate::membership::MembershipChain::from_entries(vec![founder.clone()])
         .expect("founder membership");
-    let crate::membership::MembershipStatus::Resolved(resolved_membership) = membership.status()
-    else {
-        panic!("founder membership resolves")
-    };
+    let resolved_membership = membership.resolved();
     let membership_head = crate::membership::MembershipHeadRef {
         coord: founder.coord(),
         head_hash: ObjectHash::digest(b"founder membership head"),
@@ -744,7 +741,6 @@ fn fixture() -> Fixture {
     };
     let membership_state = StoreMembershipStateRef::from_parts(
         vec![membership_head],
-        Vec::new(),
         resolved_devices.recovery.clone(),
         resolved_membership.state_hash,
     )
@@ -793,11 +789,7 @@ fn fixture() -> Fixture {
         crate::store_commit::StorePublicationBase::Genesis,
         membership_state,
         device_state,
-        StoreOperationMembershipAuthority {
-            predecessor: crate::membership::MembershipGrantCreationAuthority::Entry(
-                founder.coord(),
-            ),
-        },
+        founder.coord(),
         StoreCommitOperationsInput {
             store_package: Some(StorePackageInput {
                 candidate_family,
@@ -954,7 +946,7 @@ fn unknown_fields_and_versions_are_rejected() {
     .is_err());
 
     let mut value = serde_json::to_value(&fixture.commit).unwrap();
-    value["version"] = serde_json::json!(2);
+    value["version"] = serde_json::json!(1);
     assert!(matches!(
         VerifiedStoreBatchCommit::parse(
             &serde_json::to_vec(&value).unwrap(),
@@ -962,7 +954,7 @@ fn unknown_fields_and_versions_are_rejected() {
             &fixture.commit_ref,
             &fixture.registration,
         ),
-        Err(StoreProtocolError::UnsupportedVersion(2))
+        Err(StoreProtocolError::UnsupportedVersion(1))
     ));
 }
 

@@ -3,7 +3,6 @@ use coven_protocol::audience_package::AudiencePackage;
 use coven_protocol::circle_activation::VerifiedCircleActivations;
 use coven_protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
-    StoreMembershipConflictResolutionRef,
 };
 use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
 use coven_protocol::remote_object::{remote_object_id, SharedLiveSetObjectDomain};
@@ -32,7 +31,6 @@ pub struct RetainedMergeMaterializationInput {
 pub struct VerifiedMergeMembershipObjects {
     entry: MembershipEntryRef,
     head: MembershipHeadRef,
-    resolution: Option<StoreMembershipConflictResolutionRef>,
 }
 
 impl VerifiedMergeMembershipObjects {
@@ -42,10 +40,6 @@ impl VerifiedMergeMembershipObjects {
 
     pub fn head(&self) -> &MembershipHeadRef {
         &self.head
-    }
-
-    pub fn resolution(&self) -> Option<&StoreMembershipConflictResolutionRef> {
-        self.resolution.as_ref()
     }
 
     pub fn verify(
@@ -74,29 +68,18 @@ impl VerifiedMergeMembershipObjects {
                     .to_string(),
             ));
         }
-        let resolution = match &entry.change {
-            coven_protocol::membership::StoreAuthorityChange::ResolutionActivation {
-                resolution,
-            } => Some(resolution.clone()),
-            _ => None,
-        };
         Ok(Self {
             entry: transition.body.entry.clone(),
             head,
-            resolution,
         })
     }
 
     pub fn object_ids(&self) -> impl Iterator<Item = ObjectHash> + '_ {
         [
-            Some(remote_object_id(&self.entry.object)),
-            Some(remote_object_id(&self.head.object)),
-            self.resolution
-                .as_ref()
-                .map(|resolution| remote_object_id(&resolution.object)),
+            remote_object_id(&self.entry.object),
+            remote_object_id(&self.head.object),
         ]
         .into_iter()
-        .flatten()
     }
 }
 
@@ -507,18 +490,11 @@ impl OwnedVerifiedMergeMaterialization {
         // objects. A retained image need not carry a second remote-record copy.
         let entry = serde_json::to_vec(&proof.entry_value)?;
         let head = serde_json::to_vec(&proof.head_value)?;
-        let resolution = proof
-            .resolution_value
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()?
-            .map(|bytes| MembershipAuthorityBytes::new(bytes.clone(), bytes));
         activated_merge_membership_remote_objects(
             self.commit().candidate_family(),
             objects,
             MembershipAuthorityBytes::new(entry.clone(), entry),
             MembershipAuthorityBytes::new(head.clone(), head),
-            resolution,
             self.commit_ref(),
         )
         .map_err(DbError::from)
@@ -687,13 +663,12 @@ pub fn activated_merge_membership_remote_objects(
     objects: &VerifiedMergeMembershipObjects,
     entry_bytes: MembershipAuthorityBytes,
     head_bytes: MembershipAuthorityBytes,
-    resolution_bytes: Option<MembershipAuthorityBytes>,
     commit_ref: &StoreBatchCommitRef,
 ) -> Result<
     Vec<coven_protocol::remote_object::ClosedRemoteObject>,
     coven_protocol::remote_object::RemoteObjectRecordError,
 > {
-    let mut remotes = vec![
+    let remotes = vec![
         coven_protocol::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
             family,
             objects.entry().clone(),
@@ -711,24 +686,6 @@ pub fn activated_merge_membership_remote_objects(
         )?
         .map_record(|record| record.into_observed_activated(commit_ref))?,
     ];
-    if let Some(resolution) = objects.resolution() {
-        let bytes = resolution_bytes.ok_or(
-            coven_protocol::remote_object::RemoteObjectRecordError::StoredReferenceMismatch,
-        )?;
-        remotes.push(
-            coven_protocol::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
-                resolution.clone(),
-                &bytes.canonical,
-                &bytes.stored,
-                commit_ref.clone(),
-            )?
-            .map_record(|record| record.into_observed_activated(commit_ref))?,
-        );
-    } else if resolution_bytes.is_some() {
-        return Err(
-            coven_protocol::remote_object::RemoteObjectRecordError::StoredReferenceMismatch,
-        );
-    }
     Ok(remotes)
 }
 

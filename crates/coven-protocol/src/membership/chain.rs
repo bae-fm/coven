@@ -17,9 +17,9 @@ impl MembershipChain {
                 || entries
                     .iter()
                     .find(|(coord, _)| *coord == head.entry_coord())
-                    .is_none_or(|(_, entry)| head.body.resolutions != entry.resolution_dependencies)
+                    .is_none()
         }) {
-            return Err(MembershipError::MissingConflictHeads);
+            return Err(MembershipError::MissingExactHeads);
         }
         Self::from_entries_with_coords_and_head_refs(
             entries,
@@ -40,28 +40,23 @@ impl MembershipChain {
             Self::validate_entry_authenticity(index, entry)?;
         }
         let (coords, entries): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-        let mut chain = Self {
+        let (included, resolved) = Self::reduce(&entries, &coords, &provider_admin_genesis)?;
+        Ok(Self {
             entries,
             coords,
-            state: CausalState::default(),
-            included: BTreeSet::new(),
-            status: None,
+            included,
+            resolved,
             head_refs,
-            resolution_checkpoint: None,
             provider_admin_genesis,
-        };
-        chain.rebuild()?;
-        Ok(chain)
+        })
     }
 
     pub fn entries(&self) -> &[MembershipEntry] {
         &self.entries
     }
 
-    pub fn status(&self) -> &MembershipStatus {
-        self.status
-            .as_ref()
-            .expect("a loaded membership chain always has status")
+    pub fn resolved(&self) -> &ResolvedStoreMembership {
+        &self.resolved
     }
 
     pub fn head_refs(&self) -> &[MembershipHeadRef] {
@@ -104,31 +99,23 @@ impl MembershipChain {
     }
 
     pub fn membership_anchor(&self, grant: &MembershipGrantId) -> Option<&GrantStreamAnchor> {
-        self.entries
-            .iter()
-            .find_map(|entry| match &entry.change {
-                StoreAuthorityChange::Founder {
-                    owner_grant_id,
-                    membership,
-                    ..
-                } if owner_grant_id == grant => Some(membership),
-                StoreAuthorityChange::SetMember {
-                    grant_id,
-                    membership: Some(membership),
-                    ..
-                } if grant_id == grant => Some(membership),
-                _ => None,
-            })
-            .or_else(|| {
-                self.resolution_checkpoint
-                    .as_ref()?
-                    .grant_anchors
-                    .get(grant)
-            })
+        self.entries.iter().find_map(|entry| match &entry.change {
+            StoreAuthorityChange::Founder {
+                owner_grant_id,
+                membership,
+                ..
+            } if owner_grant_id == grant => Some(membership),
+            StoreAuthorityChange::SetMember {
+                grant_id,
+                membership: Some(membership),
+                ..
+            } if grant_id == grant => Some(membership),
+            _ => None,
+        })
     }
 
     pub fn membership_stream_id(&self, grant: &MembershipGrantId) -> Option<AuthorStreamId> {
-        let record = self.state.grants.get(grant)?.record();
+        let record = self.resolved().grants.get(grant)?.record();
         let founder = self.founder_coord()?;
         if founder.author_owner_grant == *grant {
             // Creation owns the founder's first slot before grant-based paths
@@ -140,7 +127,7 @@ impl MembershipChain {
 
     pub fn activated_membership_streams(&self) -> Vec<(MembershipStreamKey, GrantStreamAnchor)> {
         let mut streams = self
-            .state
+            .resolved()
             .grants
             .iter()
             .filter_map(|(grant, state)| {
@@ -157,19 +144,7 @@ impl MembershipChain {
                 ))
             })
             .collect::<BTreeMap<_, _>>();
-        let mut included = self.included.clone();
-        if let MembershipStatus::Conflict(MembershipConflict::RevocationCycle {
-            maximal_valid_branches,
-            ..
-        }) = self.status()
-        {
-            for branch in maximal_valid_branches {
-                included.extend(causal_grants::history_closure(
-                    &self.entries,
-                    &branch.effective_frontier,
-                ));
-            }
-        }
+        let included = &self.included;
         for (coord, entry) in self.entries_with_coords() {
             if !included.contains(coord) {
                 continue;
@@ -213,34 +188,14 @@ impl MembershipChain {
         reference: MembershipHeadRef,
     ) -> Result<(), MembershipError> {
         if !self.coords.contains(&reference.coord) {
-            return Err(MembershipError::MissingConflictHeads);
+            return Err(MembershipError::MissingExactHeads);
         }
         let stream = reference.coord.stream_key();
         self.head_refs
             .retain(|current| current.coord.stream_key() != stream);
         self.head_refs.push(reference);
         self.head_refs.sort();
-        self.rebuild()
-    }
-
-    pub fn resolution_refs(&self) -> &[StoreMembershipConflictResolutionRef] {
-        self.resolution_checkpoint
-            .as_ref()
-            .map_or(&[], |checkpoint| checkpoint.resolutions.as_slice())
-    }
-
-    pub fn conflict(&self) -> Option<&MembershipConflict> {
-        match self.status() {
-            MembershipStatus::Resolved(_) => None,
-            MembershipStatus::Conflict(conflict) => Some(conflict),
-        }
-    }
-
-    pub fn ensure_resolved(&self) -> Result<(), MembershipError> {
-        match self.status() {
-            MembershipStatus::Resolved(_) => Ok(()),
-            MembershipStatus::Conflict(_) => Err(MembershipError::Conflict),
-        }
+        Ok(())
     }
 
     pub(crate) fn entries_with_coords(
@@ -273,8 +228,7 @@ impl MembershipChain {
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
             | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin
-            | StoreAuthorityChange::ResolutionActivation { .. } => None,
+            | StoreAuthorityChange::ProviderAdmin => None,
         })
     }
 
@@ -294,11 +248,16 @@ impl MembershipChain {
         Self::validate_entry_authenticity(self.entries.len(), &entry)?;
         self.entries.push(entry);
         self.coords.push(coord);
-        if let Err(error) = self.rebuild() {
-            self.entries.pop();
-            self.coords.pop();
-            self.rebuild().expect("previous membership chain validated");
-            return Err(error);
+        match Self::reduce(&self.entries, &self.coords, &self.provider_admin_genesis) {
+            Ok((included, resolved)) => {
+                self.included = included;
+                self.resolved = resolved;
+            }
+            Err(error) => {
+                self.entries.pop();
+                self.coords.pop();
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -349,7 +308,7 @@ impl MembershipChain {
     }
 
     pub(crate) fn contains_member_history(&self, pubkey: &str) -> bool {
-        self.state
+        self.resolved()
             .grants
             .values()
             .any(|state| state.record().member_pubkey == pubkey)
@@ -384,10 +343,6 @@ impl MembershipChain {
 
     pub fn causally_includes(&self, predecessor: &MembershipChain) -> bool {
         predecessor.included.is_subset(&self.included)
-            && predecessor
-                .resolution_refs()
-                .iter()
-                .all(|reference| self.resolution_refs().binary_search(reference).is_ok())
     }
 
     pub(crate) fn stream_tip(
@@ -471,9 +426,12 @@ impl MembershipChain {
         }
     }
 
-    fn rebuild(&mut self) -> Result<(), MembershipError> {
-        let expected_store = self
-            .entries
+    fn reduce(
+        entries: &[MembershipEntry],
+        coords: &[MembershipCoord],
+        provider_admin_genesis: &crate::provider::ProviderAdminState,
+    ) -> Result<(BTreeSet<MembershipCoord>, ResolvedStoreMembership), MembershipError> {
+        let expected_store = entries
             .first()
             .ok_or(MembershipError::EmptyChain)?
             .store_id
@@ -482,7 +440,7 @@ impl MembershipChain {
             return Err(MembershipError::InvalidFounder);
         }
 
-        for (index, (coord, entry)) in self.entries_with_coords().enumerate() {
+        for (index, (coord, entry)) in coords.iter().zip(entries).enumerate() {
             if entry.require_version().is_err() {
                 return Err(MembershipError::UnsupportedVersion(index));
             }
@@ -558,39 +516,6 @@ impl MembershipChain {
                     retirement_device_state,
                     ..
                 } => (retirement_barriers, retirement_device_state),
-                StoreAuthorityChange::ResolutionActivation { resolution } => {
-                    if resolution.resolver_pubkey != entry.author_pubkey
-                        || entry.seq != 1
-                        || entry.previous_hash.is_some()
-                        || entry
-                            .dependencies
-                            .iter()
-                            .any(|dependency| dependency.stream_key() == entry.coord().stream_key())
-                        || entry.author_owner_grant
-                            != derive_store_resolution_grant(
-                                &resolution.conflict_hash,
-                                &resolution.resolver_pubkey,
-                            )
-                        || entry
-                            .resolution_dependencies
-                            .binary_search(resolution)
-                            .is_err()
-                        || self
-                            .resolution_checkpoint
-                            .as_ref()
-                            .is_none_or(|checkpoint| {
-                                let already_checkpointed =
-                                    checkpoint.included.contains(&entry.coord())
-                                        || checkpoint.raw_heads.contains(&entry.coord());
-                                !already_checkpointed
-                                    && (entry.dependencies != checkpoint.effective_frontier
-                                        || entry.resolution_dependencies != checkpoint.resolutions)
-                            })
-                    {
-                        return Err(MembershipError::InvalidResolutionActivation(index));
-                    }
-                    continue;
-                }
                 StoreAuthorityChange::ProviderAdmin => {
                     let Some(crate::provider::ProviderAdminMembershipChange {
                         owner_barriers, ..
@@ -598,14 +523,12 @@ impl MembershipChain {
                     else {
                         return Err(MembershipError::InvalidProviderAdminChange(index));
                     };
-                    if !entry.resolution_dependencies.is_empty()
-                        || owner_barriers.values().any(|barrier| {
-                            !barrier
-                                .observed_streams
-                                .windows(2)
-                                .all(|pair| pair[0].stream_key() < pair[1].stream_key())
-                        })
-                    {
+                    if owner_barriers.values().any(|barrier| {
+                        !barrier
+                            .observed_streams
+                            .windows(2)
+                            .all(|pair| pair[0].stream_key() < pair[1].stream_key())
+                    }) {
                         return Err(MembershipError::InvalidProviderAdminChange(index));
                     }
                     continue;
@@ -655,8 +578,7 @@ impl MembershipChain {
             }
         }
 
-        let founders = self
-            .entries
+        let founders = entries
             .iter()
             .filter_map(|entry| {
                 let StoreAuthorityChange::Founder {
@@ -681,277 +603,17 @@ impl MembershipChain {
             return Err(MembershipError::InvalidFounder);
         }
 
-        validate_provider_admin_controls(&self.entries, self.resolution_checkpoint.as_ref())?;
-        validate_membership_retirement_barriers(
-            &self.entries,
-            self.resolution_checkpoint.as_ref(),
+        validate_provider_admin_controls(entries)?;
+        validate_membership_retirement_barriers(entries)?;
+        validate_membership_wrapped_keys(entries)?;
+        let reduced = reduce_store_membership(entries)?;
+        let provider_admin = crate::provider::ProviderAdminState::reduce_merge(
+            provider_admin_genesis,
+            entries,
+            &reduced.included,
         )?;
-        validate_membership_wrapped_keys(&self.entries, self.resolution_checkpoint.as_ref())?;
-
-        let reduced = match &self.resolution_checkpoint {
-            Some(checkpoint) => reduce_store_membership_from_checkpoint(&self.entries, checkpoint)?,
-            None => reduce_store_membership(&self.entries)?,
-        };
-        let checkpoint_grants = self
-            .resolution_checkpoint
-            .as_ref()
-            .map(|checkpoint| &checkpoint.grants);
-        let provider_admin_seed = self
-            .resolution_checkpoint
-            .as_ref()
-            .map_or(&self.provider_admin_genesis, |checkpoint| {
-                &checkpoint.provider_admin
-            });
-        let (state_source, status) = match reduced {
-            CausalGrantStatus::Resolved(reduced) => {
-                let provider_admin = crate::provider::ProviderAdminState::reduce_merge(
-                    provider_admin_seed,
-                    &self.entries,
-                    &reduced.included,
-                )?;
-                let resolved = resolved_store_membership(
-                    &reduced,
-                    checkpoint_grants,
-                    provider_admin,
-                    &self.entries,
-                )?;
-                (Some(reduced), MembershipStatus::Resolved(resolved))
-            }
-            CausalGrantStatus::Conflict(CausalGrantConflict::ConcurrentMemberAssignments {
-                raw_heads,
-                effective_frontier,
-                member_pubkey,
-                conflicting_grants,
-                uncontested_grants,
-                reduced,
-            }) => {
-                let heads = self.exact_head_refs(&raw_heads)?;
-                let provider_admin = crate::provider::ProviderAdminState::reduce_merge(
-                    provider_admin_seed,
-                    &self.entries,
-                    &reduced.included,
-                )?;
-                let grants = reduced
-                    .grants
-                    .iter()
-                    .map(|(grant, state)| {
-                        Ok((
-                            grant.clone(),
-                            map_store_grant_state(grant, state, checkpoint_grants, &self.entries)?,
-                        ))
-                    })
-                    .collect::<Result<_, MembershipError>>()?;
-                let conflict = MembershipConflict::ConcurrentMemberAssignments {
-                    conflict_hash: membership_assignment_conflict_hash(
-                        &heads,
-                        &member_pubkey,
-                        &conflicting_grants,
-                    ),
-                    heads,
-                    effective_frontier,
-                    member_pubkey,
-                    conflicting_grants: map_store_grants(conflicting_grants, checkpoint_grants)?,
-                    uncontested_grants: map_store_grants(uncontested_grants, checkpoint_grants)?,
-                    grants,
-                    provider_admin,
-                };
-                (Some(reduced), MembershipStatus::Conflict(conflict))
-            }
-            CausalGrantStatus::Conflict(CausalGrantConflict::RevocationCycle {
-                raw_heads,
-                cyclic_sources,
-                involved_owner_grants,
-                maximal_valid_branches,
-            }) => {
-                let heads = self.exact_head_refs(&raw_heads)?;
-                let branches = maximal_valid_branches
-                    .into_iter()
-                    .map(|branch| -> Result<StoreMembershipBranch, MembershipError> {
-                        let resolved = resolved_store_membership(
-                            &branch.reduced,
-                            checkpoint_grants,
-                            crate::provider::ProviderAdminState::reduce_merge(
-                                provider_admin_seed,
-                                &self.entries,
-                                &branch.reduced.included,
-                            )?,
-                            &self.entries,
-                        )?;
-                        Ok(StoreMembershipBranch {
-                            heads: self.branch_head_refs(&branch.raw_heads)?,
-                            effective_frontier: branch.effective_frontier,
-                            grants: resolved.grants,
-                            provider_admin: resolved.provider_admin,
-                            state_hash: resolved.state_hash,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let conflict_hash = membership_revocation_conflict_hash(
-                    &heads,
-                    &cyclic_sources,
-                    &involved_owner_grants,
-                );
-                (
-                    None,
-                    MembershipStatus::Conflict(MembershipConflict::RevocationCycle {
-                        conflict_hash,
-                        heads,
-                        cyclic_sources,
-                        involved_owner_grants,
-                        maximal_valid_branches: branches,
-                    }),
-                )
-            }
-        };
-        if let Some(reduced) = state_source {
-            self.state = CausalState {
-                grants: reduced
-                    .grants
-                    .iter()
-                    .map(|(grant, state)| {
-                        Ok((
-                            grant.clone(),
-                            map_store_grant_state(grant, state, checkpoint_grants, &self.entries)?,
-                        ))
-                    })
-                    .collect::<Result<_, MembershipError>>()?,
-            };
-            self.included = reduced.included;
-        } else {
-            self.state = CausalState::default();
-            self.included.clear();
-        }
-        self.status = Some(status);
-        Ok(())
-    }
-
-    pub fn apply_resolutions(
-        &mut self,
-        store_root_hash: ObjectHash,
-        resolutions: &[(
-            StoreMembershipConflictResolutionRef,
-            StoreMembershipConflictResolution,
-        )],
-    ) -> Result<(), MembershipError> {
-        let (raw_heads, effective_frontier) = match self.conflict() {
-            Some(MembershipConflict::ConcurrentMemberAssignments {
-                heads,
-                effective_frontier,
-                ..
-            }) => (
-                heads
-                    .iter()
-                    .map(|reference| reference.coord.clone())
-                    .collect(),
-                effective_frontier.clone(),
-            ),
-            Some(MembershipConflict::RevocationCycle {
-                heads,
-                maximal_valid_branches,
-                ..
-            }) => (
-                heads
-                    .iter()
-                    .map(|reference| reference.coord.clone())
-                    .collect(),
-                causal_grants::selected_branch_frontier(resolutions, |(_, resolution)| {
-                    let MembershipConflictSelection::RevocationBranch {
-                        heads: selected_heads,
-                    } = &resolution.selection
-                    else {
-                        return Err(MembershipError::InvalidConflictResolution);
-                    };
-                    maximal_valid_branches
-                        .iter()
-                        .find(|branch| branch.heads == *selected_heads)
-                        .map(|branch| branch.effective_frontier.as_slice())
-                        .ok_or(MembershipError::InvalidConflictResolution)
-                })?,
-            ),
-            _ => return Err(MembershipError::InvalidConflictResolution),
-        };
-        let resolved = self.resolved_with(store_root_hash, resolutions)?;
-        let grants = resolved.grants.clone();
-        let mut grant_anchors = self
-            .resolution_checkpoint
-            .as_ref()
-            .map_or_else(BTreeMap::new, |checkpoint| checkpoint.grant_anchors.clone());
-        for entry in &self.entries {
-            match &entry.change {
-                StoreAuthorityChange::Founder {
-                    owner_grant_id,
-                    membership,
-                    ..
-                } => {
-                    grant_anchors.insert(owner_grant_id.clone(), membership.clone());
-                }
-                StoreAuthorityChange::SetMember {
-                    grant_id,
-                    membership: Some(membership),
-                    ..
-                } => {
-                    grant_anchors.insert(grant_id.clone(), membership.clone());
-                }
-                _ => {}
-            }
-        }
-        for (_, resolution) in resolutions {
-            grant_anchors.insert(
-                resolution.replacement_grant.clone(),
-                resolution.replacement_membership.clone(),
-            );
-        }
-        let included = causal_grants::history_closure(&self.entries, &effective_frontier);
-        self.resolution_checkpoint = Some(MembershipResolutionCheckpoint {
-            raw_heads,
-            effective_frontier: effective_frontier.clone(),
-            grants: grants.clone(),
-            grant_anchors,
-            included: included.clone(),
-            resolutions: causal_grants::checkpoint_resolution_refs(
-                self.resolution_checkpoint
-                    .as_ref()
-                    .map(|checkpoint| checkpoint.resolutions.as_slice()),
-                resolutions.iter().map(|(reference, _)| reference.clone()),
-            ),
-            provider_admin: resolved.provider_admin.combined_state().clone(),
-        });
-        self.state = CausalState { grants };
-        self.included = included;
-        self.status = Some(MembershipStatus::Resolved(resolved));
-        Ok(())
-    }
-
-    fn exact_head_refs(
-        &self,
-        raw_heads: &[MembershipCoord],
-    ) -> Result<Vec<MembershipHeadRef>, MembershipError> {
-        crate::causal_grants::exact_head_refs(&self.head_refs, raw_heads, |reference| {
-            &reference.coord
-        })
-        .ok_or(MembershipError::MissingConflictHeads)
-    }
-
-    fn branch_head_refs(
-        &self,
-        branch_heads: &[MembershipCoord],
-    ) -> Result<Vec<MembershipHeadRef>, MembershipError> {
-        let by_coord = self
-            .head_refs
-            .iter()
-            .map(|reference| (reference.coord.clone(), reference.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let mut references = branch_heads
-            .iter()
-            .map(|coord| {
-                by_coord
-                    .get(coord)
-                    .cloned()
-                    .ok_or(MembershipError::MissingConflictHeads)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        references.sort();
-        Ok(references)
+        let resolved = resolved_store_membership(&reduced, provider_admin, entries)?;
+        Ok((reduced.included, resolved))
     }
 
     #[cfg(any(test, feature = "test-utils"))]

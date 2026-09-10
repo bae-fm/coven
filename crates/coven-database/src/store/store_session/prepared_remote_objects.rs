@@ -149,7 +149,6 @@ impl StoreSession<'_> {
                     ownership.pending.contains(accepted.commit_ref())
                         || ownership.activated.contains(accepted.commit_ref())
                 }
-                _ => false,
             };
             if record.identity != proposed.identity
                 || record.payloads != proposed.payloads

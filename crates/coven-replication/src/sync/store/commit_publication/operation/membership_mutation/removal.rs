@@ -151,8 +151,9 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             .operation
             .finish_store_membership_transition(transition, candidate.reference.clone())
             .await?;
-        self.operation
-            .attach_membership_proof(&mut candidate, &publication)?;
+        candidate
+            .attach_merge_membership_proof(&publication)
+            .map_err(crate::sync::store::StoreError::from)?;
         let provider_account_email = chain
             .current_member_provider_email(revokee_pubkey)
             .map(str::to_string);
@@ -196,7 +197,6 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     .refresh_membership_publication()
                     .await
                     .map_err(MembershipMutationError::from)?;
-                self.operation.membership.ensure_resolved()?;
                 let is_current = self
                     .operation
                     .membership

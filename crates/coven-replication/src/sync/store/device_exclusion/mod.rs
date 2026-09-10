@@ -373,7 +373,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             .finish_store_membership_transition(transition, candidate.reference.clone())
             .await?;
         candidate
-            .attach_merge_membership_proof_with(&publication, None)
+            .attach_merge_membership_proof(&publication)
             .map_err(StoreError::from)?;
         let operation = DurableStoreDeviceExclusionOperation::prepared(
             DurableStoreDeviceExclusionObject::Proposal {
@@ -491,7 +491,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             .finish_store_membership_transition(transition, candidate.reference.clone())
             .await?;
         candidate
-            .attach_merge_membership_proof_with(&publication, None)
+            .attach_merge_membership_proof(&publication)
             .map_err(StoreError::from)?;
         let operation = DurableStoreDeviceExclusionOperation::prepared(
             DurableStoreDeviceExclusionObject::Outcome {

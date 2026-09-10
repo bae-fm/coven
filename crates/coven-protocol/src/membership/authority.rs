@@ -15,17 +15,9 @@ impl MembershipChain {
             StoreAuthorityChange::Founder { .. } => return Err(MembershipError::InvalidFounder),
             StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ResolutionActivation { .. } => return Ok(()),
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => return Ok(()),
         }
-        let MembershipStatus::Resolved(current) = self.status() else {
-            return Err(MembershipError::Conflict);
-        };
-        if entry.resolution_dependencies != self.resolution_refs() {
-            return Err(MembershipError::PublicationPredecessorChanged {
-                coord: Box::new(entry.coord()),
-            });
-        }
+        let current = self.resolved();
         let included = causal_grants::history_closure(&self.entries, &entry.dependencies);
         let causal_past = self
             .entries
@@ -33,30 +25,13 @@ impl MembershipChain {
             .filter(|prior| included.contains(&prior.coord()))
             .cloned()
             .collect::<Vec<_>>();
-        let reduced = match &self.resolution_checkpoint {
-            Some(checkpoint) => reduce_store_membership_from_checkpoint(&causal_past, checkpoint)?,
-            None => reduce_store_membership(&causal_past)?,
-        };
-        let CausalGrantStatus::Resolved(reduced) = reduced else {
-            return Err(MembershipError::Conflict);
-        };
-        let checkpoint_grants = self
-            .resolution_checkpoint
-            .as_ref()
-            .map(|checkpoint| &checkpoint.grants);
-        let provider_seed = self
-            .resolution_checkpoint
-            .as_ref()
-            .map_or(&self.provider_admin_genesis, |checkpoint| {
-                &checkpoint.provider_admin
-            });
+        let reduced = reduce_store_membership(&causal_past)?;
         let provider = crate::provider::ProviderAdminState::reduce_merge(
-            provider_seed,
+            &self.provider_admin_genesis,
             &causal_past,
             &reduced.included,
         )?;
-        let prepared =
-            resolved_store_membership(&reduced, checkpoint_grants, provider, &causal_past)?;
+        let prepared = resolved_store_membership(&reduced, provider, &causal_past)?;
         if prepared.state_hash != current.state_hash {
             return Err(MembershipError::PublicationPredecessorChanged {
                 coord: Box::new(entry.coord()),
@@ -66,9 +41,6 @@ impl MembershipChain {
     }
 
     pub fn can_write_now(&self, pubkey: &str) -> bool {
-        if self.conflict().is_some() {
-            return false;
-        }
         self.active_grants_for(pubkey)
             .iter()
             .any(|(_, record)| record.role.can_write())
@@ -84,29 +56,17 @@ impl MembershipChain {
     /// Anything asking "could this principal still be owed history" has to ask
     /// membership, not device status.
     pub fn is_member_now(&self, pubkey: &str) -> bool {
-        if self.conflict().is_some() {
-            return false;
-        }
         !self.active_grants_for(pubkey).is_empty()
     }
 
     pub fn is_owner_now(&self, pubkey: &str) -> bool {
-        if self.conflict().is_some() {
-            return false;
-        }
         self.active_grants_for(pubkey)
             .iter()
             .any(|(_, record)| record.role.is_owner())
     }
 
-    pub fn authorizes_write_authority(
-        &self,
-        authority: &MembershipGrantCreationAuthority,
-        pubkey: &str,
-    ) -> bool {
-        let MembershipStatus::Resolved(resolved) = self.status() else {
-            return false;
-        };
+    pub fn authorizes_write_authority(&self, authority: &MembershipCoord, pubkey: &str) -> bool {
+        let resolved = self.resolved();
         resolved.active_grants().any(|(_, record)| {
             record.member_pubkey == pubkey
                 && record.role.can_write()
@@ -114,15 +74,13 @@ impl MembershipChain {
         })
     }
 
-    /// The permanent retirement of this exact grant, if membership is resolved.
+    /// The permanent retirement of this exact grant.
     pub fn write_authority_retirement(
         &self,
-        authority: &MembershipGrantCreationAuthority,
+        authority: &MembershipCoord,
         pubkey: &str,
     ) -> Option<&MembershipGrantRetirement> {
-        let MembershipStatus::Resolved(resolved) = self.status() else {
-            return None;
-        };
+        let resolved = self.resolved();
         let grant = resolved.grants.values().find(|grant| {
             grant.record().creation_authority == *authority
                 && grant.record().member_pubkey == pubkey
@@ -137,15 +95,13 @@ impl MembershipChain {
     }
 
     pub fn active_grant(&self, grant_id: &MembershipGrantId) -> Option<&MembershipGrantRecord> {
-        let MembershipStatus::Resolved(resolved) = self.status() else {
-            return None;
-        };
+        let resolved = self.resolved();
         resolved.active_grant(grant_id)
     }
 
     pub fn current_members(&self) -> Vec<(String, MemberRole)> {
         let mut members = BTreeMap::new();
-        for state in self.state.grants.values() {
+        for state in self.resolved().grants.values() {
             let Some(record) = state.active() else {
                 continue;
             };
@@ -170,8 +126,7 @@ impl MembershipChain {
                 | StoreAuthorityChange::DeviceRegistrationActivation { .. }
                 | StoreAuthorityChange::DeviceExclusionProposal { .. }
                 | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-                | StoreAuthorityChange::ProviderAdmin
-                | StoreAuthorityChange::ResolutionActivation { .. } => &[],
+                | StoreAuthorityChange::ProviderAdmin => &[],
             })
             .filter(|reference| reference.recipient_pubkey == recipient_pubkey)
             .cloned()
@@ -239,7 +194,7 @@ impl MembershipChain {
             .and_then(|(_, record)| record.provider_account_email.as_deref())
     }
 
-    pub fn write_grant_authority(&self, pubkey: &str) -> Option<MembershipGrantCreationAuthority> {
+    pub fn write_grant_authority(&self, pubkey: &str) -> Option<MembershipCoord> {
         self.active_grants_for(pubkey)
             .into_iter()
             .find(|(_, record)| record.role.can_write())
@@ -267,7 +222,7 @@ impl MembershipChain {
     ) -> Result<BTreeMap<MembershipGrantId, MergeMembershipGrantRetirementBarrier>, MembershipError>
     {
         let retires_owner = grants.iter().any(|grant| {
-            self.state
+            self.resolved()
                 .grants
                 .get(grant)
                 .and_then(GrantState::active)
@@ -287,7 +242,7 @@ impl MembershipChain {
             .iter()
             .map(|grant| {
                 let record = self
-                    .state
+                    .resolved()
                     .grants
                     .get(grant)
                     .and_then(GrantState::active)
@@ -323,7 +278,7 @@ impl MembershipChain {
         &self,
         pubkey: &str,
     ) -> Vec<(&MembershipGrantId, &MembershipGrantRecord)> {
-        self.state
+        self.resolved()
             .grants
             .iter()
             .filter_map(|(grant, state)| {

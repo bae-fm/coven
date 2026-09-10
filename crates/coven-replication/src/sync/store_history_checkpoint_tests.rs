@@ -706,7 +706,7 @@ async fn retained_commit_evidence_rejects_an_omitted_acknowledgement() {
 }
 
 #[tokio::test]
-async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_history() {
+async fn operation_authorization_reads_retained_checkpoints_not_store_history() {
     let fixture = PublishedHistory::publish(4).await;
     let retained = fixture.retained_history().await;
     let historical_slots = retained
@@ -728,9 +728,9 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
     fixture.home.clear_exact_reads();
     fixture
         .device
-        .prepare_conflict_resolution_plan_for_test(fixture.membership.head_refs())
+        .prepare_store_operation_plan_for_test()
         .await
-        .expect("authorize from retained conflict-resolution predecessor");
+        .expect("authorize from retained operation predecessor");
     let reread = fixture
         .home
         .exact_reads()
@@ -739,12 +739,12 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
         .collect::<Vec<_>>();
     assert!(
         reread.is_empty(),
-        "conflict-resolution authorization reread historical Store commit/publication slots: {reread:?}",
+        "operation authorization reread historical Store commit/publication slots: {reread:?}",
     );
 }
 
 /// The pull-side twin of
-/// `conflict_resolution_authorization_reads_retained_checkpoints_not_store_history`.
+/// `operation_authorization_reads_retained_checkpoints_not_store_history`.
 ///
 /// Every other reuse assertion in this file is scoped `within_a_cycle` — they
 /// prove one cycle never reads the same object twice, which was already true

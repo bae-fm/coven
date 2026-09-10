@@ -44,7 +44,6 @@ impl VerifiedMergeMembershipHeadActivation {
 pub(crate) struct VerifiedMergeMembershipControl {
     pub(crate) activations: VerifiedCircleActivations,
     pub(crate) head_activation: VerifiedMergeMembershipHeadActivation,
-    pub(crate) conflict_resolution: Option<VerifiedMergeConflictResolutionActivation>,
 }
 
 #[derive(Clone, Default)]
@@ -52,10 +51,6 @@ pub struct VerifiedMergeMembershipPrefix {
     commits: BTreeSet<StoreBatchCommitRef>,
     predecessor_memberships: Vec<MembershipChain>,
     head_activations: BTreeMap<StoreBatchCommitRef, VerifiedMergeMembershipHeadActivation>,
-    conflict_resolutions: BTreeMap<
-        protocol_membership::StoreMembershipConflictResolutionRef,
-        VerifiedMergeConflictResolutionActivation,
-    >,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,23 +137,6 @@ impl VerifiedMergeMembershipPrefix {
                 ));
             }
         }
-        if let Some(reference) = &proof.resolution {
-            let activation = VerifiedMergeConflictResolutionActivation {
-                reference: reference.clone(),
-            };
-            match self.conflict_resolutions.entry(reference.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(activation);
-                }
-                std::collections::btree_map::Entry::Occupied(entry)
-                    if entry.get() == &activation => {}
-                std::collections::btree_map::Entry::Occupied(_) => {
-                    return Err(StorePullError::InvalidState(
-                        "retained checkpoints disagree on a conflict resolution".to_string(),
-                    ));
-                }
-            }
-        }
         Ok(())
     }
 
@@ -167,15 +145,6 @@ impl VerifiedMergeMembershipPrefix {
         commit: &StoreBatchCommitRef,
     ) -> Option<&VerifiedMergeMembershipHeadActivation> {
         self.head_activations.get(commit)
-    }
-
-    pub(crate) fn verifies_conflict_resolution(
-        &self,
-        reference: &protocol_membership::StoreMembershipConflictResolutionRef,
-    ) -> bool {
-        self.conflict_resolutions
-            .get(reference)
-            .is_some_and(|proof| proof.verifies(reference))
     }
 
     pub(crate) fn classify_head(
@@ -222,16 +191,6 @@ impl VerifiedMergeMembershipPrefix {
         {
             return Err(StorePullError::InvalidState(
                 "membership state omits an accepted Store membership control".to_string(),
-            ));
-        }
-        if self.conflict_resolutions.keys().any(|reference| {
-            membership
-                .resolution_refs()
-                .binary_search(reference)
-                .is_err()
-        }) {
-            return Err(StorePullError::InvalidState(
-                "membership state omits an accepted Store conflict resolution".to_string(),
             ));
         }
         Ok(())
@@ -290,11 +249,6 @@ pub(crate) fn verified_merge_membership_prefix(
             prefix
                 .head_activations
                 .insert(reference, control.head_activation.clone());
-            if let Some(resolution) = &control.conflict_resolution {
-                prefix
-                    .conflict_resolutions
-                    .insert(resolution.reference.clone(), resolution.clone());
-            }
         }
     }
     Ok(prefix)
@@ -307,14 +261,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         commit: &StoreBatchCommit,
         predecessor_membership: &MembershipChain,
         predecessor_state: &ResolvedStoreDeviceState,
-        pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
-    ) -> Result<
-        (
-            VerifiedCircleActivations,
-            Option<VerifiedMergeConflictResolutionActivation>,
-        ),
-        StorePullError,
-    > {
+    ) -> Result<VerifiedCircleActivations, StorePullError> {
         let Some(store_commit::StoreControl { transition }) = commit.control() else {
             return Err(StorePullError::InvalidState(
                 "Merge membership verifier received another Store control".to_string(),
@@ -328,7 +275,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await?;
         if transition.body.author_registration != commit.author_registration
             || transition.body.entry.coord.author_pubkey != commit_author.value.author_pubkey
-            || transition.body.resolutions != state.resolutions
             || transition.body.successor.predecessor
                 != transition
                     .body
@@ -364,7 +310,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await?;
         if opened_entry.value.coord() != transition.body.entry.coord
             || opened_entry.value.dependencies != predecessor_membership.effective_frontier()
-            || opened_entry.value.resolution_dependencies != transition.body.resolutions
         {
             return Err(StorePullError::InvalidState(
                 "Merge membership transition differs from its exact entry".to_string(),
@@ -401,7 +346,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             let mut successor_membership = predecessor_membership.clone();
             successor_membership.add_entry(opened_entry.value)?;
             return VerifiedCircleActivations::membership_control(commit, commit_ref)
-                .map(|activations| (activations, None))
                 .map_err(StorePullError::from);
         }
         if let protocol_membership::StoreAuthorityChange::RemoveMember {
@@ -437,7 +381,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             let mut successor_membership = predecessor_membership.clone();
             successor_membership.add_entry(opened_entry.value)?;
             return VerifiedCircleActivations::membership_control(commit, commit_ref)
-                .map(|activations| (activations, None))
                 .map_err(StorePullError::from);
         }
         if let protocol_membership::StoreAuthorityChange::SetMember {
@@ -463,59 +406,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             let mut successor_membership = predecessor_membership.clone();
             successor_membership.add_entry(opened_entry.value)?;
             return VerifiedCircleActivations::membership_control(commit, commit_ref)
-                .map(|activations| (activations, None))
-                .map_err(StorePullError::from);
-        }
-        if let protocol_membership::StoreAuthorityChange::ResolutionActivation { resolution } =
-            &opened_entry.value.change
-        {
-            let resolution = resolution.clone();
-            let resolution_proof = pending_resolution
-                .filter(|proof| proof.verifies(&resolution))
-                .ok_or_else(|| {
-                    StorePullError::InvalidState(
-                        "Merge conflict resolution lacks its verified Store activation".to_string(),
-                    )
-                })?
-                .clone();
-            let opened_resolution = self
-                .commit_verifier
-                .membership_objects()
-                .load_resolution(&resolution)
-                .await?;
-            let acceptance = &opened_resolution.value.replacement_acceptance;
-            let mut expected = vec![
-                store_commit::StreamActivation::grant_authorized(
-                    root.store_root_hash,
-                    acceptance.owner_registration.clone(),
-                    opened_resolution.value.replacement_grant.clone(),
-                    acceptance.membership.clone(),
-                ),
-                store_commit::StreamActivation::grant_authorized(
-                    root.store_root_hash,
-                    acceptance.owner_registration.clone(),
-                    opened_resolution.value.replacement_grant.clone(),
-                    acceptance.recovery.clone(),
-                ),
-            ];
-            expected.sort();
-            if transition.body.predecessor.is_some()
-                || transition
-                    .body
-                    .resolutions
-                    .binary_search(&resolution)
-                    .is_err()
-                || commit.stream_activations() != expected
-            {
-                return Err(StorePullError::InvalidState(
-                    "Merge conflict-resolution control differs from its exact membership entry"
-                        .to_string(),
-                ));
-            }
-            let mut successor_membership = predecessor_membership.clone();
-            successor_membership.add_entry(opened_entry.value)?;
-            return VerifiedCircleActivations::membership_control(commit, commit_ref)
-                .map(|activations| (activations, Some(resolution_proof)))
                 .map_err(StorePullError::from);
         }
         let protocol_membership::StoreAuthorityChange::SetMember {
@@ -615,7 +505,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             ));
         }
         VerifiedCircleActivations::membership_control(commit, commit_ref)
-            .map(|activations| (activations, None))
             .map_err(StorePullError::from)
     }
 
@@ -750,7 +639,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         heads: &[protocol_membership::MembershipHeadRef],
         owner: Option<&str>,
     ) -> Result<
-        (MembershipChain, membership::TraversedMembership),
+        (MembershipChain, Vec<membership::TraversedMembershipStream>),
         crate::sync::store::membership::AnchoredChainError,
     > {
         let (membership, traversed) = membership::HistoryMembershipActivation::new(self)
@@ -769,26 +658,23 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn load_membership_at_exact_heads(
         &mut self,
         heads: &[protocol_membership::MembershipHeadRef],
-        resolutions: &[protocol_membership::StoreMembershipConflictResolutionRef],
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
         membership::HistoryMembershipActivation::new(self)
-            .load_at_exact_heads(heads, resolutions)
+            .load_at_exact_heads(heads)
             .await
     }
 
     pub(crate) async fn load_membership_at_verified_prefix(
         &self,
         heads: &[protocol_membership::MembershipHeadRef],
-        resolutions: &[protocol_membership::StoreMembershipConflictResolutionRef],
         verified_activations: &VerifiedMergeMembershipPrefix,
-        pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
         VerifiedPrefixMembershipActivation::new(
             &self.root,
             &self.commit_verifier,
             verified_activations,
         )
-        .load_at_exact_heads(heads, resolutions, pending_resolution)
+        .load_at_exact_heads(heads)
         .await
     }
 
@@ -796,7 +682,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         state: &StoreMembershipStateRef,
     ) -> Result<MembershipChain, RegistrationLoadError> {
-        self.load_membership_at_exact_heads(&state.heads, &state.resolutions)
+        self.load_membership_at_exact_heads(&state.heads)
             .await
             .map_err(RegistrationLoadError::from)
     }
@@ -805,18 +691,23 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self,
         state: &StoreMembershipStateRef,
         verified_activations: &VerifiedMergeMembershipPrefix,
-        pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
     ) -> Result<MembershipChain, RegistrationLoadError> {
-        self.load_membership_at_verified_prefix(
-            &state.heads,
-            &state.resolutions,
-            verified_activations,
-            pending_resolution,
-        )
-        .await
-        .map_err(RegistrationLoadError::from)
+        self.load_membership_at_verified_prefix(&state.heads, verified_activations)
+            .await
+            .map_err(RegistrationLoadError::from)
     }
 
+    pub(crate) async fn project_membership_to_verified_prefix(
+        &self,
+        candidate_heads: &[protocol_membership::MembershipHeadRef],
+        prefix: &VerifiedMergeMembershipPrefix,
+    ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
+        VerifiedPrefixMembershipActivation::new(&self.root, &self.commit_verifier, prefix)
+            .project(candidate_heads)
+            .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn load_exact_membership_head(
         &mut self,
         reference: &protocol_membership::MembershipHeadRef,
@@ -828,16 +719,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
             .map(|loaded| loaded.value)
             .map_err(membership::map_membership_object_error)
-    }
-
-    pub(crate) async fn project_membership_to_verified_prefix(
-        &self,
-        candidate_heads: &[protocol_membership::MembershipHeadRef],
-        prefix: &VerifiedMergeMembershipPrefix,
-    ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
-        VerifiedPrefixMembershipActivation::new(&self.root, &self.commit_verifier, prefix)
-            .project(candidate_heads)
-            .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]

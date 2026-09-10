@@ -55,10 +55,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         let membership = self.membership;
         let routing_encryption = self.routing_encryption;
         let store_root_hash = self.history.root().store_root_hash;
-        membership
-            .ensure_resolved()
-            .map_err(StorePullMembershipError::State)
-            .map_err(StorePullError::Membership)?;
         let routing_key = if self.history.has_scoped_graph() {
             let encryption = routing_encryption.ok_or_else(|| {
                 StorePullError::InvalidState(
@@ -401,9 +397,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         held.extend(blocked.into_values());
         {
             let local_store_membership =
-                LocalStoreMembership::from_membership(&latest_membership, self.identity)
-                    .map_err(StorePullMembershipError::State)
-                    .map_err(StorePullError::Membership)?;
+                LocalStoreMembership::from_membership(&latest_membership, self.identity);
             match timings
                 .stage(
                     "materialize accepted interval",
@@ -495,7 +489,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         receiver_wall_ms: u64,
         timings: &mut StageTimings,
     ) -> Result<Result<PreparedMergeMaterialization, HeldStorePositionReason>, StorePullError> {
-        let root = self.history.root().clone();
         let candidate = &merge_candidate.candidate;
         let commit = candidate.commit();
         let commit_ref = candidate.commit_ref();
@@ -528,7 +521,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         let (local_store_membership, membership_after_candidate) = self
             .local_store_membership_after_candidate(
                 latest_membership,
-                &root,
                 &merge_candidate.predecessor_membership,
                 membership_objects.as_ref(),
             )?;
@@ -660,27 +652,12 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
     fn local_store_membership_after_candidate(
         &self,
         latest: &MembershipChain,
-        root: &StoreRootRef,
         predecessor: &MembershipChain,
         membership_objects: Option<&VerifiedMergeMembershipClosure>,
     ) -> Result<(LocalStoreMembership, MembershipChain), StorePullError> {
         let candidate = if let Some(membership_objects) = membership_objects {
             let proof = &membership_objects.proof;
             let mut successor = predecessor.clone();
-            match (&proof.resolution, &proof.resolution_value) {
-                (Some(reference), Some(value)) => successor
-                    .apply_resolutions(root.store_root_hash, &[(reference.clone(), value.clone())])
-                    .map_err(|error| {
-                        StorePullError::Membership(StorePullMembershipError::State(error))
-                    })?,
-                (None, None) => {}
-                _ => {
-                    return Err(StorePullError::InvalidState(
-                        "verified Merge membership proof has incomplete resolution evidence"
-                            .to_string(),
-                    ));
-                }
-            }
             successor
                 .add_entry(proof.entry_value.clone())
                 .and_then(|()| successor.activate_head_ref(proof.head.clone()))
@@ -691,18 +668,14 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         } else {
             predecessor.clone()
         };
-        let candidate_state = LocalStoreMembership::from_membership(&candidate, self.identity)
-            .map_err(StorePullMembershipError::State)
-            .map_err(StorePullError::Membership)?;
+        let candidate_state = LocalStoreMembership::from_membership(&candidate, self.identity);
         if candidate.causally_includes(latest) {
             return Ok((candidate_state, candidate));
         }
         if latest.causally_includes(&candidate) {
-            let latest_state = LocalStoreMembership::from_membership(latest, self.identity)
-                .map_err(StorePullMembershipError::State)
-                .map_err(StorePullError::Membership);
+            let latest_state = LocalStoreMembership::from_membership(latest, self.identity);
             return Ok((
-                historical_local_store_membership(latest_state?, candidate_state),
+                historical_local_store_membership(latest_state, candidate_state),
                 latest.clone(),
             ));
         }

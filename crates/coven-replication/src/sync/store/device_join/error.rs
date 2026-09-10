@@ -44,8 +44,6 @@ pub enum DeviceJoinError {
     OwnerAuthorityRequired,
     #[error("device join requires the selected effective provider administrator")]
     ProviderAdministratorRequired,
-    #[error("device join requires resolved Store membership")]
-    MembershipConflict,
     #[error("device join attempt cut does not include its provider-access activation")]
     ApprovalActivationMissing,
     #[error("device join activation is not materialized in the installed Store database")]

@@ -204,19 +204,6 @@ impl Store {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn prepare_conflict_resolution_plan_for_test(
-        &self,
-        candidate_membership_heads: &[coven_protocol::membership::MembershipHeadRef],
-    ) -> Result<(), StoreError> {
-        self.authorize_writer()
-            .await
-            .map_err(StoreError::from)?
-            .prepare_conflict_resolution_plan(candidate_membership_heads)
-            .await?;
-        Ok(())
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn load_membership_head_for_test(
         &self,
         reference: &coven_protocol::membership::MembershipHeadRef,
@@ -232,11 +219,10 @@ impl Store {
     pub(crate) async fn load_membership_at_exact_heads_for_test(
         &self,
         heads: &[coven_protocol::membership::MembershipHeadRef],
-        resolutions: &[coven_protocol::membership::StoreMembershipConflictResolutionRef],
     ) -> Result<coven_protocol::membership::MembershipChain, StoreError> {
         let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
-            .load_membership_at_exact_heads_for_test(heads, resolutions)
+            .load_membership_at_exact_heads_for_test(heads)
             .await
             .map_err(StoreError::from)
     }

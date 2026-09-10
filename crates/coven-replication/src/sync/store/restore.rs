@@ -14,7 +14,7 @@ use coven_protocol::store_commit::{
     StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder, StoreDeviceRegistration,
     StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
-    StoreHistoryCut, StoreOperationMembershipAuthority, SuccessorLink,
+    StoreHistoryCut, SuccessorLink,
 };
 
 /// A snapshot-installed Store that retains the exact remote authority used to
@@ -336,16 +336,10 @@ impl<'storage> RestoringStore<'storage> {
             .device_signer(identity_signer)
             .map_err(StoreRegistrationError::from)?;
         let bootstrap_cut = readiness.initial_ack.exact().value.store_cut.clone();
-        let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
-        else {
-            return Err(StoreRegistrationError::Invalid(
-                "Owner recovery requires resolved membership".into(),
-            ));
-        };
+        let resolved = membership.resolved();
         let node_membership_state =
             coven_protocol::circle_control::StoreMembershipStateRef::from_parts(
                 membership.head_refs().to_vec(),
-                membership.resolution_refs().to_vec(),
                 vec![authority.recovery.clone()],
                 resolved.state_hash,
             )
@@ -576,19 +570,15 @@ impl<'storage> RestoringStore<'storage> {
                     publication_previous.record().publication_base(),
                     membership_state,
                     device_state,
-                    StoreOperationMembershipAuthority {
-                        predecessor: self
-                            .membership
-                            .active_grant(&authority.owner_grant)
-                            .ok_or_else(|| {
-                                StoreRegistrationError::Invalid(
-                                    "Owner recovery grant is absent from active membership"
-                                        .to_string(),
-                                )
-                            })?
-                            .creation_authority
-                            .clone(),
-                    },
+                    self.membership
+                        .active_grant(&authority.owner_grant)
+                        .ok_or_else(|| {
+                            StoreRegistrationError::Invalid(
+                                "Owner recovery grant is absent from active membership".to_string(),
+                            )
+                        })?
+                        .creation_authority
+                        .clone(),
                     coven_protocol::store_commit::StoreCommitOperationsInput {
                         device_registrations: vec![activation_ref],
                         control: Some(coven_protocol::store_commit::StoreControl {
@@ -643,8 +633,6 @@ impl<'storage> RestoringStore<'storage> {
                     entry_value: membership_publication.entry.clone(),
                     head: membership_publication.head_ref.clone(),
                     head_value: membership_publication.head.clone(),
-                    resolution: None,
-                    resolution_value: None,
                 };
                 let state_after = predecessor_state
                     .activate_registration(

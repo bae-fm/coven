@@ -4,7 +4,7 @@ use super::merge_history::registration::{
 };
 use crate::sync::store::pull::*;
 use coven_database::{activated_merge_membership_remote_objects, MembershipAuthorityBytes};
-use coven_protocol::membership::{MembershipChain, MembershipHeadRef, StoreAuthorityChange};
+use coven_protocol::membership::{MembershipChain, MembershipHeadRef};
 use coven_protocol::objects::{
     decode_protocol_object, verify_store_root, StoreObjectError, VerifiedObject,
 };
@@ -132,7 +132,7 @@ pub(crate) struct StoreCommitVerifier<'a> {
     /// fetched them, keyed by the provider prefix the stream is listed under.
     ///
     /// One anchored-chain load traverses the same stream several times — the
-    /// founder's seven times over a small fixture — because discovery, layering
+    /// founder's seven times over a small fixture — because discovery
     /// and activation each walk it for their own reasons. The walks are by
     /// slot, and a slot read is the one read that cannot go through
     /// `exact_objects`, since a walker does not know a head's reference until
@@ -164,17 +164,11 @@ impl VerifiedMergeMembershipClosure {
         .map_err(StorePullError::Database)?;
         let entry_bytes = serde_json::to_vec(&proof.entry_value)?;
         let head_bytes = serde_json::to_vec(&proof.head_value)?;
-        let resolution_bytes = proof
-            .resolution_value
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()?;
         let remote_objects = activated_merge_membership_remote_objects(
             proof.commit_value.candidate_family(),
             &objects,
             MembershipAuthorityBytes::new(entry_bytes.clone(), entry_bytes),
             MembershipAuthorityBytes::new(head_bytes.clone(), head_bytes),
-            resolution_bytes.map(|bytes| MembershipAuthorityBytes::new(bytes.clone(), bytes)),
             &proof.commit,
         )
         .map_err(StorePullError::RemoteObject)?;
@@ -247,20 +241,6 @@ impl<'a> StoreCommitVerifier<'a> {
             head_hash: head.head_hash(),
             object: head_object,
         };
-        let resolution = match &entry.value.change {
-            StoreAuthorityChange::ResolutionActivation { resolution } => Some(resolution.clone()),
-            _ => None,
-        };
-        let resolution_value = if let Some(resolution) = &resolution {
-            let loaded = self
-                .membership_objects()
-                .load_resolution(resolution)
-                .await
-                .map_err(StorePullError::Object)?;
-            Some(loaded.value)
-        } else {
-            None
-        };
         let proof = RetainedMergeMembershipProof {
             commit: commit_ref.clone(),
             commit_value: commit.clone(),
@@ -268,8 +248,6 @@ impl<'a> StoreCommitVerifier<'a> {
             entry_value: entry.value,
             head: head_ref,
             head_value: head,
-            resolution,
-            resolution_value,
         };
         VerifiedMergeMembershipClosure::from_verified_proof(proof).map(Some)
     }

@@ -401,15 +401,9 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             .store_device_state_for_history_cut(&history_cut)
             .await
             .map_err(SnapshotError::from)?;
-        let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
-        else {
-            return Err(SnapshotError::PublicationState(
-                "snapshot publication requires resolved membership".to_string(),
-            ));
-        };
+        let resolved = membership.resolved();
         let membership_state = coven_protocol::circle_control::StoreMembershipStateRef::from_parts(
             membership.head_refs().to_vec(),
-            membership.resolution_refs().to_vec(),
             resolved_devices.recovery.clone(),
             resolved.state_hash,
         )
@@ -428,14 +422,14 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             )
             .await
             .map_err(SnapshotError::from)?;
-        let (rollup_streams, rollup_resolutions) = self
+        let rollup_streams = self
             .writer
             .membership_rollup_parts(membership)
             .await
             .map_err(SnapshotError::from)?;
         let rollup = self
             .local_writer
-            .sign_membership_rollup(store_root_hash, rollup_streams, rollup_resolutions)
+            .sign_membership_rollup(store_root_hash, rollup_streams)
             .map_err(SnapshotError::from)?;
         let storage = storage.as_ref();
         let meta_context = ProtocolObjectContext::signed_plaintext(

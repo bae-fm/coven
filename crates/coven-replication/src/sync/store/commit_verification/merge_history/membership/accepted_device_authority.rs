@@ -253,16 +253,6 @@ impl AcceptedDeviceAuthority {
                     "membership result omits or changes an earlier accepted authority head".into(),
                 ));
             }
-            if let StoreAuthorityChange::ResolutionActivation { resolution } = &entry.change {
-                let loaded = verifier
-                    .membership_objects()
-                    .load_resolution(resolution)
-                    .await?;
-                preceding.apply_resolutions(
-                    root.reference().store_root_hash,
-                    &[(resolution.clone(), loaded.value)],
-                )?;
-            }
             preceding.validate_publication_predecessor(entry)?;
             preceding.add_entry_at(reference.coord.clone(), entry.clone())?;
             preceding.activate_head_ref(reference.clone())?;
@@ -528,29 +518,12 @@ impl AcceptedDeviceAuthority {
             commit_verifier: verifier,
             device_authority: AcceptedDeviceAuthority::default(),
         };
-        let resolutions = acceptance.accepted_predecessor.0.iter().map(|tip| async {
-            verifier
-                .membership_objects()
-                .load_head(tip)
-                .await
-                .map(|loaded| loaded.value.body.resolutions.clone())
-        });
-        let mut exact_resolutions = BTreeSet::new();
-        for loaded in resolutions {
-            exact_resolutions.extend(loaded.await.map_err(map_membership_object_error)?);
-        }
-        let predecessor = Box::pin(authority.load_anchored_chain_at_exact_heads(
-            &acceptance.accepted_predecessor.0,
-            &exact_resolutions.into_iter().collect::<Vec<_>>(),
-            None,
-        ))
+        let predecessor = Box::pin(
+            authority.load_anchored_chain_at_exact_heads(&acceptance.accepted_predecessor.0),
+        )
         .await?;
-        let historical = Box::pin(authority.load_anchored_chain_at_exact_heads(
-            &value.membership.heads,
-            &value.membership.resolutions,
-            None,
-        ))
-        .await?;
+        let historical =
+            Box::pin(authority.load_anchored_chain_at_exact_heads(&value.membership.heads)).await?;
         crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier::verify_owner_recovery_node_authority(&value, &historical, &predecessor)
             .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
         let record = predecessor
@@ -580,9 +553,6 @@ impl AcceptedDeviceAuthority {
             coven_protocol::membership::OwnerRecoveryAnchorRef::Promotion { acceptance } => {
                 &acceptance.anchors.recovery
             }
-            coven_protocol::membership::OwnerRecoveryAnchorRef::ConflictResolution {
-                acceptance,
-            } => &acceptance.recovery,
         };
         let GrantStreamAnchor::OwnerRecovery { first_slot } = anchor else {
             return Err(AnchoredChainError::LoadFailed(
@@ -643,7 +613,7 @@ impl AcceptedDeviceAuthority {
         verifier: &StoreCommitVerifier<'_>,
         snapshot: &SnapshotMeta,
         membership: &MembershipChain,
-        traversed: &TraversedMembership,
+        traversed: &[TraversedMembershipStream],
     ) -> Result<(), StorePullError> {
         let founder = verifier.load_founder_registration().await?;
         let descriptor = &root.protocol().descriptor;
@@ -655,7 +625,6 @@ impl AcceptedDeviceAuthority {
             &descriptor.founder_recovery,
         )?;
         let selected = traversed
-            .streams
             .iter()
             .flat_map(|stream| &stream.heads)
             .filter(|(reference, _, _)| {
@@ -697,18 +666,6 @@ impl AcceptedDeviceAuthority {
                         },
                     ..
                 } => recovery_effect(root, user_pubkey, grant_id, &acceptance.anchors.recovery)?,
-                StoreAuthorityChange::ResolutionActivation { resolution } => {
-                    let loaded = verifier
-                        .membership_objects()
-                        .load_resolution(resolution)
-                        .await?;
-                    recovery_effect(
-                        root,
-                        &loaded.value.resolver_pubkey,
-                        &loaded.value.replacement_grant,
-                        &loaded.value.replacement_acceptance.recovery,
-                    )?
-                }
                 StoreAuthorityChange::DeviceExclusionProposal { proposal } => {
                     let loaded = verifier.load_device_exclusion_proposal(proposal).await?;
                     if loaded.object.value.owner_registration != head.body.author_registration

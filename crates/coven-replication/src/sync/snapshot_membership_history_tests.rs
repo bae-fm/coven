@@ -1,7 +1,7 @@
 use super::store_database;
 use crate::sync::test_helpers::TestStore;
 use coven_keys::keys::UserKeypair;
-use coven_protocol::objects::{ExactObjectRef, ObjectSlot};
+use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::store_commit::ObjectHash;
 
 struct MemberRemovalHistory {
@@ -176,38 +176,6 @@ async fn membership_checkpoint_floor_includes_the_activating_control() {
         .membership_floor
         .effective_coordinates
         .contains(&control.entry.coord));
-}
-
-#[tokio::test]
-async fn retained_membership_proof_rejects_an_incomplete_resolution_authority() {
-    let fixture = Box::pin(MemberRemovalHistory::create()).await;
-    let mut evidence = fixture.removal.history_evidence().clone();
-    let proof = evidence
-        .membership_proof
-        .as_mut()
-        .expect("retained history contains a membership proof");
-    let bytes = b"incomplete retained resolution authority";
-    proof.resolution = Some(
-        coven_protocol::membership::StoreMembershipConflictResolutionRef {
-            conflict_hash: ObjectHash::digest(b"retained resolution conflict"),
-            resolver_pubkey: "retained-resolution-resolver".to_string(),
-            resolution_hash: ObjectHash::digest(bytes),
-            object: ExactObjectRef::new(
-                ObjectSlot::logical(
-                    "store-v1/tests/incomplete-retained-resolution.json".to_string(),
-                )
-                .expect("valid retained resolution slot"),
-                bytes.len() as u64,
-                ObjectHash::digest(bytes),
-            ),
-        },
-    );
-    assert!(
-        evidence
-            .validate_for(fixture.removal.commit_ref(), fixture.removal.commit())
-            .is_err(),
-        "retained membership proof accepted a resolution reference without its signed value",
-    );
 }
 
 #[tokio::test]

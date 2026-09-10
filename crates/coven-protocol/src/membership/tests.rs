@@ -1,11 +1,11 @@
 use super::*;
+use crate::causal_grants::GrantRetirements;
 use crate::objects::ObjectSlot;
 use crate::objects::{ProviderDeviceBinding, ProviderPrincipalId};
 use crate::store_commit::{
     membership_entry_semantic_prefix, membership_head_semantic_prefix,
-    membership_resolution_semantic_prefix, registration_semantic_prefix, CommitFrontier,
-    DeviceStreamAnchor, GrantStreamAnchor, ResolvedStoreDeviceState, StoreCreationId,
-    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreRootRef,
+    registration_semantic_prefix, DeviceStreamAnchor, GrantStreamAnchor, MembershipCausalFloor,
+    StoreCreationId, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreRootRef,
     StreamActivation,
 };
 
@@ -28,12 +28,6 @@ fn exact(key: impl Into<String>, bytes: &[u8]) -> ExactObjectRef {
 fn membership_anchor(store_id: &str) -> GrantStreamAnchor {
     GrantStreamAnchor::StoreMembership {
         first_slot: slot(format!("test/{store_id}/membership/1.json")),
-    }
-}
-
-fn recovery_anchor(store_id: &str) -> GrantStreamAnchor {
-    GrantStreamAnchor::OwnerRecovery {
-        first_slot: slot(format!("test/{store_id}/recovery/1.json")),
     }
 }
 
@@ -97,108 +91,7 @@ fn registration(
     (registration, reference)
 }
 
-fn conflict_acceptance(
-    chain: &MembershipChain,
-    store_root_hash: ObjectHash,
-    membership: GrantStreamAnchor,
-    signer: &UserKeypair,
-) -> OwnerConflictResolutionAcceptance {
-    let (conflict_hash, owner_grants) = match chain
-        .conflict()
-        .expect("test chain has a membership conflict")
-    {
-        MembershipConflict::ConcurrentMemberAssignments {
-            conflict_hash,
-            grants,
-            ..
-        } => (
-            conflict_hash,
-            grants
-                .iter()
-                .filter_map(|(grant, state)| {
-                    state
-                        .active()
-                        .filter(|record| record.role.is_owner())
-                        .map(|record| (grant.clone(), record.clone()))
-                })
-                .collect::<Vec<_>>(),
-        ),
-        MembershipConflict::RevocationCycle {
-            conflict_hash,
-            maximal_valid_branches,
-            ..
-        } => (
-            conflict_hash,
-            maximal_valid_branches
-                .iter()
-                .flat_map(StoreMembershipBranch::active_grants)
-                .filter(|(_, record)| record.role.is_owner())
-                .map(|(grant, record)| (grant.clone(), record.clone()))
-                .collect::<Vec<_>>(),
-        ),
-    };
-    let resolver_pubkey = keys::public_key_hex(signer);
-    let root = StoreRootRef {
-        store_root_id: ObjectHash::digest(b"test conflict-resolution root id"),
-        store_root_hash,
-        object: exact(
-            "test/conflict-resolution/root.json",
-            b"conflict resolution root",
-        ),
-    };
-    let (registration, owner_registration) = registration(
-        &root,
-        &format!("conflict-resolution-{resolver_pubkey}"),
-        signer,
-    );
-    let mut recovery = owner_grants
-        .into_iter()
-        .map(|(grant, record)| OwnerRecoveryCursor {
-            owner_grant: grant.clone(),
-            position: OwnerRecoveryPosition::At {
-                node: OwnerRecoveryNodeRef {
-                    owner_pubkey: record.member_pubkey,
-                    owner_grant: grant.clone(),
-                    sequence: 1,
-                    node_hash: ObjectHash::digest(format!("conflict recovery {grant}").as_bytes()),
-                    object: exact(
-                        format!("test/conflict-recovery/{grant}/1.json"),
-                        format!("conflict recovery {grant}").as_bytes(),
-                    ),
-                },
-            },
-        })
-        .collect::<Vec<_>>();
-    recovery.sort();
-    recovery.dedup_by(|left, right| left.owner_grant == right.owner_grant);
-    OwnerConflictResolutionAcceptance::unsigned_for_test(OwnerConflictResolutionAcceptanceBody {
-        store_root_hash,
-        owner_grant: derive_store_resolution_grant(conflict_hash, &resolver_pubkey),
-        owner_registration,
-        provider: registration.provider.clone(),
-        membership,
-        recovery: recovery_anchor(&format!("conflict-resolution-{resolver_pubkey}")),
-        device_state: StoreDeviceStateRef::from_resolved(
-            CommitFrontier(BTreeMap::new()),
-            &ResolvedStoreDeviceState {
-                devices: BTreeMap::new(),
-                recovery,
-                state_hash: ObjectHash::digest(b"test conflict-resolution device state"),
-            },
-        )
-        .expect("construct conflict-resolution device state"),
-    })
-}
-
 fn exact_head(entry: &MembershipEntry, signer: &UserKeypair) -> (MembershipHeadRef, AuthorHead) {
-    exact_head_with_resolutions(entry, signer, entry.resolution_dependencies.clone())
-}
-
-fn exact_head_with_resolutions(
-    entry: &MembershipEntry,
-    signer: &UserKeypair,
-    resolutions: Vec<StoreMembershipConflictResolutionRef>,
-) -> (MembershipHeadRef, AuthorHead) {
     let root = test_root(&entry.store_id);
     let (registration, registration_ref) = registration(
         &root,
@@ -245,7 +138,6 @@ fn exact_head_with_resolutions(
             author_registration: registration_ref,
             entry: entry_ref,
             predecessor: None,
-            resolutions,
             successor,
         },
         MembershipHeadActivation::Direct,
@@ -270,27 +162,6 @@ fn exact_head_with_resolutions(
         ),
     };
     (reference, head)
-}
-
-fn exact_resolution(
-    resolution: StoreMembershipConflictResolution,
-) -> (
-    StoreMembershipConflictResolutionRef,
-    StoreMembershipConflictResolution,
-) {
-    let bytes = serde_json::to_vec(&resolution).expect("serialize membership resolution");
-    let reference = resolution.resolution_ref(exact(
-        format!(
-            "{}.json",
-            membership_resolution_semantic_prefix(
-                resolution.conflict_hash,
-                &resolution.resolver_pubkey,
-                resolution.resolution_hash(),
-            )
-        ),
-        &bytes,
-    ));
-    (reference, resolution)
 }
 
 fn founded(store_id: &str, owner: &UserKeypair) -> MembershipChain {
@@ -368,9 +239,7 @@ fn merge_active_grant_lookup_returns_only_the_exact_live_record() {
     };
     let grant_id = grant_id.clone();
     chain.add_entry(addition).unwrap();
-    let MembershipStatus::Resolved(resolved) = chain.status() else {
-        panic!("membership must resolve")
-    };
+    let resolved = chain.resolved();
     assert_eq!(
         chain.active_grant(&grant_id),
         resolved.active_grant(&grant_id)
@@ -390,14 +259,12 @@ fn merge_active_grant_lookup_returns_only_the_exact_live_record() {
     let retirement_authority = removal.coord();
     chain.add_entry(removal).unwrap();
     assert!(chain.active_grant(&grant_id).is_none());
-    let MembershipStatus::Resolved(resolved) = chain.status() else {
-        panic!("membership must resolve")
-    };
+    let resolved = chain.resolved();
     assert!(matches!(
         &resolved.grants[&grant_id],
         GrantState::Tombstoned { record, retirements }
             if record.member_pubkey == member_pubkey
-                && retirements.as_set() == &BTreeSet::from([MembershipGrantRetirement::Entry {
+                && retirements.as_set() == &BTreeSet::from([MembershipGrantRetirement {
                     authority: retirement_authority.clone(),
                     barrier: MergeMembershipGrantRetirementBarrier::NonOwner {
                         author_streams: StoreGrantStreamBarrier {
@@ -413,7 +280,7 @@ fn merge_active_grant_lookup_returns_only_the_exact_live_record() {
     else {
         unreachable!()
     };
-    retirements.insert(MembershipGrantRetirement::Entry {
+    retirements.insert(MembershipGrantRetirement {
         authority: MembershipCoord {
             entry_hash: ObjectHash::digest(b"different retirement entry"),
             ..retirement_authority.clone()
@@ -493,7 +360,7 @@ fn grant_mapping_returns_an_error_when_signed_retirement_evidence_is_absent() {
     };
 
     assert!(matches!(
-        map_store_grant_state(&owner_grant_id, &state, None, &[founder]),
+        map_store_grant_state(&owner_grant_id, &state, &[founder]),
         Err(MembershipError::MissingRetirementBarrier {
             grant,
             authority: missing,
@@ -547,7 +414,7 @@ fn concurrent_effective_removals_union_exact_retirement_entries() {
             "second removal".to_string(),
         )
         .unwrap();
-    let expected = GrantRetirements::new(MembershipGrantRetirement::Entry {
+    let expected = GrantRetirements::new(MembershipGrantRetirement {
         authority: first_removal.coord(),
         barrier: MergeMembershipGrantRetirementBarrier::NonOwner {
             author_streams: StoreGrantStreamBarrier {
@@ -556,7 +423,7 @@ fn concurrent_effective_removals_union_exact_retirement_entries() {
         },
     });
     let mut expected = expected;
-    expected.insert(MembershipGrantRetirement::Entry {
+    expected.insert(MembershipGrantRetirement {
         authority: second_removal.coord(),
         barrier: MergeMembershipGrantRetirementBarrier::NonOwner {
             author_streams: StoreGrantStreamBarrier {
@@ -567,140 +434,12 @@ fn concurrent_effective_removals_union_exact_retirement_entries() {
     let mut entries = base.entries().to_vec();
     entries.extend([first_removal, second_removal]);
     let chain = MembershipChain::from_entries(entries).unwrap();
-    let MembershipStatus::Resolved(resolved) = chain.status() else {
-        panic!("concurrent non-Owner removals must resolve")
-    };
+    let resolved = chain.resolved();
 
     assert!(matches!(
         &resolved.grants[&member_grant],
         GrantState::Tombstoned { retirements, .. }
             if retirements.as_set() == expected.as_set()
-    ));
-}
-
-fn three_owner_store_cycle() -> (UserKeypair, UserKeypair, UserKeypair, MembershipChain) {
-    let first = key();
-    let second = key();
-    let third = key();
-    let first_pubkey = keys::public_key_hex(&first);
-    let second_pubkey = keys::public_key_hex(&second);
-    let third_pubkey = keys::public_key_hex(&third);
-    let mut base = founded("three-owner-store", &first);
-    base.add_owner_for_test(
-        &first,
-        stream(1),
-        second_pubkey.clone(),
-        "add second Owner".to_string(),
-    )
-    .expect("add second Owner");
-    base.add_owner_for_test(
-        &first,
-        stream(1),
-        third_pubkey,
-        "add third Owner".to_string(),
-    )
-    .expect("add third Owner");
-    let remove_second = base
-        .signed_remove_member_in_stream(
-            &first,
-            stream(1),
-            second_pubkey,
-            "first branch".to_string(),
-        )
-        .expect("first branch");
-    let remove_first = base
-        .signed_remove_member_in_stream(
-            &second,
-            stream(92),
-            first_pubkey,
-            "second branch".to_string(),
-        )
-        .expect("second branch");
-    let mut entries = base.entries().to_vec();
-    entries.extend([remove_second.clone(), remove_first.clone()]);
-    let heads = vec![
-        exact_head(
-            base.entries().first().expect("founder membership entry"),
-            &first,
-        ),
-        exact_head(&remove_second, &first),
-        exact_head(&remove_first, &second),
-    ];
-    let conflict = MembershipChain::from_entries_with_coords_and_heads(
-        entries
-            .into_iter()
-            .map(|entry| (entry.coord(), entry))
-            .collect(),
-        heads,
-    )
-    .expect("three-Owner Store conflict");
-    (first, second, third, conflict)
-}
-
-#[test]
-fn unaffected_store_owner_resolution_retires_its_selected_branch_grant() {
-    let (_first, _second, third, conflicted) = three_owner_store_cycle();
-    let third_pubkey = keys::public_key_hex(&third);
-    let (branch, old_grant) = match conflicted.conflict().expect("conflict") {
-        MembershipConflict::RevocationCycle {
-            maximal_valid_branches,
-            ..
-        } => {
-            let branch = maximal_valid_branches
-                .iter()
-                .find(|branch| {
-                    branch.active_grants().any(|(_, record)| {
-                        record.member_pubkey == third_pubkey && record.role.is_owner()
-                    })
-                })
-                .expect("unaffected Owner branch");
-            let old_grant = branch
-                .active_grants()
-                .find_map(|(grant, record)| {
-                    (record.member_pubkey == third_pubkey).then_some(grant.clone())
-                })
-                .expect("unaffected Owner grant");
-            (branch.heads.clone(), old_grant)
-        }
-        _ => panic!("expected revocation conflict"),
-    };
-    let store_root_hash = ObjectHash::digest(b"unaffected Store resolver root");
-    let replacement_membership = membership_anchor("unaffected-store-resolver");
-    let acceptance = conflict_acceptance(
-        &conflicted,
-        store_root_hash,
-        replacement_membership.clone(),
-        &third,
-    );
-    let resolution = conflicted
-        .signed_conflict_resolution(
-            store_root_hash,
-            MembershipConflictSelection::RevocationBranch { heads: branch },
-            replacement_membership,
-            acceptance,
-            &third,
-        )
-        .expect("unaffected Owner resolution");
-    let resolution = exact_resolution(resolution);
-    let resolved = conflicted
-        .resolved_with(store_root_hash, std::slice::from_ref(&resolution))
-        .expect("unaffected Owner resolution is valid");
-
-    assert!(resolution.1.retired_owner_grants.contains(&old_grant));
-    assert!(resolved.grants[&old_grant].active().is_none());
-    assert!(resolved
-        .grants
-        .get(&resolution.1.replacement_grant)
-        .and_then(GrantState::active)
-        .is_some());
-    assert!(matches!(
-        &resolved.grants[&old_grant],
-        GrantState::Tombstoned { retirements, .. }
-            if retirements.iter().any(|retirement| matches!(
-                retirement,
-                MembershipGrantRetirement::ConflictResolution { authority, .. }
-                    if authority == &resolution.0
-            ))
     ));
 }
 
@@ -1025,7 +764,7 @@ fn concurrent_add_and_rotation_has_incomplete_wrapped_key_authority() {
 }
 
 #[test]
-fn concurrent_member_assignments_are_validated_conflict_state() {
+fn concurrent_member_assignments_are_rejected_as_conflicting_authority() {
     let owner = key();
     let target = key();
     let target_pubkey = keys::public_key_hex(&target);
@@ -1075,293 +814,35 @@ fn concurrent_member_assignments_are_validated_conflict_state() {
         .map(|entry| exact_head(entry, &owner))
         .collect();
 
-    let conflicted = MembershipChain::from_entries_with_coords_and_heads(
-        entries
-            .into_iter()
-            .map(|entry| (entry.coord(), entry))
-            .collect(),
-        heads,
-    )
-    .expect("well-formed conflict");
-    let MembershipConflict::ConcurrentMemberAssignments {
-        member_pubkey,
-        conflicting_grants,
-        ..
-    } = conflicted.conflict().expect("assignment conflict")
-    else {
-        panic!("concurrent assignments must produce an assignment conflict")
-    };
-    assert_eq!(member_pubkey, &target_pubkey);
-    assert_eq!(conflicting_grants.len(), 2);
-
-    let selected_grant = conflicting_grants
-        .iter()
-        .find_map(|(grant, record)| {
-            (record.role.role() == MemberRole::Follower).then(|| grant.clone())
-        })
-        .expect("Follower assignment");
-    let retired_grant = conflicting_grants
-        .keys()
-        .find(|grant| **grant != selected_grant)
-        .expect("other assignment")
-        .clone();
-    let opaque_choice = MembershipConflictChoice::new(
-        "opaque-choice".to_string(),
-        Vec::new(),
-        ObjectHash::digest(b"hidden conflict"),
-        MembershipConflictSelection::MemberAssignment {
-            grant: selected_grant.clone(),
-        },
-    );
-    assert_eq!(
-        format!("{opaque_choice:?}"),
-        "MembershipConflictChoice { id: \"opaque-choice\", members: [] }",
-    );
-    let store_root_hash = ObjectHash::digest(b"assignment-resolution Store root");
-    let replacement_membership = membership_anchor("assignment-resolution");
-    let acceptance = conflict_acceptance(
-        &conflicted,
-        store_root_hash,
-        replacement_membership.clone(),
-        &owner,
-    );
-    let resolution_value = conflicted
-        .signed_conflict_resolution(
-            store_root_hash,
-            MembershipConflictSelection::MemberAssignment {
-                grant: selected_grant.clone(),
-            },
-            replacement_membership,
-            acceptance,
-            &owner,
-        )
-        .expect("Owner selects an assignment");
-    let mut incomplete_resolution = resolution_value.clone();
-    incomplete_resolution
-        .body_mut()
-        .retirement_barriers
-        .remove(&retired_grant);
-    incomplete_resolution.resign(&owner);
-    assert!(!incomplete_resolution.verify_against(
-        store_root_hash,
-        conflicted.conflict().expect("assignment conflict"),
-    ));
-    let resolution = exact_resolution(resolution_value);
-    let resolved_once = conflicted
-        .resolved_with(store_root_hash, std::slice::from_ref(&resolution))
-        .expect("assignment resolution applies");
-    let resolved_retry = conflicted
-        .resolved_with(store_root_hash, &[resolution.clone(), resolution.clone()])
-        .expect("exact assignment resolution retry is idempotent");
-
-    assert_eq!(resolved_once, resolved_retry);
-    assert_eq!(
-        resolved_once
-            .grants
-            .get(&selected_grant)
-            .and_then(GrantState::active)
-            .map(|record| record.role.role()),
-        Some(MemberRole::Follower),
-    );
     assert!(matches!(
-        resolved_once.grants.get(&retired_grant),
-        Some(GrantState::Tombstoned { .. })
+        MembershipChain::from_entries_with_coords_and_heads(
+            entries
+                .into_iter()
+                .map(|entry| (entry.coord(), entry))
+                .collect(),
+            heads,
+        ),
+        Err(MembershipError::Conflict)
     ));
-    assert!(resolution
-        .1
-        .retired_owner_grants
-        .iter()
-        .all(|grant| resolved_once
-            .grants
-            .get(grant)
-            .and_then(GrantState::active)
-            .is_none()));
-    assert!(resolved_once
-        .grants
-        .get(&resolution.1.replacement_grant)
-        .and_then(GrantState::active)
-        .is_some());
+
+    chain.add_entry(first.clone()).unwrap();
+    chain
+        .activate_head_ref(exact_head(&first, &owner).0)
+        .unwrap();
+    let retained = chain.clone();
+    assert!(matches!(
+        chain.add_entry_at(second.coord(), second),
+        Err(MembershipError::Conflict)
+    ));
+    assert_eq!(chain.entries(), retained.entries());
+    assert_eq!(chain.coords, retained.coords);
+    assert_eq!(chain.included, retained.included);
+    assert_eq!(chain.head_refs(), retained.head_refs());
+    assert_eq!(chain.resolved(), retained.resolved());
 }
 
 #[test]
-fn assignment_resolvers_keep_only_a_choice_they_all_selected() {
-    let first_owner = key();
-    let second_owner = key();
-    let target = key();
-    let first_owner_pubkey = keys::public_key_hex(&first_owner);
-    let second_owner_pubkey = keys::public_key_hex(&second_owner);
-    let target_pubkey = keys::public_key_hex(&target);
-    let mut base = founded("assignment-consensus", &first_owner);
-    base.add_owner_for_test(
-        &first_owner,
-        stream(1),
-        second_owner_pubkey.clone(),
-        "add second Owner".to_string(),
-    )
-    .unwrap();
-    let initial = base
-        .signed_set_member_in_stream(
-            &first_owner,
-            stream(1),
-            target_pubkey.clone(),
-            None,
-            MemberRole::Member,
-            "initial target assignment".to_string(),
-        )
-        .unwrap();
-    base.add_entry(initial).unwrap();
-    let follower_assignment = base
-        .signed_set_member_in_stream(
-            &first_owner,
-            stream(21),
-            target_pubkey.clone(),
-            None,
-            MemberRole::Follower,
-            "Follower assignment".to_string(),
-        )
-        .unwrap();
-    let member_assignment = base
-        .signed_set_member_in_stream(
-            &second_owner,
-            stream(22),
-            target_pubkey.clone(),
-            None,
-            MemberRole::Member,
-            "Member assignment".to_string(),
-        )
-        .unwrap();
-    let mut entries = base.entries().to_vec();
-    entries.extend([follower_assignment, member_assignment]);
-    let heads = entries
-        .iter()
-        .filter(|entry| {
-            !entries.iter().any(|candidate| {
-                candidate
-                    .dependencies
-                    .iter()
-                    .any(|dependency| dependency == &entry.coord())
-                    && candidate.stream_id == entry.stream_id
-            })
-        })
-        .map(|entry| {
-            let signer = if entry.author_pubkey == first_owner_pubkey {
-                &first_owner
-            } else {
-                assert_eq!(entry.author_pubkey, second_owner_pubkey);
-                &second_owner
-            };
-            exact_head(entry, signer)
-        })
-        .collect();
-    let conflicted = MembershipChain::from_entries_with_coords_and_heads(
-        entries
-            .into_iter()
-            .map(|entry| (entry.coord(), entry))
-            .collect(),
-        heads,
-    )
-    .expect("well-formed assignment conflict");
-    let MembershipConflict::ConcurrentMemberAssignments {
-        conflicting_grants, ..
-    } = conflicted.conflict().expect("assignment conflict")
-    else {
-        panic!("concurrent assignments must produce an assignment conflict")
-    };
-    let follower_grant = conflicting_grants
-        .iter()
-        .find_map(|(grant, record)| {
-            (record.role.role() == MemberRole::Follower).then(|| grant.clone())
-        })
-        .expect("Follower assignment");
-    let member_grant = conflicting_grants
-        .iter()
-        .find_map(|(grant, record)| {
-            (record.role.role() == MemberRole::Member).then(|| grant.clone())
-        })
-        .expect("Member assignment");
-    let store_root_hash = ObjectHash::digest(b"assignment consensus Store root");
-
-    let first_membership = membership_anchor("first-assignment-resolution");
-    let first_acceptance = conflict_acceptance(
-        &conflicted,
-        store_root_hash,
-        first_membership.clone(),
-        &first_owner,
-    );
-    let first_resolution = exact_resolution(
-        conflicted
-            .signed_conflict_resolution(
-                store_root_hash,
-                MembershipConflictSelection::MemberAssignment {
-                    grant: follower_grant.clone(),
-                },
-                first_membership,
-                first_acceptance,
-                &first_owner,
-            )
-            .expect("first Owner selects the Follower assignment"),
-    );
-    let second_membership = membership_anchor("second-assignment-resolution");
-    let second_acceptance = conflict_acceptance(
-        &conflicted,
-        store_root_hash,
-        second_membership.clone(),
-        &second_owner,
-    );
-    let second_resolution = exact_resolution(
-        conflicted
-            .signed_conflict_resolution(
-                store_root_hash,
-                MembershipConflictSelection::MemberAssignment {
-                    grant: member_grant.clone(),
-                },
-                second_membership,
-                second_acceptance,
-                &second_owner,
-            )
-            .expect("second Owner selects the Member assignment"),
-    );
-
-    let resolved = conflicted
-        .resolved_with(
-            store_root_hash,
-            &[first_resolution.clone(), second_resolution.clone()],
-        )
-        .expect("disagreeing assignment resolutions converge");
-
-    assert!(matches!(
-        resolved.grants.get(&follower_grant),
-        Some(GrantState::Tombstoned { .. })
-    ));
-    assert!(matches!(
-        resolved.grants.get(&member_grant),
-        Some(GrantState::Tombstoned { .. })
-    ));
-    assert!(!resolved
-        .grants
-        .values()
-        .filter_map(GrantState::active)
-        .any(|record| record.member_pubkey == target_pubkey));
-    for resolution in [&first_resolution, &second_resolution] {
-        assert!(resolved
-            .grants
-            .get(&resolution.1.replacement_grant)
-            .and_then(GrantState::active)
-            .is_some());
-        assert!(resolution
-            .1
-            .retired_owner_grants
-            .iter()
-            .all(|grant| resolved
-                .grants
-                .get(grant)
-                .and_then(GrantState::active)
-                .is_none()));
-    }
-}
-
-#[test]
-fn concurrent_cross_revocation_is_a_validated_cycle_conflict() {
+fn concurrent_cross_revocation_is_rejected_as_conflicting_authority() {
     let first_owner = key();
     let second_owner = key();
     let first_pubkey = keys::public_key_hex(&first_owner);
@@ -1401,325 +882,15 @@ fn concurrent_cross_revocation_is_a_validated_cycle_conflict() {
         exact_head(&remove_first, &second_owner),
     ];
 
-    let conflicted = MembershipChain::from_entries_with_coords_and_heads(
-        entries
-            .into_iter()
-            .map(|entry| (entry.coord(), entry))
-            .collect(),
-        heads,
-    )
-    .expect("well-formed conflict");
     assert!(matches!(
-        conflicted.status(),
-        MembershipStatus::Conflict(MembershipConflict::RevocationCycle {
-            cyclic_sources,
-            involved_owner_grants,
-            maximal_valid_branches,
-            ..
-
-        }) if cyclic_sources.len() == 2
-            && involved_owner_grants.len() == 2
-            && maximal_valid_branches.len() == 2
-    ));
-
-    let MembershipConflict::RevocationCycle {
-        maximal_valid_branches,
-        ..
-    } = conflicted.conflict().expect("cycle conflict")
-    else {
-        unreachable!();
-    };
-    let resolver_branch_state = maximal_valid_branches
-        .iter()
-        .find(|branch| {
-            branch
-                .active_grants()
-                .any(|(_, record)| record.member_pubkey == first_pubkey && record.role.is_owner())
-        })
-        .expect("first Owner branch")
-        .clone();
-    let resolver_branch = resolver_branch_state.heads.clone();
-    let second_resolver_branch = maximal_valid_branches
-        .iter()
-        .find(|branch| {
-            branch
-                .active_grants()
-                .any(|(_, record)| record.member_pubkey == second_pubkey && record.role.is_owner())
-        })
-        .expect("second Owner branch")
-        .heads
-        .clone();
-    let store_root_hash = ObjectHash::digest(b"resolution Store root");
-    let first_membership = membership_anchor("first-cycle-resolution");
-    let first_acceptance = conflict_acceptance(
-        &conflicted,
-        store_root_hash,
-        first_membership.clone(),
-        &first_owner,
-    );
-    let resolution_value = conflicted
-        .signed_conflict_resolution(
-            store_root_hash,
-            MembershipConflictSelection::RevocationBranch {
-                heads: resolver_branch.clone(),
-            },
-            first_membership.clone(),
-            first_acceptance.clone(),
-            &first_owner,
-        )
-        .expect("branch Owner resolves the conflict");
-    let mut forged_resolution = resolution_value.clone();
-    forged_resolution.resign(&second_owner);
-    assert!(!forged_resolution.verify_signature());
-    assert!(!forged_resolution.verify_against(
-        store_root_hash,
-        conflicted.conflict().expect("cycle conflict"),
-    ));
-    let second_membership = membership_anchor("second-cycle-resolution");
-    let second_acceptance = conflict_acceptance(
-        &conflicted,
-        store_root_hash,
-        second_membership.clone(),
-        &second_owner,
-    );
-    let second_resolution_value = conflicted
-        .signed_conflict_resolution(
-            store_root_hash,
-            MembershipConflictSelection::RevocationBranch {
-                heads: second_resolver_branch,
-            },
-            second_membership,
-            second_acceptance,
-            &second_owner,
-        )
-        .expect("other branch Owner resolves the conflict");
-    let retried = conflicted
-        .signed_conflict_resolution(
-            store_root_hash,
-            MembershipConflictSelection::RevocationBranch {
-                heads: resolver_branch,
-            },
-            first_membership,
-            first_acceptance,
-            &first_owner,
-        )
-        .expect("same resolver retry");
-    assert_eq!(resolution_value, retried);
-    assert!(resolution_value.verify_against(
-        store_root_hash,
-        conflicted.conflict().expect("cycle conflict"),
-    ));
-    let resolution = exact_resolution(resolution_value);
-    let second_resolution = exact_resolution(second_resolution_value);
-    let resolved_once = conflicted
-        .resolved_with(store_root_hash, std::slice::from_ref(&resolution))
-        .expect("one resolution applies");
-    let resolved_duplicate = conflicted
-        .resolved_with(store_root_hash, &[resolution.clone(), resolution.clone()])
-        .expect("an exact retry is idempotent");
-    assert_eq!(resolved_once, resolved_duplicate);
-    assert!(resolved_once
-        .grants
-        .get(&resolution.1.replacement_grant)
-        .and_then(GrantState::active)
-        .is_some());
-    assert!(resolution
-        .1
-        .retired_owner_grants
-        .iter()
-        .all(|grant| resolved_once
-            .grants
-            .get(grant)
-            .and_then(GrantState::active)
-            .is_none()));
-
-    let resolved_union = conflicted
-        .resolved_with(
-            store_root_hash,
-            &[resolution.clone(), second_resolution.clone()],
-        )
-        .expect("distinct resolvers are unioned");
-    assert!(resolved_union
-        .grants
-        .get(&resolution.1.replacement_grant)
-        .and_then(GrantState::active)
-        .is_some());
-    assert!(resolved_union
-        .grants
-        .get(&second_resolution.1.replacement_grant)
-        .and_then(GrantState::active)
-        .is_some());
-
-    let mut branch_specific = conflicted.conflict().expect("cycle conflict").clone();
-    let MembershipConflict::RevocationCycle {
-        maximal_valid_branches,
-        ..
-    } = &mut branch_specific
-    else {
-        unreachable!()
-    };
-    let branch_only_grant = MembershipGrantId(ObjectHash::digest(b"branch-only grant"));
-    let branch_only_creation = maximal_valid_branches[0].effective_frontier[0].clone();
-    maximal_valid_branches[0].grants.insert(
-        branch_only_grant.clone(),
-        GrantState::Active {
-            record: MembershipGrantRecord {
-                member_pubkey: keys::public_key_hex(&key()),
-                role: StoreMembershipRoleGrant::Member,
-                provider_account_email: None,
-                creation_authority: MembershipGrantCreationAuthority::Entry(branch_only_creation),
-            },
-        },
-    );
-    let branch_barrier = MergeMembershipGrantRetirementBarrier::NonOwner {
-        author_streams: StoreGrantStreamBarrier {
-            observed_streams: Vec::new(),
-        },
-    };
-    let mut branch_resolution_value = resolution.1.clone();
-    branch_resolution_value
-        .body_mut()
-        .retirement_barriers
-        .insert(branch_only_grant.clone(), branch_barrier.clone());
-    branch_resolution_value.resign(&first_owner);
-    let branch_resolution = exact_resolution(branch_resolution_value);
-    let mut branch_second_resolution_value = second_resolution.1.clone();
-    branch_second_resolution_value
-        .body_mut()
-        .retirement_barriers
-        .insert(branch_only_grant.clone(), branch_barrier);
-    branch_second_resolution_value.resign(&second_owner);
-    let branch_second_resolution = exact_resolution(branch_second_resolution_value);
-    let composed = resolve_store_membership_conflict(
-        store_root_hash,
-        &branch_specific,
-        &[branch_resolution.clone(), branch_second_resolution.clone()],
-    )
-    .expect("retire grants not agreed by every valid branch");
-    let branch_only_retirements = composed
-        .grants
-        .get(&branch_only_grant)
-        .and_then(GrantState::retirements)
-        .expect("branch-only grant is retained as retired");
-    assert!(branch_only_retirements.iter().any(|retirement| matches!(
-        retirement,
-        MembershipGrantRetirement::ConflictResolution { authority, .. }
-            if authority == &branch_resolution.0
-    )));
-    assert!(branch_only_retirements.iter().any(|retirement| matches!(
-        retirement,
-        MembershipGrantRetirement::ConflictResolution { authority, .. }
-            if authority == &branch_second_resolution.0
-    )));
-
-    let mut duplicate_member = branch_specific;
-    let MembershipConflict::RevocationCycle {
-        maximal_valid_branches,
-        ..
-    } = &mut duplicate_member
-    else {
-        unreachable!()
-    };
-    let duplicate_pubkey = keys::public_key_hex(&key());
-    let duplicate_creation = resolution.1.conflicting_heads[0].coord.clone();
-    for branch in maximal_valid_branches {
-        for suffix in [b'a', b'b'] {
-            branch.grants.insert(
-                MembershipGrantId(ObjectHash::digest(&[suffix])),
-                GrantState::Active {
-                    record: MembershipGrantRecord {
-                        member_pubkey: duplicate_pubkey.clone(),
-                        role: StoreMembershipRoleGrant::Member,
-                        provider_account_email: None,
-                        creation_authority: MembershipGrantCreationAuthority::Entry(
-                            duplicate_creation.clone(),
-                        ),
-                    },
-                },
-            );
-        }
-    }
-    assert!(matches!(
-        resolve_store_membership_conflict(
-            store_root_hash,
-            &duplicate_member,
-            &[resolution.clone(), second_resolution.clone()],
+        MembershipChain::from_entries_with_coords_and_heads(
+            entries
+                .into_iter()
+                .map(|entry| (entry.coord(), entry))
+                .collect(),
+            heads,
         ),
-        Err(MembershipError::InvalidConflictResolution)
-    ));
-
-    let mut resumed = conflicted.clone();
-    let raw_heads = resumed.author_heads();
-    resumed
-        .apply_resolutions(store_root_hash, std::slice::from_ref(&resolution))
-        .expect("resolution activates replacement Owner grant");
-    assert_eq!(resumed.author_heads(), raw_heads);
-    let accepted_controls = [remove_second.coord(), remove_first.coord()];
-    assert!(accepted_controls
-        .iter()
-        .all(|coord| resumed.contains_coord(coord)));
-    assert!(accepted_controls
-        .iter()
-        .any(|coord| !resumed.included.contains(coord)));
-    let raw_losing_control = accepted_controls
-        .iter()
-        .find(|coord| !resumed.included.contains(*coord))
-        .expect("resolved history retains one raw losing control")
-        .clone();
-    let checkpoint_floor = crate::store_commit::MembershipCausalFloor {
-        effective_coordinates: vec![raw_losing_control],
-        resolutions: resumed.resolution_refs().to_vec(),
-    };
-    assert!(
-            !checkpoint_floor.is_included_in(&resumed),
-            "a coordinate present only in the raw losing branch cannot satisfy a retained effective checkpoint floor",
-        );
-    assert_eq!(
-        resumed.effective_frontier(),
-        resolver_branch_state.effective_frontier
-    );
-    assert_eq!(
-        resumed.resolution_refs(),
-        std::slice::from_ref(&resolution.0)
-    );
-    let after_resolution = resumed
-        .signed_set_member_in_stream(
-            &first_owner,
-            stream(37),
-            keys::public_key_hex(&key()),
-            None,
-            MemberRole::Member,
-            "write after resolution".to_string(),
-        )
-        .expect("replacement Owner can author from a fresh stream");
-    assert_eq!(
-        after_resolution.author_owner_grant,
-        resolution.1.replacement_grant
-    );
-    let activated_head = exact_head(&after_resolution, &first_owner).1;
-    resumed
-        .add_entry(after_resolution)
-        .expect("future authoring validates from the resolved checkpoint");
-    assert_eq!(activated_head.body.resolutions, vec![resolution.0.clone()]);
-    let authority = MembershipGrantCreationAuthority::ConflictResolution(resolution.0.clone());
-    assert!(resumed.authorizes_write_authority(&authority, &first_pubkey));
-    let outsider = key();
-    let outsider_membership = membership_anchor("non-owner-cycle-resolution");
-    let outsider_acceptance = conflict_acceptance(
-        &conflicted,
-        store_root_hash,
-        outsider_membership.clone(),
-        &outsider,
-    );
-    assert!(matches!(
-        conflicted.signed_conflict_resolution(
-            store_root_hash,
-            resolution.1.selection.clone(),
-            outsider_membership,
-            outsider_acceptance,
-            &outsider,
-        ),
-        Err(MembershipError::SignerIsNotOwner(_))
+        Err(MembershipError::Conflict)
     ));
 }
 
@@ -1961,8 +1132,14 @@ fn before_first_barrier_excludes_every_entry_from_the_revoked_owner_stream() {
     ));
 
     let mut entries = observed.entries().to_vec();
+    let stale_coord = stale_entry.coord();
     entries.extend([removal, stale_entry]);
     let chain = MembershipChain::from_entries(entries).unwrap();
+    assert!(chain.contains_coord(&stale_coord));
+    assert!(!MembershipCausalFloor {
+        effective_coordinates: vec![stale_coord],
+    }
+    .is_included_in(&chain));
     assert!(!chain.can_write_now(&keys::public_key_hex(&target)));
     assert!(chain
         .author_heads()
@@ -2131,81 +1308,4 @@ fn created_at_is_signed_but_never_orders_entries() {
     let mut tampered = entry.clone();
     tampered.body_mut().created_at = "other".to_string();
     assert!(!verify_membership_entry(&tampered));
-}
-
-#[test]
-fn membership_head_resolution_cut_must_equal_its_tip_entry_cut() {
-    let owner = UserKeypair::generate();
-    let entry = test_founder_entry(
-        "head-tip-resolution-cut",
-        &owner,
-        "founder",
-        membership_anchor("head-tip-resolution-cut"),
-    );
-    let fake = StoreMembershipConflictResolutionRef {
-        conflict_hash: ObjectHash::digest(b"head-tip conflict"),
-        resolver_pubkey: keys::public_key_hex(&owner),
-        resolution_hash: ObjectHash::digest(b"head-tip resolution"),
-        object: exact(
-            "test/head-tip-resolution-cut/resolution.json",
-            b"head-tip resolution",
-        ),
-    };
-    let head = exact_head_with_resolutions(&entry, &owner, vec![fake]);
-
-    assert!(matches!(
-        MembershipChain::from_entries_with_coords_and_heads(
-            vec![(entry.coord(), entry)],
-            vec![head],
-        ),
-        Err(MembershipError::MissingConflictHeads)
-    ));
-}
-
-#[test]
-fn membership_entry_rejects_unsorted_or_duplicate_resolution_dependencies() {
-    let owner = UserKeypair::generate();
-    let founder = test_founder_entry(
-        "entry-resolution-cut",
-        &owner,
-        "founder",
-        membership_anchor("entry-resolution-cut"),
-    );
-    let chain = MembershipChain::from_entries(vec![founder]).unwrap();
-    let entry = chain
-        .signed_set_member_in_stream(
-            &owner,
-            stream(1),
-            keys::public_key_hex(&UserKeypair::generate()),
-            None,
-            MemberRole::Member,
-            "member".to_string(),
-        )
-        .unwrap();
-    let mut refs = [b"first".as_slice(), b"second".as_slice()]
-        .into_iter()
-        .map(|label| StoreMembershipConflictResolutionRef {
-            conflict_hash: ObjectHash::digest(label),
-            resolver_pubkey: keys::public_key_hex(&owner),
-            resolution_hash: ObjectHash::digest(&[label, b" resolution"].concat()),
-            object: exact(
-                format!(
-                    "test/entry-resolution-cut/{}.json",
-                    String::from_utf8_lossy(label)
-                ),
-                label,
-            ),
-        })
-        .collect::<Vec<_>>();
-    refs.sort();
-
-    let mut unsorted = entry.clone();
-    unsorted.body_mut().resolution_dependencies = refs.iter().rev().cloned().collect();
-    unsorted.resign(&owner);
-    assert!(!verify_membership_entry(&unsorted));
-
-    let mut duplicate = entry;
-    duplicate.body_mut().resolution_dependencies = vec![refs[0].clone(), refs[0].clone()];
-    duplicate.resign(&owner);
-    assert!(!verify_membership_entry(&duplicate));
 }

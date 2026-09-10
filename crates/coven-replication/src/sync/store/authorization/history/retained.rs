@@ -1,52 +1,7 @@
 use super::*;
 use crate::sync::store::commit_verification::merge_history::validate_composed_snapshot_history_summary;
-use crate::sync::store::merge_conflict;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
-    pub(crate) async fn authorize_retained_conflict_resolution(
-        &self,
-        order: &coven_protocol::store_commit::StoreCommitOrder,
-        candidate_membership_heads: &[MembershipHeadRef],
-        author_registration: &StoreDeviceRegistrationRef,
-        resolver_pubkey: &str,
-    ) -> Result<merge_conflict::MergeConflictResolutionAuthorization, pull::StorePullError> {
-        let frontier = order
-            .predecessor_cut()
-            .map_err(pull::StorePullError::Protocol)?
-            .0;
-        let checkpoints = self
-            .retained_history_checkpoints(frontier.values().cloned().collect())
-            .await?;
-        let prefix = VerifiedMergeMembershipPrefix::from_retained(&checkpoints)?;
-        let membership = self
-            .project_membership_to_verified_prefix(candidate_membership_heads, &prefix)
-            .await
-            .map_err(pull::StorePullError::MembershipChain)?;
-        merge_conflict::validate_retained_membership_floors(&checkpoints, &membership)?;
-        prefix.validate_complete_membership(&membership)?;
-        let (device_state_ref, device_state) = self.retained_merge_device_state(&frontier).await?;
-        if !crate::sync::store::commit_verification::merge_history::registration::device_state_has_active_registration(
-            &device_state,
-            author_registration,
-        ) {
-            return Err(pull::StorePullError::InvalidState(
-                "Merge conflict-resolution author is inactive at its predecessor cut".to_string(),
-            ));
-        }
-        self.history_verifier
-            .verify_canonical_owner_registration(
-                &device_state,
-                resolver_pubkey,
-                author_registration,
-            )
-            .await?;
-        Ok(merge_conflict::MergeConflictResolutionAuthorization {
-            membership,
-            device_state_ref,
-            device_state,
-        })
-    }
-
     pub(crate) async fn authorize_retained_outbound(
         &self,
         order: &coven_protocol::store_commit::StoreCommitOrder,
@@ -119,7 +74,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .project_membership_to_verified_prefix(candidate_membership_heads, &prefix)
             .await
             .map_err(pull::StorePullError::MembershipChain)?;
-        merge_conflict::validate_retained_membership_floors(checkpoints, &membership)?;
+        if checkpoints.iter().any(|checkpoint| {
+            matches!(checkpoint, coven_database::RetainedMergeHistoryCheckpoint::Snapshot(checkpoint)
+                if !checkpoint.summary.membership_floor.is_included_in(&membership))
+        }) {
+            return Err(pull::StorePullError::InvalidState(
+                "Merge membership omits retained effective predecessor authority".to_string(),
+            ));
+        }
         prefix.validate_complete_membership(&membership)?;
         let (device_state_ref, device_state) = self.retained_merge_device_state(frontier).await?;
         if !crate::sync::store::commit_verification::merge_history::registration::device_state_has_active_registration(
@@ -130,14 +92,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 "Merge outbound author is inactive at its exact predecessor cut".to_string(),
             ));
         }
-        let MembershipStatus::Resolved(resolved) = membership.status() else {
-            return Err(pull::StorePullError::InvalidState(
-                "Merge outbound predecessor membership is conflicted".to_string(),
-            ));
-        };
+        let resolved = membership.resolved();
         let membership_state = StoreMembershipStateRef::from_parts(
             membership.head_refs().to_vec(),
-            membership.resolution_refs().to_vec(),
             device_state.recovery.clone(),
             resolved.state_hash,
         )

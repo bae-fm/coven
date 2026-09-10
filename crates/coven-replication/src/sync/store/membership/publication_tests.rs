@@ -123,7 +123,7 @@ async fn the_membership_mutation_journal_carries_no_object_it_already_names() {
         .prepared_head()
         .expect("rebuild the membership head");
 
-    for carried in ["head_object", "resolution_object", "prepared_head"] {
+    for carried in ["head_object", "prepared_head"] {
         assert!(
             !plan.contains(carried),
             "the journal carries {carried}, whose bytes its own reference already names"
@@ -450,13 +450,8 @@ async fn a_membership_rollup_reaches_the_chain_the_full_walk_reaches() {
         "the rollup reader ends on another membership frontier"
     );
     assert_eq!(
-        walked.resolution_refs(),
-        rolled.resolution_refs(),
-        "the rollup reader ends on another resolution cut"
-    );
-    assert_eq!(
-        walked.status(),
-        rolled.status(),
+        walked.resolved(),
+        rolled.resolved(),
         "the rollup reader resolves another member set"
     );
     for (label, pubkey) in [

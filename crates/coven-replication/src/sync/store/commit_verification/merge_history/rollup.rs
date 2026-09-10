@@ -20,15 +20,12 @@ use std::collections::BTreeMap;
 impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn membership_rollup_parts(
         &self,
-        traversed: membership::TraversedMembership,
+        traversed: Vec<membership::TraversedMembershipStream>,
     ) -> Result<
-        (
-            Vec<coven_protocol::store_commit::MembershipRollupStream>,
-            Vec<coven_protocol::store_commit::MembershipRollupResolution>,
-        ),
+        Vec<coven_protocol::store_commit::MembershipRollupStream>,
         crate::sync::store::membership::AnchoredChainError,
     > {
-        traversed.into_rollup_parts(&self.commit_verifier).await
+        membership::membership_rollup_streams(traversed, &self.commit_verifier).await
     }
 
     /// Find the membership rollup the Store's newest published snapshot names
@@ -124,7 +121,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     /// the whole admission, so the rollup is either a faithful carrier of this
     /// Store's own objects or it is not used at all. What is left after that —
     /// predecessor linkage, grant authority, Store-commit activation of
-    /// authority changes, conflict-resolution layering, the cursor the
+    /// authority changes, and the cursor the
     /// admission floor names — is decided afterwards by the same anchored walk,
     /// over the same code, as it is for bytes read off the provider.
     ///
@@ -133,7 +130,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     /// membership head lives at a create-once slot, so which of an author's
     /// heads sits at sequence N is settled by the provider and not by whoever
     /// describes it — and an author with two devices can sign two valid heads
-    /// at one coordinate, which is the fork the conflict machinery exists for.
+    /// at one coordinate; only the provider's create-once result selects it.
     /// A rollup that could stand in for every covered slot could therefore hand
     /// a reader the branch the provider does not hold. Leaving the last covered
     /// head to be read closes it whole: the walk checks that head's signed
@@ -218,12 +215,6 @@ impl<'a> MergeHistoryVerifier<'a> {
                 ),
                 std::sync::Arc::new(reads),
             ));
-        }
-        for carried in &rollup.resolutions {
-            self.commit_verifier.remember_exact_object(
-                &carried.resolution.object,
-                &canonical_rollup_bytes(&carried.resolution_value)?,
-            );
         }
         for (object, bytes) in entries {
             self.commit_verifier.remember_exact_object(&object, &bytes);

@@ -45,10 +45,7 @@ pub fn merge_membership_ref(
     owner: &UserKeypair,
     members: &[(String, membership::MemberRole)],
     label: &str,
-) -> (
-    StoreMembershipStateRef,
-    membership::MembershipGrantCreationAuthority,
-) {
+) -> (StoreMembershipStateRef, membership::MembershipCoord) {
     let founder = test_founder_entry(
         label,
         owner,
@@ -91,12 +88,7 @@ pub fn merge_membership_ref(
             .add_entry(entry)
             .expect("apply merge-concurrent member");
     }
-    let resolved = match chain.status() {
-        membership::MembershipStatus::Resolved(resolved) => resolved,
-        membership::MembershipStatus::Conflict(_) => {
-            panic!("membership fixture must resolve")
-        }
-    };
+    let resolved = chain.resolved();
     let tip = chain.entries().last().expect("membership tip").coord();
     let head = membership::MembershipHeadRef {
         coord: tip,
@@ -104,14 +96,9 @@ pub fn merge_membership_ref(
         object: exact_object(&format!("{label}/membership-head"), b"membership head"),
     };
     (
-        StoreMembershipStateRef::from_parts(
-            vec![head],
-            Vec::new(),
-            Vec::new(),
-            resolved.state_hash,
-        )
-        .expect("valid merge-concurrent membership reference"),
-        membership::MembershipGrantCreationAuthority::Entry(founder_coord),
+        StoreMembershipStateRef::from_parts(vec![head], Vec::new(), resolved.state_hash)
+            .expect("valid merge-concurrent membership reference"),
+        founder_coord,
     )
 }
 
@@ -144,7 +131,7 @@ impl MergeDeviceAuthority {
         order: store_commit::StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: store_commit::StoreDeviceStateRef,
-        membership_authority: store_commit::StoreOperationMembershipAuthority,
+        membership_authority: membership::MembershipCoord,
         input: store_commit::StoreCommitOperationsInput<'_>,
     ) -> Result<store_commit::StoreBatchCommit, store_commit::StoreProtocolError> {
         store_commit::StoreBatchCommit::signed_operations(

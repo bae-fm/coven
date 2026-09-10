@@ -343,7 +343,6 @@ async fn an_unaccepted_owner_promotion_cannot_authorize_its_own_snapshot() {
         root.store_root_hash,
         fixture.member_registration.clone(),
         streams,
-        original.resolutions.clone(),
         &device_signer,
     )
     .expect("sign exact proposed membership rollup");

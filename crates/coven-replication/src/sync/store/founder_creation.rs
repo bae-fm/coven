@@ -613,7 +613,6 @@ impl<'operation> FounderStoreCreation<'operation> {
                     author_registration: registration_ref.clone(),
                     entry: entry_ref.clone(),
                     predecessor: None,
-                    resolutions: Vec::new(),
                     successor: SuccessorLink {
                         activation:
                             coven_protocol::store_commit::StreamActivation::grant_authorized(

@@ -372,13 +372,6 @@ impl SyncLoopHandle {
         self.inner.components.members().await
     }
 
-    pub async fn membership_conflict(
-        &self,
-    ) -> Result<Option<coven_protocol::MembershipConflictInfo>, super::store::MembershipOpsError>
-    {
-        self.inner.components.membership_conflict().await
-    }
-
     pub async fn restore_membership(
         &self,
     ) -> Result<super::store::authorization::StoreRestoreMembership, super::store::MembershipOpsError>
@@ -595,16 +588,6 @@ impl SyncLoopHandle {
         public_key_hex: &str,
     ) -> Result<String, super::store::MembershipOpsError> {
         self.inner.components.remove_member(public_key_hex).await
-    }
-
-    pub async fn resolve_membership_conflict(
-        &self,
-        choice: &coven_protocol::MembershipConflictChoice,
-    ) -> Result<(), super::store::MembershipOpsError> {
-        self.inner
-            .components
-            .resolve_membership_conflict(choice)
-            .await
     }
 
     pub async fn drain_uploads(
