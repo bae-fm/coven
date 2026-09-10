@@ -478,18 +478,14 @@ pub(crate) fn materialized_frontier_on(
         );
     }
 
-    for (device_id, reference) in snapshot_coverage_on(conn)? {
-        if exclude_device == Some(device_id.as_str()) {
-            continue;
-        }
-        if frontier
-            .get(&device_id)
-            .is_none_or(|current| current.coord.sequence() < reference.coord.sequence())
-        {
-            frontier.insert(device_id, reference);
-        }
-    }
-    Ok(frontier)
+    let coverage = snapshot_coverage_on(conn)?
+        .into_iter()
+        .filter(|(device_id, _)| exclude_device != Some(device_id.as_str()))
+        .collect();
+    CommitFrontier::from_refs(frontier)?
+        .join(CommitFrontier::from_refs(coverage)?)
+        .map(CommitFrontier::into_refs)
+        .map_err(|error| DbError::context("join materialized history and snapshot coverage", error))
 }
 
 /// The exact commit each stream's installed snapshot image reaches. The image
@@ -643,16 +639,20 @@ pub(crate) fn latest_position_for_device_on(
         let seq = Database::sequence_from_sqlite(device_id, seq)?;
         references.push(parse_stored_commit_ref(device_id, seq, &reference)?);
     }
-    if references.len() == 2
-        && references[0].coord.sequence() == references[1].coord.sequence()
-        && references[0] != references[1]
-    {
-        return Err(DbError::Message(format!(
-            "materialized ledger and snapshot coverage fork {device_id:?} at sequence {}",
-            references[0].coord.sequence()
-        )));
-    }
-    Ok(references
+    let frontier = references
         .into_iter()
-        .max_by_key(|reference| reference.coord.sequence()))
+        .try_fold(CommitFrontier(BTreeMap::new()), |frontier, reference| {
+            frontier.join(CommitFrontier(BTreeMap::from([(
+                reference.coord.stream_id,
+                reference,
+            )])))
+        })
+        .map_err(|error| {
+            DbError::context("join materialized history and snapshot coverage", error)
+        })?;
+    Ok(frontier.0.into_values().next())
 }
+
+#[cfg(test)]
+#[path = "materialized_commit_index_tests.rs"]
+mod tests;

@@ -563,7 +563,7 @@ impl CommitFrontier {
     pub fn join(self, other: Self) -> Result<Self, StoreProtocolError> {
         StoreHistoryCut::from_commits(self.0)
             .join(StoreHistoryCut::from_commits(other.0))
-            .map(|cut| cut.frontier())
+            .map(|cut| Self(cut.0))
     }
 }
 
