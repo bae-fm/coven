@@ -70,7 +70,7 @@ impl StoreSession<'_> {
         candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<ObjectHash, DbError> {
         let publication = validate_membership_candidate_objects(&candidate, &remote_objects)?;
-        let pending_rotation_generation = membership_rotation_generation(&publication)?;
+        let pending_rotation_generation = membership_rotation_generation(&publication.entry)?;
         let active_publication = ActiveStorePublication::for_commit(
             ActiveStorePublicationOwner::MembershipMutation,
             &candidate,
@@ -349,8 +349,8 @@ impl StoreSession<'_> {
                 "replacement changes the retained membership request".into(),
             ));
         }
-        let previous_rotation_generation = membership_rotation_generation(original)?;
-        let pending_rotation_generation = membership_rotation_generation(&publication)?;
+        let previous_rotation_generation = membership_rotation_generation(&original.entry)?;
+        let pending_rotation_generation = membership_rotation_generation(&publication.entry)?;
         let replacement = consume_retired_membership_candidate_on(&tx, &expected)?
             .replace_attempt(candidate.publication.clone())?;
         let installed = super::observed_store_publication::load_store_current_publication_on(&tx)?;
@@ -601,9 +601,9 @@ fn validate_membership_candidate_objects(
 }
 
 pub(super) fn membership_rotation_generation(
-    publication: &coven_protocol::membership_mutation::PreparedMembershipPublication,
+    entry: &coven_protocol::membership::MembershipEntry,
 ) -> Result<Option<u64>, DbError> {
-    match &publication.entry.change {
+    match &entry.change {
         coven_protocol::membership::StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => {
             let generation = wrapped_keys
                 .first()

@@ -869,12 +869,6 @@ pub struct DurableMembershipMutation {
     pub progress_bytes: Vec<u8>,
 }
 
-#[derive(Clone, Copy)]
-pub enum MembershipMutationActivation {
-    WithoutRotation,
-    Rotation { generation: u64 },
-}
-
 pub struct DurableSnapshotPublication {
     pub reference: StoreSnapshotRef,
     pub meta: ExactProtocolObject<SnapshotMeta>,

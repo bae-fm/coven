@@ -22,6 +22,7 @@ pub use conflict::{IncomingTimestampPolicy, TableSchema};
 use super::local_blob_cleanup::{
     exact_blob_bindings_on, record_obsolete_copy_intents_from_bindings_on,
 };
+use super::membership_mutations::membership_rotation_generation;
 use super::membership_rotation::commit_rotation_candidate_on;
 use super::{
     verified_store_authority::{VerifiedRegistrationLookup, VerifiedStoreLookup},

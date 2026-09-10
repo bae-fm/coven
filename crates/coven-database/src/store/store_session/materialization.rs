@@ -484,12 +484,14 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
         &self,
         verified_commit: &VerifiedStoreBatchCommit,
         acceptance: &crate::AcceptedStoreCommitEvidence,
+        history_evidence: &coven_protocol::store_commit::RetainedMergeCommitEvidence,
         operation_object_ids: Option<Vec<coven_protocol::store_commit::ObjectHash>>,
         membership_completion: Option<
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         >,
     ) -> Result<(), DbError> {
         let reference = verified_commit.reference();
+        history_evidence.validate_for(reference, verified_commit.value())?;
         let store_transaction = MergeMaterializationTransaction::from_store(self.store);
         if let Some(object_ids) = operation_object_ids {
             store_transaction.activate_store_operation_remote_objects(reference, &object_ids)?;
@@ -510,7 +512,12 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
         }
         if let Some(completion) = membership_completion {
             store_transaction
-                .complete_membership_journal(completion, acceptance, verified_commit)
+                .complete_membership_journal(
+                    completion,
+                    acceptance,
+                    verified_commit,
+                    history_evidence,
+                )
                 .map_err(|error| DbError::context("complete exact membership journal", error))?;
         }
         Ok(())
@@ -576,6 +583,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
         self.complete_published_store_operation(
             &verified_commit,
             &acceptance,
+            &history_evidence,
             operation_object_ids,
             membership_completion,
         )?;
@@ -1079,11 +1087,13 @@ impl StoreDatabase {
     }
 
     /// Complete an operation that an accepted pull already installed. Its
-    /// historical materialization inputs are no longer required after retirement.
+    /// exact candidate evidence still binds completion after its historical
+    /// materialization inputs have been retired.
     pub async fn complete_installed_store_operation(
         &self,
         verified_commit: VerifiedStoreBatchCommit,
         acceptance: crate::AcceptedStoreCommitEvidence,
+        history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
         operation_object_ids: Option<Vec<coven_protocol::store_commit::ObjectHash>>,
         membership_completion: Option<
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
@@ -1097,6 +1107,7 @@ impl StoreDatabase {
                 transaction.complete_published_store_operation(
                     &verified_commit,
                     &acceptance,
+                    &history_evidence,
                     operation_object_ids,
                     membership_completion,
                 )?;

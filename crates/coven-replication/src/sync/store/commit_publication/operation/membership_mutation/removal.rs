@@ -562,24 +562,23 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             .await?;
         let current_remotes = candidate_remotes(&candidate)?;
         let reference = operation
-                    .publish_membership_activation(
-                        &transition,
-                        &publication,
-                        candidate.clone(),
-                        coven_protocol::membership_mutation::StoreMembershipJournalCompletion::RotationMutation {
-                        intent_hash: persistence.intent_hash(),
-                        progress_bytes: MembershipMutationProgress::RevokeActivated {
-                            candidate: candidate.reference.clone(),
-                        }
-                        .encode()?,
-                        generation: keyring.current_generation(),
-                        remote_objects: current_remotes
-                            .iter()
-                            .map(|remote| remote.record().clone())
-                            .collect(),
-                    },
-                    )
-                    .await?;
+            .publish_membership_activation(
+                &transition,
+                &publication,
+                candidate.clone(),
+                coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
+                    intent_hash: persistence.intent_hash(),
+                    progress_bytes: MembershipMutationProgress::RevokeActivated {
+                        candidate: candidate.reference.clone(),
+                    }
+                    .encode()?,
+                    remote_objects: current_remotes
+                        .iter()
+                        .map(|remote| remote.record().clone())
+                        .collect(),
+                },
+            )
+            .await?;
         if reference != candidate.reference {
             return Err(MembershipMutationError::InvalidDurableMutation(
                 "membership removal accepted another Store candidate".to_string(),

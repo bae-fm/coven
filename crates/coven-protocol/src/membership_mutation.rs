@@ -255,12 +255,6 @@ pub enum StoreMembershipJournalCompletion {
         progress_bytes: Vec<u8>,
         remote_objects: Vec<crate::remote_object::RemoteObjectRecord>,
     },
-    RotationMutation {
-        intent_hash: ObjectHash,
-        progress_bytes: Vec<u8>,
-        generation: u64,
-        remote_objects: Vec<crate::remote_object::RemoteObjectRecord>,
-    },
     OwnerPromotion {
         transition: crate::owner_promotion_journal::OwnerPromotionJournalTransition,
         remote_objects: Vec<crate::remote_object::RemoteObjectRecord>,
@@ -274,7 +268,6 @@ impl StoreMembershipJournalCompletion {
             | Self::DeviceJoin { remote_objects }
             | Self::DeviceExclusion { remote_objects, .. }
             | Self::Mutation { remote_objects, .. }
-            | Self::RotationMutation { remote_objects, .. }
             | Self::OwnerPromotion { remote_objects, .. } => remote_objects,
         };
         remote_objects.push(remote);
@@ -286,7 +279,6 @@ impl StoreMembershipJournalCompletion {
             | Self::DeviceJoin { remote_objects }
             | Self::DeviceExclusion { remote_objects, .. }
             | Self::Mutation { remote_objects, .. }
-            | Self::RotationMutation { remote_objects, .. }
             | Self::OwnerPromotion { remote_objects, .. } => remote_objects,
         };
         remote_objects
@@ -304,7 +296,6 @@ impl StoreMembershipJournalCompletion {
             | Self::DeviceJoin { remote_objects }
             | Self::DeviceExclusion { remote_objects, .. }
             | Self::Mutation { remote_objects, .. }
-            | Self::RotationMutation { remote_objects, .. }
             | Self::OwnerPromotion { remote_objects, .. } => remote_objects,
         };
         remote_objects

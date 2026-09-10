@@ -191,7 +191,7 @@ impl StoreSession<'_> {
         let RetiredStoreCandidateInputs::Membership(original) = &retired.inputs else {
             unreachable!("retired membership candidate is validated")
         };
-        let rotation_generation = membership_rotation_generation(original)?;
+        let rotation_generation = membership_rotation_generation(&original.entry)?;
         StoreTransaction::new(&tx, self.store_dir).require_accepted_membership(
             self.verified_store_authority,
             &membership,

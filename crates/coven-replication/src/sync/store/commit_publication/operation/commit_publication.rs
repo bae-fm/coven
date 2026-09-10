@@ -544,6 +544,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .complete_installed_store_operation(
                 verified_commit,
                 accepted,
+                candidate.history_evidence.clone(),
                 operation_object_ids,
                 membership_completion,
             )

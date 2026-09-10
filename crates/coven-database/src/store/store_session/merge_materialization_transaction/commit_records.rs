@@ -271,6 +271,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         completion: coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         acceptance: &crate::AcceptedStoreCommitEvidence,
         verified_commit: &VerifiedStoreBatchCommit,
+        history_evidence: &coven_protocol::store_commit::RetainedMergeCommitEvidence,
     ) -> Result<(), DbError> {
         // The publication transaction resolves this evidence against its live
         // baseline and records any new materialization before completing journals.
@@ -317,19 +318,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 candidate,
                 &remote_objects,
                 progress_bytes,
-                crate::MembershipMutationActivation::WithoutRotation,
-            ),
-            coven_protocol::membership_mutation::StoreMembershipJournalCompletion::RotationMutation {
-                intent_hash,
-                progress_bytes,
-                generation,
-                remote_objects,
-            } => self.record_activated_membership_candidate_mutation(
-                intent_hash,
-                candidate,
-                &remote_objects,
-                progress_bytes,
-                crate::MembershipMutationActivation::Rotation { generation },
+                &history_evidence.membership_proof.as_ref().ok_or_else(|| {
+                    DbError::Message("membership mutation completion has no exact membership proof".into())
+                })?.entry_value,
             ),
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion::OwnerPromotion {
                 transition,
@@ -448,7 +439,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         candidate: &StoreBatchCommitRef,
         remote_objects: &[coven_protocol::remote_object::RemoteObjectRecord],
         progress_bytes: Vec<u8>,
-        activation: crate::MembershipMutationActivation,
+        entry: &coven_protocol::membership::MembershipEntry,
     ) -> Result<(), DbError> {
         let mut unique = std::collections::BTreeSet::new();
         let object_ids = remote_objects
@@ -480,7 +471,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 "membership mutation changed during activated recording".to_string(),
             ));
         }
-        if let crate::MembershipMutationActivation::Rotation { generation } = activation {
+        if let Some(generation) = membership_rotation_generation(entry)? {
             super::commit_rotation_candidate_on(self.store.transaction, intent_hash, generation)?;
         }
         crate::store::clear_active_store_commit_for_owner_on(
