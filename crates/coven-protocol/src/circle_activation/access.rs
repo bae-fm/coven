@@ -119,7 +119,6 @@ impl VerifiedCircleImage {
 pub struct CircleEpochAccess {
     circle_id: CircleId,
     encryption: EncryptionService,
-    key_fingerprint: KeyFingerprint,
     writers: BTreeSet<String>,
 }
 
@@ -146,7 +145,7 @@ impl CircleEpochAccess {
     }
 
     pub fn key_fingerprint(&self) -> KeyFingerprint {
-        self.key_fingerprint
+        self.encryption.seal_key_fingerprint()
     }
 
     pub fn protocol_context(
@@ -193,7 +192,6 @@ impl CircleEpochAccess {
         Ok(Self {
             circle_id,
             encryption,
-            key_fingerprint,
             writers: roster.members().keys().cloned().collect(),
         })
     }
@@ -215,7 +213,7 @@ impl CircleEpochAccess {
                 reference.circle_id
             )));
         }
-        if self.key_fingerprint != reference.key_fingerprint {
+        if self.key_fingerprint() != reference.key_fingerprint {
             return Err(CircleStateError::Invariant(format!(
                 "Circle package key for {} differs from its activated control",
                 reference.circle_id
@@ -300,11 +298,9 @@ pub(super) fn epoch_access_from(
             circle_id,
             source,
         })?;
-    let key_fingerprint = verified.key_fingerprint;
     Ok(CircleEpochAccess {
         circle_id,
         encryption,
-        key_fingerprint,
         writers: roster.members().keys().cloned().collect(),
     })
 }
