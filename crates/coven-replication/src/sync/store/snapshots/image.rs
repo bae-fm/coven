@@ -589,12 +589,12 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 "Store root differs from bootstrap authority".to_string(),
             ));
         }
-        let snapshot = history_verifier
+        let selected = history_verifier
             .load_current_accepted_snapshot()
             .await
             .map_err(SnapshotError::from)?;
         let selected = if let Some(attempt) =
-            attempt.filter(|attempt| snapshot.meta.coverage.covers_commit(attempt))
+            attempt.filter(|attempt| selected.snapshot.meta.coverage.covers_commit(attempt))
         {
             let closure = history_verifier
                 .retained_device_join_bootstrap(attempt)
@@ -610,14 +610,12 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 .ok_or_else(|| {
                     SnapshotError::BootstrapState("retained Attempt has no snapshot image".into())
                 })?;
-            Some(history_verifier.verify_retained_join_snapshot(base).await?)
+            history_verifier.verify_retained_join_snapshot(base).await?
         } else {
-            None
+            selected
         };
-        let (snapshot, retained_authority) = match selected {
-            Some(selected) => (selected.snapshot, Some(selected.verified)),
-            None => (snapshot, None),
-        };
+        let snapshot = selected.snapshot;
+        let authority = selected.verified;
         let heads = &membership_floor.0;
         let mut resolutions = std::collections::BTreeSet::new();
         for reference in heads {
@@ -650,14 +648,6 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             .load_founder_registration()
             .await
             .map_err(SnapshotError::from)?;
-        let authority = match retained_authority {
-            Some(authority) => authority,
-            None => {
-                history_verifier
-                    .verify_installable_snapshot(&snapshot)
-                    .await?
-            }
-        };
         let coverage = snapshot.meta.coverage.clone();
         let database_image =
             SnapshotDatabaseImage::create(target_path.to_path_buf(), &plaintext)?.canonicalize()?;

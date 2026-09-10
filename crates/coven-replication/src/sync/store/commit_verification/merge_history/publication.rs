@@ -202,14 +202,11 @@ impl MergeHistoryVerifier<'_> {
         let snapshot = Self::accepted_snapshot_value(accepted, metadata);
         // This historical handoff must not replace the active verifier's floor.
         let verification = PublicationVerification::new(self);
-        verification
+        let authority = verification
             .verifier
             .admit_accepted_snapshot_verification_baseline(snapshot.clone())
             .await?;
-        let verified = verification
-            .verifier
-            .verify_installable_snapshot(&snapshot)
-            .await?;
+        let verified = VerifiedStoreSnapshotAuthority::from_authority(authority)?;
         Ok(SelectedStoreSnapshot { snapshot, verified })
     }
 
@@ -798,7 +795,7 @@ impl MergeHistoryVerifier<'_> {
 
     pub(crate) async fn load_current_accepted_snapshot(
         &mut self,
-    ) -> Result<coven_database::PublishedStoreSnapshot, StorePullError> {
+    ) -> Result<SelectedStoreSnapshot, StorePullError> {
         let verification = PublicationVerification::new(self);
         let mut publication = Box::pin(
             verification
@@ -806,15 +803,11 @@ impl MergeHistoryVerifier<'_> {
                 .load_current_accepted_publication_inner(),
         )
         .await?;
-        let snapshot = publication
-            .accepted_snapshots
-            .pop()
-            .map(|selected| selected.snapshot)
-            .ok_or_else(|| {
-                StorePullError::InvalidState(
-                    "Store current publication record has no accepted snapshot".to_string(),
-                )
-            })?;
+        let snapshot = publication.accepted_snapshots.pop().ok_or_else(|| {
+            StorePullError::InvalidState(
+                "Store current publication record has no accepted snapshot".to_string(),
+            )
+        })?;
         verification.commit();
         Ok(snapshot)
     }

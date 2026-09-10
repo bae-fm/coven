@@ -9,6 +9,7 @@ struct VerifiedMergeSnapshotState {
 /// One snapshot chosen out of the candidates, with the verification that made
 /// it eligible. The two predicates answer different questions, so the evidence
 /// they produce has different types and cannot be swapped.
+#[derive(Debug)]
 pub(crate) struct SelectedStoreSnapshot {
     pub(crate) snapshot: coven_database::PublishedStoreSnapshot,
     pub(crate) verified: coven_database::VerifiedStoreSnapshotAuthority,
@@ -294,7 +295,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(super) async fn admit_accepted_snapshot_verification_baseline(
         &mut self,
         snapshot: coven_database::PublishedStoreSnapshot,
-    ) -> Result<(), StorePullError> {
+    ) -> Result<coven_protocol::store_commit::RetainedReplaySnapshotAuthority, StorePullError> {
         let baseline = coven_database::InstalledReplayBaseline::new(
             snapshot.meta.coverage.clone(),
             BTreeMap::new(),
@@ -342,20 +343,19 @@ impl<'a> MergeHistoryVerifier<'a> {
         if !membership.is_owner_now(&author.value().author_pubkey) {
             return Err(StorePullError::SnapshotAuthorNotOwner);
         }
-        coven_protocol::store_commit::RetainedReplaySnapshotAuthority {
+        let authority = coven_protocol::store_commit::RetainedReplaySnapshotAuthority {
             store_root: self.root.reference().clone(),
             founder_registration: self.founder.clone(),
             snapshot: snapshot.reference.clone(),
             metadata: snapshot.meta.clone(),
             snapshot_cut: StoreHistoryCut(snapshot.meta.coverage.commits().clone()),
             active_registrations: registrations,
-        }
-        .validate()
-        .map_err(StorePullError::Protocol)?;
+        };
+        authority.validate().map_err(StorePullError::Protocol)?;
         // This changes the verifier's read floor only. Live rows and their replay
         // retention remain owned by the database installation transaction.
         self.admit_installed_baseline(baseline)?;
-        Ok(())
+        Ok(authority)
     }
 
     /// Verify one snapshot as installable: the owner's signature over metadata

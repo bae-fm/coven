@@ -467,7 +467,8 @@ async fn owner_removal_preserves_device_authority_accepted_after_its_preparation
         let snapshot = history
             .load_current_accepted_snapshot()
             .await
-            .expect("verify the accepted snapshot after grant retirement");
+            .expect("verify the accepted snapshot after grant retirement")
+            .snapshot;
         assert_eq!(snapshot.reference, published.reference);
         assert!(
             snapshot
