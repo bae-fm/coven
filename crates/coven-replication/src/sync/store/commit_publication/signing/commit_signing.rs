@@ -69,7 +69,6 @@ impl LocalStoreWriter {
 
     pub(crate) fn sign_device_acknowledgement(
         &self,
-        store_root_hash: coven_protocol::store_commit::ObjectHash,
         sequence: u64,
         assertion: coven_protocol::store_commit::StoreAckAssertion,
         sync_time: String,
@@ -79,7 +78,7 @@ impl LocalStoreWriter {
         coven_protocol::store_commit::StoreProtocolError,
     > {
         coven_protocol::store_commit::StoreAck::signed(
-            store_root_hash,
+            self.registration.value().store_root.store_root_hash,
             sequence,
             assertion,
             sync_time,
@@ -308,7 +307,7 @@ impl LocalStoreWriter {
             coven_protocol::store_commit::StoreProtocolError,
         > {
             coven_protocol::store_commit::StoreBatchCommit::signed_operations(
-                context.root.store_root_hash,
+                registration.store_root.store_root_hash,
                 write_id,
                 context.coord,
                 registration_ref,
@@ -333,7 +332,7 @@ impl LocalStoreWriter {
         let registration_ref = self.registration.reference().clone();
         let registration = self.registration.value();
         let signer = &self.device_signer;
-        let root_hash = context.root.store_root_hash;
+        let root_hash = registration.store_root.store_root_hash;
         let commit = match batch {
             StoreOperationBatch::AbandonCandidates(manifests) => {
                 StoreBatchCommit::signed_with_candidate_abandonment(

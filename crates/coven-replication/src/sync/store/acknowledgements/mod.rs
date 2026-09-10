@@ -346,7 +346,6 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         let acknowledgement = self
             .local_writer
             .sign_device_acknowledgement(
-                root.store_root_hash,
                 sequence,
                 assertion,
                 sync_time,
@@ -625,7 +624,6 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         StoreAckError,
     > {
         let value = self.local_writer.sign_device_acknowledgement(
-            plan.root().store_root_hash,
             sequence,
             self.local_writer.device_acknowledgement_assertion(
                 plan.predecessor_cut()?,

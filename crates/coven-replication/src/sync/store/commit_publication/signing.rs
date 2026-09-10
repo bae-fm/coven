@@ -3,7 +3,6 @@ use coven_keys::keys::UserKeypair;
 use std::sync::Arc;
 
 pub(crate) struct StoreOperationSigningContext {
-    pub(super) root: coven_protocol::store_commit::StoreRootRef,
     pub(super) coord: coven_protocol::store_commit::StoreCommitCoord,
     pub(super) order: coven_protocol::store_commit::StoreCommitOrder,
     pub(super) publication_base: coven_protocol::store_commit::StorePublicationBase,

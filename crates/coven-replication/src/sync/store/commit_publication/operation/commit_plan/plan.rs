@@ -118,7 +118,6 @@ impl StoreOperationCommitPlan {
         self.writer.sign_operation_batch(
             write_id,
             StoreOperationSigningContext {
-                root: self.root.clone(),
                 coord: self.coord.clone(),
                 order: self.order.clone(),
                 publication_base: self.publication_previous.record().publication_base(),
