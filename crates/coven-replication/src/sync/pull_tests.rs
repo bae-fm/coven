@@ -4,6 +4,9 @@
 //! pulls and applies them through a real [`coven_database::Database`], exercising
 //! the real `pull_changes` + blob plumbing.
 
+#[path = "pull_tests/browsable_versions.rs"]
+mod browsable_versions;
+
 use crate::sync::store::pull::HeldStorePositionReason;
 use std::collections::HashMap;
 use std::sync::Arc;

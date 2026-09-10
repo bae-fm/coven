@@ -471,29 +471,10 @@ impl RowBlobAuthority {
     }
 }
 
-/// Whether `locator` describes exactly the row version it was minted for.
-///
-/// A stored blob's locator carries the namespace, id, plaintext size and hash,
-/// and encryption scope of the row it was sealed from. Anything that hands a
-/// `StoredBlobRef` and a row to each other checks this before trusting the pair.
-///
-/// [`RowBlobRef::new`] enforces the same facts and more, one field at a time so
-/// it can name which one diverged; this is the yes-or-no form for callers that
-/// answer a mismatch their own way.
-/// Whether `locator` is the blob this row already has at the provider, for the
-/// audience it is being published to.
-///
-/// This is deliberately **not** equality with a freshly minted locator. A
-/// locator carries the fingerprint of the key that sealed its bytes, and that
-/// key is whichever generation the keyring sealed under at upload time. Minting
-/// one today and demanding the stored one match it says "any key rotation
-/// re-identifies every blob in the Store" — which would ask the publisher to
-/// re-upload bytes it has, under a name nothing has ever written, and for a
-/// user-provided blob there is no local file left to re-upload from.
-///
-/// What actually identifies an already-uploaded blob is its content and where
-/// it is readable from: namespace, id, plaintext size and hash, key scope, and
-/// audience. An audience move is a genuine re-seal and is still refused here.
+/// Whether this row can retain its uploaded object for the destination audience.
+/// Content, encryption scope, audience, and a Browsable locator's readable path
+/// must agree. A Store key rotation alone does not require uploading the same
+/// bytes again: the accepted locator retains its original sealing key.
 pub fn locator_is_this_rows_upload(
     locator: &locator::BlobLocator,
     blob: &BlobRef,
@@ -503,8 +484,15 @@ pub fn locator_is_this_rows_upload(
 ) -> bool {
     locator_describes_row(locator, blob, plaintext_size, plaintext_hash)
         && &locator.audience() == audience
+        && locator
+            .cloud_path()
+            .is_none_or(|path| blob.cloud_path.as_deref() == Some(path))
 }
 
+/// Whether the object supplies this row's plaintext and encryption scope.
+/// The readable path and audience may differ when this object is the source
+/// for a rename or an audience move; retaining it as the destination upload
+/// additionally requires [`locator_is_this_rows_upload`].
 pub fn locator_describes_row(
     locator: &locator::BlobLocator,
     blob: &BlobRef,

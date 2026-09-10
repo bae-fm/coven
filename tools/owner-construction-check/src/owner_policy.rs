@@ -312,6 +312,11 @@ pub(super) const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build",
     ),
     (
+        "crates/coven-replication/src/sync/pull_tests/browsable_versions.rs",
+        "BrowsableFixture",
+        "new",
+    ),
+    (
         "crates/coven-replication/src/sync/store/circles/tests/recovery.rs",
         "RevokedOperation",
         "prepare",
