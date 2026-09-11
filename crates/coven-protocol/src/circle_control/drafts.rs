@@ -17,49 +17,69 @@ impl PreparedCircleControl {
     }
 }
 
+/// One recipient's sealed access leaf beside its plaintext: the sealed bytes
+/// as they appear in the control's access map, and the signed leaf they carry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedAccessLeaf {
     pub bytes: Vec<u8>,
     pub value: CircleAccessLeaf,
-    pub leaf_hash: ObjectHash,
 }
 
 impl PreparedAccessLeaf {
+    /// Seal a signed leaf to its own recipient.
+    pub fn seal(value: CircleAccessLeaf) -> Result<Self, CircleTransitionError> {
+        let recipient_x25519 = keys::ed25519_hex_to_x25519_public_key(&value.recipient_pubkey)
+            .map_err(|_| CircleTransitionError::InvalidRecipient(value.recipient_pubkey.clone()))?;
+        let plaintext =
+            serde_json::to_vec(&value).expect("circle access leaf serialization cannot fail");
+        Ok(Self {
+            bytes: keys::seal_box_encrypt(&plaintext, &recipient_x25519),
+            value,
+        })
+    }
+
+    /// Open one control access entry with the recipient's own identity key. The
+    /// caller checks the leaf's context against the control it came from.
+    pub fn open(
+        entry: &CircleAccessEntry,
+        identity: &UserKeypair,
+    ) -> Result<Self, crate::circle_activation::CircleStateError> {
+        let bytes = hex::decode(&entry.sealed).map_err(|source| {
+            crate::circle_activation::CircleStateError::Hex {
+                subject: "Circle access entry",
+                source,
+            }
+        })?;
+        let plaintext = keys::seal_box_decrypt(&bytes, &identity.to_x25519_secret_key())?;
+        let value = serde_json::from_slice(&plaintext).map_err(|source| {
+            crate::circle_activation::CircleStateError::Json {
+                operation: "parse sealed Circle access leaf",
+                source,
+            }
+        })?;
+        Ok(Self { bytes, value })
+    }
+
+    /// This leaf's entry as the signing control carries it.
+    pub fn entry(&self) -> CircleAccessEntry {
+        CircleAccessEntry {
+            sealed: hex::encode(&self.bytes),
+            value_hash: ObjectHash::digest(
+                &serde_json::to_vec(&self.value)
+                    .expect("circle access leaf serialization cannot fail"),
+            ),
+        }
+    }
+
     pub fn verify(
         &self,
         control: &PreparedCircleControl,
         candidate_family: crate::store_commit::CandidateFamilyId,
     ) -> bool {
         self.value.verify_for_control(control, candidate_family)
-            && ObjectHash::digest(&self.bytes) == self.leaf_hash
+            && control.value.value.access.entry(&self.value.recipient_slot) == Some(&self.entry())
     }
-
-    pub fn verify_envelope(
-        &self,
-        control: &PreparedCircleControl,
-        envelope: &AccessEnvelope,
-        candidate_family: crate::store_commit::CandidateFamilyId,
-    ) -> bool {
-        self.verify(control, candidate_family)
-            && envelope.verify(control, candidate_family)
-            && self.leaf_hash == envelope.leaf_hash
-            && envelope.value_hash
-                == ObjectHash::digest(
-                    &serde_json::to_vec(&self.value)
-                        .expect("circle access leaf serialization cannot fail"),
-                )
-            && self.value.leaf_id == envelope.leaf_id
-            && self.value.owner_pubkey == envelope.owner_pubkey
-            && self.value.recipient_slot == envelope.recipient_slot
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreparedCircleAccess {
-    pub leaf: PreparedAccessLeaf,
-    pub envelope: AccessEnvelope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,7 +126,7 @@ pub struct CircleTransitionDraft {
     pub close_intent: Option<CircleEpochCloseIntent>,
     pub close_finalization: Option<CircleEpochCloseFinalizationDraft>,
     pub close_cancellation: Option<CircleEpochCloseCancellationDraft>,
-    pub access: Vec<PreparedCircleAccess>,
+    pub access: Vec<PreparedAccessLeaf>,
     pub control: PreparedCircleControl,
 }
 
@@ -130,17 +150,16 @@ pub(super) struct FounderRosterObjects {
     pub(super) resolved: ResolvedCircleRoster,
 }
 
-pub(super) struct CircleAccessDraft<'identity> {
-    store_root_hash: ObjectHash,
-    candidate_family: crate::store_commit::CandidateFamilyId,
-    circle_id: CircleId,
-    access_root: ObjectHash,
-    leaves: Vec<PreparedAccessLeaf>,
-    proofs: Vec<Vec<MerkleStep>>,
-    signer: &'identity dyn coven_keys::keys::IdentityKeyAuthority,
+/// Every Store member's sealed access leaf for one control, and the map the
+/// control signs over them.
+pub(super) struct CircleAccessSet {
+    pub(super) leaves: Vec<PreparedAccessLeaf>,
+    pub(super) map: CircleAccessMap,
 }
 
-impl<'identity> CircleAccessDraft<'identity> {
+impl CircleAccessSet {
+    /// Sign one leaf per Store member — Active for roster members, Inactive
+    /// otherwise — seal each to its recipient, and build the control's map.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare(
         store_root_hash: ObjectHash,
@@ -154,8 +173,7 @@ impl<'identity> CircleAccessDraft<'identity> {
         store_membership: &StoreMembershipStateRef,
         store_members: &[(String, MemberRole)],
         bootstraps: &std::collections::BTreeMap<String, CircleBootstrapRef>,
-        ids: &dyn coven_foundation::id_provider::IdProvider,
-        signer: &'identity dyn coven_keys::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let author_pubkey = keys::public_key_hex(signer);
         let leaves = store_members
@@ -177,84 +195,17 @@ impl<'identity> CircleAccessDraft<'identity> {
                     candidate_family,
                     circle_id,
                     epoch_id,
-                    leaf_id: AccessLeafId::generate(ids),
                     owner_pubkey: author_pubkey.clone(),
                     recipient_pubkey: recipient_pubkey.clone(),
                     recipient_slot,
                     disposition,
                     store_membership: store_membership.clone(),
                 };
-                let value = Signed::sign(value, signer);
-                let recipient_x25519 = keys::ed25519_hex_to_x25519_public_key(recipient_pubkey)
-                    .map_err(|_| {
-                        CircleTransitionError::InvalidRecipient(recipient_pubkey.clone())
-                    })?;
-                let plaintext =
-                    serde_json::to_vec(&value).expect("circle access serialization cannot fail");
-                let bytes = keys::seal_box_encrypt(&plaintext, &recipient_x25519);
-                let leaf_hash = ObjectHash::digest(&bytes);
-                Ok::<PreparedAccessLeaf, CircleTransitionError>(PreparedAccessLeaf {
-                    bytes,
-                    value,
-                    leaf_hash,
-                })
+                PreparedAccessLeaf::seal(Signed::sign(value, signer))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
-        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
-        Ok(Self {
-            store_root_hash,
-            candidate_family,
-            circle_id,
-            access_root,
-            leaves,
-            proofs,
-            signer,
-        })
-    }
-
-    pub(super) fn access_root(&self) -> ObjectHash {
-        self.access_root
-    }
-
-    pub(super) fn finish(
-        self,
-        control: &PreparedCircleControl,
-    ) -> Result<Vec<PreparedCircleAccess>, CircleTransitionError> {
-        let author_pubkey = keys::public_key_hex(self.signer);
-        if control.value.store_root_hash != self.store_root_hash
-            || control.value.circle_id != self.circle_id
-            || control.value.author_pubkey != author_pubkey
-            || control.value.access_root() != self.access_root
-        {
-            return Err(CircleTransitionError::InvalidCurrentState);
-        }
-        Ok(self
-            .leaves
-            .into_iter()
-            .zip(self.proofs)
-            .map(|(leaf, proof)| {
-                let envelope = AccessEnvelopeBody {
-                    store_root_hash: self.store_root_hash,
-                    candidate_family: self.candidate_family,
-                    circle_id: self.circle_id,
-                    owner_pubkey: author_pubkey.clone(),
-                    recipient_slot: leaf.value.recipient_slot.clone(),
-                    control_hash: control.coord.control_hash(),
-                    leaf_id: leaf.value.leaf_id,
-                    leaf_hash: leaf.leaf_hash,
-                    value_hash: ObjectHash::digest(
-                        &serde_json::to_vec(&leaf.value)
-                            .expect("circle access leaf serialization cannot fail"),
-                    ),
-                    proof,
-                };
-                PreparedCircleAccess {
-                    leaf,
-                    envelope: Signed::sign(envelope, self.signer),
-                }
-            })
-            .collect())
+        let map = CircleAccessMap::from_leaves(&leaves)?;
+        Ok(Self { leaves, map })
     }
 }
 
@@ -270,7 +221,7 @@ pub struct PreparedCircleTransition {
     pub close_intent: Option<CircleEpochCloseIntent>,
     pub close_outcome: Option<CircleEpochCloseOutcome>,
     pub close_cancellation: Option<CircleEpochCloseCancellation>,
-    pub access: Vec<PreparedCircleAccess>,
+    pub access: Vec<PreparedAccessLeaf>,
     pub control: PreparedCircleControl,
 }
 

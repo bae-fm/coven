@@ -241,20 +241,18 @@ pub(crate) fn candidate_manifest(
                         reference: reference.clone(),
                     });
                 }
-                if control
-                    .objects()
-                    .access
-                    .iter()
-                    .any(|access| access.envelope.control_hash != control.control().control_hash())
-                {
-                    return Err(StoreProtocolError::Malformed(
-                        "Circle access envelope differs from its activating control".to_string(),
-                    ));
-                }
                 objects.extend(
-                    control.objects().access.iter().cloned().map(|access| {
-                        CandidateExclusiveObjectRef::CircleAccess { circle_id, access }
-                    }),
+                    control
+                        .objects()
+                        .bootstraps
+                        .iter()
+                        .cloned()
+                        .map(
+                            |bootstrap| CandidateExclusiveObjectRef::CircleBootstrapImage {
+                                circle_id,
+                                bootstrap,
+                            },
+                        ),
                 );
             }
         }
@@ -267,25 +265,27 @@ pub(crate) fn candidate_manifest(
         serde_json::to_vec(object).expect("candidate object serialization cannot fail")
     });
     let mut exact_refs = BTreeSet::new();
-    let mut access_keys = BTreeSet::new();
+    let mut bootstrap_keys = BTreeSet::new();
     for object in &objects {
         validate_candidate_object_path(family, object)?;
         match object {
-            CandidateExclusiveObjectRef::CircleAccess { circle_id, access } => {
+            CandidateExclusiveObjectRef::CircleBootstrapImage {
+                circle_id,
+                bootstrap,
+            } => {
                 let key = (
                     *circle_id,
-                    access.leaf.owner_pubkey.clone(),
-                    access.leaf.recipient_slot.clone(),
-                    access.envelope.control_hash,
+                    bootstrap.owner_pubkey.clone(),
+                    bootstrap.epoch_id,
+                    bootstrap.recipient_slot.clone(),
                 );
-                if !access_keys.insert(key) {
+                if !bootstrap_keys.insert(key) {
                     return Err(StoreProtocolError::Malformed(
-                        "candidate object manifest repeats a Circle access semantic key"
+                        "candidate object manifest repeats a Circle bootstrap semantic key"
                             .to_string(),
                     ));
                 }
-                insert_candidate_exact_ref(&mut exact_refs, &access.leaf.object)?;
-                insert_candidate_exact_ref(&mut exact_refs, &access.envelope.object)?;
+                insert_candidate_exact_ref(&mut exact_refs, &bootstrap.image.object)?;
             }
             CandidateExclusiveObjectRef::CircleEpochCloseIntent { reference, .. } => {
                 insert_candidate_exact_ref(&mut exact_refs, &reference.object)?;
@@ -340,8 +340,27 @@ pub(super) fn validate_candidate_object_path(
             }
             Ok(())
         }
-        CandidateExclusiveObjectRef::CircleAccess { circle_id, access } => {
-            validate_circle_access_ref(*circle_id, family, access)?;
+        CandidateExclusiveObjectRef::CircleBootstrapImage {
+            circle_id,
+            bootstrap,
+        } => {
+            let expected = format!(
+                "{}.db",
+                circle_bootstrap_image_semantic_prefix(
+                    *circle_id,
+                    family,
+                    &bootstrap.owner_pubkey,
+                    bootstrap.epoch_id,
+                    &bootstrap.recipient_slot,
+                    bootstrap.image.image_hash,
+                )
+            );
+            if bootstrap.image.object.slot().logical_key() != expected {
+                return Err(StoreProtocolError::RelocatedCandidateObject {
+                    expected,
+                    actual: bootstrap.image.object.slot().logical_key().to_string(),
+                });
+            }
             Ok(())
         }
         CandidateExclusiveObjectRef::CircleEpochCloseIntent {
@@ -403,54 +422,6 @@ pub(super) fn validate_candidate_object_path(
             Ok(())
         }
     }
-}
-
-pub(super) fn validate_circle_access_ref(
-    circle_id: CircleId,
-    family: CandidateFamilyId,
-    access: &CircleAccessObjectRef,
-) -> Result<(), StoreProtocolError> {
-    if access.leaf.owner_pubkey != access.envelope.owner_pubkey
-        || access.leaf.recipient_slot != access.envelope.recipient_slot
-        || access.leaf.leaf_id != access.envelope.leaf_id
-        || access.leaf.leaf_hash != access.envelope.leaf_hash
-        || access.leaf.leaf_hash != access.leaf.object.stored_hash()
-    {
-        return Err(StoreProtocolError::Malformed(
-            "paired Circle access leaf and envelope references differ".to_string(),
-        ));
-    }
-    let leaf_expected = circle_access_leaf_semantic_prefix(
-        circle_id,
-        family,
-        &access.leaf.owner_pubkey,
-        access.leaf.epoch_id,
-        &access.leaf.recipient_slot,
-        access.leaf.leaf_id,
-    );
-    if access.leaf.object.slot().logical_key() != leaf_expected {
-        return Err(StoreProtocolError::RelocatedCandidateObject {
-            expected: leaf_expected,
-            actual: access.leaf.object.slot().logical_key().to_string(),
-        });
-    }
-    let envelope_expected = format!(
-        "{}.json",
-        circle_access_envelope_semantic_prefix(
-            circle_id,
-            family,
-            &access.envelope.owner_pubkey,
-            &access.envelope.recipient_slot,
-            access.envelope.control_hash,
-        )
-    );
-    if access.envelope.object.slot().logical_key() != envelope_expected {
-        return Err(StoreProtocolError::RelocatedCandidateObject {
-            expected: envelope_expected,
-            actual: access.envelope.object.slot().logical_key().to_string(),
-        });
-    }
-    Ok(())
 }
 
 pub(super) fn package_ref(

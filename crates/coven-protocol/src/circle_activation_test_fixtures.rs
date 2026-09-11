@@ -305,22 +305,21 @@ pub fn test_circle_activation(label: &str, active: bool) -> TestCircleActivation
         roster_resolutions: BTreeMap::new(),
         metadata_entries,
         metadata_heads,
-        access: Vec::new(),
+        bootstraps: Vec::new(),
     };
     let reference = creation.control_ref(objects, head_object);
     let control = creation.control.clone();
     let own_access = creation
         .access
         .iter()
-        .find(|access| access.leaf.value.recipient_pubkey == owner_pubkey)
+        .find(|access| access.value.recipient_pubkey == owner_pubkey)
         .expect("test Circle owner access");
     let activation = VerifiedCircleReference {
         reference,
         circle_id: creation.circle_id,
         control: control.clone(),
         local_access: active.then(|| VerifiedCircleAccess {
-            envelope: own_access.envelope.clone(),
-            leaf: own_access.leaf.clone(),
+            leaf: own_access.clone(),
             active: Some(VerifiedCircleActive {
                 roster: creation.resolved_roster(),
                 metadata: creation.metadata.clone(),

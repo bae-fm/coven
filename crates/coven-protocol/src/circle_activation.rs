@@ -3,15 +3,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::circle::{
-    AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf, CircleBootstrapRef, CircleControl,
+    CircleAccessDisposition, CircleAccessLeaf, CircleBootstrapRef, CircleControl,
     CircleControlCoord, CircleEpochCloseId, CircleId, CircleMetadata, PreparedAccessLeaf,
-    PreparedCircleAccess, PreparedCircleControl,
+    PreparedCircleControl,
 };
 use crate::circle_roster::CircleMaterializedRoster;
 use crate::store_commit::{
-    CandidateFamilyId, CircleAccessObjectRef, CircleControlRef, CirclePackageRef, ObjectHash,
-    StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StreamActivation, StreamActivationId, VerifiedStoreBatchCommit,
+    CandidateFamilyId, CircleControlRef, CirclePackageRef, ObjectHash, StoreBatchCommit,
+    StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StreamActivation,
+    StreamActivationId, VerifiedStoreBatchCommit,
 };
 use coven_keys::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 
@@ -34,6 +34,14 @@ pub enum CircleStateError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("{subject} is not valid hexadecimal: {source}")]
+    Hex {
+        subject: &'static str,
+        #[source]
+        source: hex::FromHexError,
+    },
+    #[error("Circle access key: {0}")]
+    Key(#[from] coven_keys::keys::KeyError),
     #[error("{operation} for Circle {circle_id}: {source}")]
     Encryption {
         operation: &'static str,

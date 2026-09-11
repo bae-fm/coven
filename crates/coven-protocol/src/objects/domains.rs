@@ -36,8 +36,6 @@ pub enum ProtectedObjectDomain {
     CircleEpochCloseIntent,
     CircleEpochCloseOutcome,
     CircleEpochCloseResponse,
-    CircleAccessLeaf,
-    CircleAccessEnvelope,
     CircleAcknowledgement,
     CircleSnapshotMeta,
     CircleSnapshotImage,
@@ -456,22 +454,6 @@ impl ProtectedObjectDomain {
                 }]),
                 extension: ".json",
             },
-            Self::CircleAccessLeaf => ProtocolObjectMetadata {
-                aad_label: b"circle-access-leaf",
-                path: ProtocolPathRule::CircleCandidate {
-                    kind: "access-leaves",
-                    component_count: 9,
-                },
-                extension: "",
-            },
-            Self::CircleAccessEnvelope => ProtocolObjectMetadata {
-                aad_label: b"circle-access-envelope",
-                path: ProtocolPathRule::CircleCandidate {
-                    kind: "access-envelopes",
-                    component_count: 8,
-                },
-                extension: ".json",
-            },
             Self::CircleAcknowledgement => ProtocolObjectMetadata {
                 aad_label: b"circle-acknowledgement",
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
@@ -581,14 +563,10 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipHeadAcceptance);
     pub const StoreWrappedKey: RecipientSealedProtocolObjectDomain =
         RecipientSealedProtocolObjectDomain(ProtectedObjectDomain::StoreWrappedKey);
-    pub const CircleAccessLeaf: RecipientSealedProtocolObjectDomain =
-        RecipientSealedProtocolObjectDomain(ProtectedObjectDomain::CircleAccessLeaf);
     pub const StorePackage: StoreEncryptedProtocolObjectDomain =
         StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::StorePackage);
     pub const CircleControl: StoreEncryptedProtocolObjectDomain =
         StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::CircleControl);
-    pub const CircleAccessEnvelope: StoreEncryptedProtocolObjectDomain =
-        StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::CircleAccessEnvelope);
     pub const CircleRoster: CircleProtocolObjectDomain =
         CircleProtocolObjectDomain(ProtectedObjectDomain::CircleRoster);
     pub const CircleRosterResolution: CircleProtocolObjectDomain =

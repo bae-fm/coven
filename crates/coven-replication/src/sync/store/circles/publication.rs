@@ -12,7 +12,6 @@ use coven_protocol::circle_activation::{
 use coven_protocol::circle_journal::CircleOperationJournal;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
-    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, StoreBatchCommit, StoreDeviceRegistration,
 };
 use coven_storage::CloudSyncObjectStorage;
@@ -92,16 +91,13 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             ));
         }
         verify_prepared_objects_are_signed(&journal, reference)?;
-        if creation.access.iter().any(|access| {
-            !access.leaf.verify_envelope(
-                &creation.control,
-                &access.envelope,
-                commit.candidate_family(),
-            )
-        }) {
+        if creation
+            .access
+            .iter()
+            .any(|access| !access.verify(&creation.control, commit.candidate_family()))
+        {
             return Err(CircleOperationError::InvalidState(
-                "prepared Circle access bytes, plaintext hash, ciphertext hash, or envelope differ"
-                    .to_string(),
+                "prepared Circle access leaf differs from its signed control entry".to_string(),
             ));
         }
         if let CurrentMergeAuthority::Revoked { grant_id } =
@@ -215,20 +211,22 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         let bootstrap_access = creation
             .access
             .iter()
-            .zip(&reference.objects().access)
-            .filter_map(|(access, object)| {
+            .filter_map(|access| {
                 let CircleAccessDisposition::Active {
                     bootstrap: Some(bootstrap),
                     ..
-                } = &access.leaf.value.disposition
+                } = &access.value.disposition
                 else {
                     return None;
                 };
-                Some((access, object, bootstrap))
+                Some((access, bootstrap))
             })
             .collect::<Vec<_>>();
-        for (access, object, bootstrap) in bootstrap_access {
-            if object.bootstrap.as_ref() != Some(&bootstrap.image) {
+        for (access, bootstrap) in bootstrap_access {
+            if !reference
+                .objects()
+                .names_bootstrap(&access.value, bootstrap)
+            {
                 return Err(CircleOperationError::JournalState(
                     "Circle bootstrap access differs from its signed object graph".to_string(),
                 ));
@@ -260,11 +258,11 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 ));
             }
             let prefix = coven_protocol::store_commit::circle_bootstrap_image_semantic_prefix(
-                access.leaf.value.circle_id,
+                access.value.circle_id,
                 commit.candidate_family(),
-                &access.leaf.value.owner_pubkey,
-                access.leaf.value.epoch_id,
-                &access.leaf.value.recipient_slot,
+                &access.value.owner_pubkey,
+                access.value.epoch_id,
+                &access.value.recipient_slot,
                 bootstrap.image.image_hash,
             );
             self.append_hashed_step(
@@ -372,26 +370,6 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 ));
             }
         }
-        for (index, access) in creation.access.iter().enumerate() {
-            self.append_step(
-                &mut journal,
-                &format!("access-leaf-{index}"),
-                &ProtocolObjectContext::recipient_sealed(
-                    store_root_hash,
-                    ProtocolObjectDomain::CircleAccessLeaf,
-                ),
-                &circle_access_leaf_semantic_prefix(
-                    access.leaf.value.circle_id,
-                    commit.candidate_family(),
-                    &access.leaf.value.owner_pubkey,
-                    access.leaf.value.epoch_id,
-                    &access.leaf.value.recipient_slot,
-                    access.leaf.value.leaf_id,
-                ),
-                &access.leaf.bytes,
-            )
-            .await?;
-        }
         self.append_step(
             &mut journal,
             "control",
@@ -422,26 +400,6 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 .expect("circle control head serialization cannot fail"),
         )
         .await?;
-        for (index, access) in creation.access.iter().enumerate() {
-            self.append_step(
-                &mut journal,
-                &format!("access-envelope-{index}"),
-                &ProtocolObjectContext::store_encrypted(
-                    store_root_hash,
-                    ProtocolObjectDomain::CircleAccessEnvelope,
-                ),
-                &circle_access_envelope_semantic_prefix(
-                    access.envelope.circle_id,
-                    commit.candidate_family(),
-                    &access.envelope.owner_pubkey,
-                    &access.envelope.recipient_slot,
-                    access.envelope.control_hash,
-                ),
-                &serde_json::to_vec(&access.envelope)
-                    .expect("access envelope serialization cannot fail"),
-            )
-            .await?;
-        }
         let verified = self
             .local_writer
             .load_circle_activations(
@@ -665,12 +623,8 @@ fn verify_prepared_objects_are_signed(
     if let Some(cancellation) = &objects.close_cancellation {
         signed.insert(cancellation.object.clone());
     }
-    for access in &objects.access {
-        signed.insert(access.leaf.object.clone());
-        signed.insert(access.envelope.object.clone());
-        if let Some(bootstrap) = &access.bootstrap {
-            signed.insert(bootstrap.object.clone());
-        }
+    for bootstrap in &objects.bootstraps {
+        signed.insert(bootstrap.image.object.clone());
     }
     for (step, object) in &operation.prepared_objects {
         if !signed.contains(object) {
@@ -700,13 +654,13 @@ fn expected_local_circle_activation(
     let access = creation
         .access
         .iter()
-        .find(|access| access.leaf.value.recipient_pubkey == author_pubkey)
+        .find(|access| access.value.recipient_pubkey == author_pubkey)
         .ok_or_else(|| {
             CircleOperationError::InvalidState(
                 "Circle author has no journaled access disposition".to_string(),
             )
         })?;
-    let active = match &access.leaf.value.disposition {
+    let active = match &access.value.disposition {
         CircleAccessDisposition::Active { .. } => Some(VerifiedCircleActive {
             roster: creation.roster.clone(),
             metadata: creation.metadata.clone(),
@@ -718,8 +672,7 @@ fn expected_local_circle_activation(
         circle_id: creation.circle_id,
         control: creation.control.clone(),
         local_access: Some(VerifiedCircleAccess {
-            envelope: access.envelope.clone(),
-            leaf: access.leaf.clone(),
+            leaf: access.clone(),
             active,
         }),
     })

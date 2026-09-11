@@ -987,10 +987,10 @@ async fn resolution_resumes_idempotently_after_a_restart() {
     // A crash between publication and activation: the resolution control commit
     // reaches durable storage, but the operation is interrupted before it claims
     // its device-stream head and records the activation. Resume finds the commit
-    // already published and completes idempotently. The resolution publishes
-    // 2*access + 4 exact objects (access leaves, control, control head, access
-    // envelopes, then the commit and the head); failing before the final head
-    // create leaves the commit published and activation not yet recorded.
+    // already published and completes idempotently. The resolution publishes four
+    // exact objects (the control, its head, then the commit and the publication
+    // head); failing before the final head create leaves the commit published and
+    // activation not yet recorded.
     let after_publication = ConflictFixture::build("resolve-restart-after").await;
     let (chosen, _losing) = after_publication.fork().await;
     let journal = after_publication.journal_resolution(&chosen).await;
@@ -1000,7 +1000,7 @@ async fn resolution_resumes_idempotently_after_a_restart() {
         .circle_control_activation_count_for_test(after_publication.circle_id)
         .await
         .expect("count circle activations");
-    let head_create_call = 2 * journal.operation().creation.access.len() + 4;
+    let head_create_call = 4;
     after_publication
         .home
         .fail_exact_create_before_call(head_create_call);

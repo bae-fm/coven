@@ -1,12 +1,14 @@
 //! Circle metadata, access records, controls, and creation objects.
 
+use std::collections::BTreeMap;
+
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use super::causal_grants::AuthorStreamId;
 use super::circle::CircleEpochCloseId;
-use super::circle::{generated_id_digest, AccessLeafId, CircleEpochId, CircleId};
+use super::circle::{generated_id_digest, CircleEpochId, CircleId};
 use super::circle_roster::{
     CircleAuthorStreamKey, CircleGrantCreationAuthority, CircleMaterializedRoster,
     CircleRosterChain, CircleRosterEntry, CircleRosterError, CircleRosterHead, CircleRosterHeadRef,
@@ -35,7 +37,7 @@ const CLOSE_RESPONSE_DOMAIN: &[u8] = b"coven.circle-epoch-close-response.v1\0";
 const CLOSE_EXCLUSION_DOMAIN: &[u8] = b"coven.circle-epoch-close-exclusion.v1\0";
 const CLOSE_OUTCOME_DOMAIN: &[u8] = b"coven.circle-epoch-close-outcome.v1\0";
 const CLOSE_CANCELLATION_DOMAIN: &[u8] = b"coven.circle-epoch-close-cancellation.v1\0";
-const ENVELOPE_DOMAIN: &[u8] = b"coven.circle-access-envelope.v1\0";
+const ACCESS_MAP_DOMAIN: &[u8] = b"coven.circle-access-map.v1\0";
 const OWNER_GRANT_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-owner-grant-id-generation.v1\0";
 
 mod access;
@@ -48,21 +50,20 @@ mod semantic_path;
 mod transition;
 
 pub use access::{
-    merkle_root_and_proofs, verify_merkle_proof, CircleAccessDisposition, CircleAccessLeaf,
-    CircleAccessLeafBody, MerkleStep,
+    CircleAccessDisposition, CircleAccessEntry, CircleAccessLeaf, CircleAccessLeafBody,
+    CircleAccessMap,
 };
 pub use access::{CircleBootstrapCoverageRef, CircleBootstrapRef};
 pub use control::{
-    merge_frontier_head, AccessEnvelope, AccessEnvelopeBody, CircleControl, CircleControlBody,
-    CircleControlHead, CircleControlState, CircleControlValue, DeletedCircle,
-    MergeCircleControlHeadRef, MergeCircleControlOrder, MergeCircleOwnerAuthorityRef,
-    ResolvedConflictBranch,
+    merge_frontier_head, CircleControl, CircleControlBody, CircleControlHead, CircleControlState,
+    CircleControlValue, DeletedCircle, MergeCircleControlHeadRef, MergeCircleControlOrder,
+    MergeCircleOwnerAuthorityRef, ResolvedConflictBranch,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use drafts::CircleTransitionDraftPolicy;
 pub use drafts::{
     CircleRosterDraftPolicy, CircleRosterPolicyObjects, CircleTransitionDraft,
-    CircleTransitionPolicyObjects, PreparedAccessLeaf, PreparedCircleAccess, PreparedCircleControl,
+    CircleTransitionPolicyObjects, PreparedAccessLeaf, PreparedCircleControl,
     PreparedCircleTransition,
 };
 pub use epoch_close::{

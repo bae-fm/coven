@@ -209,33 +209,6 @@ pub fn store_protocol_root_logical_key() -> &'static str {
     STORE_PROTOCOL_ROOT_SEMANTIC_PATH
 }
 
-pub fn circle_access_leaf_semantic_prefix(
-    circle_id: CircleId,
-    family: CandidateFamilyId,
-    owner_pubkey: &str,
-    epoch_id: CircleEpochId,
-    recipient_slot: &str,
-    leaf_id: AccessLeafId,
-) -> String {
-    format!(
-        "circles/{circle_id}/candidates/{}/access-leaves/{owner_pubkey}/{epoch_id}/{recipient_slot}/{leaf_id}",
-        family.as_hash(),
-    )
-}
-
-pub fn circle_access_envelope_semantic_prefix(
-    circle_id: CircleId,
-    family: CandidateFamilyId,
-    owner_pubkey: &str,
-    recipient_slot: &str,
-    control_hash: ObjectHash,
-) -> String {
-    format!(
-        "circles/{circle_id}/candidates/{}/access-envelopes/{owner_pubkey}/{recipient_slot}/{control_hash}",
-        family.as_hash(),
-    )
-}
-
 pub fn device_join_abandonment_semantic_prefix(attempt_id: DeviceJoinAttemptId) -> String {
     format!("{STORE_DEVICE_JOIN_ABANDONMENT_PREFIX}{attempt_id}")
 }

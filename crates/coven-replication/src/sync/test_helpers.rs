@@ -2476,7 +2476,6 @@ mod test_device {
             &self,
             draft: coven_protocol::circle::CircleTransitionDraft,
             history: &crate::sync::store::CircleTransitionHistory,
-            candidate_family: coven_protocol::store_commit::CandidateFamilyId,
         ) -> Result<
             (
                 coven_protocol::circle::PreparedCircleTransition,
@@ -2490,7 +2489,7 @@ mod test_device {
             self.circle_writer()
                 .await?
                 .circles()
-                .prepare_circle_activation_objects_for_test(draft, history, candidate_family)
+                .prepare_circle_activation_objects_for_test(draft, history)
                 .await
         }
 

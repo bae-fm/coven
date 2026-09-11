@@ -1,100 +1,5 @@
 use super::*;
 
-pub(super) fn validate_access_pairs(
-    objects: &[CandidateExclusiveObjectDomain],
-    materials: &std::collections::BTreeMap<ExactObjectRef, CandidateObjectMaterial>,
-) -> Result<(), RemoteObjectRecordError> {
-    let mut index = 0;
-    while index < objects.len() {
-        let CandidateExclusiveObjectDomain::CircleAccessLeaf {
-            family,
-            circle_id,
-            reference: leaf_ref,
-        } = &objects[index]
-        else {
-            index += 1;
-            continue;
-        };
-        let Some(CandidateExclusiveObjectDomain::CircleAccessEnvelope {
-            family: envelope_family,
-            circle_id: envelope_circle,
-            reference: envelope_ref,
-        }) = objects.get(index + 1)
-        else {
-            return Err(RemoteObjectRecordError::DomainMismatch);
-        };
-        if family != envelope_family
-            || circle_id != envelope_circle
-            || leaf_ref.owner_pubkey != envelope_ref.owner_pubkey
-            || leaf_ref.recipient_slot != envelope_ref.recipient_slot
-            || leaf_ref.leaf_id != envelope_ref.leaf_id
-            || leaf_ref.leaf_hash != envelope_ref.leaf_hash
-        {
-            return Err(RemoteObjectRecordError::DomainMismatch);
-        }
-        let leaf_material = materials
-            .get(&leaf_ref.object)
-            .ok_or(RemoteObjectRecordError::CandidateObjectMissing)?;
-        let envelope_material = materials
-            .get(&envelope_ref.object)
-            .ok_or(RemoteObjectRecordError::CandidateObjectMissing)?;
-        let leaf: crate::circle_control::CircleAccessLeaf =
-            serde_json::from_slice(&leaf_material.canonical_semantic_bytes)?;
-        let envelope: crate::circle_control::AccessEnvelope =
-            serde_json::from_slice(&envelope_material.canonical_semantic_bytes)?;
-        let leaf_bytes = serde_json::to_vec(&leaf)?;
-        if envelope.value_hash != ObjectHash::digest(&leaf_bytes) {
-            return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-        }
-        let bootstrap = match &leaf.disposition {
-            crate::circle_control::CircleAccessDisposition::Active { bootstrap, .. } => {
-                bootstrap.as_ref()
-            }
-            crate::circle_control::CircleAccessDisposition::Inactive => None,
-        };
-        match bootstrap {
-            Some(bootstrap) => {
-                let Some(CandidateExclusiveObjectDomain::CircleBootstrapImage {
-                    family: bootstrap_family,
-                    circle_id: bootstrap_circle,
-                    owner_pubkey,
-                    epoch_id,
-                    recipient_slot,
-                    reference,
-                }) = objects.get(index + 2)
-                else {
-                    return Err(RemoteObjectRecordError::DomainMismatch);
-                };
-                let material = materials
-                    .get(&reference.object)
-                    .ok_or(RemoteObjectRecordError::CandidateObjectMissing)?;
-                if bootstrap_family != family
-                    || bootstrap_circle != circle_id
-                    || owner_pubkey != &leaf.owner_pubkey
-                    || *epoch_id != leaf.epoch_id
-                    || recipient_slot != &leaf.recipient_slot
-                    || reference != &bootstrap.image
-                    || !bootstrap.verify_for_access(&leaf)
-                    || !material.canonical_semantic_bytes.is_empty()
-                {
-                    return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-                }
-                index += 3;
-            }
-            None => {
-                if matches!(
-                    objects.get(index + 2),
-                    Some(CandidateExclusiveObjectDomain::CircleBootstrapImage { .. })
-                ) {
-                    return Err(RemoteObjectRecordError::DomainMismatch);
-                }
-                index += 2;
-            }
-        }
-    }
-    Ok(())
-}
-
 pub(super) fn validate_candidate_exclusive_identity(
     identity: &CandidateExclusiveTarget,
     canonical_semantic_bytes: &[u8],
@@ -149,28 +54,6 @@ pub(super) fn validate_candidate_exclusive_identity(
             canonical_semantic_bytes,
             &identity.object,
         ),
-        CandidateExclusiveObjectDomain::CircleAccessLeaf {
-            family,
-            circle_id,
-            reference,
-        } => validate_circle_access_leaf_identity(
-            *family,
-            *circle_id,
-            reference,
-            canonical_semantic_bytes,
-            &identity.object,
-        ),
-        CandidateExclusiveObjectDomain::CircleAccessEnvelope {
-            family,
-            circle_id,
-            reference,
-        } => validate_circle_access_envelope_identity(
-            *family,
-            *circle_id,
-            reference,
-            canonical_semantic_bytes,
-            &identity.object,
-        ),
         CandidateExclusiveObjectDomain::CircleEpochCloseIntent {
             circle_id,
             reference,
@@ -203,23 +86,20 @@ pub(super) fn validate_candidate_exclusive_identity(
         ),
         CandidateExclusiveObjectDomain::CircleBootstrapImage {
             circle_id,
-            owner_pubkey,
-            epoch_id,
-            recipient_slot,
             reference,
             ..
         } => {
             let expected_prefix = crate::store_commit::circle_bootstrap_image_semantic_prefix(
                 *circle_id,
                 identity.family,
-                owner_pubkey,
-                *epoch_id,
-                recipient_slot,
-                reference.image_hash,
+                &reference.owner_pubkey,
+                reference.epoch_id,
+                &reference.recipient_slot,
+                reference.image.image_hash,
             );
             if !canonical_semantic_bytes.is_empty()
-                || reference.object != identity.object
-                || reference.object.slot().logical_key() != format!("{expected_prefix}.db")
+                || reference.image.object != identity.object
+                || reference.image.object.slot().logical_key() != format!("{expected_prefix}.db")
             {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
@@ -262,58 +142,6 @@ pub(super) fn validate_package_reference(
         }
         _ => Err(RemoteObjectRecordError::DomainMismatch),
     }
-}
-
-pub(super) fn validate_circle_access_leaf_identity(
-    family: CandidateFamilyId,
-    circle_id: CircleId,
-    reference: &crate::store_commit::CircleAccessLeafObjectRef,
-    canonical_semantic_bytes: &[u8],
-    object: &ExactObjectRef,
-) -> Result<(), RemoteObjectRecordError> {
-    let leaf: crate::circle_control::CircleAccessLeaf =
-        serde_json::from_slice(canonical_semantic_bytes)?;
-    let parsed_bytes = serde_json::to_vec(&leaf)?;
-    if parsed_bytes != canonical_semantic_bytes
-        || !leaf.verify_signature()
-        || leaf.candidate_family != family
-        || leaf.circle_id != circle_id
-        || leaf.owner_pubkey != reference.owner_pubkey
-        || leaf.epoch_id != reference.epoch_id
-        || leaf.recipient_slot != reference.recipient_slot
-        || leaf.leaf_id != reference.leaf_id
-        || reference.leaf_hash != reference.object.stored_hash()
-        || reference.object != *object
-    {
-        return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-    }
-    Ok(())
-}
-
-pub(super) fn validate_circle_access_envelope_identity(
-    family: CandidateFamilyId,
-    circle_id: CircleId,
-    reference: &crate::store_commit::CircleAccessEnvelopeObjectRef,
-    canonical_semantic_bytes: &[u8],
-    object: &ExactObjectRef,
-) -> Result<(), RemoteObjectRecordError> {
-    let envelope: crate::circle_control::AccessEnvelope =
-        serde_json::from_slice(canonical_semantic_bytes)?;
-    let parsed_bytes = serde_json::to_vec(&envelope)?;
-    if parsed_bytes != canonical_semantic_bytes
-        || envelope.verify_by(&envelope.owner_pubkey).is_err()
-        || envelope.candidate_family != family
-        || envelope.circle_id != circle_id
-        || envelope.owner_pubkey != reference.owner_pubkey
-        || envelope.recipient_slot != reference.recipient_slot
-        || envelope.control_hash != reference.control_hash
-        || envelope.leaf_id != reference.leaf_id
-        || envelope.leaf_hash != reference.leaf_hash
-        || reference.object != *object
-    {
-        return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-    }
-    Ok(())
 }
 
 pub(super) fn validate_circle_epoch_close_intent_identity(
@@ -576,28 +404,6 @@ pub(super) fn validate_retained_authority_identity(
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
-        RetainedAuthorityObjectDomain::CircleAccessLeaf {
-            family,
-            circle_id,
-            reference,
-        } => validate_circle_access_leaf_identity(
-            *family,
-            *circle_id,
-            reference,
-            canonical_semantic_bytes,
-            &identity.object,
-        )?,
-        RetainedAuthorityObjectDomain::CircleAccessEnvelope {
-            family,
-            circle_id,
-            reference,
-        } => validate_circle_access_envelope_identity(
-            *family,
-            *circle_id,
-            reference,
-            canonical_semantic_bytes,
-            &identity.object,
-        )?,
         RetainedAuthorityObjectDomain::CircleEpochCloseIntent {
             circle_id,
             reference,

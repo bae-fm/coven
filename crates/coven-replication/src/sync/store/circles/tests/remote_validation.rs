@@ -1,101 +1,78 @@
 use super::*;
 
 #[tokio::test]
-async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
+async fn remote_activation_rejects_a_tampered_access_entry_in_a_resigned_control() {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-    let (fixture, _home, signer, journal) =
-        persist_merge_operation_fixture(&db, db_store_dir.clone(), "circle-invented-access-refs")
-            .await;
+    let founder = UserKeypair::generate();
+    let fixture = TestStore::create_with_connection(
+        &db,
+        db_store_dir.clone(),
+        "circle-tampered-access-entry",
+        founder.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact Circle test Store");
     let (store, cloud_storage) = fixture;
     let device = store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
-        .expect("bind invented-access Circle object Store");
+        .expect("bind tampered-access Circle object Store");
+    let peer = UserKeypair::generate();
+    let peer_pubkey = keys::public_key_hex(&peer);
+    store
+        .admit_member(
+            &db,
+            db_store_dir.clone(),
+            &founder,
+            &peer_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Tampered access test Store",
+        )
+        .await
+        .expect("admit Store member outside the Circle roster");
+    let journal = store
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000001000-0000-founder", "Household")
+        .await
+        .expect("prepare Circle with Store-member access")
+        .journal;
     let old_commit = journal.commit().expect("parse prepared Store commit");
-    publish_prepared_objects(&store, &db, &journal).await;
-    let mut objects = old_commit
-        .operations()
-        .expect("Circle commit carries operations")
-        .circle_controls[0]
-        .objects()
-        .clone();
-    let original_ref = objects.access[0].clone();
-    let original_access = &journal.operation().creation.access[0];
-    let invented_recipient_slot = format!("{}-invented", original_ref.leaf.recipient_slot);
-    let candidate_family = old_commit.candidate_family();
-    let leaf_prefix = circle_access_leaf_semantic_prefix(
-        journal.operation().creation.circle_id,
-        candidate_family,
-        &original_ref.leaf.owner_pubkey,
-        original_ref.leaf.epoch_id,
-        &invented_recipient_slot,
-        original_ref.leaf.leaf_id,
-    );
-    let leaf = device
-        .prepare_circle_object(
-            &ProtocolObjectContext::recipient_sealed(
-                old_commit.store_root_hash,
-                ProtocolObjectDomain::CircleAccessLeaf,
-            ),
-            &leaf_prefix,
-            "",
-            original_access.leaf.bytes.clone(),
-        )
-        .await
-        .expect("prepare invented access leaf path");
-    let envelope_prefix = circle_access_envelope_semantic_prefix(
-        journal.operation().creation.circle_id,
-        candidate_family,
-        &original_ref.envelope.owner_pubkey,
-        &invented_recipient_slot,
-        original_ref.envelope.control_hash,
-    );
-    let envelope = device
-        .prepare_circle_object(
-            &ProtocolObjectContext::store_encrypted(
-                old_commit.store_root_hash,
-                ProtocolObjectDomain::CircleAccessEnvelope,
-            ),
-            &envelope_prefix,
-            ".json",
-            serde_json::to_vec(&original_access.envelope)
-                .expect("serialize original access envelope"),
-        )
-        .await
-        .expect("prepare invented access envelope path");
-    cloud_storage
-        .create_protocol_object(&leaf)
-        .await
-        .expect("publish invented access leaf path");
-    cloud_storage
-        .create_protocol_object(&envelope)
-        .await
-        .expect("publish invented access envelope path");
-    objects.access.push(CircleAccessObjectRef {
-        leaf: CircleAccessLeafObjectRef {
-            recipient_slot: invented_recipient_slot.clone(),
-            object: leaf.reference().clone(),
-            ..original_ref.leaf
-        },
-        envelope: CircleAccessEnvelopeObjectRef {
-            recipient_slot: invented_recipient_slot,
-            object: envelope.reference().clone(),
-            ..original_ref.envelope
-        },
-        bootstrap: None,
-    });
     let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
+    // The Owner seals the peer's slot with a leaf naming a foreign Store
+    // membership. Preparation re-signs and re-seals it, so the control's entry
+    // is the exact sealed bytes of this leaf — the only surviving contradiction
+    // is between the leaf's signed context and the control it rides in.
+    let mut draft = draft_from_transition(&journal.operation().creation);
+    let peer_leaf = draft
+        .access
+        .iter_mut()
+        .find(|access| access.value.recipient_pubkey == peer_pubkey)
+        .expect("Store member has a prepared access leaf");
+    peer_leaf.value.body_mut().store_membership =
+        draft.control.value.access_epoch().store_membership.clone();
+    peer_leaf.value.body_mut().store_membership.state_hash =
+        ObjectHash::digest(b"foreign Store membership state");
+    let (creation, objects, prepared, control_head_object, stream_activations) = device
+        .prepare_circle_activation_objects(draft, &journal.operation().history)
+        .await
+        .expect("prepare exact tampered access objects");
+    for object in prepared.values() {
+        cloud_storage
+            .create_protocol_object(object)
+            .await
+            .expect("publish exact tampered access object");
+    }
     let commit_coord = journal.operation().commit_ref().coord.clone();
-    let original_control = &old_commit.circle_controls()[0];
-    let circle_reference = journal
-        .operation()
-        .creation
-        .control_ref(objects, Some(original_control.head_object().clone()));
-    let stream_activations = old_commit.stream_activations().to_vec();
+    let circle_reference = creation.control_ref(objects, control_head_object);
     let commit = device
         .sign_circle_commit(
             &old_commit,
@@ -104,7 +81,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
             stream_activations,
         )
         .await
-        .expect("sign commit naming invented access refs");
+        .expect("sign tampered access commit");
     let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
     let commit_prepared = device
         .prepare_circle_object(
@@ -122,29 +99,29 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
             commit.to_bytes(),
         )
         .await
-        .expect("prepare re-signed Store commit");
+        .expect("prepare tampered access Store commit");
     cloud_storage
         .create_protocol_object(&commit_prepared)
         .await
-        .expect("publish re-signed Store commit");
+        .expect("publish tampered access Store commit");
     let commit_ref = StoreBatchCommitRef::from_commit(
         &commit,
         commit_coord,
         commit_prepared.reference().clone(),
     )
-    .expect("bind re-signed Store commit reference");
+    .expect("bind tampered access Store commit");
 
     let error = store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &peer)
         .await
-        .expect("bind invented-access Circle Store")
+        .expect("bind tampered-access Circle Store")
         .load_circle_activations(&commit_ref, &commit, author.value())
         .await
-        .expect_err("invented access references must fail activation");
+        .expect_err("a recipient must reject an access entry that contradicts its control");
     assert!(
         error
             .to_string()
-            .contains("circle access envelope failed verification"),
+            .contains("circle access leaf failed context verification"),
         "{error}"
     );
 }
@@ -192,7 +169,6 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .expect("prepare Circle with inactive Store-member access")
         .journal;
     let old_commit = journal.commit().expect("parse prepared Store commit");
-    let candidate_family = old_commit.candidate_family();
     let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
@@ -200,7 +176,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
     let mut draft = draft_from_transition(&journal.operation().creation);
     promote_store_member_access_without_adding_to_circle_roster(&mut draft, &founder, &peer);
     let (creation, objects, prepared, control_head_object, stream_activations) = device
-        .prepare_circle_activation_objects(draft, &journal.operation().history, candidate_family)
+        .prepare_circle_activation_objects(draft, &journal.operation().history)
         .await
         .expect("prepare exact promoted access objects");
     for object in prepared.values() {
@@ -265,14 +241,14 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
 }
 
 #[tokio::test]
-async fn candidate_graph_rejects_partial_circle_access_ownership() {
+async fn candidate_graph_rejects_an_access_leaf_that_differs_from_its_control() {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let founder = UserKeypair::generate();
     let store = TestStore::create(
         &db,
         db_store_dir.clone(),
-        "circle-partial-access-graph",
+        "circle-substituted-access-leaf",
         founder.clone(),
         crate::sync::test_helpers::test_cloud_home(),
     )
@@ -282,37 +258,21 @@ async fn candidate_graph_rejects_partial_circle_access_ownership() {
         .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle preparation Store")
-        .prepare_circle_operation("0000000001000-0000-founder", "Partial access graph")
+        .prepare_circle_operation("0000000001000-0000-founder", "Substituted access leaf")
         .await
         .expect("prepare Circle operation");
-    let commit = prepared.journal.commit().expect("parse Circle commit");
-    let envelope_object = commit.circle_controls()[0].objects().access[0]
-        .envelope
-        .object
-        .clone();
-    let removed = prepared
-        .journal
-        .operation()
-        .prepared_objects
-        .iter()
-        .find(|(_, object)| *object == &envelope_object)
-        .map(|(step, _)| step.clone())
-        .expect("find prepared access envelope");
-    // The step leaves the operation and its bytes together, so what the graph
-    // is missing is the envelope itself, not a bytes-to-references mismatch.
-    prepared
-        .journal
-        .operation_mut()
-        .prepared_objects
-        .remove(&removed);
-    prepared.prepared_objects.remove(&removed);
+    let leaf = &mut prepared.journal.operation_mut().creation.access[0];
+    leaf.value.body_mut().disposition = CircleAccessDisposition::Inactive;
+    leaf.value.resign(&founder);
 
     let error = prepared
         .journal
         .closed_remote_objects(&prepared.prepared_objects)
-        .expect_err("a leaf without its envelope must not acquire candidate ownership");
+        .expect_err("a leaf that differs from its control entry must not acquire ownership");
     assert!(
-        error.to_string().contains("has no prepared bytes"),
+        error
+            .to_string()
+            .contains("differs from its signed control entry"),
         "{error}"
     );
 }
@@ -469,13 +429,12 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
     let store_root_hash = draft.control.value.store_root_hash;
     let roster = &mut draft.roster;
     roster.state_hash = ObjectHash::digest(b"different historical roster state");
-    let candidate_family = old_commit.candidate_family();
     let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
     let (creation, objects, prepared, control_head_object, stream_activations) = device
-        .prepare_circle_activation_objects(draft, &journal.operation().history, candidate_family)
+        .prepare_circle_activation_objects(draft, &journal.operation().history)
         .await
         .expect("prepare forged exact Circle activation objects");
     for object in prepared.values() {

@@ -1,28 +1,10 @@
 use super::*;
-use crate::circle_control::{merkle_root_and_proofs, verify_merkle_proof};
 use crate::circle_test_fixtures::merge_membership_ref;
 use crate::{membership, store_commit};
 use coven_keys::keys::{self, UserKeypair};
 
 fn candidate_family(label: &str) -> store_commit::CandidateFamilyId {
     store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(label.as_bytes()))
-}
-
-#[test]
-fn merkle_proofs_verify_for_every_leaf_in_even_and_odd_layers() {
-    for leaf_count in 1..=9 {
-        let leaves = (0..leaf_count)
-            .map(|index| ObjectHash::digest(format!("leaf-{index}").as_bytes()))
-            .collect::<Vec<_>>();
-        let (root, proofs) = merkle_root_and_proofs(&leaves);
-        assert_eq!(proofs.len(), leaves.len());
-        for (index, (leaf, proof)) in leaves.iter().zip(&proofs).enumerate() {
-            assert!(
-                verify_merkle_proof(*leaf, proof, root),
-                "leaf {index} of {leaf_count} failed its canonical proof"
-            );
-        }
-    }
 }
 
 #[test]
@@ -58,13 +40,17 @@ fn founder_payload_is_complete_and_acyclic() {
     assert!(creation.metadata.verify());
     assert!(creation.roster.verify());
     assert_eq!(creation.access.len(), 2);
+    let map = &creation.control.value.value.access;
+    assert_eq!(map.len(), 2);
     for access in &creation.access {
-        assert!(access.leaf.verify(&creation.control, candidate_family));
-        assert!(access.envelope.verify(&creation.control, candidate_family));
-        assert!(access
-            .leaf
-            .verify_envelope(&creation.control, &access.envelope, candidate_family));
-        assert!(!access.leaf.bytes.windows(64).any(|window| {
+        assert!(access.verify(&creation.control, candidate_family));
+        assert_eq!(
+            map.entry(&access.value.recipient_slot),
+            Some(&access.entry())
+        );
+        let sealed = hex::decode(&map.entry(&access.value.recipient_slot).unwrap().sealed)
+            .expect("access entry is hex");
+        assert!(!sealed.windows(64).any(|window| {
             window == creation.control.coord.control_hash().to_string().as_bytes()
         }));
     }
@@ -72,9 +58,8 @@ fn founder_payload_is_complete_and_acyclic() {
         creation
             .access
             .iter()
-            .find(|access| access.leaf.value.recipient_pubkey == owner_pubkey)
+            .find(|access| access.value.recipient_pubkey == owner_pubkey)
             .unwrap()
-            .leaf
             .value
             .disposition,
         CircleAccessDisposition::Active { .. }
@@ -83,9 +68,8 @@ fn founder_payload_is_complete_and_acyclic() {
         creation
             .access
             .iter()
-            .find(|access| access.leaf.value.recipient_pubkey == peer_pubkey)
+            .find(|access| access.value.recipient_pubkey == peer_pubkey)
             .unwrap()
-            .leaf
             .value
             .disposition,
         CircleAccessDisposition::Inactive
@@ -109,7 +93,7 @@ fn founder_payload_is_complete_and_acyclic() {
 }
 
 #[test]
-fn access_verification_rejects_signed_context_and_proof_substitution() {
+fn access_verification_rejects_signed_context_and_entry_substitution() {
     let owner = coven_keys::keys::UserKeypair::generate();
     let peer = coven_keys::keys::UserKeypair::generate();
     let owner_pubkey = coven_keys::keys::public_key_hex(&owner);
@@ -135,58 +119,19 @@ fn access_verification_rejects_signed_context_and_proof_substitution() {
     )
     .expect("construct founder circle");
 
-    let mut wrong_store = creation.access[0].envelope.clone();
-    wrong_store.body_mut().store_root_hash = ObjectHash::digest(b"other-store");
-    wrong_store.resign(&owner);
-    assert!(!wrong_store.verify(&creation.control, candidate_family));
-
-    let mut wrong_family_envelope = creation.access[0].envelope.clone();
-    wrong_family_envelope.body_mut().candidate_family =
-        store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(b"other access family"));
-    wrong_family_envelope.resign(&owner);
-    assert!(!wrong_family_envelope.verify(&creation.control, candidate_family));
-
-    let mut wrong_family_leaf = creation.access[0].leaf.clone();
-    wrong_family_leaf.value.body_mut().candidate_family =
+    let mut wrong_family_leaf = creation.access[0].value.clone();
+    wrong_family_leaf.body_mut().candidate_family =
         store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(b"other leaf family"));
-    wrong_family_leaf.value.resign(&owner);
+    wrong_family_leaf.resign(&owner);
+    let wrong_family_leaf = PreparedAccessLeaf::seal(wrong_family_leaf).expect("seal forged leaf");
     assert!(!wrong_family_leaf.verify(&creation.control, candidate_family));
 
-    let mut non_owner = creation.access[0].envelope.clone();
-    non_owner.body_mut().owner_pubkey = peer_pubkey;
-    non_owner.resign(&peer);
-    assert!(!non_owner.verify(&creation.control, candidate_family));
-
-    let mut substituted_proof = creation.access[0].envelope.clone();
-    substituted_proof.body_mut().proof = creation.access[1].envelope.proof.clone();
-    substituted_proof.resign(&owner);
-    assert!(!substituted_proof.verify(&creation.control, candidate_family));
-
-    let mut substituted_leaf_id = creation.access[0].envelope.clone();
-    substituted_leaf_id.body_mut().leaf_id = creation.access[1].leaf.value.leaf_id;
-    substituted_leaf_id.resign(&owner);
-    assert!(substituted_leaf_id.verify(&creation.control, candidate_family));
-    assert!(!creation.access[0].leaf.verify_envelope(
-        &creation.control,
-        &substituted_leaf_id,
-        candidate_family,
-    ));
-
-    let mut wrong_membership_leaf = creation.access[0].leaf.value.clone();
+    let mut wrong_membership_leaf = creation.access[0].value.clone();
     wrong_membership_leaf.body_mut().store_membership =
         merge_membership_ref(&owner, &members, "wrong-membership-leaf").0;
     wrong_membership_leaf.resign(&owner);
-    let recipient_key =
-        keys::ed25519_to_x25519_public_key(&owner.public_key()).expect("convert recipient key");
-    let bytes = keys::seal_box_encrypt(
-        &serde_json::to_vec(&wrong_membership_leaf).expect("serialize forged leaf"),
-        &recipient_key,
-    );
-    let wrong_membership_leaf = PreparedAccessLeaf {
-        leaf_hash: ObjectHash::digest(&bytes),
-        bytes,
-        value: wrong_membership_leaf,
-    };
+    let wrong_membership_leaf =
+        PreparedAccessLeaf::seal(wrong_membership_leaf).expect("seal forged leaf");
     assert!(!wrong_membership_leaf.verify(&creation.control, candidate_family));
 
     let mut wrong_keyring_leaf = creation
@@ -194,12 +139,11 @@ fn access_verification_rejects_signed_context_and_proof_substitution() {
         .iter()
         .find(|access| {
             matches!(
-                &access.leaf.value.disposition,
+                &access.value.disposition,
                 CircleAccessDisposition::Active { .. }
             )
         })
         .expect("founder access")
-        .leaf
         .value
         .clone();
     let CircleAccessDisposition::Active { keyring, .. } =
@@ -209,16 +153,45 @@ fn access_verification_rejects_signed_context_and_proof_substitution() {
     };
     *keyring = coven_keys::encryption::MasterKeyring::generate().to_serialized();
     wrong_keyring_leaf.resign(&owner);
-    let bytes = keys::seal_box_encrypt(
-        &serde_json::to_vec(&wrong_keyring_leaf).expect("serialize wrong-keyring leaf"),
-        &recipient_key,
-    );
-    let wrong_keyring_leaf = PreparedAccessLeaf {
-        leaf_hash: ObjectHash::digest(&bytes),
-        bytes,
-        value: wrong_keyring_leaf,
-    };
+    let wrong_keyring_leaf =
+        PreparedAccessLeaf::seal(wrong_keyring_leaf).expect("seal wrong-keyring leaf");
     assert!(!wrong_keyring_leaf.verify(&creation.control, candidate_family));
+
+    // Sealing is randomized, so re-sealing the same signed leaf produces bytes
+    // the control's entry does not name.
+    let resealed =
+        PreparedAccessLeaf::seal(creation.access[0].value.clone()).expect("re-seal own leaf");
+    assert_ne!(resealed.bytes, creation.access[0].bytes);
+    assert!(!resealed.verify(&creation.control, candidate_family));
+
+    let mut other_slot = creation.access[0].value.clone();
+    other_slot.body_mut().recipient_slot = creation.access[1].value.recipient_slot.clone();
+    other_slot.resign(&owner);
+    let other_slot = PreparedAccessLeaf {
+        bytes: creation.access[0].bytes.clone(),
+        value: other_slot,
+    };
+    assert!(!other_slot.verify(&creation.control, candidate_family));
+
+    let mut duplicated = creation.access.clone();
+    duplicated[1].value.body_mut().recipient_slot = duplicated[0].value.recipient_slot.clone();
+    assert_eq!(
+        CircleAccessMap::from_leaves(&duplicated),
+        Err(CircleTransitionError::InvalidCurrentState)
+    );
+
+    let mut deleted_with_access = creation.control.value.clone();
+    deleted_with_access.body_mut().value.state =
+        CircleControlState::Deleted(crate::circle::DeletedCircle {
+            frozen_epoch: creation.control.value.access_epoch().clone(),
+        });
+    deleted_with_access.resign(&owner);
+    assert!(!deleted_with_access.verify());
+
+    let mut active_without_access = creation.control.value.clone();
+    active_without_access.body_mut().value.access = CircleAccessMap::empty();
+    active_without_access.resign(&owner);
+    assert!(!active_without_access.verify());
 }
 
 #[test]

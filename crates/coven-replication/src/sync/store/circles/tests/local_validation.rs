@@ -11,19 +11,15 @@ async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
         .creation
         .access
         .iter_mut()
-        .find(|access| access.leaf.value.recipient_pubkey == author)
+        .find(|access| access.value.recipient_pubkey == author)
         .expect("founder access");
     let CircleAccessDisposition::Active { keyring, .. } =
-        &mut own_access.leaf.value.body_mut().disposition
+        &mut own_access.value.body_mut().disposition
     else {
         panic!("founder access must be active")
     };
     *keyring = MasterKeyring::generate().to_serialized();
-    own_access.leaf.value.resign(&signer);
-    own_access.envelope.body_mut().value_hash = ObjectHash::digest(
-        &serde_json::to_vec(&own_access.leaf.value).expect("serialize mismatched access leaf"),
-    );
-    own_access.envelope.resign(&signer);
+    own_access.value.resign(&signer);
     coven_database::StoreDatabase::new(&db)
         .substitute_circle_operation_for_test(journal.clone())
         .await
@@ -36,9 +32,9 @@ async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
         .await
         .expect_err("local activation must reject substituted journal plaintext");
     assert!(
-        error.to_string().contains(
-            "prepared Circle access bytes, plaintext hash, ciphertext hash, or envelope differ"
-        ),
+        error
+            .to_string()
+            .contains("prepared Circle access leaf differs from its signed control entry"),
         "{error}"
     );
     assert_eq!(
@@ -611,9 +607,9 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         .creation
         .access
         .iter()
-        .find(|access| access.leaf.value.recipient_pubkey == author)
+        .find(|access| access.value.recipient_pubkey == author)
         .expect("founder access");
-    let CircleAccessDisposition::Active { keyring, .. } = &access.leaf.value.disposition else {
+    let CircleAccessDisposition::Active { keyring, .. } = &access.value.disposition else {
         panic!("founder access must be active")
     };
     let encryption = EncryptionService::from(

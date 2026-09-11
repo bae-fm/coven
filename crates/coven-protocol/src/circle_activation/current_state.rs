@@ -141,19 +141,18 @@ impl CircleCurrentState {
                 current,
                 access: CircleInactiveAccess::NotGranted,
             })),
-            Some(VerifiedCircleAccess {
-                leaf, active: None, ..
-            }) => Self::Inactive(Box::new(CircleInactiveState {
-                current,
-                access: CircleInactiveAccess::Inactive {
-                    candidate_family: leaf.value.candidate_family,
-                    access: leaf.value.clone(),
-                },
-            })),
+            Some(VerifiedCircleAccess { leaf, active: None }) => {
+                Self::Inactive(Box::new(CircleInactiveState {
+                    current,
+                    access: CircleInactiveAccess::Inactive {
+                        candidate_family: leaf.value.candidate_family,
+                        access: leaf.value.clone(),
+                    },
+                }))
+            }
             Some(VerifiedCircleAccess {
                 leaf,
                 active: Some(active),
-                ..
             }) => {
                 let accessible = Box::new(CircleAccessibleState {
                     current,

@@ -302,10 +302,8 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                 .value()
                 .circle_controls()
                 .iter()
-                .flat_map(|control| control.objects.access.iter())
-                .any(|access| {
-                    access.bootstrap.as_ref() == Some(&bootstrap.coverage.bootstrap.image)
-                }),
+                .flat_map(|control| control.objects.bootstraps.iter())
+                .any(|image| image.image == bootstrap.coverage.bootstrap.image),
             coven_protocol::reclaim::ReclaimTarget::CircleSnapshotImage(_)
             | coven_protocol::reclaim::ReclaimTarget::AudienceBlob(_) => {
                 return Err(RegistrationLoadError::Invalid(

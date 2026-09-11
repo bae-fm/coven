@@ -21,7 +21,6 @@ const ROW_ROUTING_KEY_DOMAIN: &[u8] = b"coven.row-routing.v1";
 const ROW_ROUTING_ID_DOMAIN: &[u8] = b"coven.row-routing-id.v1\0";
 const CIRCLE_ID_FOUNDER_DOMAIN: &str = "coven.circle-id-founder.v1";
 const CIRCLE_EPOCH_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-epoch-id-generation.v1\0";
-const ACCESS_LEAF_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-access-leaf-id-generation.v1\0";
 
 /// A self-certifying 128-bit circle identity encoded as canonical lowercase base32.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -469,7 +468,6 @@ macro_rules! generated_hex_id {
 }
 
 generated_hex_id!(CircleEpochId, CIRCLE_EPOCH_ID_GENERATION_DOMAIN);
-generated_hex_id!(AccessLeafId, ACCESS_LEAF_ID_GENERATION_DOMAIN);
 
 pub(crate) fn generated_id_digest(
     ids: &dyn coven_foundation::id_provider::IdProvider,

@@ -8,21 +8,19 @@ use super::{
 use crate::sync::store::circles::bootstrap_blobs::CircleBootstrapBlobVerification;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
-use coven_keys::keys;
 use coven_protocol::circle::{
     circle_control_head_prefix, circle_metadata_head_prefix, circle_roster_head_prefix,
-    circle_semantic_prefix, CircleAccessDisposition, CircleMetadataHeadRef, CircleOperationId,
-    CirclePublicationBlocked, CircleRosterHeadRef, CircleSemanticSlot, CircleTransitionDraft,
-    CircleTransitionPolicyObjects, PreparedCircleTransition,
+    circle_semantic_prefix, CircleAccessDisposition, CircleAccessMap, CircleMetadataHeadRef,
+    CircleOperationId, CirclePublicationBlocked, CircleRosterHeadRef, CircleSemanticSlot,
+    CircleTransitionDraft, CircleTransitionPolicyObjects, PreparedAccessLeaf,
+    PreparedCircleTransition,
 };
 use coven_protocol::objects::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
 };
 use coven_protocol::store_commit::{
-    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix, CandidateFamilyId,
-    CircleAccessEnvelopeObjectRef, CircleAccessLeafObjectRef, CircleAccessObjectRef,
-    CircleActivationObjects, CircleMetadataObjectRef, GrantStreamAnchor, ObjectHash,
-    StreamActivation, StreamAnchorDomain, SuccessorLink,
+    CircleActivationObjects, CircleBootstrapObjectRef, CircleMetadataObjectRef, GrantStreamAnchor,
+    ObjectHash, StreamActivation, StreamAnchorDomain, SuccessorLink,
 };
 use coven_storage::CloudSyncObjectStorage;
 
@@ -301,7 +299,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             request.member_pubkey.clone(),
                             request.role,
                             bootstrap,
-                            db,
                             signer,
                         )?,
                         vec![("bootstrap-image".to_string(), bootstrap_prepared)],
@@ -627,15 +624,15 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             coven_protocol::store_commit::circle_bootstrap_image_semantic_prefix(
                                 request.circle_id,
                                 candidate_family,
-                                &access.leaf.value.owner_pubkey,
+                                &access.value.owner_pubkey,
                                 draft.epoch_id,
-                                &access.leaf.value.recipient_slot,
+                                &access.value.recipient_slot,
                                 image_hash,
                             );
                         if let CircleAccessDisposition::Active {
                             bootstrap: active_bootstrap,
                             ..
-                        } = &mut access.leaf.value.body_mut().disposition
+                        } = &mut access.value.body_mut().disposition
                         {
                             let bootstrap_prepared = self
                                 .prepare_circle_object(
@@ -698,7 +695,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             &request.current.roster,
                             &request.current.metadata,
                             keyring,
-                            db,
                             signer,
                         )?,
                         Vec::new(),
@@ -710,7 +706,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     creation,
                     &history,
                     &merged_branch_objects,
-                    candidate_family,
                 ))
                 .await?;
             for (step, object) in additional_prepared {

@@ -525,8 +525,8 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             .value()
             .circle_controls()
             .iter()
-            .flat_map(|control| control.objects.access.iter())
-            .any(|access| access.bootstrap.as_ref() == Some(&claim.target.coverage.bootstrap.image))
+            .flat_map(|control| control.objects.bootstraps.iter())
+            .any(|bootstrap| bootstrap.image == claim.target.coverage.bootstrap.image)
         {
             return Err(StoreReclaimError::Authorization(
                 "Circle bootstrap reclaim activation names another image".to_string(),

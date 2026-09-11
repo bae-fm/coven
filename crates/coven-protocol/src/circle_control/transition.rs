@@ -71,7 +71,7 @@ impl CircleTransitionDraft {
             state_hash: metadata.metadata_hash(),
         };
         let roster = roster_objects.resolved.clone();
-        let access = CircleAccessDraft::prepare(
+        let access = CircleAccessSet::prepare(
             store_root_hash,
             candidate_family,
             circle_id,
@@ -83,14 +83,12 @@ impl CircleTransitionDraft {
             &store_membership,
             &store_members,
             &std::collections::BTreeMap::new(),
-            ids,
             signer,
         )?;
         let common = ActiveCircleEpochCore {
             epoch_id,
             key_fingerprint,
             owners: vec![author_pubkey.clone()],
-            access_root: access.access_root(),
             origin: CircleEpochOrigin::Founder,
         };
         let value = CircleControlValue {
@@ -109,6 +107,7 @@ impl CircleTransitionDraft {
                 store_membership,
                 covered_control_heads: Vec::new(),
             }),
+            access: access.map.clone(),
             author_authority: MergeCircleOwnerAuthorityRef::Roster {
                 roster: roster_state,
                 grant_id: owner_grant.clone(),
@@ -135,7 +134,6 @@ impl CircleTransitionDraft {
             },
             metadata_successor: true,
         };
-        let access = access.finish(&control)?;
         Ok(Self {
             circle_id,
             epoch_id,
@@ -146,7 +144,7 @@ impl CircleTransitionDraft {
             close_intent: None,
             close_finalization: None,
             close_cancellation: None,
-            access,
+            access: access.leaves,
             control,
         })
     }
@@ -167,7 +165,6 @@ impl CircleTransitionDraft {
         member_pubkey: String,
         role: crate::circle::CircleRole,
         bootstrap: CircleBootstrapRef,
-        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         if current_roster_chain.try_resolved()? != *current_roster {
@@ -234,6 +231,7 @@ impl CircleTransitionDraft {
                     store_membership,
                     covered_control_heads: active_epoch.covered_control_heads.clone(),
                 }),
+                access: CircleAccessMap::empty(),
                 author_authority,
                 membership_authority,
             },
@@ -241,7 +239,7 @@ impl CircleTransitionDraft {
         };
         let bootstraps =
             std::collections::BTreeMap::from([(member_pubkey.clone(), bootstrap.clone())]);
-        let access = CircleAccessDraft::prepare(
+        let access = CircleAccessSet::prepare(
             store_root_hash,
             candidate_family,
             circle_id,
@@ -258,16 +256,9 @@ impl CircleTransitionDraft {
                 .store_membership,
             &store_members,
             &bootstraps,
-            ids,
             signer,
         )?;
-        control_value
-            .value
-            .state
-            .active_epoch_mut()
-            .expect("member addition constructs an active epoch")
-            .common
-            .access_root = access.access_root();
+        control_value.value.access = access.map.clone();
         let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
@@ -275,7 +266,6 @@ impl CircleTransitionDraft {
                 .expect("circle control serialization cannot fail"),
             value: control_value,
         };
-        let access = access.finish(&control)?;
         Ok(Self {
             circle_id,
             epoch_id,
@@ -292,7 +282,7 @@ impl CircleTransitionDraft {
             close_intent: None,
             close_finalization: None,
             close_cancellation: None,
-            access,
+            access: access.leaves,
             control,
         })
     }
@@ -387,6 +377,7 @@ impl CircleTransitionDraft {
                 store_membership,
                 covered_control_heads: active_epoch.covered_control_heads.clone(),
             }),
+            access: CircleAccessMap::empty(),
             author_authority,
             membership_authority,
         };
@@ -427,7 +418,7 @@ impl CircleTransitionDraft {
         metadata_state.selected = selected.coord();
         metadata_state.state_hash = selected.metadata_hash();
 
-        let access = CircleAccessDraft::prepare(
+        let access = CircleAccessSet::prepare(
             store_root_hash,
             candidate_family,
             circle_id,
@@ -443,15 +434,14 @@ impl CircleTransitionDraft {
                 .store_membership,
             &store_members,
             &std::collections::BTreeMap::new(),
-            ids,
             signer,
         )?;
-        let active_epoch = control_value
+        control_value.access = access.map.clone();
+        control_value
             .state
             .active_epoch_mut()
-            .expect("rename constructs an active epoch");
-        active_epoch.common.access_root = access.access_root();
-        active_epoch.metadata = metadata_state;
+            .expect("rename constructs an active epoch")
+            .metadata = metadata_state;
         let control_value = CircleControlBody {
             store_root_hash,
             circle_id,
@@ -469,7 +459,6 @@ impl CircleTransitionDraft {
             roster: CircleRosterDraftPolicy::Inherited,
             metadata_successor: true,
         };
-        let access = access.finish(&control)?;
         Ok(Self {
             circle_id,
             epoch_id,
@@ -480,7 +469,7 @@ impl CircleTransitionDraft {
             close_intent: None,
             close_finalization: None,
             close_cancellation: None,
-            access,
+            access: access.leaves,
             control,
         })
     }
@@ -631,12 +620,13 @@ impl CircleTransitionDraft {
                     store_membership,
                     covered_control_heads,
                 }),
+                access: CircleAccessMap::empty(),
                 author_authority,
                 membership_authority,
             },
             author_pubkey,
         };
-        let access = CircleAccessDraft::prepare(
+        let access = CircleAccessSet::prepare(
             store_root_hash,
             candidate_family,
             circle_id,
@@ -653,16 +643,9 @@ impl CircleTransitionDraft {
                 .store_membership,
             &store_members,
             &std::collections::BTreeMap::new(),
-            ids,
             signer,
         )?;
-        control_value
-            .value
-            .state
-            .active_epoch_mut()
-            .expect("control resolution constructs an active epoch")
-            .common
-            .access_root = access.access_root();
+        control_value.value.access = access.map.clone();
         let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
@@ -670,7 +653,6 @@ impl CircleTransitionDraft {
                 .expect("circle control serialization cannot fail"),
             value: control_value,
         };
-        let access = access.finish(&control)?;
         Ok(Self {
             circle_id,
             epoch_id,
@@ -684,7 +666,7 @@ impl CircleTransitionDraft {
             close_intent: None,
             close_finalization: None,
             close_cancellation: None,
-            access,
+            access: access.leaves,
             control,
         })
     }
@@ -692,8 +674,8 @@ impl CircleTransitionDraft {
     /// Build the terminal deletion: a successor of the current control whose
     /// state is `Deleted`, freezing the epoch spine for historical verification
     /// and reclamation. It publishes no roster successor, metadata successor,
-    /// access material, or bootstraps — its control inherits the predecessor's
-    /// access root.
+    /// access material, or bootstraps — its control carries an empty access
+    /// map.
     #[allow(clippy::too_many_arguments)]
     pub fn delete(
         device_id: &str,
@@ -763,6 +745,7 @@ impl CircleTransitionDraft {
                     dependencies: vec![current_control.coord.clone()],
                 },
                 state: CircleControlState::Deleted(DeletedCircle { frozen_epoch }),
+                access: CircleAccessMap::empty(),
                 author_authority,
                 membership_authority,
             },

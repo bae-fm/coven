@@ -34,7 +34,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         mut draft: CircleTransitionDraft,
         history: &CircleTransitionHistory,
         merged_branch_objects: &[CircleActivationObjects],
-        candidate_family: CandidateFamilyId,
     ) -> Result<
         (
             PreparedCircleTransition,
@@ -552,32 +551,16 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
 
             for access in &mut draft.access {
                 if let CircleAccessDisposition::Active { roster, .. } =
-                    &mut access.leaf.value.body_mut().disposition
+                    &mut access.value.body_mut().disposition
                 {
                     *roster = roster_state.clone();
                 }
-                access.leaf.value.resign(identity_signer);
-                let recipient_x25519 =
-                    keys::ed25519_hex_to_x25519_public_key(&access.leaf.value.recipient_pubkey)
-                        .map_err(CircleOperationError::Key)?;
-                let plaintext = serde_json::to_vec(&access.leaf.value)
-                    .expect("Circle access serialization cannot fail");
-                access.leaf.bytes = keys::seal_box_encrypt(&plaintext, &recipient_x25519);
-                access.leaf.leaf_hash = ObjectHash::digest(&access.leaf.bytes);
+                access.value.resign(identity_signer);
+                *access = PreparedAccessLeaf::seal(access.value.clone())?;
             }
-            // A deletion carries no access material: its control inherits the
-            // predecessor's access root and publishes no leaves.
-            let (access_root, proofs) = if draft.access.is_empty() {
-                (None, Vec::new())
-            } else {
-                let leaf_hashes = draft
-                    .access
-                    .iter()
-                    .map(|access| access.leaf.leaf_hash)
-                    .collect::<Vec<_>>();
-                let (root, proofs) = coven_protocol::circle::merkle_root_and_proofs(&leaf_hashes);
-                (Some(root), proofs)
-            };
+            // A deletion carries no access material: its map is empty and it
+            // publishes no leaves.
+            let access_map = CircleAccessMap::from_leaves(&draft.access)?;
 
             let mut control_frontier = draft
                 .control
@@ -654,6 +637,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             let coven_protocol::circle::CircleControlValue {
                 order,
                 state,
+                access,
                 author_authority,
                 membership_authority: _,
             } = &mut draft.control.value.body_mut().value;
@@ -670,9 +654,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 .collect();
             access_epoch.roster = roster_state.clone();
             access_epoch.metadata = metadata_state;
-            if let Some(access_root) = access_root {
-                access_epoch.common.access_root = access_root;
-            }
+            *access = access_map;
             access_epoch.covered_control_heads = control_frontier;
             if let (
                 Some((true, _, entry, _, _)),
@@ -696,7 +678,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     epoch_id: active_epoch.common.epoch_id,
                     key_fingerprint: active_epoch.common.key_fingerprint,
                     owners: active_epoch.common.owners.clone(),
-                    access_root: active_epoch.common.access_root,
+                    access_digest: access.digest(),
                     metadata: active_epoch.metadata.clone(),
                     roster: active_epoch.roster.clone(),
                     store_membership: active_epoch.store_membership.clone(),
@@ -776,19 +758,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             draft.control.coord = draft.control.value.coord();
             draft.control.bytes = serde_json::to_vec(&draft.control.value)
                 .expect("Circle control serialization cannot fail");
-
-            for (access, proof) in draft.access.iter_mut().zip(proofs) {
-                let value_hash = ObjectHash::digest(
-                    &serde_json::to_vec(&access.leaf.value)
-                        .expect("Circle access leaf serialization cannot fail"),
-                );
-                let envelope = access.envelope.body_mut();
-                envelope.control_hash = draft.control.coord.control_hash();
-                envelope.leaf_hash = access.leaf.leaf_hash;
-                envelope.value_hash = value_hash;
-                envelope.proof = proof;
-                access.envelope.resign(identity_signer);
-            }
 
             let control_prefix = circle_semantic_prefix(CircleSemanticSlot::Control {
                 circle_id: draft.circle_id,
@@ -872,73 +841,22 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             }
         };
 
-        let mut access_objects = Vec::with_capacity(draft.access.len());
-        for (index, access) in draft.access.iter().enumerate() {
-            let leaf_prefix = circle_access_leaf_semantic_prefix(
-                access.leaf.value.circle_id,
-                candidate_family,
-                &access.leaf.value.owner_pubkey,
-                access.leaf.value.epoch_id,
-                &access.leaf.value.recipient_slot,
-                access.leaf.value.leaf_id,
-            );
-            let leaf = self
-                .prepare_circle_object(
-                    &ProtocolObjectContext::recipient_sealed(
-                        store_root_hash,
-                        ProtocolObjectDomain::CircleAccessLeaf,
-                    ),
-                    &leaf_prefix,
-                    "",
-                    access.leaf.bytes.clone(),
-                )
-                .await?;
-            prepared.insert(format!("access-leaf-{index}"), leaf.clone());
-            let envelope_prefix = circle_access_envelope_semantic_prefix(
-                access.envelope.circle_id,
-                candidate_family,
-                &access.envelope.owner_pubkey,
-                &access.envelope.recipient_slot,
-                access.envelope.control_hash,
-            );
-            let envelope = self
-                .prepare_circle_object(
-                    &ProtocolObjectContext::store_encrypted(
-                        store_root_hash,
-                        ProtocolObjectDomain::CircleAccessEnvelope,
-                    ),
-                    &envelope_prefix,
-                    ".json",
-                    serde_json::to_vec(&access.envelope)
-                        .expect("Circle access envelope serialization cannot fail"),
-                )
-                .await?;
-            prepared.insert(format!("access-envelope-{index}"), envelope.clone());
-            access_objects.push(CircleAccessObjectRef {
-                leaf: CircleAccessLeafObjectRef {
-                    owner_pubkey: access.leaf.value.owner_pubkey.clone(),
-                    epoch_id: access.leaf.value.epoch_id,
-                    recipient_slot: access.leaf.value.recipient_slot.clone(),
-                    leaf_id: access.leaf.value.leaf_id,
-                    leaf_hash: access.leaf.leaf_hash,
-                    object: leaf.reference().clone(),
-                },
-                envelope: CircleAccessEnvelopeObjectRef {
-                    owner_pubkey: access.envelope.owner_pubkey.clone(),
-                    recipient_slot: access.envelope.recipient_slot.clone(),
-                    control_hash: access.envelope.control_hash,
-                    leaf_id: access.envelope.leaf_id,
-                    leaf_hash: access.envelope.leaf_hash,
-                    object: envelope.reference().clone(),
-                },
-                bootstrap: match &access.leaf.value.disposition {
-                    CircleAccessDisposition::Active { bootstrap, .. } => {
-                        bootstrap.as_ref().map(|bootstrap| bootstrap.image.clone())
-                    }
-                    CircleAccessDisposition::Inactive => None,
-                },
-            });
-        }
+        let bootstraps = draft
+            .access
+            .iter()
+            .filter_map(|access| match &access.value.disposition {
+                CircleAccessDisposition::Active {
+                    bootstrap: Some(bootstrap),
+                    ..
+                } => Some(CircleBootstrapObjectRef {
+                    owner_pubkey: access.value.owner_pubkey.clone(),
+                    epoch_id: access.value.epoch_id,
+                    recipient_slot: access.value.recipient_slot.clone(),
+                    image: bootstrap.image.clone(),
+                }),
+                CircleAccessDisposition::Active { .. } | CircleAccessDisposition::Inactive => None,
+            })
+            .collect::<Vec<_>>();
 
         let control = prepared
             .get("control")
@@ -987,7 +905,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 roster_resolutions,
                 metadata_entries,
                 metadata_heads,
-                access: access_objects,
+                bootstraps,
             },
             prepared,
             control_head_object,

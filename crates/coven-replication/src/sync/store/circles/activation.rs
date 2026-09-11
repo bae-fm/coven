@@ -8,17 +8,16 @@ use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::circle::{
     circle_epoch_close_intent_semantic_prefix, circle_semantic_prefix, recipient_slot_with_peer,
-    verify_circle_semantic_prefix, AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf,
-    CircleControl, CircleControlCoord, CircleControlState, CircleEpochCloseId, CircleId,
-    CircleMetadataHeadRef, CircleRosterHeadRef, CircleSemanticSlot, MergeCircleOwnerAuthorityRef,
-    PreparedAccessLeaf, PreparedCircleControl, ResolvedCircleRoster,
+    verify_circle_semantic_prefix, CircleAccessDisposition, CircleAccessLeaf, CircleControl,
+    CircleControlCoord, CircleControlState, CircleEpochCloseId, CircleId, CircleMetadataHeadRef,
+    CircleRosterHeadRef, CircleSemanticSlot, MergeCircleOwnerAuthorityRef, PreparedAccessLeaf,
+    PreparedCircleControl, ResolvedCircleRoster,
 };
 use coven_protocol::objects::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
-    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
-    CircleAccessObjectRef, CircleActivationObjects, GrantStreamAnchor, ObjectHash,
-    StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreRootRef, StreamActivation, StreamActivationId, VerifiedStoreBatchCommit,
+    CircleActivationObjects, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef, StreamActivation,
+    StreamActivationId, VerifiedStoreBatchCommit,
 };
 use coven_storage::CloudSyncObjectStorage;
 

@@ -387,7 +387,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             epoch_id: active.common.epoch_id,
             key_fingerprint: active.common.key_fingerprint,
             owners: active.common.owners.clone(),
-            access_root: active.common.access_root,
+            access_digest: control.value.value.access.digest(),
             metadata: active.metadata.clone(),
             roster: active.roster.clone(),
             store_membership: active.store_membership.clone(),

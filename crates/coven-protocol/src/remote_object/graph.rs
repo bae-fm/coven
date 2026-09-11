@@ -1,4 +1,3 @@
-use super::identity::*;
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,30 +34,15 @@ impl CandidateObjectGraph {
                         reference: reference.clone(),
                     });
                 }
-                crate::store_commit::CandidateExclusiveObjectRef::CircleAccess {
+                crate::store_commit::CandidateExclusiveObjectRef::CircleBootstrapImage {
                     circle_id,
-                    access,
+                    bootstrap,
                 } => {
-                    objects.push(CandidateExclusiveObjectDomain::CircleAccessLeaf {
+                    objects.push(CandidateExclusiveObjectDomain::CircleBootstrapImage {
                         family: manifest.family,
                         circle_id: *circle_id,
-                        reference: access.leaf.clone(),
+                        reference: bootstrap.clone(),
                     });
-                    objects.push(CandidateExclusiveObjectDomain::CircleAccessEnvelope {
-                        family: manifest.family,
-                        circle_id: *circle_id,
-                        reference: access.envelope.clone(),
-                    });
-                    if let Some(bootstrap) = &access.bootstrap {
-                        objects.push(CandidateExclusiveObjectDomain::CircleBootstrapImage {
-                            family: manifest.family,
-                            circle_id: *circle_id,
-                            owner_pubkey: access.leaf.owner_pubkey.clone(),
-                            epoch_id: access.leaf.epoch_id,
-                            recipient_slot: access.leaf.recipient_slot.clone(),
-                            reference: bootstrap.clone(),
-                        });
-                    }
                 }
                 crate::store_commit::CandidateExclusiveObjectRef::CircleEpochCloseIntent {
                     circle_id,
@@ -120,7 +104,6 @@ impl CandidateObjectGraph {
                 return Err(RemoteObjectRecordError::DuplicateCandidateObject);
             }
         }
-        validate_access_pairs(&self.objects, &exact)?;
         let mut records = Vec::with_capacity(self.objects.len());
         for domain in self.objects {
             let object = domain.object().clone();
@@ -128,9 +111,10 @@ impl CandidateObjectGraph {
                 .remove(&object)
                 .ok_or(RemoteObjectRecordError::CandidateObjectMissing)?;
             let (semantic_hash, payloads) = match &domain {
-                CandidateExclusiveObjectDomain::CircleBootstrapImage { reference, .. } => {
-                    (reference.image_hash, RemoteObjectPayloads::SpooledExternal)
-                }
+                CandidateExclusiveObjectDomain::CircleBootstrapImage { reference, .. } => (
+                    reference.image.image_hash,
+                    RemoteObjectPayloads::SpooledExternal,
+                ),
                 _ => (
                     ObjectHash::digest(&material.canonical_semantic_bytes),
                     RemoteObjectPayloads::SpooledInline,

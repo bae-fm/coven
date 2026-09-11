@@ -1,21 +1,8 @@
 use super::heads::*;
 use super::*;
 
-pub(super) struct VerifiedAccessPair {
-    reference: CircleAccessObjectRef,
-    envelope: AccessEnvelope,
-    leaf_bytes: Vec<u8>,
-}
-
-/// One identity's own resolved access at a verified control: the exact access
-/// envelope and the decrypted, context-verified access leaf.
-struct ResolvedIdentityAccess {
-    envelope: AccessEnvelope,
-    prepared_leaf: PreparedAccessLeaf,
-}
-
-/// Resolve an identity's own access leaf at an already-verified control, given the
-/// control's verified access pairs and membership checkpoint. Returns `None` when
+/// Resolve an identity's own access leaf at an already-verified control, from the
+/// control's own signed access map and membership checkpoint. Returns `None` when
 /// the identity is not a current member (removed or never added). This is the
 /// identity-specific decryption step of Circle activation, split out so a
 /// snapshot-restore selection can resolve its own access without re-verifying the
@@ -23,13 +10,12 @@ struct ResolvedIdentityAccess {
 /// materialization, and the lineage walk touches covered controls a restore may
 /// have reclaimed.
 fn resolve_identity_access_leaf(
-    verified_access: &[VerifiedAccessPair],
     checkpoint_members: &[(String, coven_protocol::membership::MemberRole)],
     reference: &coven_protocol::store_commit::CircleControlRef,
     control: &PreparedCircleControl,
     commit: &StoreBatchCommit,
     identity: &UserKeypair,
-) -> Result<Option<ResolvedIdentityAccess>, CircleOperationError> {
+) -> Result<Option<PreparedAccessLeaf>, CircleOperationError> {
     let own_pubkey = keys::public_key_hex(identity);
     if !checkpoint_members
         .iter()
@@ -38,49 +24,43 @@ fn resolve_identity_access_leaf(
         return Ok(None);
     }
     let owner_pubkey = &control.value.author_pubkey;
-    let owner = (
-        owner_pubkey.clone(),
-        recipient_slot_with_peer(identity, owner_pubkey, reference.circle_id())?,
-    );
-    let access = verified_access
-        .iter()
-        .find(|candidate| {
-            candidate.reference.envelope.owner_pubkey == owner.0
-                && candidate.reference.envelope.recipient_slot == owner.1
-                && candidate.reference.envelope.control_hash == reference.control().control_hash()
-        })
+    let recipient_slot = recipient_slot_with_peer(identity, owner_pubkey, reference.circle_id())?;
+    let entry = control
+        .value
+        .value
+        .access
+        .entry(&recipient_slot)
         .ok_or_else(|| {
             CircleOperationError::InvalidState(
-                "Circle activation lacks the recipient's exact access envelope".to_string(),
+                "Circle activation lacks the recipient's exact access entry".to_string(),
             )
         })?;
-    let envelope = access.envelope.clone();
-    let leaf_bytes = access.leaf_bytes.clone();
-    let plaintext = keys::seal_box_decrypt(&leaf_bytes, &identity.to_x25519_secret_key())?;
-    let leaf: CircleAccessLeaf = serde_json::from_slice(&plaintext)?;
-    let prepared_leaf = PreparedAccessLeaf {
-        bytes: leaf_bytes,
-        value: leaf,
-        leaf_hash: envelope.leaf_hash,
-    };
-    let leaf = &prepared_leaf.value;
+    let prepared = PreparedAccessLeaf::open(entry, identity)?;
+    let leaf = &prepared.value;
     if leaf.candidate_family != commit.candidate_family()
-        || leaf.owner_pubkey != owner.0
+        || leaf.owner_pubkey != *owner_pubkey
         || leaf.recipient_pubkey != own_pubkey
-        || leaf.recipient_slot != owner.1
+        || leaf.recipient_slot != recipient_slot
         || leaf.store_membership != control.value.store_membership_state_ref()
-        || leaf.epoch_id != access.reference.leaf.epoch_id
-        || leaf.leaf_id != access.reference.leaf.leaf_id
-        || !prepared_leaf.verify_envelope(control, &envelope, commit.candidate_family())
+        || leaf.epoch_id != control.value.epoch_id()
+        || !prepared.verify(control, commit.candidate_family())
     {
         return Err(CircleOperationError::InvalidState(
             "circle access leaf failed context verification".to_string(),
         ));
     }
-    Ok(Some(ResolvedIdentityAccess {
-        envelope,
-        prepared_leaf,
-    }))
+    if let CircleAccessDisposition::Active {
+        bootstrap: Some(bootstrap),
+        ..
+    } = &leaf.disposition
+    {
+        if !reference.objects().names_bootstrap(leaf, bootstrap) {
+            return Err(CircleOperationError::InvalidState(
+                "Circle access bootstrap is absent from its signed object graph".to_string(),
+            ));
+        }
+    }
+    Ok(Some(prepared))
 }
 
 fn consume_public_private_stream_activations(
@@ -146,94 +126,6 @@ fn consume_public_private_stream_activations(
 }
 
 impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
-    pub(super) async fn load_access_pairs(
-        &self,
-        commit: &StoreBatchCommit,
-        circle_id: CircleId,
-        control: &PreparedCircleControl,
-        objects: &CircleActivationObjects,
-    ) -> Result<Vec<VerifiedAccessPair>, CircleOperationError> {
-        let family = commit.candidate_family();
-        let mut verified = Vec::with_capacity(objects.access.len());
-        for reference in &objects.access {
-            if reference.leaf.owner_pubkey != reference.envelope.owner_pubkey
-                || reference.leaf.recipient_slot != reference.envelope.recipient_slot
-                || reference.leaf.leaf_id != reference.envelope.leaf_id
-                || reference.leaf.leaf_hash != reference.envelope.leaf_hash
-                || reference.leaf.leaf_hash != reference.leaf.object.stored_hash()
-                || reference.envelope.control_hash != control.coord.control_hash()
-            {
-                return Err(CircleOperationError::InvalidState(
-                    "paired Circle access references differ".to_string(),
-                ));
-            }
-            let envelope_prefix = circle_access_envelope_semantic_prefix(
-                circle_id,
-                family,
-                &reference.envelope.owner_pubkey,
-                &reference.envelope.recipient_slot,
-                reference.envelope.control_hash,
-            );
-            let envelope_bytes = self
-                .storage
-                .read_protocol_object(
-                    &ProtocolObjectContext::store_encrypted(
-                        commit.store_root_hash,
-                        ProtocolObjectDomain::CircleAccessEnvelope,
-                    ),
-                    &reference.envelope.object,
-                    &envelope_prefix,
-                )
-                .await
-                .map_err(coven_protocol::objects::StoreObjectError::from)?;
-            let envelope: AccessEnvelope = serde_json::from_slice(&envelope_bytes)?;
-            if envelope.candidate_family != family
-                || envelope.circle_id != circle_id
-                || envelope.owner_pubkey != reference.envelope.owner_pubkey
-                || envelope.recipient_slot != reference.envelope.recipient_slot
-                || envelope.control_hash != reference.envelope.control_hash
-                || envelope.leaf_id != reference.envelope.leaf_id
-                || envelope.leaf_hash != reference.envelope.leaf_hash
-                || !envelope.verify(control, family)
-            {
-                return Err(CircleOperationError::InvalidState(
-                    "circle access envelope failed verification".to_string(),
-                ));
-            }
-            let leaf_prefix = circle_access_leaf_semantic_prefix(
-                circle_id,
-                family,
-                &reference.leaf.owner_pubkey,
-                reference.leaf.epoch_id,
-                &reference.leaf.recipient_slot,
-                reference.leaf.leaf_id,
-            );
-            let leaf_bytes = self
-                .storage
-                .read_protocol_object(
-                    &ProtocolObjectContext::recipient_sealed(
-                        commit.store_root_hash,
-                        ProtocolObjectDomain::CircleAccessLeaf,
-                    ),
-                    &reference.leaf.object,
-                    &leaf_prefix,
-                )
-                .await
-                .map_err(coven_protocol::objects::StoreObjectError::from)?;
-            if ObjectHash::digest(&leaf_bytes) != reference.leaf.leaf_hash {
-                return Err(CircleOperationError::InvalidState(
-                    "Circle access leaf bytes differ from the paired leaf hash".to_string(),
-                ));
-            }
-            verified.push(VerifiedAccessPair {
-                reference: reference.clone(),
-                envelope,
-                leaf_bytes,
-            });
-        }
-        Ok(verified)
-    }
-
     /// Download and verify the Circle image named by an access leaf's bootstrap:
     /// the recipient's own baseline for a Circle whose accessible content predates
     /// their join, which no forward replay reconstructs. Shared by pull activation
@@ -420,21 +312,11 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     ) -> Result<coven_database::StagedCircleAccess, CircleOperationError> {
         verify_control_context_for_verified_commit(reference, control, verified)?;
         let commit = verified.value();
-        let verified_access = self
-            .load_access_pairs(commit, reference.circle_id(), control, reference.objects())
-            .await?;
         let checkpoint_members = self.verify_control_membership(control).await?;
         let resolved = if control.value.state().is_deleted() {
             None
         } else {
-            resolve_identity_access_leaf(
-                &verified_access,
-                &checkpoint_members,
-                reference,
-                control,
-                commit,
-                identity,
-            )?
+            resolve_identity_access_leaf(&checkpoint_members, reference, control, commit, identity)?
         };
         let local_device_id = self
             .database
@@ -444,10 +326,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let mut leaf_bootstrap = None;
         let local_access = match resolved {
             None => None,
-            Some(ResolvedIdentityAccess {
-                envelope,
-                prepared_leaf,
-            }) => {
+            Some(prepared_leaf) => {
                 let leaf = &prepared_leaf.value;
                 let active = match &leaf.disposition {
                     CircleAccessDisposition::Inactive => None,
@@ -491,7 +370,6 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     }
                 };
                 Some(VerifiedCircleAccess {
-                    envelope,
                     leaf: prepared_leaf,
                     active,
                 })
@@ -735,9 +613,6 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 objects,
                 &mut consumed_stream_activations,
             )?;
-            let verified_access = self
-                .load_access_pairs(commit, reference.circle_id(), &control, objects)
-                .await?;
             let checkpoint_members = self
                 .verify_control_membership_at_verified_prefix(&control, verified_membership_prefix)
                 .await?;
@@ -762,8 +637,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 });
                 continue;
             };
-            let Some(resolved) = resolve_identity_access_leaf(
-                &verified_access,
+            let Some(prepared_leaf) = resolve_identity_access_leaf(
                 &checkpoint_members,
                 reference,
                 &control,
@@ -779,10 +653,6 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 });
                 continue;
             };
-            let ResolvedIdentityAccess {
-                envelope,
-                prepared_leaf,
-            } = resolved;
             let leaf = &prepared_leaf.value;
             let active = match &leaf.disposition {
                 CircleAccessDisposition::Active { keyring, .. } => {
@@ -859,7 +729,6 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 circle_id: reference.circle_id(),
                 control,
                 local_access: Some(VerifiedCircleAccess {
-                    envelope: envelope.clone(),
                     leaf: prepared_leaf,
                     active,
                 }),

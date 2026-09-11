@@ -12,9 +12,9 @@ use super::membership::{
     MembershipEntryRef, MembershipGrantId, MembershipHeadRef, StoreAuthorityChange,
 };
 use crate::circle::{
-    AccessLeafId, CircleBootstrapCoverageRef, CircleBootstrapRef, CircleControlCoord,
-    CircleEpochId, CircleId, CircleMetadataCoord, CircleMetadataHeadRef,
-    CircleRosterConflictResolutionRef, CircleRosterCoord, CircleRosterHeadRef,
+    CircleBootstrapCoverageRef, CircleBootstrapRef, CircleControlCoord, CircleEpochId, CircleId,
+    CircleMetadataCoord, CircleMetadataHeadRef, CircleRosterConflictResolutionRef,
+    CircleRosterCoord, CircleRosterHeadRef,
 };
 use crate::circle_control::StoreMembershipStateRef;
 use crate::objects::ObjectSlot;

@@ -1320,7 +1320,7 @@ fn candidate_manifest_rejects_one_exact_object_reached_twice() {
 }
 
 #[test]
-fn candidate_manifest_rejects_duplicate_circle_access_with_distinct_provider_ids() {
+fn candidate_manifest_rejects_duplicate_circle_bootstraps_with_distinct_provider_ids() {
     let fixture = fixture();
     let family = fixture.commit.candidate_family();
     let circle_id = CircleId::from_bytes([7; 16]);
@@ -1328,54 +1328,31 @@ fn candidate_manifest_rejects_duplicate_circle_access_with_distinct_provider_ids
     let recipient_slot = "recipient-slot".to_string();
     let ids = coven_foundation::id_provider::SequentialIdProvider::new("duplicate Circle access");
     let epoch_id = CircleEpochId::generate(&ids);
-    let leaf_id = AccessLeafId::generate(&ids);
-    let leaf_hash = ObjectHash::digest(b"sealed access leaf");
+    let image_hash = ObjectHash::digest(b"Circle bootstrap image");
     let control_hash = ObjectHash::digest(b"Circle access control");
-    let leaf_key = circle_access_leaf_semantic_prefix(
-        circle_id,
-        family,
-        &owner_pubkey,
-        epoch_id,
-        &recipient_slot,
-        leaf_id,
-    );
-    let envelope_key = format!(
-        "{}.json",
-        circle_access_envelope_semantic_prefix(
+    let image_key = format!(
+        "{}.db",
+        circle_bootstrap_image_semantic_prefix(
             circle_id,
             family,
             &owner_pubkey,
+            epoch_id,
             &recipient_slot,
-            control_hash,
+            image_hash,
         )
     );
-    let access = |provider_id: &str| CircleAccessObjectRef {
-        leaf: CircleAccessLeafObjectRef {
-            owner_pubkey: owner_pubkey.clone(),
-            epoch_id,
-            recipient_slot: recipient_slot.clone(),
-            leaf_id,
-            leaf_hash,
+    let bootstrap = |provider_id: &str| CircleBootstrapObjectRef {
+        owner_pubkey: owner_pubkey.clone(),
+        epoch_id,
+        recipient_slot: recipient_slot.clone(),
+        image: SnapshotImageRef {
+            image_hash,
             object: ExactObjectRef::new(
-                ObjectSlot::opaque(leaf_key.clone(), format!("{provider_id}-leaf")).unwrap(),
+                ObjectSlot::opaque(image_key.clone(), provider_id.to_string()).unwrap(),
                 18,
-                leaf_hash,
+                image_hash,
             ),
         },
-        envelope: CircleAccessEnvelopeObjectRef {
-            owner_pubkey: owner_pubkey.clone(),
-            recipient_slot: recipient_slot.clone(),
-            control_hash,
-            leaf_id,
-            leaf_hash,
-            object: ExactObjectRef::new(
-                ObjectSlot::opaque(envelope_key.clone(), format!("{provider_id}-envelope"))
-                    .unwrap(),
-                20,
-                ObjectHash::digest(provider_id.as_bytes()),
-            ),
-        },
-        bootstrap: None,
     };
     let control = fixture.circle_control_coord(control_hash);
     let mut operations = fixture
@@ -1401,14 +1378,14 @@ fn candidate_manifest_rejects_duplicate_circle_access_with_distinct_provider_ids
             roster_resolutions: BTreeMap::new(),
             metadata_entries: BTreeMap::new(),
             metadata_heads: Vec::new(),
-            access: vec![access("drive-file-a"), access("drive-file-b")],
+            bootstraps: vec![bootstrap("drive-file-a"), bootstrap("drive-file-b")],
         },
     });
 
     assert!(matches!(
         candidate_manifest(family, &StoreCommitBody::Operations(operations)),
         Err(StoreProtocolError::Malformed(reason))
-            if reason.contains("repeats a Circle access semantic key")
+            if reason.contains("repeats a Circle bootstrap semantic key")
     ));
 }
 

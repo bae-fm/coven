@@ -97,12 +97,13 @@ impl CircleTransitionDraft {
                     provisional_frontier,
                     outcome_slot,
                 }),
+                access: CircleAccessMap::empty(),
                 author_authority,
                 membership_authority,
             },
             author_pubkey,
         };
-        let access = CircleAccessDraft::prepare(
+        let access = CircleAccessSet::prepare(
             store_root_hash,
             candidate_family,
             circle_id,
@@ -114,15 +115,9 @@ impl CircleTransitionDraft {
             &control_value.access_epoch().store_membership,
             &store_members,
             &std::collections::BTreeMap::new(),
-            ids,
             signer,
         )?;
-        control_value
-            .value
-            .state
-            .access_epoch_mut()
-            .common
-            .access_root = access.access_root();
+        control_value.value.access = access.map.clone();
         let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
@@ -130,7 +125,6 @@ impl CircleTransitionDraft {
                 .expect("circle control serialization cannot fail"),
             value: control_value,
         };
-        let access = access.finish(&control)?;
         Ok(Self {
             circle_id,
             epoch_id,
@@ -144,7 +138,7 @@ impl CircleTransitionDraft {
             close_intent: Some(close_intent),
             close_finalization: None,
             close_cancellation: None,
-            access,
+            access: access.leaves,
             control,
         })
     }
@@ -318,7 +312,6 @@ impl CircleTransitionDraft {
                         epoch_id,
                         key_fingerprint,
                         owners,
-                        access_root: close.frozen_epoch.common.access_root,
                         origin: close.frozen_epoch.common.origin.clone(),
                     },
                     metadata: metadata_state,
@@ -326,12 +319,13 @@ impl CircleTransitionDraft {
                     store_membership,
                     covered_control_heads: close.frozen_epoch.covered_control_heads.clone(),
                 }),
+                access: CircleAccessMap::empty(),
                 author_authority,
                 membership_authority,
             },
             author_pubkey,
         };
-        let access = CircleAccessDraft::prepare(
+        let access = CircleAccessSet::prepare(
             control_value.store_root_hash,
             candidate_family,
             control_value.circle_id,
@@ -343,16 +337,9 @@ impl CircleTransitionDraft {
             &control_value.access_epoch().store_membership,
             &store_members,
             &std::collections::BTreeMap::new(),
-            ids,
             signer,
         )?;
-        control_value
-            .value
-            .state
-            .active_epoch_mut()
-            .expect("Circle finalization constructs an active epoch")
-            .common
-            .access_root = access.access_root();
+        control_value.value.access = access.map.clone();
         let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
@@ -360,7 +347,6 @@ impl CircleTransitionDraft {
                 .expect("Circle control serialization cannot fail"),
             value: control_value,
         };
-        let access = access.finish(&control)?;
         Ok(Self {
             circle_id: control.value.circle_id,
             epoch_id,
@@ -382,7 +368,7 @@ impl CircleTransitionDraft {
                 outcome_slot: close.outcome_slot.clone(),
             }),
             close_cancellation: None,
-            access,
+            access: access.leaves,
             control,
         })
     }
@@ -402,7 +388,6 @@ impl CircleTransitionDraft {
         current_roster: &CircleMaterializedRoster,
         current_metadata: &CircleMetadata,
         keyring: &str,
-        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = close_control.value.state() else {
@@ -479,7 +464,6 @@ impl CircleTransitionDraft {
                         epoch_id,
                         key_fingerprint,
                         owners: frozen.common.owners.clone(),
-                        access_root: frozen.common.access_root,
                         origin: frozen.common.origin.clone(),
                     },
                     metadata: frozen.metadata.clone(),
@@ -487,12 +471,13 @@ impl CircleTransitionDraft {
                     store_membership,
                     covered_control_heads: frozen.covered_control_heads.clone(),
                 }),
+                access: CircleAccessMap::empty(),
                 author_authority,
                 membership_authority,
             },
             author_pubkey,
         };
-        let access = CircleAccessDraft::prepare(
+        let access = CircleAccessSet::prepare(
             control_value.store_root_hash,
             candidate_family,
             control_value.circle_id,
@@ -504,16 +489,9 @@ impl CircleTransitionDraft {
             &control_value.access_epoch().store_membership,
             &store_members,
             &std::collections::BTreeMap::new(),
-            ids,
             signer,
         )?;
-        control_value
-            .value
-            .state
-            .active_epoch_mut()
-            .expect("Circle reopen constructs an active epoch")
-            .common
-            .access_root = access.access_root();
+        control_value.value.access = access.map.clone();
         let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
@@ -521,7 +499,6 @@ impl CircleTransitionDraft {
                 .expect("Circle control serialization cannot fail"),
             value: control_value,
         };
-        let access = access.finish(&control)?;
         Ok(Self {
             circle_id: control.value.circle_id,
             epoch_id,
@@ -538,7 +515,7 @@ impl CircleTransitionDraft {
                 close_control: close_control.clone(),
                 outcome_slot: close.outcome_slot.clone(),
             }),
-            access,
+            access: access.leaves,
             control,
         })
     }

@@ -207,7 +207,7 @@ async fn check_bootstrap_discard(operation: BootstrapOperation, authority: Disca
             .access
             .iter()
             .any(|access| matches!(
-                &access.leaf.value.disposition,
+                &access.value.disposition,
                 CircleAccessDisposition::Active { bootstrap: Some(bootstrap), .. }
                     if bootstrap.blobs.iter().any(|binding| binding.stored() == Some(&blob))
             )),

@@ -19,7 +19,6 @@ pub struct VerifiedCircleReference {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCircleAccess {
-    pub envelope: AccessEnvelope,
     pub leaf: PreparedAccessLeaf,
     pub active: Option<VerifiedCircleActive>,
 }

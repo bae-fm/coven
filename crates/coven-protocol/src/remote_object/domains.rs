@@ -14,7 +14,7 @@ impl CandidateExclusiveTarget {
     pub(super) fn validate_semantic(&self, bytes: &[u8]) -> Result<(), RemoteObjectRecordError> {
         match &self.domain {
             CandidateExclusiveObjectDomain::CircleBootstrapImage { reference, .. }
-                if bytes.is_empty() && self.semantic_hash == reference.image_hash =>
+                if bytes.is_empty() && self.semantic_hash == reference.image.image_hash =>
             {
                 Ok(())
             }
@@ -47,16 +47,6 @@ pub enum CandidateExclusiveObjectDomain {
     CirclePackage {
         reference: crate::store_commit::CirclePackageRef,
     },
-    CircleAccessLeaf {
-        family: CandidateFamilyId,
-        circle_id: CircleId,
-        reference: crate::store_commit::CircleAccessLeafObjectRef,
-    },
-    CircleAccessEnvelope {
-        family: CandidateFamilyId,
-        circle_id: CircleId,
-        reference: crate::store_commit::CircleAccessEnvelopeObjectRef,
-    },
     CircleEpochCloseIntent {
         family: CandidateFamilyId,
         circle_id: CircleId,
@@ -75,10 +65,7 @@ pub enum CandidateExclusiveObjectDomain {
     CircleBootstrapImage {
         family: CandidateFamilyId,
         circle_id: CircleId,
-        owner_pubkey: String,
-        epoch_id: crate::circle::CircleEpochId,
-        recipient_slot: String,
-        reference: crate::store_commit::SnapshotImageRef,
+        reference: crate::store_commit::CircleBootstrapObjectRef,
     },
 }
 
@@ -90,9 +77,7 @@ impl CandidateExclusiveObjectDomain {
             | Self::MergeMembershipWrappedStoreKey { family, .. } => *family,
             Self::StorePackage { reference } => reference.candidate_family,
             Self::CirclePackage { reference } => reference.package.candidate_family,
-            Self::CircleAccessLeaf { family, .. }
-            | Self::CircleAccessEnvelope { family, .. }
-            | Self::CircleEpochCloseIntent { family, .. }
+            Self::CircleEpochCloseIntent { family, .. }
             | Self::CircleEpochCloseOutcome { family, .. }
             | Self::CircleEpochCloseCancellation { family, .. }
             | Self::CircleBootstrapImage { family, .. } => *family,
@@ -106,12 +91,10 @@ impl CandidateExclusiveObjectDomain {
             Self::MergeMembershipWrappedStoreKey { reference, .. } => &reference.object,
             Self::StorePackage { reference } => &reference.object,
             Self::CirclePackage { reference } => &reference.package.object,
-            Self::CircleAccessLeaf { reference, .. } => &reference.object,
-            Self::CircleAccessEnvelope { reference, .. } => &reference.object,
             Self::CircleEpochCloseIntent { reference, .. } => &reference.object,
             Self::CircleEpochCloseOutcome { reference, .. } => &reference.object,
             Self::CircleEpochCloseCancellation { reference, .. } => &reference.object,
-            Self::CircleBootstrapImage { reference, .. } => &reference.object,
+            Self::CircleBootstrapImage { reference, .. } => &reference.image.object,
         }
     }
 
@@ -125,14 +108,12 @@ impl CandidateExclusiveObjectDomain {
             }),
             Self::CircleBootstrapImage { reference, .. } => {
                 Some(SharedLiveSetObjectDomain::CircleBootstrapImage {
-                    reference: reference.clone(),
+                    reference: reference.image.clone(),
                 })
             }
             Self::MergeMembershipEntry { .. }
             | Self::MergeMembershipHead { .. }
             | Self::MergeMembershipWrappedStoreKey { .. }
-            | Self::CircleAccessLeaf { .. }
-            | Self::CircleAccessEnvelope { .. }
             | Self::CircleEpochCloseIntent { .. }
             | Self::CircleEpochCloseOutcome { .. }
             | Self::CircleEpochCloseCancellation { .. } => None,
@@ -156,24 +137,6 @@ impl CandidateExclusiveObjectDomain {
                     reference: reference.clone(),
                 },
             ),
-            Self::CircleAccessLeaf {
-                family,
-                circle_id,
-                reference,
-            } => Some(RetainedAuthorityObjectDomain::CircleAccessLeaf {
-                family: *family,
-                circle_id: *circle_id,
-                reference: reference.clone(),
-            }),
-            Self::CircleAccessEnvelope {
-                family,
-                circle_id,
-                reference,
-            } => Some(RetainedAuthorityObjectDomain::CircleAccessEnvelope {
-                family: *family,
-                circle_id: *circle_id,
-                reference: reference.clone(),
-            }),
             Self::CircleEpochCloseIntent {
                 family,
                 circle_id,
@@ -391,16 +354,6 @@ pub enum RetainedAuthorityObjectDomain {
     },
     ReclaimReceipt {
         reference: crate::reclaim::ReclaimReceiptRef,
-    },
-    CircleAccessLeaf {
-        family: CandidateFamilyId,
-        circle_id: CircleId,
-        reference: crate::store_commit::CircleAccessLeafObjectRef,
-    },
-    CircleAccessEnvelope {
-        family: CandidateFamilyId,
-        circle_id: CircleId,
-        reference: crate::store_commit::CircleAccessEnvelopeObjectRef,
     },
     CircleEpochCloseIntent {
         family: CandidateFamilyId,

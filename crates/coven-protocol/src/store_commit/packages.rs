@@ -19,36 +19,17 @@ pub struct CirclePackageRef {
     pub key_fingerprint: KeyFingerprint,
 }
 
-/// Exact recipient-visible access envelope paired with its sealed leaf.
+/// Exact bootstrap image an Active access entry of this control names for one
+/// recipient. The recipient's sealed leaf carries the full `CircleBootstrapRef`;
+/// this public reference is what makes the image a candidate-exclusive object
+/// of the activating commit.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CircleAccessEnvelopeObjectRef {
-    pub owner_pubkey: String,
-    pub recipient_slot: String,
-    pub control_hash: ObjectHash,
-    pub leaf_id: AccessLeafId,
-    pub leaf_hash: ObjectHash,
-    pub object: ExactObjectRef,
-}
-
-/// Exact recipient-sealed access-leaf object named by a Store activation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CircleAccessLeafObjectRef {
+pub struct CircleBootstrapObjectRef {
     pub owner_pubkey: String,
     pub epoch_id: CircleEpochId,
     pub recipient_slot: String,
-    pub leaf_id: AccessLeafId,
-    pub leaf_hash: ObjectHash,
-    pub object: ExactObjectRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CircleAccessObjectRef {
-    pub leaf: CircleAccessLeafObjectRef,
-    pub envelope: CircleAccessEnvelopeObjectRef,
-    pub bootstrap: Option<SnapshotImageRef>,
+    pub image: SnapshotImageRef,
 }
 
 /// Exact Circle-metadata object and the epoch key that must open it.
@@ -75,7 +56,23 @@ pub struct CircleActivationObjects {
     #[serde(with = "ordered_map_entries")]
     pub metadata_entries: BTreeMap<CircleMetadataCoord, CircleMetadataObjectRef>,
     pub metadata_heads: Vec<CircleMetadataHeadRef>,
-    pub access: Vec<CircleAccessObjectRef>,
+    pub bootstraps: Vec<CircleBootstrapObjectRef>,
+}
+
+impl CircleActivationObjects {
+    /// Whether this graph names exactly the bootstrap image the leaf seals.
+    pub fn names_bootstrap(
+        &self,
+        leaf: &crate::circle::CircleAccessLeaf,
+        bootstrap: &crate::circle::CircleBootstrapRef,
+    ) -> bool {
+        self.bootstraps.contains(&CircleBootstrapObjectRef {
+            owner_pubkey: leaf.owner_pubkey.clone(),
+            epoch_id: leaf.epoch_id,
+            recipient_slot: leaf.recipient_slot.clone(),
+            image: bootstrap.image.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,9 +466,9 @@ pub enum CandidateExclusiveObjectRef {
         circle_id: CircleId,
         reference: crate::circle::CircleEpochCloseCancellationRef,
     },
-    CircleAccess {
+    CircleBootstrapImage {
         circle_id: CircleId,
-        access: CircleAccessObjectRef,
+        bootstrap: CircleBootstrapObjectRef,
     },
 }
 

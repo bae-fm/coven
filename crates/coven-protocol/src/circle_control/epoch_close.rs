@@ -6,7 +6,6 @@ pub struct ActiveCircleEpochCore {
     pub epoch_id: CircleEpochId,
     pub key_fingerprint: KeyFingerprint,
     pub owners: Vec<String>,
-    pub access_root: ObjectHash,
     pub origin: CircleEpochOrigin,
 }
 
@@ -480,7 +479,7 @@ pub struct CircleEpochSuccessor {
     pub epoch_id: CircleEpochId,
     pub key_fingerprint: KeyFingerprint,
     pub owners: Vec<String>,
-    pub access_root: ObjectHash,
+    pub access_digest: ObjectHash,
     pub metadata: MergeCircleMetadataStateRef,
     pub roster: MergeCircleRosterStateRef,
     pub store_membership: StoreMembershipStateRef,

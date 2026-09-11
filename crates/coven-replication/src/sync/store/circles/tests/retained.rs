@@ -274,11 +274,12 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         .local_access
         .as_ref()
         .expect("founder has retained Circle access");
-    let envelope_bytes =
-        serde_json::to_vec(&local_access.envelope).expect("serialize retained Circle envelope");
-    let mut envelope_field = b",\"envelope\":".to_vec();
-    envelope_field.extend_from_slice(&envelope_bytes);
-    let omitted = replace_once(&retained, &envelope_field, &[]);
+    let sealed_bytes =
+        serde_json::to_vec(&local_access.leaf.bytes).expect("serialize retained sealed leaf bytes");
+    let mut sealed_field = b"\"bytes\":".to_vec();
+    sealed_field.extend_from_slice(&sealed_bytes);
+    sealed_field.extend_from_slice(b",");
+    let omitted = replace_once(&retained, &sealed_field, &[]);
     let omitted_error = VerifiedCircleActivations::parse_retained(
         &omitted,
         &commit,
@@ -286,26 +287,24 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         author.value(),
         Some(&founder_pubkey),
     )
-    .expect_err("retained Circle access cannot omit its envelope");
-    assert!(omitted_error
-        .to_string()
-        .contains("missing field `envelope`"));
+    .expect_err("retained Circle access cannot omit its sealed bytes");
+    assert!(
+        omitted_error.to_string().contains("missing field `bytes`"),
+        "{omitted_error}"
+    );
 
-    let peer_envelope = journal
+    let peer_leaf = journal
         .operation()
         .creation
         .access
         .iter()
-        .find(|access| access.leaf.value.recipient_pubkey == peer_pubkey)
-        .expect("peer has an exact retained Circle envelope");
-    let local_pair = serde_json::to_vec(&coven_protocol::circle::PreparedCircleAccess {
-        leaf: local_access.leaf.clone(),
-        envelope: local_access.envelope.clone(),
-    })
-    .expect("serialize local retained Circle access pair");
-    let substituted_pair =
-        serde_json::to_vec(peer_envelope).expect("serialize substituted Circle access pair");
-    let substituted = replace_once(&retained, &local_pair, &substituted_pair);
+        .find(|access| access.value.recipient_pubkey == peer_pubkey)
+        .expect("peer has an exact retained Circle access leaf");
+    let local_leaf =
+        serde_json::to_vec(&local_access.leaf).expect("serialize local retained Circle access");
+    let substituted_leaf =
+        serde_json::to_vec(peer_leaf).expect("serialize substituted Circle access");
+    let substituted = replace_once(&retained, &local_leaf, &substituted_leaf);
     let substituted_error = VerifiedCircleActivations::parse_retained(
         &substituted,
         &commit,
@@ -313,7 +312,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         author.value(),
         Some(&founder_pubkey),
     )
-    .expect_err("retained Circle access cannot substitute another signed access pair");
+    .expect_err("retained Circle access cannot substitute another signed access leaf");
     assert!(
         substituted_error
             .to_string()
@@ -321,11 +320,11 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         "{substituted_error}"
     );
 
-    let mut tampered_envelope = local_access.envelope.clone();
-    tampered_envelope.corrupt_signature_for_test();
-    let tampered_envelope = serde_json::to_vec(&tampered_envelope)
-        .expect("serialize tampered retained Circle envelope");
-    let tampered = replace_once(&retained, &envelope_bytes, &tampered_envelope);
+    let mut tampered_bytes = local_access.leaf.bytes.clone();
+    tampered_bytes[0] ^= 0xff;
+    let tampered_bytes =
+        serde_json::to_vec(&tampered_bytes).expect("serialize tampered sealed leaf bytes");
+    let tampered = replace_once(&retained, &sealed_bytes, &tampered_bytes);
     let tampered_error = VerifiedCircleActivations::parse_retained(
         &tampered,
         &commit,
@@ -333,11 +332,11 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         author.value(),
         Some(&founder_pubkey),
     )
-    .expect_err("retained Circle access cannot alter a signed envelope");
+    .expect_err("retained Circle access cannot alter its sealed bytes");
     assert!(
         tampered_error
             .to_string()
-            .contains("access leaf and envelope failed verification"),
+            .contains("retained Circle access leaf failed verification"),
         "{tampered_error}"
     );
 

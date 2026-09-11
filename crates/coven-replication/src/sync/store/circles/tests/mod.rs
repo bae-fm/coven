@@ -10,19 +10,17 @@ use coven_database::{Database, DbError};
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::circle::{
-    circle_semantic_prefix, CircleAccessDisposition, CircleId, CircleOperationId,
+    circle_semantic_prefix, CircleAccessDisposition, CircleAccessMap, CircleId, CircleOperationId,
     CircleOperationKind, CircleOperationState, CircleRole, CircleRosterDraftPolicy,
     CircleSemanticSlot, CircleTransitionDraft, CircleTransitionDraftPolicy,
-    CircleTransitionPolicyObjects, PreparedCircleTransition,
+    CircleTransitionPolicyObjects, PreparedAccessLeaf, PreparedCircleTransition,
 };
 use coven_protocol::membership::MemberRole;
 use coven_protocol::objects::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
 };
 use coven_protocol::store_commit::{
-    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
-    commit_semantic_prefix, CircleAccessEnvelopeObjectRef, CircleAccessLeafObjectRef,
-    CircleAccessObjectRef, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
+    commit_semantic_prefix, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
     StoreCommitCoord, StreamActivation,
 };
 use coven_storage::cloud::CloudHome;
@@ -193,55 +191,23 @@ fn promote_store_member_access_without_adding_to_circle_roster(
     let access = creation
         .access
         .iter_mut()
-        .find(|access| access.leaf.value.recipient_pubkey == recipient_pubkey)
+        .find(|access| access.value.recipient_pubkey == recipient_pubkey)
         .expect("Store member has a prepared inactive access leaf");
-    access.leaf.value.body_mut().disposition = CircleAccessDisposition::Active {
+    access.value.body_mut().disposition = CircleAccessDisposition::Active {
         keyring: creation.keyring.clone(),
         key_fingerprint: creation.control.value.key_fingerprint(),
         roster: creation.control.value.roster_state_ref(),
         bootstrap: None,
     };
-    access.leaf.value.resign(owner);
-    let recipient_key =
-        keys::ed25519_to_x25519_public_key(&recipient.public_key()).expect("convert recipient key");
-    access.leaf.bytes = keys::seal_box_encrypt(
-        &serde_json::to_vec(&access.leaf.value).expect("serialize promoted access leaf"),
-        &recipient_key,
-    );
-    access.leaf.leaf_hash = ObjectHash::digest(&access.leaf.bytes);
+    access.value.resign(owner);
+    *access = PreparedAccessLeaf::seal(access.value.clone()).expect("seal promoted access leaf");
 
-    let leaf_hashes = creation
-        .access
-        .iter()
-        .map(|access| access.leaf.leaf_hash)
-        .collect::<Vec<_>>();
-    let (access_root, proofs) =
-        coven_protocol::circle_control::merkle_root_and_proofs(&leaf_hashes);
-    creation
-        .control
-        .value
-        .body_mut()
-        .value
-        .state
-        .active_epoch_mut()
-        .expect("test transition has an active epoch")
-        .common
-        .access_root = access_root;
+    let map = CircleAccessMap::from_leaves(&creation.access).expect("rebuild promoted access map");
+    creation.control.value.body_mut().value.access = map;
     creation.control.value.resign(owner);
     creation.control.coord = creation.control.value.coord();
     creation.control.bytes =
         serde_json::to_vec(&creation.control.value).expect("serialize promoted control");
-    for (access, proof) in creation.access.iter_mut().zip(proofs) {
-        let value_hash = ObjectHash::digest(
-            &serde_json::to_vec(&access.leaf.value).expect("serialize access leaf value"),
-        );
-        let envelope = access.envelope.body_mut();
-        envelope.control_hash = creation.control.coord.control_hash();
-        envelope.leaf_hash = access.leaf.leaf_hash;
-        envelope.value_hash = value_hash;
-        envelope.proof = proof;
-        access.envelope.resign(owner);
-    }
 }
 
 /// Cloud storage backed by a Circle test's in-memory home, sealed with the fixed

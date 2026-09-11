@@ -140,6 +140,9 @@ impl MergeCircleOwnerAuthorityRef {
 pub struct CircleControlValue {
     pub order: MergeCircleControlOrder,
     pub state: CircleControlState,
+    /// Every Store member's sealed access entry at this control. The control's
+    /// own signature is what binds the set.
+    pub access: CircleAccessMap,
     pub author_authority: MergeCircleOwnerAuthorityRef,
     pub membership_authority: MembershipCoord,
 }
@@ -187,10 +190,6 @@ impl CircleControlBody {
 
     pub fn owners(&self) -> &[String] {
         &self.active_common().owners
-    }
-
-    pub(crate) fn access_root(&self) -> ObjectHash {
-        self.active_common().access_root
     }
 
     pub fn roster_state_ref(&self) -> CircleRosterStateRef {
@@ -312,9 +311,18 @@ impl CircleControl {
             // above.
             CircleControlState::Deleted(_) => !founder,
         };
+        // A deletion issues no access material; every live control seals one
+        // entry per Store member.
+        let access_matches_state = match &self.value.state {
+            CircleControlState::Deleted(_) => self.value.access.is_empty(),
+            CircleControlState::ActiveEpoch(_) | CircleControlState::EpochClose(_) => {
+                !self.value.access.is_empty() && self.value.access.verify_shape()
+            }
+        };
         owners_are_canonical
             && origin_is_valid
             && state_is_valid
+            && access_matches_state
             && order_is_valid
             && continuity_is_valid
             && founder_identity_is_valid
@@ -378,44 +386,5 @@ impl CircleControlHead {
         self.control.validate().is_ok()
             && self.control.device_id == registration.device_id.to_string()
             && self.verify_by(&registration.device_signing_pubkey).is_ok()
-    }
-}
-
-/// The wire body of one recipient's access envelope. Every field here is
-/// signed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AccessEnvelopeBody {
-    pub store_root_hash: ObjectHash,
-    pub candidate_family: crate::store_commit::CandidateFamilyId,
-    pub circle_id: CircleId,
-    pub owner_pubkey: String,
-    pub recipient_slot: String,
-    pub control_hash: ObjectHash,
-    pub leaf_id: AccessLeafId,
-    pub leaf_hash: ObjectHash,
-    pub value_hash: ObjectHash,
-    pub proof: Vec<MerkleStep>,
-}
-
-impl SignedBody for AccessEnvelopeBody {
-    const DOMAIN: &'static [u8] = ENVELOPE_DOMAIN;
-}
-
-pub type AccessEnvelope = Signed<AccessEnvelopeBody>;
-
-impl AccessEnvelope {
-    pub fn verify(
-        &self,
-        control: &PreparedCircleControl,
-        candidate_family: crate::store_commit::CandidateFamilyId,
-    ) -> bool {
-        self.store_root_hash == control.value.store_root_hash
-            && self.candidate_family == candidate_family
-            && self.circle_id == control.value.circle_id
-            && self.owner_pubkey == control.value.author_pubkey
-            && self.control_hash == control.coord.control_hash()
-            && self.verify_by(&self.owner_pubkey).is_ok()
-            && verify_merkle_proof(self.leaf_hash, &self.proof, control.value.access_root())
     }
 }

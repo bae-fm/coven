@@ -86,7 +86,6 @@ pub struct CircleAccessLeafBody {
     pub candidate_family: crate::store_commit::CandidateFamilyId,
     pub circle_id: CircleId,
     pub epoch_id: CircleEpochId,
-    pub leaf_id: AccessLeafId,
     pub owner_pubkey: String,
     pub recipient_pubkey: String,
     pub recipient_slot: String,
@@ -139,69 +138,72 @@ impl CircleAccessLeaf {
     }
 }
 
+/// One recipient's sealed access entry inside a signed Circle control.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MerkleStep {
-    Left(ObjectHash),
-    Right(ObjectHash),
+#[serde(deny_unknown_fields)]
+pub struct CircleAccessEntry {
+    /// Hex-encoded sealed box (`seal_box_encrypt` output) carrying the
+    /// Owner-signed `CircleAccessLeaf` JSON for this slot's recipient.
+    pub sealed: String,
+    /// Digest of the signed leaf's canonical JSON, binding a locally retained
+    /// decrypted leaf to this exact control entry.
+    pub value_hash: ObjectHash,
 }
 
-fn merkle_parent(left: ObjectHash, right: ObjectHash) -> ObjectHash {
-    let mut bytes = Vec::with_capacity(1 + 64);
-    bytes.push(1);
-    bytes.extend_from_slice(left.as_bytes());
-    bytes.extend_from_slice(right.as_bytes());
-    ObjectHash::digest(&bytes)
-}
+/// Every Store member's sealed access entry at one control, keyed by the
+/// opaque recipient slot. Canonical by construction (`BTreeMap`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CircleAccessMap(BTreeMap<String, CircleAccessEntry>);
 
-pub fn verify_merkle_proof(mut hash: ObjectHash, proof: &[MerkleStep], root: ObjectHash) -> bool {
-    for step in proof {
-        hash = match step {
-            MerkleStep::Left(left) => merkle_parent(*left, hash),
-            MerkleStep::Right(right) => merkle_parent(hash, *right),
-        };
+impl CircleAccessMap {
+    pub fn empty() -> Self {
+        Self(BTreeMap::new())
     }
-    hash == root
-}
 
-pub fn merkle_root_and_proofs(hashes: &[ObjectHash]) -> (ObjectHash, Vec<Vec<MerkleStep>>) {
-    assert!(
-        !hashes.is_empty(),
-        "a circle control has at least one access leaf"
-    );
-    let mut indexed = hashes
-        .iter()
-        .copied()
-        .enumerate()
-        .collect::<Vec<(usize, ObjectHash)>>();
-    indexed.sort_by_key(|(index, hash)| (*hash, *index));
-    let mut proofs = vec![Vec::new(); hashes.len()];
-    let mut layer = indexed
-        .into_iter()
-        .map(|(index, hash)| (hash, vec![index]))
-        .collect::<Vec<_>>();
-    while layer.len() > 1 {
-        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
-        for pair in layer.chunks(2) {
-            let (left_hash, left_indices) = &pair[0];
-            if let Some((right_hash, right_indices)) = pair.get(1) {
-                for index in left_indices {
-                    proofs[*index].push(MerkleStep::Right(*right_hash));
-                }
-                for index in right_indices {
-                    proofs[*index].push(MerkleStep::Left(*left_hash));
-                }
-                let mut indices = left_indices.clone();
-                indices.extend(right_indices);
-                next.push((merkle_parent(*left_hash, *right_hash), indices));
-            } else {
-                for index in left_indices {
-                    proofs[*index].push(MerkleStep::Right(*left_hash));
-                }
-                next.push((merkle_parent(*left_hash, *left_hash), left_indices.clone()));
+    /// One entry per leaf; a repeated recipient slot is a contradiction in the
+    /// leaf set the caller sealed.
+    pub fn from_leaves(leaves: &[PreparedAccessLeaf]) -> Result<Self, CircleTransitionError> {
+        let mut map = Self::empty();
+        for leaf in leaves {
+            if map
+                .insert(leaf.value.recipient_slot.clone(), leaf.entry())
+                .is_some()
+            {
+                return Err(CircleTransitionError::InvalidCurrentState);
             }
         }
-        layer = next;
+        Ok(map)
     }
-    (layer[0].0, proofs)
+
+    pub fn insert(
+        &mut self,
+        recipient_slot: String,
+        entry: CircleAccessEntry,
+    ) -> Option<CircleAccessEntry> {
+        self.0.insert(recipient_slot, entry)
+    }
+
+    pub fn entry(&self, recipient_slot: &str) -> Option<&CircleAccessEntry> {
+        self.0.get(recipient_slot)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The value an epoch-close outcome commits to.
+    pub fn digest(&self) -> ObjectHash {
+        ObjectHash::digest(&crate::store_commit::domain_json(ACCESS_MAP_DOMAIN, self))
+    }
+
+    pub(crate) fn verify_shape(&self) -> bool {
+        self.0
+            .values()
+            .all(|entry| hex::decode(&entry.sealed).is_ok_and(|bytes| !bytes.is_empty()))
+    }
 }

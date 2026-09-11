@@ -137,7 +137,7 @@ struct RetainedCircleReference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RetainedCircleAccess {
-    access: PreparedCircleAccess,
+    access: PreparedAccessLeaf,
     state: RetainedCircleAccessState,
 }
 
@@ -410,10 +410,7 @@ impl RetainedCircleAccess {
             None => RetainedCircleAccessState::Inactive,
         };
         Self {
-            access: PreparedCircleAccess {
-                leaf: verified.leaf.clone(),
-                envelope: verified.envelope.clone(),
-            },
+            access: verified.leaf.clone(),
             state,
         }
     }
@@ -425,33 +422,34 @@ impl RetainedCircleAccess {
         control: &PreparedCircleControl,
         recipient_pubkey: Option<&str>,
     ) -> Result<VerifiedCircleAccess, CircleStateError> {
-        if !self.access.leaf.verify_envelope(
-            control,
-            &self.access.envelope,
-            commit.candidate_family(),
-        ) {
+        if !self.access.verify(control, commit.candidate_family()) {
             return Err(CircleStateError::Invariant(
-                "retained Circle access leaf and envelope failed verification".to_string(),
+                "retained Circle access leaf failed verification".to_string(),
             ));
         }
         if let Some(recipient_pubkey) = recipient_pubkey {
-            if self.access.leaf.value.recipient_pubkey != recipient_pubkey {
+            if self.access.value.recipient_pubkey != recipient_pubkey {
                 return Err(CircleStateError::Invariant(
                     "retained Circle access names another local recipient".to_string(),
                 ));
             }
         }
-        if !reference
-            .objects()
-            .access
-            .iter()
-            .any(|candidate| retained_access_matches(candidate, &self.access))
+        if let CircleAccessDisposition::Active {
+            bootstrap: Some(bootstrap),
+            ..
+        } = &self.access.value.disposition
         {
-            return Err(CircleStateError::Invariant(
-                "retained Circle access differs from every exact commit reference".to_string(),
-            ));
+            if !reference
+                .objects()
+                .names_bootstrap(&self.access.value, bootstrap)
+            {
+                return Err(CircleStateError::Invariant(
+                    "retained Circle access bootstrap is absent from its signed object graph"
+                        .to_string(),
+                ));
+            }
         }
-        let active = match (self.access.leaf.value.disposition.clone(), self.state) {
+        let active = match (self.access.value.disposition.clone(), self.state) {
             (
                 CircleAccessDisposition::Active { .. },
                 RetainedCircleAccessState::Active { roster, metadata },
@@ -464,35 +462,8 @@ impl RetainedCircleAccess {
             }
         };
         Ok(VerifiedCircleAccess {
-            envelope: self.access.envelope,
-            leaf: self.access.leaf,
+            leaf: self.access,
             active,
         })
     }
-}
-
-fn retained_access_matches(
-    reference: &CircleAccessObjectRef,
-    access: &PreparedCircleAccess,
-) -> bool {
-    reference.envelope.owner_pubkey == access.envelope.owner_pubkey
-        && reference.envelope.recipient_slot == access.envelope.recipient_slot
-        && reference.envelope.control_hash == access.envelope.control_hash
-        && reference.envelope.leaf_id == access.envelope.leaf_id
-        && reference.envelope.leaf_hash == access.envelope.leaf_hash
-        && reference.leaf.owner_pubkey == access.leaf.value.owner_pubkey
-        && reference.leaf.epoch_id == access.leaf.value.epoch_id
-        && reference.leaf.recipient_slot == access.leaf.value.recipient_slot
-        && reference.leaf.leaf_id == access.leaf.value.leaf_id
-        && reference.leaf.leaf_hash == access.leaf.leaf_hash
-        && reference.leaf.object.stored_hash() == access.leaf.leaf_hash
-        && u64::try_from(access.leaf.bytes.len())
-            .is_ok_and(|size| reference.leaf.object.stored_size() == size)
-        && reference.bootstrap
-            == match &access.leaf.value.disposition {
-                crate::circle::CircleAccessDisposition::Active { bootstrap, .. } => {
-                    bootstrap.as_ref().map(|bootstrap| bootstrap.image.clone())
-                }
-                crate::circle::CircleAccessDisposition::Inactive => None,
-            }
 }

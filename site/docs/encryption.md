@@ -62,9 +62,9 @@ Protection is selected by the object kind, not by its filename extension:
 | --- | --- |
 | Store row packages, Store snapshot images, reclamation evidence | Store-key encryption |
 | Store root, publications, commit records, acknowledgements, device registrations, snapshot metadata, membership entries and rollups | Signed, readable records |
-| Wrapped Store keyrings and Circle access leaves | Recipient-encrypted contents, without another Store-key encryption layer |
+| Wrapped Store keyrings | Recipient-encrypted contents, without another Store-key encryption layer |
 | Circle packages, roster and metadata records, acknowledgements, snapshot images and metadata | Circle-key encryption |
-| Circle control records and access envelopes | Store-key encryption |
+| Circle control records, including each recipient's sealed access entry | Store-key encryption |
 | Application blobs | Encryption under their audience key and declared scope |
 
 A commit record can be readable while the row changes it references are in an

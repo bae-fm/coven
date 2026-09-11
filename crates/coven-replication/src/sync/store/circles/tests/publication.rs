@@ -1761,13 +1761,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .as_ref()
         .expect("successor activation names its close outcome");
     assert_eq!(
-        activation
-            .reference
-            .objects()
-            .access
-            .iter()
-            .filter(|access| access.bootstrap.is_some())
-            .count(),
+        activation.reference.objects().bootstraps.len(),
         2,
         "each remaining Circle member receives a successor bootstrap"
     );
@@ -2140,12 +2134,13 @@ async fn an_upload_step_fails_when_its_object_has_no_ownership_record() {
         "circle-missing-candidate-ownership",
     )
     .await;
-    let step = "access-leaf-0";
+    // The only candidate-owned object a founder create uploads.
+    let step = "store-commit";
     let object = journal
         .operation()
         .prepared_objects
         .get(step)
-        .expect("operation carries its access leaf")
+        .expect("operation carries its Store commit")
         .clone();
     db.delete_remote_object_for_test(object)
         .await
@@ -2217,13 +2212,13 @@ async fn journaling_an_operation_rejects_a_tampered_leaf_disposition() {
         .creation
         .access
         .iter_mut()
-        .find(|access| access.leaf.value.recipient_pubkey == author)
+        .find(|access| access.value.recipient_pubkey == author)
         .expect("founder access");
     assert!(matches!(
-        own_access.leaf.value.disposition,
+        own_access.value.disposition,
         CircleAccessDisposition::Active { .. }
     ));
-    own_access.leaf.value.body_mut().disposition = CircleAccessDisposition::Inactive;
+    own_access.value.body_mut().disposition = CircleAccessDisposition::Inactive;
     let circle_id = prepared.journal.circle_id();
     let operation_id = prepared.journal.operation_id.clone();
     let error = coven_database::StoreDatabase::new(&db)
@@ -2231,7 +2226,9 @@ async fn journaling_an_operation_rejects_a_tampered_leaf_disposition() {
         .await
         .expect_err("journaling must verify its closed candidate graph");
     assert!(
-        error.to_string().contains("stored reference differs"),
+        error
+            .to_string()
+            .contains("differs from its signed control entry"),
         "{error}"
     );
 
@@ -3113,7 +3110,9 @@ async fn interrupted_cancellation_flow() {
         .circle_control_activation_count_for_test(after_commit_upload.circle_id)
         .await
         .expect("count circle activations");
-    let publication_entry_create_call = 2 * journal.operation().creation.access.len() + 5;
+    // A cancellation uploads its cancellation object, the control, the control
+    // head and the Store commit; its publication entry is the fifth exact create.
+    let publication_entry_create_call = 5;
     after_commit_upload
         .home
         .fail_exact_create_before_call(publication_entry_create_call);
@@ -4318,14 +4317,9 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
     let image_slots: Vec<coven_protocol::objects::ObjectSlot> = activation
         .reference
         .objects()
-        .access
+        .bootstraps
         .iter()
-        .filter_map(|access| {
-            access
-                .bootstrap
-                .as_ref()
-                .map(|image| image.object.slot().clone())
-        })
+        .map(|bootstrap| bootstrap.image.object.slot().clone())
         .collect();
     assert!(
         !image_slots.is_empty(),

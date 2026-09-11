@@ -198,7 +198,7 @@ impl MergeDeviceAuthority {
             roster_resolutions: BTreeMap::new(),
             metadata_entries: BTreeMap::new(),
             metadata_heads: Vec::new(),
-            access: Vec::new(),
+            bootstraps: Vec::new(),
         };
         store_commit::CircleControlRef {
             circle_id: control.value.circle_id,

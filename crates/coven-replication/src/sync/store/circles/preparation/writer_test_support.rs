@@ -32,7 +32,6 @@ impl AuthorizedCircleWriter<'_, '_> {
         &mut self,
         draft: coven_protocol::circle::CircleTransitionDraft,
         history: &CircleTransitionHistory,
-        candidate_family: coven_protocol::store_commit::CandidateFamilyId,
     ) -> Result<
         (
             coven_protocol::circle::PreparedCircleTransition,
@@ -44,7 +43,7 @@ impl AuthorizedCircleWriter<'_, '_> {
         CircleOperationError,
     > {
         self.preparer()
-            .prepare_circle_activation_objects(draft, history, &[], candidate_family)
+            .prepare_circle_activation_objects(draft, history, &[])
             .await
     }
 }

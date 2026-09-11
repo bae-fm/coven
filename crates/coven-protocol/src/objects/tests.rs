@@ -147,7 +147,7 @@ fn every_protocol_domain_requires_its_exact_path_grammar() {
         DomainPathCase {
             domain: ProtectedObjectDomain::CirclePackage,
             valid: &["circles/circle/candidates/family/packages/device/1/hash"],
-            cross_domain: "circles/circle/candidates/family/access-envelopes/owner/recipient/hash",
+            cross_domain: "circles/circle/candidates/family/bootstraps/owner/epoch/recipient/hash",
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::CircleBootstrapImage,
@@ -168,17 +168,6 @@ fn every_protocol_domain_requires_its_exact_path_grammar() {
             domain: ProtectedObjectDomain::CircleEpochCloseResponse,
             valid: &["circles/circle/epoch-close/close/responses/device"],
             cross_domain: "circles/circle/epoch-close/close/outcome",
-        },
-        DomainPathCase {
-            domain: ProtectedObjectDomain::CircleAccessLeaf,
-            valid: &["circles/circle/candidates/family/access-leaves/owner/epoch/recipient/leaf"],
-            cross_domain: "circles/circle/candidates/family/access-envelopes/owner/recipient/hash",
-        },
-        DomainPathCase {
-            domain: ProtectedObjectDomain::CircleAccessEnvelope,
-            valid: &["circles/circle/candidates/family/access-envelopes/owner/recipient/hash"],
-            cross_domain:
-                "circles/circle/candidates/family/access-leaves/owner/epoch/recipient/leaf",
         },
     ];
 
@@ -244,18 +233,6 @@ fn candidate_protocol_domains_reject_reordered_and_nested_components() {
         (
             ProtectedObjectDomain::CircleBootstrapImage,
             "circles/circle/candidates/family/bootstraps/owner/epoch/recipient/hash",
-            2,
-            4,
-        ),
-        (
-            ProtectedObjectDomain::CircleAccessLeaf,
-            "circles/circle/candidates/family/access-leaves/owner/epoch/recipient/leaf",
-            2,
-            4,
-        ),
-        (
-            ProtectedObjectDomain::CircleAccessEnvelope,
-            "circles/circle/candidates/family/access-envelopes/owner/recipient/hash",
             2,
             4,
         ),

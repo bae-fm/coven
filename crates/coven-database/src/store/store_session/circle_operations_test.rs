@@ -125,15 +125,14 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
     let own_access = creation
         .access
         .iter()
-        .find(|access| access.leaf.value.recipient_pubkey == author_pubkey)
+        .find(|access| access.value.recipient_pubkey == author_pubkey)
         .expect("author access");
     let verified = coven_protocol::circle_activation::VerifiedCircleReference {
         reference,
         circle_id: creation.circle_id,
         control: control.clone(),
         local_access: Some(coven_protocol::circle_activation::VerifiedCircleAccess {
-            envelope: own_access.envelope.clone(),
-            leaf: own_access.leaf.clone(),
+            leaf: own_access.clone(),
             active: Some(coven_protocol::circle_activation::VerifiedCircleActive {
                 roster: creation.roster.clone(),
                 metadata: creation.metadata.clone(),
@@ -179,13 +178,13 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
     assert_eq!(publication_fingerprint, control.value.key_fingerprint());
 
     let mut second_value = control.value.clone();
-    let active_epoch = second_value
-        .body_mut()
-        .value
-        .state
-        .active_epoch_mut()
-        .expect("test control has an active epoch");
-    active_epoch.common.access_root = ObjectHash::digest(b"different founder access root");
+    second_value.body_mut().value.access.insert(
+        "zz-second-founder".to_string(),
+        coven_protocol::circle::CircleAccessEntry {
+            sealed: hex::encode(b"different founder access"),
+            value_hash: ObjectHash::digest(b"different founder access"),
+        },
+    );
     second_value.resign(&author);
     let second_control = PreparedCircleControl {
         coord: second_value.coord(),

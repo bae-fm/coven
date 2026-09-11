@@ -69,7 +69,7 @@ impl PreparedCircleOperation {
             if let crate::circle::CircleAccessDisposition::Active {
                 bootstrap: Some(bootstrap),
                 ..
-            } = &access.leaf.value.disposition
+            } = &access.value.disposition
             {
                 for blob in &bootstrap.blobs {
                     let stored = blob.stored().ok_or_else(|| {
@@ -268,16 +268,6 @@ impl CircleOperationJournal {
         operation.require_prepared_objects(prepared_objects)?;
         operation.store_commit.validate_closed_shape()?;
         let commit = operation.commit();
-        let access_refs = commit
-            .circle_controls()
-            .iter()
-            .flat_map(|control| control.objects().access.iter())
-            .collect::<Vec<_>>();
-        if access_refs.len() != operation.creation.access.len() {
-            return Err(CircleJournalError::Invariant(
-                "Circle access material does not cover the signed candidate graph".to_string(),
-            ));
-        }
         let prepared_for = |object: &ExactObjectRef| {
             prepared_objects
                 .values()
@@ -289,7 +279,7 @@ impl CircleOperationJournal {
                     ))
                 })
         };
-        let mut materials = Vec::with_capacity(access_refs.len() * 3 + 1);
+        let mut materials = Vec::new();
         let [circle_reference] = commit.circle_controls() else {
             return Err(CircleJournalError::Invariant(
                 "Circle operation commit must activate exactly one Circle control".to_string(),
@@ -374,37 +364,39 @@ impl CircleOperationJournal {
                 ));
             }
         }
-        for (access, reference) in operation.creation.access.iter().zip(access_refs) {
-            let leaf = prepared_for(&reference.leaf.object)?;
-            materials.push(crate::remote_object::CandidateObjectMaterial {
-                object: reference.leaf.object.clone(),
-                canonical_semantic_bytes: serde_json::to_vec(&access.leaf.value).map_err(
-                    |source| CircleJournalError::Json {
-                        operation: "serialize Circle access leaf",
-                        source,
-                    },
-                )?,
-                stored_bytes: leaf.stored_bytes().to_vec(),
-            });
-            let envelope = prepared_for(&reference.envelope.object)?;
-            materials.push(crate::remote_object::CandidateObjectMaterial {
-                object: reference.envelope.object.clone(),
-                canonical_semantic_bytes: serde_json::to_vec(&access.envelope).map_err(
-                    |source| CircleJournalError::Json {
-                        operation: "serialize Circle access envelope",
-                        source,
-                    },
-                )?,
-                stored_bytes: envelope.stored_bytes().to_vec(),
-            });
-            if let Some(bootstrap) = &reference.bootstrap {
-                let image = prepared_for(&bootstrap.object)?;
-                materials.push(crate::remote_object::CandidateObjectMaterial {
-                    object: bootstrap.object.clone(),
-                    canonical_semantic_bytes: Vec::new(),
-                    stored_bytes: image.stored_bytes().to_vec(),
-                });
+        let objects = circle_reference.objects();
+        let family = commit.candidate_family();
+        let mut matched_bootstraps = 0;
+        for access in &operation.creation.access {
+            if !access.verify(&operation.creation.control, family) {
+                return Err(CircleJournalError::Invariant(
+                    "Circle access leaf differs from its signed control entry".to_string(),
+                ));
             }
+            let crate::circle::CircleAccessDisposition::Active {
+                bootstrap: Some(bootstrap),
+                ..
+            } = &access.value.disposition
+            else {
+                continue;
+            };
+            if !objects.names_bootstrap(&access.value, bootstrap) {
+                return Err(CircleJournalError::Invariant(
+                    "Circle bootstrap image is absent from its signed candidate graph".to_string(),
+                ));
+            }
+            matched_bootstraps += 1;
+            let image = prepared_for(&bootstrap.image.object)?;
+            materials.push(crate::remote_object::CandidateObjectMaterial {
+                object: bootstrap.image.object.clone(),
+                canonical_semantic_bytes: Vec::new(),
+                stored_bytes: image.stored_bytes().to_vec(),
+            });
+        }
+        if matched_bootstraps != objects.bootstraps.len() {
+            return Err(CircleJournalError::Invariant(
+                "Circle candidate graph names a bootstrap image no access entry seals".to_string(),
+            ));
         }
         let mut remotes = crate::remote_object::CandidateObjectGraph::from_commit(commit)
             .and_then(|graph| graph.close(commit, operation.commit_ref(), materials))?;
