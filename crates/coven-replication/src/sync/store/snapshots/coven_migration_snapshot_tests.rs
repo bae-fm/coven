@@ -250,7 +250,7 @@ async fn exact_v0_snapshot_obeys_writer_coven_migration_policy() {
         error,
         coven_database::OpenError::CovenMigration(coven_database::CovenMigrationError::Pending {
             current: 0,
-            target: 1
+            target: 2
         })
     ));
     assert_v0_uninitialized(refuse_image.path());

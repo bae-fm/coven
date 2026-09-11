@@ -4,11 +4,20 @@
 //! Coven defines and applies its own table changes; a writer's policy decides
 //! whether pending Coven changes may run during open. Readers never authorize
 //! writes and therefore refuse pending changes.
+//!
+//! Every rung is checked against the exact manifest its schema produces, so a
+//! table edited in place — a column dropped, a table renamed — with no rung
+//! added leaves every existing database matching no rung and refusing to
+//! open. A change to any `coven_tables!` entry ships with the rung that
+//! carries a database from the previous shape, and the previous shape's
+//! columns stay declared in `coven_schema_definitions` for that rung's
+//! expected manifest.
 
 use rusqlite::Connection;
 
 use crate::coven_schema::{
-    expected_coven_schema_manifest, expected_coven_schema_v0_manifest, live_coven_schema_manifest,
+    expected_coven_schema_manifest, expected_coven_schema_v0_manifest,
+    expected_coven_schema_v1_manifest, live_coven_schema_manifest,
     recreate_current_transition_tables, CovenSchemaManifest,
 };
 use crate::{
@@ -20,7 +29,7 @@ pub(crate) const COVEN_SCHEMA_VERSION_STATE_KEY: &str = "coven_schema_version";
 
 type ApplyCovenMigration = fn(&Connection) -> Result<(), CovenMigrationError>;
 
-const COVEN_MIGRATION_COUNT: usize = 1;
+const COVEN_MIGRATION_COUNT: usize = 2;
 const LATEST_COVEN_SCHEMA_VERSION: u32 = COVEN_MIGRATION_COUNT as u32;
 
 pub(crate) struct CovenMigrationStep<'a> {
@@ -87,8 +96,15 @@ pub enum CovenMigrationError {
 
 enum CovenSchemaState {
     Current,
-    Pending { current: u32 },
-    PendingLedgerInstallation { version: u32 },
+    Pending {
+        current: u32,
+    },
+    /// The latest schema with no version ledger: a retained replay image (which
+    /// carries none at any version) or a database from before the ledger
+    /// existed. Writing the ledger is all that is pending.
+    PendingLedgerInstallation {
+        version: u32,
+    },
 }
 
 fn stored_manifest(conn: &Connection) -> Result<CovenSchemaManifest, CovenMigrationError> {
@@ -97,24 +113,12 @@ fn stored_manifest(conn: &Connection) -> Result<CovenSchemaManifest, CovenMigrat
     serde_json::from_str(&json).map_err(CovenMigrationError::InvalidManifest)
 }
 
-fn pre_ledger_version(
-    manifest: &CovenSchemaManifest,
-    version_0_manifest: &CovenSchemaManifest,
-    migrations: &[CovenMigrationStep<'_>],
-) -> Option<u32> {
-    if manifest == version_0_manifest {
-        Some(0)
-    } else if migrations
-        .first()
-        .is_some_and(|migration| manifest == migration.expected_manifest)
-    {
-        Some(1)
-    } else {
-        None
-    }
-}
-
-fn uninitialized_snapshot_version(
+/// The version whose exact manifest `manifest` is, for a database that carries
+/// no version ledger: a retained replay image (its protocol state is the
+/// generation-zero set, which has no ledger at any version), an uninitialized
+/// snapshot, or a database from before the ledger existed. Matched against
+/// every version, and only when exactly one matches.
+fn ledgerless_version(
     manifest: &CovenSchemaManifest,
     version_0_manifest: &CovenSchemaManifest,
     migrations: &[CovenMigrationStep<'_>],
@@ -144,7 +148,7 @@ fn classify_schema(
 
     let version = get_protocol_state_on(conn, COVEN_SCHEMA_VERSION_STATE_KEY)?;
     match version {
-        None => pre_ledger_version(&stored, version_0_manifest, migrations)
+        None => ledgerless_version(&stored, version_0_manifest, migrations)
             .map(|version| {
                 if version == migrations.len() as u32 {
                     CovenSchemaState::PendingLedgerInstallation { version }
@@ -214,6 +218,24 @@ fn add_root_label_to_transition_tables(conn: &Connection) -> Result<(), CovenMig
     Ok(())
 }
 
+/// Version 2: drop the columns whose values live elsewhere. A replay
+/// baseline's `generation` was always zero and its `exact_cut` repeated the
+/// coverage its authority record carries; an outbound snapshot's `image_ref`
+/// and `rollup_ref` are named by its signed metadata. Rows stay: nothing else
+/// about them changes, and a Store with a retained replay baseline keeps it.
+fn drop_derived_baseline_and_snapshot_columns(
+    conn: &Connection,
+) -> Result<(), CovenMigrationError> {
+    conn.execute_batch(
+        "ALTER TABLE retained_replay_baselines DROP COLUMN generation;
+         ALTER TABLE retained_replay_baselines DROP COLUMN exact_cut;
+         ALTER TABLE outbound_store_snapshot DROP COLUMN image_ref;
+         ALTER TABLE outbound_store_snapshot DROP COLUMN rollup_ref;
+         ALTER TABLE outbound_circle_snapshot DROP COLUMN image_ref;",
+    )?;
+    Ok(())
+}
+
 fn apply_migration_steps(
     conn: &Connection,
     current_version: u32,
@@ -266,7 +288,7 @@ fn run_uninitialized_snapshot_migrations_with_ladder(
     require_absent_snapshot_metadata(conn, COVEN_SCHEMA_VERSION_STATE_KEY)?;
 
     let live = live_coven_schema_manifest(conn)?;
-    let current = uninitialized_snapshot_version(&live, version_0_manifest, migrations)
+    let current = ledgerless_version(&live, version_0_manifest, migrations)
         .ok_or(CovenMigrationError::UnknownUnversionedSchema)?;
     let latest = migrations.len() as u32;
     if current == latest {
@@ -284,10 +306,16 @@ fn run_uninitialized_snapshot_migrations_with_ladder(
 fn migration_ladder(
     include_routing: bool,
 ) -> Result<[CovenMigrationStep<'static>; COVEN_MIGRATION_COUNT], CovenMigrationError> {
-    Ok([CovenMigrationStep {
-        expected_manifest: expected_coven_schema_manifest(include_routing)?,
-        apply: add_root_label_to_transition_tables,
-    }])
+    Ok([
+        CovenMigrationStep {
+            expected_manifest: expected_coven_schema_v1_manifest(include_routing)?,
+            apply: add_root_label_to_transition_tables,
+        },
+        CovenMigrationStep {
+            expected_manifest: expected_coven_schema_manifest(include_routing)?,
+            apply: drop_derived_baseline_and_snapshot_columns,
+        },
+    ])
 }
 
 fn run_coven_migrations_with_ladder(

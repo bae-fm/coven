@@ -178,3 +178,39 @@ BEGIN
     SELECT RAISE(ABORT, 'reclaimed Store package identity has another ownership state');
 END;
 ";
+
+/// `retained_replay_baselines` as version 1 of the Coven schema wrote it. The
+/// current shape dropped `generation` (always zero) and `exact_cut` (the
+/// coverage the baseline's authority already carries).
+pub(crate) const RETAINED_REPLAY_BASELINES_V1_COLUMNS: &str = "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    exact_cut TEXT NOT NULL CHECK (json_valid(exact_cut)),
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 0),
+    routing_hash TEXT NOT NULL CHECK (length(routing_hash) = 64),
+    image_payload_hash TEXT NOT NULL CHECK (length(image_payload_hash) = 64),
+    authority_hash TEXT NOT NULL CHECK (length(authority_hash) = 64)
+";
+
+/// `outbound_store_snapshot` as version 1 wrote it. The current shape dropped
+/// `image_ref` and `rollup_ref`: the signed snapshot metadata names its
+/// payloads itself.
+pub(crate) const OUTBOUND_STORE_SNAPSHOT_V1_COLUMNS: &str = "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
+    meta_prepared TEXT NOT NULL CHECK (json_valid(meta_prepared)),
+    image_ref TEXT NOT NULL CHECK (json_valid(image_ref)),
+    rollup_ref TEXT NOT NULL CHECK (json_valid(rollup_ref)),
+    meta_bytes BLOB NOT NULL,
+    blobs TEXT NOT NULL CHECK (json_valid(blobs))
+";
+
+/// `outbound_circle_snapshot` as version 1 wrote it. The current shape dropped
+/// `image_ref` for the same reason as the Store snapshot's.
+pub(crate) const OUTBOUND_CIRCLE_SNAPSHOT_V1_COLUMNS: &str = "
+    circle_id TEXT PRIMARY KEY,
+    snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
+    meta_prepared TEXT NOT NULL CHECK (json_valid(meta_prepared)),
+    image_ref TEXT NOT NULL CHECK (json_valid(image_ref)),
+    meta_bytes BLOB NOT NULL
+";

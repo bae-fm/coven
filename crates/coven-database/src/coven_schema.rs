@@ -11,7 +11,8 @@
 
 use crate::coven_schema_definitions::{
     BLOB_MAKE_REMOTE_INTENTS_COLUMNS, BLOB_MAKE_REMOTE_INTENTS_V0_COLUMNS, CLOUD_OUTBOX_COLUMNS,
-    CLOUD_OUTBOX_V0_COLUMNS, OBJECT_OWNERSHIP_TRIGGERS,
+    CLOUD_OUTBOX_V0_COLUMNS, OBJECT_OWNERSHIP_TRIGGERS, OUTBOUND_CIRCLE_SNAPSHOT_V1_COLUMNS,
+    OUTBOUND_STORE_SNAPSHOT_V1_COLUMNS, RETAINED_REPLAY_BASELINES_V1_COLUMNS,
 };
 use crate::schema_introspection::normalize_schema_sql;
 use crate::{query_mapped_rows, DbError};
@@ -752,6 +753,50 @@ fn recreate_table(conn: &rusqlite::Connection, table: &str, columns: &str) -> ru
     ))
 }
 
+/// Put the tables version 2 reshaped back to their version 1 columns. Drops
+/// their rows: the version 1 columns are NOT NULL without defaults, so rows of
+/// the current shape cannot be widened back.
+fn recreate_version_1_tables(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    recreate_table(
+        conn,
+        "retained_replay_baselines",
+        RETAINED_REPLAY_BASELINES_V1_COLUMNS,
+    )?;
+    recreate_table(
+        conn,
+        "outbound_store_snapshot",
+        OUTBOUND_STORE_SNAPSHOT_V1_COLUMNS,
+    )?;
+    recreate_table(
+        conn,
+        "outbound_circle_snapshot",
+        OUTBOUND_CIRCLE_SNAPSHOT_V1_COLUMNS,
+    )
+}
+
+/// Put the transition tables back to their version 0 columns. Drops their
+/// rows, like [`recreate_version_1_tables`].
+fn recreate_version_0_transition_tables(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    recreate_table(conn, "cloud_outbox", CLOUD_OUTBOX_V0_COLUMNS)?;
+    recreate_table(
+        conn,
+        "blob_make_remote_intents",
+        BLOB_MAKE_REMOTE_INTENTS_V0_COLUMNS,
+    )
+}
+
+fn build_expected_coven_schema_v1_manifest(
+    include_routing: bool,
+) -> rusqlite::Result<CovenSchemaManifest> {
+    let conn = rusqlite::Connection::open_in_memory()?;
+    apply_coven_schema(&conn)?;
+    if include_routing {
+        apply_coven_routing_schema(&conn)?;
+    }
+    recreate_version_1_tables(&conn)?;
+    live_coven_schema_manifest(&conn)
+}
+
 fn build_expected_coven_schema_v0_manifest(
     include_routing: bool,
 ) -> rusqlite::Result<CovenSchemaManifest> {
@@ -760,12 +805,8 @@ fn build_expected_coven_schema_v0_manifest(
     if include_routing {
         apply_coven_routing_schema(&conn)?;
     }
-    recreate_table(&conn, "cloud_outbox", CLOUD_OUTBOX_V0_COLUMNS)?;
-    recreate_table(
-        &conn,
-        "blob_make_remote_intents",
-        BLOB_MAKE_REMOTE_INTENTS_V0_COLUMNS,
-    )?;
+    recreate_version_1_tables(&conn)?;
+    recreate_version_0_transition_tables(&conn)?;
     live_coven_schema_manifest(&conn)
 }
 
@@ -774,6 +815,11 @@ static EXPECTED_COVEN_SCHEMA: std::sync::LazyLock<Result<CovenSchemaManifest, ru
 static EXPECTED_ROUTED_COVEN_SCHEMA: std::sync::LazyLock<
     Result<CovenSchemaManifest, rusqlite::Error>,
 > = std::sync::LazyLock::new(|| build_expected_coven_schema_manifest(true));
+static EXPECTED_COVEN_SCHEMA_V1: std::sync::LazyLock<Result<CovenSchemaManifest, rusqlite::Error>> =
+    std::sync::LazyLock::new(|| build_expected_coven_schema_v1_manifest(false));
+static EXPECTED_ROUTED_COVEN_SCHEMA_V1: std::sync::LazyLock<
+    Result<CovenSchemaManifest, rusqlite::Error>,
+> = std::sync::LazyLock::new(|| build_expected_coven_schema_v1_manifest(true));
 static EXPECTED_COVEN_SCHEMA_V0: std::sync::LazyLock<Result<CovenSchemaManifest, rusqlite::Error>> =
     std::sync::LazyLock::new(|| build_expected_coven_schema_v0_manifest(false));
 static EXPECTED_ROUTED_COVEN_SCHEMA_V0: std::sync::LazyLock<
@@ -787,6 +833,21 @@ pub fn expected_coven_schema_manifest(
         &*EXPECTED_ROUTED_COVEN_SCHEMA
     } else {
         &*EXPECTED_COVEN_SCHEMA
+    };
+    expected.as_ref().map_err(DbError::ExpectedSchema)
+}
+
+/// The exact manifest a version 1 database carries: the current tables with
+/// the three version 2 reshaped back. Version 1 was the ladder's top while
+/// those tables still held their derived columns, and a database written then
+/// is what version 2 advances.
+pub(crate) fn expected_coven_schema_v1_manifest(
+    include_routing: bool,
+) -> Result<&'static CovenSchemaManifest, DbError> {
+    let expected = if include_routing {
+        &*EXPECTED_ROUTED_COVEN_SCHEMA_V1
+    } else {
+        &*EXPECTED_COVEN_SCHEMA_V1
     };
     expected.as_ref().map_err(DbError::ExpectedSchema)
 }
@@ -813,19 +874,39 @@ pub(crate) fn recreate_current_transition_tables(
     )
 }
 
+/// Take a current database back to the version 1 shape, with its ledger at 1.
+#[cfg(test)]
+pub(crate) fn downgrade_coven_schema_to_v1_for_test(
+    conn: &rusqlite::Connection,
+    include_routing: bool,
+) -> Result<(), DbError> {
+    let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+    recreate_version_1_tables(&tx).map_err(DbError::from)?;
+    let manifest = serde_json::to_string(expected_coven_schema_v1_manifest(include_routing)?)
+        .map_err(DbError::from)?;
+    tx.execute(
+        "UPDATE protocol_state SET value = ?2 WHERE key = ?1",
+        (crate::COVEN_SCHEMA_MANIFEST_STATE_KEY, manifest),
+    )
+    .map_err(DbError::from)?;
+    tx.execute(
+        "UPDATE protocol_state SET value = '1' WHERE key = ?1",
+        [crate::COVEN_SCHEMA_VERSION_STATE_KEY],
+    )
+    .map_err(DbError::from)?;
+    tx.commit().map_err(DbError::from)
+}
+
+/// Take a current database back to the version 0 shape: no ledger, the
+/// manifest a database from before the ladder existed carries.
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn downgrade_coven_schema_to_v0_for_test(
     conn: &rusqlite::Connection,
     include_routing: bool,
 ) -> Result<(), DbError> {
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-    recreate_table(&tx, "cloud_outbox", CLOUD_OUTBOX_V0_COLUMNS).map_err(DbError::from)?;
-    recreate_table(
-        &tx,
-        "blob_make_remote_intents",
-        BLOB_MAKE_REMOTE_INTENTS_V0_COLUMNS,
-    )
-    .map_err(DbError::from)?;
+    recreate_version_1_tables(&tx).map_err(DbError::from)?;
+    recreate_version_0_transition_tables(&tx).map_err(DbError::from)?;
     let manifest = serde_json::to_string(expected_coven_schema_v0_manifest(include_routing)?)
         .map_err(DbError::from)?;
     tx.execute(
