@@ -282,7 +282,7 @@ pub use store::{
     PreparedCircleObjects, ReclaimedStorePackage, RetainedAudiencePackage,
     RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
-    SnapshotBlobFact, SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,
+    SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,
     SnapshotPublicationPermit, StoreCommitPublicationOutcome, StoreDatabase,
     StorePublicationBoundary, StorePublicationPreparation, StoreReclaimJournalError,
     StoreRowWrites, StoreWritePreparation, StuckReclaimOperation, TableSchema, ValidatedChangeset,

@@ -124,8 +124,7 @@ pub use retained_replay::{
 };
 pub(crate) use snapshot_image::verify_circle_bootstrap_connection;
 pub use snapshot_image::{
-    CreatedSnapshot, SnapshotBlobFact, SnapshotDatabaseImage, SnapshotImageError,
-    SnapshotImageOperationError,
+    CreatedSnapshot, SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,
 };
 pub use store_session::circle_acknowledgements::CircleAckPublicationInput;
 pub use store_session::observed_store_publication::{

@@ -39,7 +39,7 @@ impl SnapshotCut {
         Self { snapshot, coverage }
     }
 
-    pub(crate) fn blobs(&self) -> &[coven_database::SnapshotBlobFact] {
+    pub(crate) fn blobs(&self) -> &[coven_protocol::blob::RowBlobRef] {
         self.snapshot.blobs()
     }
 
@@ -602,36 +602,24 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             let mut prepared: Vec<coven_database::PreparedSnapshotBlob> = Vec::new();
             let mut exact_bindings = std::collections::BTreeMap::<String, usize>::new();
             for captured in blobs {
-                let audience = captured.audience;
-                let previous = captured.fact.previous.ok_or_else(|| {
-                    SnapshotError::PublishBlobs(format!(
-                        "snapshot blob {}/{} has no accepted exact remote binding",
-                        captured.fact.blob.namespace, captured.fact.blob.id
-                    ))
-                })?;
-                if previous.authority.remote_audience() != audience
-                    || !coven_protocol::blob::locator_is_this_rows_upload(
-                        previous.stored.locator(),
-                        &captured.fact.blob,
-                        captured.fact.plaintext_size,
-                        captured.fact.plaintext_hash,
-                        &audience,
-                    )
-                {
+                let (coven_protocol::blob::RowBlobAuthority::Remote(authority), Some(stored)) =
+                    (captured.authority(), captured.stored())
+                else {
                     return Err(SnapshotError::PublishBlobs(format!(
-                        "snapshot blob {}/{} differs from its accepted exact remote binding",
-                        captured.fact.blob.namespace, captured.fact.blob.id
+                        "snapshot blob {}/{} has no accepted exact remote binding",
+                        captured.blob().namespace,
+                        captured.blob().id
                     )));
-                }
-                // Equal plaintext does not identify an uploaded object. Preserve
-                // the accepted locator, object, and authority together.
-                let key = serde_json::to_string(&previous)?;
+                };
+                // RowBlobRef already binds content and audience to this exact object.
+                // Equal plaintext does not identify an uploaded object.
+                let key = serde_json::to_string(&(authority, stored))?;
                 let binding = coven_protocol::audience_package::RowBlobLocatorBinding::new(
-                    captured.fact.table,
-                    captured.fact.row_id,
-                    captured.fact.row_stamp,
-                    captured.fact.column,
-                    previous.stored.clone(),
+                    captured.table(),
+                    captured.row_id(),
+                    captured.row_stamp(),
+                    captured.column(),
+                    stored.clone(),
                 )?;
                 if let Some(index) = exact_bindings.get(&key).copied() {
                     prepared[index].bindings.push(binding);
@@ -639,13 +627,13 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                 }
                 let remote =
                     coven_protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
-                        &previous.stored,
+                        stored,
                         owner.clone(),
                     )?
                     .into_record();
                 prepared.push(coven_database::PreparedSnapshotBlob {
                     bindings: vec![binding],
-                    authority: previous.authority,
+                    authority: authority.clone(),
                     remote,
                 });
                 exact_bindings.insert(key, prepared.len() - 1);

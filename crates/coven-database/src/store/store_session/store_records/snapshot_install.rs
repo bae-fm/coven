@@ -16,8 +16,20 @@ impl StoreRecords<'_> {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         audience: &coven_protocol::circle::Audience,
     ) -> Result<crate::CreatedSnapshot, crate::SnapshotImageError> {
+        // Test snapshots capture the live database without consuming its owner.
+        // Production capture consumes the separate accepted-history projection.
+        let copied = (|| {
+            let bytes = crate::connection_io::serialize_database_image(self.conn)?;
+            let mut connection = rusqlite::Connection::open_in_memory()?;
+            crate::connection_io::deserialize_database_image_into(&mut connection, &bytes)?;
+            Ok::<_, crate::SnapshotImageError>(connection)
+        })();
+        let connection = match copied {
+            Ok(connection) => connection,
+            Err(error) => return image.finish(Err(error)),
+        };
         image.capture_on(
-            self.conn,
+            connection,
             self.store_dir,
             crate::store::VerifiedStoreAuthority::default(),
             root,

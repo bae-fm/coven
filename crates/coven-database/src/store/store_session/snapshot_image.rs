@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use tracing::info;
 
 use crate::*;
@@ -10,15 +10,15 @@ use super::*;
 
 pub struct CreatedSnapshot {
     db_image: SnapshotDatabaseImage,
-    blobs: Vec<SnapshotBlobFact>,
+    blobs: Vec<RowBlobRef>,
 }
 
 impl CreatedSnapshot {
-    pub fn new(db_image: SnapshotDatabaseImage, blobs: Vec<SnapshotBlobFact>) -> Self {
+    pub fn new(db_image: SnapshotDatabaseImage, blobs: Vec<RowBlobRef>) -> Self {
         Self { db_image, blobs }
     }
 
-    pub fn blobs(&self) -> &[SnapshotBlobFact] {
+    pub fn blobs(&self) -> &[RowBlobRef] {
         &self.blobs
     }
 
@@ -26,7 +26,7 @@ impl CreatedSnapshot {
         self.db_image.read().await
     }
 
-    pub fn into_parts(self) -> (SnapshotDatabaseImage, Vec<SnapshotBlobFact>) {
+    pub fn into_parts(self) -> (SnapshotDatabaseImage, Vec<RowBlobRef>) {
         (self.db_image, self.blobs)
     }
 
@@ -34,12 +34,6 @@ impl CreatedSnapshot {
     pub fn image_path_for_test(&self) -> &Path {
         self.db_image.path()
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct SnapshotBlobFact {
-    pub fact: crate::StoreWriteBlobFact,
-    pub audience: RemoteAudience,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -87,13 +81,6 @@ pub enum SnapshotImageError {
         operation: String,
         #[source]
         source: crate::PayloadStoreError,
-    },
-    #[error("snapshot blob {namespace}/{id} plaintext hash: {source}")]
-    BlobHash {
-        namespace: String,
-        id: String,
-        #[source]
-        source: coven_foundation::object_hash::InvalidObjectHash,
     },
     #[error(
         "could not remove staged snapshot database {path}: {cleanup}",
@@ -173,7 +160,7 @@ impl SnapshotDatabaseImage {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn capture_on(
         self,
-        connection: &Connection,
+        mut snapshot: Connection,
         store_dir: &coven_foundation::store_dir::StoreDir,
         mut authority: VerifiedStoreAuthority,
         root: &coven_protocol::store_commit::StoreRootRef,
@@ -184,7 +171,7 @@ impl SnapshotDatabaseImage {
         if tables.is_empty() {
             return self.finish(Err(SnapshotImageError::NoSyncedTables));
         }
-        let gates = match crate::Gates::from_tables(connection, tables) {
+        let gates = match crate::Gates::from_tables(&snapshot, tables) {
             Ok(gates) => gates,
             Err(error) => {
                 return self.finish(Err(SnapshotImageError::from(error)));
@@ -209,23 +196,6 @@ impl SnapshotDatabaseImage {
             None
         };
 
-        let source_image = match crate::connection_io::serialize_database_image(connection) {
-            Ok(image) => image,
-            Err(error) => {
-                return self.finish(Err(SnapshotImageError::from(error)));
-            }
-        };
-        let mut snapshot = match Connection::open_in_memory().map_err(DbError::from) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return self.finish(Err(SnapshotImageError::from(error)));
-            }
-        };
-        if let Err(error) =
-            crate::connection_io::deserialize_database_image_into(&mut snapshot, &source_image)
-        {
-            return self.finish(Err(SnapshotImageError::from(error)));
-        }
         if let Err(error) = Self::project(
             &mut snapshot,
             store_dir,
@@ -237,7 +207,7 @@ impl SnapshotDatabaseImage {
         ) {
             return self.finish(Err(error));
         }
-        let blobs = match Self::blob_facts(connection, &snapshot, tables) {
+        let blobs = match Self::blob_refs(&snapshot, tables) {
             Ok(blobs) => blobs,
             Err(error) => return self.finish(Err(error)),
         };
@@ -692,95 +662,35 @@ impl SnapshotDatabaseImage {
         }
     }
 
-    fn blob_facts(
-        live: &Connection,
+    fn blob_refs(
         snapshot: &Connection,
         tables: &[SyncedTable],
-    ) -> Result<Vec<SnapshotBlobFact>, SnapshotImageError> {
-        let declarations =
-            crate::BlobDecls::from_tables(snapshot, tables).map_err(SnapshotImageError::from)?;
-        let publications = declarations
-            .publication_blobs_in_db(snapshot)
-            .map_err(SnapshotImageError::from)?;
-        let gates = crate::Gates::from_tables(live, tables).map_err(SnapshotImageError::from)?;
-        let mut facts = Vec::with_capacity(publications.len());
-        for publication in publications {
-            let plaintext_hash = publication.plaintext_hash.parse().map_err(|error| {
-                SnapshotImageError::BlobHash {
-                    namespace: publication.blob.namespace.clone(),
-                    id: publication.blob.id.clone(),
-                    source: error,
-                }
-            })?;
-            let external_path =
-                if publication.blob.provenance == coven_protocol::blob::Provenance::UserProvided {
-                    live.query_row(
-                        "SELECT path FROM local_blob_refs
-                         WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
-                           AND row_stamp = ?4 AND namespace = ?5 AND blob_id = ?6",
-                        rusqlite::params![
-                            publication.table,
-                            publication.row_id,
-                            publication.column,
-                            publication.row_stamp,
-                            publication.blob.namespace,
-                            publication.blob.id,
-                        ],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(SnapshotImageError::from)?
-                    .map(PathBuf::from)
-                } else {
-                    None
-                };
-            let previous = crate::previous_row_blob_for_write_on(
-                snapshot,
-                &publication.table,
-                &publication.row_id,
-                &publication.row_stamp,
-                &publication.column,
-                &publication.blob,
-                publication.plaintext_size,
-                plaintext_hash,
-            )
-            .map_err(SnapshotImageError::from)?;
-            let audience = match crate::live_row_audience(
-                live,
-                &gates,
-                &publication.table,
-                &publication.row_id,
-            )
-            .map_err(SnapshotImageError::from)?
+    ) -> Result<Vec<RowBlobRef>, SnapshotImageError> {
+        let gates = crate::Gates::from_tables(snapshot, tables)?;
+        let mut references = Vec::new();
+        for table in tables {
+            let Some(declaration) = table.blob() else {
+                continue;
+            };
+            let sql = format!(
+                "SELECT id FROM {} WHERE {} IS NOT NULL ORDER BY id",
+                crate::quote_ident(table.name()),
+                crate::quote_ident(&declaration.id_column),
+            );
+            for row_id in
+                crate::query_mapped_rows(snapshot, &sql, [], |row| row.get::<_, String>(0))?
             {
-                coven_protocol::circle::Audience::Store => RemoteAudience::Store,
-                coven_protocol::circle::Audience::Circle(circle_id) => {
-                    RemoteAudience::Circle(circle_id)
-                }
-                coven_protocol::circle::Audience::Local => {
+                let reference = Database::row_blob_ref_on(snapshot, &gates, table, &row_id)?;
+                if reference.audience() == coven_protocol::circle::Audience::Local {
                     return Err(SnapshotImageError::Projection(format!(
-                        "scoped snapshot retains local blob row {:?}/{:?}",
-                        publication.table, publication.row_id
+                        "scoped snapshot retains local blob row {:?}/{row_id:?}",
+                        table.name(),
                     )));
                 }
-            };
-            facts.push(SnapshotBlobFact {
-                fact: crate::StoreWriteBlobFact {
-                    table: publication.table,
-                    row_id: publication.row_id,
-                    row_stamp: publication.row_stamp,
-                    column: publication.column,
-                    blob: publication.blob,
-                    plaintext_size: publication.plaintext_size,
-                    plaintext_hash,
-                    external_path,
-                    previous,
-                    audience_move: None,
-                },
-                audience,
-            });
+                references.push(reference);
+            }
         }
-        Ok(facts)
+        Ok(references)
     }
 
     fn remove_files(&self) -> std::io::Result<()> {

@@ -128,7 +128,7 @@ impl ReplayProjectionResult {
     }
 
     pub(super) fn capture_snapshot(
-        &self,
+        self,
         image: crate::SnapshotDatabaseImage,
         root: &coven_protocol::store_commit::StoreRootRef,
         tables: &[coven_protocol::synced_schema::SyncedTable],
@@ -430,7 +430,7 @@ impl ReplayProjection {
     }
 
     pub(super) fn capture_snapshot(
-        &self,
+        self,
         image: crate::SnapshotDatabaseImage,
         root: &coven_protocol::store_commit::StoreRootRef,
         tables: &[coven_protocol::synced_schema::SyncedTable],
@@ -438,9 +438,9 @@ impl ReplayProjection {
         audience: &coven_protocol::circle::Audience,
     ) -> Result<crate::CreatedSnapshot, crate::SnapshotImageError> {
         image.capture_on(
-            &self.connection,
+            self.connection,
             &self.store_dir,
-            VerifiedStoreAuthority::for_replay_baseline(self.baseline.clone()),
+            VerifiedStoreAuthority::for_replay_baseline(self.baseline),
             root,
             tables,
             routing_encryption,

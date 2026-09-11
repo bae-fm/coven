@@ -611,6 +611,221 @@ async fn snapshot_missing_accepted_blob_preserves_publication_for_retry_after_re
     assert_remote_plaintext(storage.as_ref(), &blob, bytes).await;
 }
 
+#[tokio::test]
+async fn user_provided_snapshot_preserves_exact_upload_and_private_local_sources() {
+    let source_dir = test_store_dir();
+    let source = open_test_db_with_blob(
+        source_dir.clone(),
+        BlobDecl::new("photos", Provenance::UserProvided, CacheFill::CacheLazy)
+            .with_id_column("blob_id"),
+    );
+    let signer = UserKeypair::generate();
+    let (store, storage) = TestStore::create_with_connection(
+        &source,
+        source_dir.clone(),
+        "snapshot-user-provided-sources",
+        signer.clone(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let owner = store
+        .bind_device_in(&source, source_dir.clone(), &signer)
+        .await
+        .expect("bind owner");
+    let database = StoreDatabase::new(&source);
+    let external = tempfile::tempdir().expect("user-owned source directory");
+    let shared_path = external.path().join("shared-user-source.jpg");
+    let private_path = external.path().join("private-user-source.jpg");
+    let shared_bytes = b"accepted user-provided photo";
+    let private_bytes = b"private user-provided photo";
+    let mut prepared = Vec::new();
+    for (row, path, bytes) in [
+        ("shared", &shared_path, shared_bytes.as_slice()),
+        ("private", &private_path, private_bytes.as_slice()),
+    ] {
+        std::fs::write(path, bytes).expect("write user-owned source");
+        prepared.push((
+            row,
+            bytes.len() as i64,
+            coven_database::prepare_external_blob(path, |_| {})
+                .await
+                .expect("prepare external file identity"),
+        ));
+    }
+    StoreRowWrites::new(database.clone())
+        .execute(
+            HostWriteOperation::new(WriteBatch::new(), move |sql| {
+                for (row, size, prepared) in prepared {
+                    let root = format!("root-{row}");
+                    sql.execute(
+                        "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+                         VALUES (?1, ?2, 0, ?3, '2026-09-08')",
+                        (&root, row, sql.stamp()),
+                    )?;
+                    sql.insert_external_blob(
+                        "note_photos",
+                        row,
+                        prepared,
+                        "INSERT INTO note_photos
+                         (id, note_id, kind, blob_id, size, hash, _updated_at, created_at)
+                         VALUES (:row, :root, 'image', :blob, :size,
+                                 :coven_external_blob_hash, :stamp, '2026-09-08')",
+                        &[
+                            (":row", &row),
+                            (":root", &root),
+                            (":blob", &format!("{row}-blob")),
+                            (":size", &size),
+                            (":stamp", &sql.stamp()),
+                        ],
+                    )?;
+                }
+                Ok::<_, DbError>(())
+            }),
+            None,
+            None,
+        )
+        .await
+        .expect("register both Local files atomically");
+    crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), source_dir)
+        .make_remote("notes", "root-shared", "Shared photo", false)
+        .await
+        .expect("share only the selected root");
+    let uploaded = owner
+        .drain_uploads(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("upload the external source");
+    assert_eq!(uploaded.uploaded(), 1);
+    publish_photo(&owner).await;
+    let shared = database
+        .row_blob_ref("note_photos", "shared")
+        .await
+        .expect("accepted shared row");
+    let private = database
+        .row_blob_ref("note_photos", "private")
+        .await
+        .expect("private Local row");
+    let stored = shared.stored().expect("accepted exact upload").clone();
+    let private_source = database
+        .external_blob_for_row(&private)
+        .await
+        .expect("read private registration")
+        .expect("private file remains registered");
+    assert_eq!(private_source.path, private_path);
+    let rows_before = source.query_test_text(PHOTO_ROWS).await;
+    let bindings_before = database
+        .row_blob_bindings_for_test()
+        .await
+        .expect("live bindings");
+    let claims_before = database
+        .retained_replay_payload_claims_for_test()
+        .await
+        .expect("replay claims");
+    let mut claimed_bytes = Vec::new();
+    for hash in &claims_before {
+        claimed_bytes.push((
+            *hash,
+            database
+                .payload_for_test(*hash)
+                .await
+                .expect("claimed payload"),
+        ));
+    }
+    let mut writer = owner.authorize_writer().await.expect("authorize snapshot");
+    let mut snapshots = writer.snapshots();
+    let cut = snapshots
+        .capture_snapshot_cut(None)
+        .await
+        .expect("capture accepted image");
+    let captured = cut
+        .snapshot
+        .read_image()
+        .await
+        .expect("read captured image");
+    let image = coven_database::DatabaseImageTest::from_bytes(&captured).expect("open capture");
+    let counts: (i64, i64) = image
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM notes),
+                (SELECT COUNT(*) FROM note_photos)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read projected rows");
+    assert_eq!(counts, (1, 1));
+    assert_eq!(
+        image
+            .coven_table_row_count(coven_database::DatabaseTestTable::named("local_blob_refs"))
+            .expect("read projected private paths"),
+        0
+    );
+    for secret in [
+        private_bytes.as_slice(),
+        external.path().to_str().expect("UTF-8 path").as_bytes(),
+    ] {
+        assert!(
+            !captured
+                .windows(secret.len())
+                .any(|window| window == secret),
+            "private source data entered the image"
+        );
+    }
+    assert_eq!(source.query_test_text(PHOTO_ROWS).await, rows_before);
+    assert_eq!(
+        database
+            .row_blob_bindings_for_test()
+            .await
+            .expect("unchanged bindings"),
+        bindings_before
+    );
+    assert_eq!(
+        database
+            .retained_replay_payload_claims_for_test()
+            .await
+            .expect("unchanged replay claims"),
+        claims_before
+    );
+    for (hash, bytes) in claimed_bytes {
+        assert_eq!(
+            database
+                .payload_for_test(hash)
+                .await
+                .expect("surviving claimed payload"),
+            bytes
+        );
+    }
+    drop(image);
+    let published = snapshots
+        .push_snapshot_cut(cut, "2026-09-08T00:00:01Z".into())
+        .await
+        .expect("publish accepted user-provided object");
+    let image = read_published_image(storage.as_ref(), &store.root(), &published).await;
+    assert_image_photo_bindings(&image, &[("shared", &stored)]);
+    assert_remote_plaintext(storage.as_ref(), &stored, shared_bytes).await;
+    assert_eq!(source.query_test_text(PHOTO_ROWS).await, rows_before);
+    assert_eq!(
+        database
+            .row_blob_bindings_for_test()
+            .await
+            .expect("surviving live bindings"),
+        bindings_before
+    );
+    assert_eq!(
+        database
+            .external_blob_for_row(&private)
+            .await
+            .expect("surviving private registration"),
+        Some(private_source)
+    );
+    assert_eq!(
+        std::fs::read(&private_path).expect("private user-owned file survives"),
+        private_bytes
+    );
+    assert_eq!(
+        std::fs::read(&shared_path).expect("shared user-owned file survives"),
+        shared_bytes
+    );
+}
+
 async fn read_remote_record(
     source: &Database,
     stored: &StoredBlobRef,

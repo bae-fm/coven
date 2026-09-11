@@ -228,7 +228,7 @@ impl CircleAddMemberRequest {
         }
     }
 
-    pub(super) fn bootstrap_blobs(&self) -> &[coven_database::SnapshotBlobFact] {
+    pub(super) fn bootstrap_blobs(&self) -> &[coven_protocol::blob::RowBlobRef] {
         self.bootstrap.blobs()
     }
 
@@ -324,7 +324,7 @@ impl CircleFinalizeEpochCloseRequest {
         }
     }
 
-    pub(super) fn bootstrap_blobs(&self) -> &[coven_database::SnapshotBlobFact] {
+    pub(super) fn bootstrap_blobs(&self) -> &[coven_protocol::blob::RowBlobRef] {
         self.bootstrap.blobs()
     }
 
