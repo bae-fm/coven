@@ -1,11 +1,12 @@
+use super::circle_bootstrap_rows::StagedCircleRows;
 use crate::DbError;
 use coven_protocol::circle_activation::VerifiedCircleImage;
 use coven_protocol::remote_object;
 use coven_protocol::store_commit::StoreBatchCommitRef;
 use coven_protocol::synced_schema::SyncedTable;
 
-/// Install one verified Circle image's rows, routes, and blob graph onto `conn`
-/// directly — no transaction of its own. `conn` is the caller's active
+/// Install one verified Circle bootstrap's rows, routes, and blob graph onto
+/// `conn` directly — no transaction of its own. `conn` is the caller's active
 /// transaction: the pull replay wraps this in a fresh throwaway transaction; the
 /// snapshot-restore installer runs it inside the single install transaction
 /// alongside the Store image, so the whole set commits or rolls back together.
@@ -17,154 +18,15 @@ pub(crate) fn install_circle_bootstrap_image_on(
     activation_commit: &StoreBatchCommitRef,
     bootstrap: &VerifiedCircleImage,
 ) -> Result<(), DbError> {
-    let mut source = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
-    crate::connection_io::deserialize_database_image_into(&mut source, bootstrap.image_bytes())
-        .map_err(|error| DbError::context("open retained Circle bootstrap image", error))?;
-    install_circle_bootstrap_connection_on(
+    let staged = StagedCircleRows::stage(conn, bootstrap.image_bytes(), synced_tables)
+        .map_err(|error| DbError::context("stage retained Circle bootstrap rows", error))?;
+    staged.install_on(
         conn,
-        &source,
         synced_tables,
         activation_commit,
         bootstrap.circle_id(),
         bootstrap.reference(),
     )
-}
-
-pub(crate) fn install_circle_bootstrap_connection_on(
-    conn: &rusqlite::Connection,
-    source: &rusqlite::Connection,
-    synced_tables: &[SyncedTable],
-    activation_commit: &StoreBatchCommitRef,
-    circle_id: coven_protocol::circle::CircleId,
-    reference: &coven_protocol::circle::CircleBootstrapRef,
-) -> Result<(), DbError> {
-    let mut projection_tables = synced_tables
-        .iter()
-        .map(|table| table.name().to_string())
-        .collect::<Vec<_>>();
-    projection_tables.extend([
-        "_coven_audience".to_string(),
-        "_coven_row_routes".to_string(),
-    ]);
-    projection_tables.sort();
-    projection_tables.dedup();
-    conn.pragma_update(None, "defer_foreign_keys", "ON")
-        .map_err(DbError::from)?;
-    // The image is this Circle's whole state at its coverage, so every row it
-    // names it also supersedes. The target can already hold one: a restore
-    // carries the routing tables wholesale, and a replay base built from a
-    // baseline image holds the rows that stood before the bootstrap — including
-    // a row that was in the Store audience and has since moved into the Circle.
-    // Clearing what the image restates makes the install the same operation
-    // whatever it lands on, rather than one that only works onto an empty base.
-    let superseded = crate::query_mapped_rows(
-        source,
-        "SELECT table_name, row_id FROM _coven_row_routes",
-        [],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-    )?;
-    for (table, row_id) in &superseded {
-        if !projection_tables.contains(table) {
-            return Err(DbError::Message(format!(
-                "Circle {circle_id} bootstrap routes a row in unprojected table {table:?}"
-            )));
-        }
-        conn.execute(
-            &format!("DELETE FROM {} WHERE id = ?1", crate::quote_ident(table)),
-            [row_id],
-        )
-        .map_err(DbError::from)?;
-        // The audience row is keyed by the routing id, which only the route
-        // names, so it goes before the route that finds it.
-        conn.execute(
-            "DELETE FROM _coven_audience WHERE routing_id IN (
-                 SELECT routing_id FROM _coven_row_routes
-                 WHERE table_name = ?1 AND row_id = ?2
-             )",
-            rusqlite::params![table, row_id],
-        )
-        .map_err(DbError::from)?;
-        conn.execute(
-            "DELETE FROM _coven_row_routes WHERE table_name = ?1 AND row_id = ?2",
-            rusqlite::params![table, row_id],
-        )
-        .map_err(DbError::from)?;
-    }
-    for table in &projection_tables {
-        // The routing tables are deterministic in the row they describe, so a
-        // target that already holds an entry holds the same one — a restore
-        // carries them wholesale. Skipping a re-insert there is not papering
-        // over a conflict; the data tables above have had everything this image
-        // restates cleared, so they insert exactly once.
-        let ignore_existing = table == "_coven_audience" || table == "_coven_row_routes";
-        crate::copy_table_with_conflicts(source, conn, table, ignore_existing).map_err(
-            |error| {
-                DbError::context(
-                    format!("install exact Circle {} bootstrap table {table}", circle_id),
-                    error,
-                )
-            },
-        )?;
-    }
-    install_circle_bootstrap_remote_objects_from_reference_on(conn, activation_commit, reference)?;
-    for binding in &reference.blobs {
-        let stored = binding.stored().ok_or_else(|| {
-            DbError::Message("Circle bootstrap row blob has no exact locator".to_string())
-        })?;
-        let object_id = remote_object::remote_object_id(stored.object());
-        let coven_protocol::blob::RowBlobAuthority::Remote(authority) = binding.authority() else {
-            return Err(DbError::Message(
-                "Circle bootstrap row blob lacks remote package authority".to_string(),
-            ));
-        };
-        crate::blob_records::validate_stored_locator_on(conn, stored)?;
-        let encoded_authority = serde_json::to_string(authority).map_err(|error| {
-            DbError::context("serialize Circle bootstrap blob authority", error)
-        })?;
-        let binding_inserted = conn
-            .execute(
-                "INSERT INTO row_blob_locators
-             (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(table_name, row_id, column_name, row_stamp) DO NOTHING",
-                rusqlite::params![
-                    binding.table(),
-                    binding.row_id(),
-                    binding.column(),
-                    binding.row_stamp(),
-                    &encoded_authority,
-                    object_id.to_string(),
-                ],
-            )
-            .map_err(DbError::from)?;
-        if binding_inserted == 0 {
-            let (retained_authority, retained_object): (String, String) = conn
-                .query_row(
-                    "SELECT audience_authority, remote_object_id
-                     FROM row_blob_locators
-                     WHERE table_name = ?1 AND row_id = ?2
-                       AND column_name = ?3 AND row_stamp = ?4",
-                    rusqlite::params![
-                        binding.table(),
-                        binding.row_id(),
-                        binding.column(),
-                        binding.row_stamp(),
-                    ],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(DbError::from)?;
-            if retained_authority != encoded_authority || retained_object != object_id.to_string() {
-                return Err(DbError::Message(format!(
-                    "Circle bootstrap row blob binding conflicts for {}.{}.{} at {}",
-                    binding.table(),
-                    binding.row_id(),
-                    binding.column(),
-                    binding.row_stamp(),
-                )));
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn install_circle_bootstrap_remote_objects_on(
@@ -179,7 +41,7 @@ pub(crate) fn install_circle_bootstrap_remote_objects_on(
     )
 }
 
-fn install_circle_bootstrap_remote_objects_from_reference_on(
+pub(super) fn install_circle_bootstrap_remote_objects_from_reference_on(
     conn: &rusqlite::Connection,
     activation_commit: &StoreBatchCommitRef,
     reference: &coven_protocol::circle::CircleBootstrapRef,

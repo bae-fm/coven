@@ -99,8 +99,8 @@ pub(crate) use ffi::{for_each_change, update_values, Changegroup};
 pub use model::Gates;
 #[cfg(any(test, feature = "test-utils"))]
 pub use model::{from_tables_call_count, reset_from_tables_call_count};
-pub(crate) use outbound::attach_empty_clone;
 pub(crate) use outbound::query_truth;
+pub(crate) use outbound::{attach_empty_clone, full_state_rows};
 
 /// [`crate::table_columns`] with its `rusqlite::Error` adapted
 /// into the gate's error at the boundary.

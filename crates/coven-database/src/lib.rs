@@ -162,7 +162,8 @@ pub(crate) use test_sql::DatabaseTestSql;
 pub use test_support::synthetic_store;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_support::{
-    DatabaseImageTest, OutboxAttempt, RetainedRegistrationTamper, ScopedRoutingStateForTest,
+    circle_bootstrap_changes_for_test, DatabaseImageTest, OutboxAttempt,
+    RetainedRegistrationTamper, ScopedRoutingStateForTest,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use test_transaction::DatabaseTestTransaction;
@@ -272,19 +273,20 @@ pub use store::{
     projection_table_names, AcceptedStoreCommitEvidence, AcceptedStoreCommitPublication,
     AcceptedStorePublicationInterval, AdvancedReplayBaseline, BlobTransitionRoot,
     BlobUploadDrainPermit, BlockedWriteDiscard, CandidateCleanupObject, CircleAckPublicationInput,
-    CreatedSnapshot, DeviceJoinJournalStore, DurableStoreReclaimAuthorization,
-    DurableStoreReclaimOperation, HostWriteBlobTransaction, HostWriteError, HostWriteOperation,
-    IncomingTimestampPolicy, InstalledReplayBaseline, LocalBlobCleanup, MakeRemoteAdmission,
-    MaterializedLocalBlob, ObservedStorePublication, OutboxEntry, OutboxFailure, OutboxFailureKind,
-    OutboxOperation, OutboxUploadState, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
-    PreparedCircleObjects, ReclaimedStorePackage, RetainedAudiencePackage,
-    RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
-    RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
-    SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,
-    SnapshotPublicationPermit, StoreCommitPublicationOutcome, StoreDatabase,
-    StorePublicationBoundary, StorePublicationPreparation, StoreReclaimJournalError,
-    StoreRowWrites, StoreWritePreparation, StuckReclaimOperation, TableSchema, ValidatedChangeset,
-    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow,
+    CreatedCircleSnapshot, CreatedSnapshot, DeviceJoinJournalStore,
+    DurableStoreReclaimAuthorization, DurableStoreReclaimOperation, HostWriteBlobTransaction,
+    HostWriteError, HostWriteOperation, IncomingTimestampPolicy, InstalledReplayBaseline,
+    LocalBlobCleanup, MakeRemoteAdmission, MaterializedLocalBlob, ObservedStorePublication,
+    OutboxEntry, OutboxFailure, OutboxFailureKind, OutboxOperation, OutboxUploadState,
+    OwnStreamAuthorship, OwnedVerifiedMergeMaterialization, PreparedCircleObjects,
+    ReclaimedStorePackage, RetainedAudiencePackage, RetainedMergeHistoryCheckpoint,
+    RetainedMergeMaterializationKey, RetainedPackageApplication, RetainedReplayAuthority,
+    RetainedReplayBaseline, RetainedReplayGenesisAuthority, SnapshotDatabaseImage,
+    SnapshotImageError, SnapshotImageOperationError, SnapshotPublicationPermit,
+    StoreCommitPublicationOutcome, StoreDatabase, StorePublicationBoundary,
+    StorePublicationPreparation, StoreReclaimJournalError, StoreRowWrites, StoreWritePreparation,
+    StuckReclaimOperation, TableSchema, ValidatedChangeset, VerifiedMergeMaterialization,
+    VerifiedMergeMembershipObjects, WinningRow,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use store::{resolve_and_apply_changeset, ApplyResult};

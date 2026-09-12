@@ -308,7 +308,8 @@ async fn restore_later_member(image: AncestorImage) {
         .exact_creates()
         .into_iter()
         .filter(|slot| {
-            slot.logical_key().contains("/bootstraps/") && slot.logical_key().ends_with(".db")
+            slot.logical_key().contains("/bootstraps/")
+                && slot.logical_key().ends_with(".changeset")
         })
         .collect();
     assert_eq!(

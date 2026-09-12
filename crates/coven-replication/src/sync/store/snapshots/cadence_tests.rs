@@ -225,7 +225,11 @@ async fn exercise_circle_snapshot(case: CircleSnapshotCase) {
             .capture_circle_snapshot_cut(&routing, circle)
             .await
             .expect("capture the accepted Circle state while a local edit remains pending");
-        let image = coven_database::DatabaseImageTest::open(cut.image_path_for_test()).unwrap();
+        let staged = database
+            .circle_bootstrap_rows_image_for_test(cut.rows().to_vec())
+            .await
+            .expect("stage the captured Circle bootstrap rows");
+        let image = coven_database::DatabaseImageTest::from_bytes(&staged).unwrap();
         let row: (String, String) = image.query_row(
             "SELECT title, audience FROM documents WHERE id = '12345678-1234-4234-8234-123456789abc'",
             [], |row| Ok((row.get(0)?, row.get(1)?)),

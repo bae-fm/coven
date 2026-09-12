@@ -9,6 +9,27 @@ pub mod synthetic_store;
 
 pub use image::DatabaseImageTest;
 
+/// Every change a Circle bootstrap payload states: `(table, operation,
+/// primary key)`, in payload order. Operations read as `insert`, `update` or
+/// `delete`.
+pub fn circle_bootstrap_changes_for_test(
+    rows: &[u8],
+) -> Result<Vec<(String, String, String)>, DbError> {
+    Ok(crate::store::changeset_rows(rows)
+        .map_err(DbError::from)?
+        .into_iter()
+        .map(|change| {
+            let operation = match change.op {
+                rusqlite::hooks::Action::SQLITE_INSERT => "insert",
+                rusqlite::hooks::Action::SQLITE_UPDATE => "update",
+                rusqlite::hooks::Action::SQLITE_DELETE => "delete",
+                _ => "unknown",
+            };
+            (change.table, operation.to_string(), change.row_id)
+        })
+        .collect())
+}
+
 #[derive(Clone, Copy)]
 pub enum RetainedRegistrationTamper {
     CanonicalRegistration,

@@ -7,11 +7,11 @@ pub(crate) use store_session::active_store_publication::{
 };
 pub(crate) use store_session::payload_store;
 use store_session::{
-    blob_outbox, blob_transitions, circle_authority, circle_controls, circle_operations,
-    host_write_capture, host_write_operation, local_blob_cleanup, materialized_commit_index,
-    merge_materialization_transaction, pull_replay, replay_projection, retained_merge_replay,
-    retained_replay, snapshot_image, stream_activation_records, verified_store_authority,
-    write_lifecycle,
+    blob_outbox, blob_transitions, circle_authority, circle_bootstrap_rows, circle_controls,
+    circle_operations, host_write_capture, host_write_operation, local_blob_cleanup,
+    materialized_commit_index, merge_materialization_transaction, pull_replay, replay_projection,
+    retained_merge_replay, retained_replay, snapshot_image, stream_activation_records,
+    verified_store_authority, write_lifecycle,
 };
 pub use store_session::{candidate_records, payload_store::PayloadStoreError, reclaim};
 mod device_join;
@@ -75,6 +75,9 @@ pub use blob_transitions::{
 };
 pub use candidate_records::CandidateCleanupObject;
 pub use circle_authority::CirclePackageAccess;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use circle_bootstrap_rows::changeset_rows;
+pub(crate) use circle_bootstrap_rows::verify_circle_bootstrap_rows;
 pub use circle_controls::PreparedCircleObjects;
 pub use device_join::DeviceJoinJournalStore;
 pub use host_sql::{SqlContext, SqlReadContext};
@@ -110,8 +113,7 @@ pub use merge_materialization_transaction::{
 };
 pub use publication_state::{StorePublicationPreparation, StoreWritePreparation};
 pub(crate) use pull_replay::{
-    install_circle_bootstrap_connection_on, install_circle_bootstrap_image_on,
-    install_circle_bootstrap_remote_objects_on,
+    install_circle_bootstrap_image_on, install_circle_bootstrap_remote_objects_on,
 };
 pub use reclaim::journal::{
     DurableStoreReclaimAuthorization, DurableStoreReclaimOperation, ReclaimedStorePackage,
@@ -123,9 +125,9 @@ pub use retained_replay::{
     projection_table_names, RetainedReplayAuthority, RetainedReplayBaseline,
     RetainedReplayGenesisAuthority,
 };
-pub(crate) use snapshot_image::verify_circle_bootstrap_connection;
 pub use snapshot_image::{
-    CreatedSnapshot, SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,
+    CreatedCircleSnapshot, CreatedSnapshot, SnapshotDatabaseImage, SnapshotImageError,
+    SnapshotImageOperationError,
 };
 pub use store_session::circle_acknowledgements::CircleAckPublicationInput;
 pub use store_session::observed_store_publication::{

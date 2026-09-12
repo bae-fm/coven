@@ -47,18 +47,17 @@ impl StoreSession<'_> {
         &mut self,
         meta: CircleSnapshotMeta,
         meta_prepared: PreparedExactObject,
-        image: SnapshotDatabaseImage,
+        rows: Vec<u8>,
         image_prepared: PreparedExactObject,
     ) -> Result<CircleSnapshotRef, DbError> {
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let image_facts =
-            crate::payload_store::write_payload_file_blocking(&tx, self.store_dir, image.path())
-                .map_err(|source| SnapshotImageError::ProjectionPayloadStore {
-                    operation: "spool Circle snapshot image".to_string(),
-                    source,
-                });
-        let (image_hash, _) = image.finish(image_facts).map_err(snapshot_image_db_error)?;
+        let image_hash = crate::payload_store::write_payload_blocking(&tx, self.store_dir, &rows)
+            .map_err(|source| SnapshotImageError::ProjectionPayloadStore {
+                operation: "spool Circle snapshot rows".to_string(),
+                source,
+            })
+            .map_err(snapshot_image_db_error)?;
         let image_prepared_hash = crate::payload_store::write_payload_blocking(
             &tx,
             self.store_dir,
@@ -77,7 +76,7 @@ impl StoreSession<'_> {
             image_prepared_hash,
             image_prepared_size,
             format!(
-                "{}.db",
+                "{}.changeset",
                 circle_snapshot_image_semantic_prefix(
                     meta.circle_id,
                     &device_id,
@@ -283,11 +282,11 @@ impl StoreDatabase {
         &self,
         meta: CircleSnapshotMeta,
         meta_prepared: PreparedExactObject,
-        image: SnapshotDatabaseImage,
+        rows: Vec<u8>,
         image_prepared: PreparedExactObject,
     ) -> Result<CircleSnapshotRef, DbError> {
         self.call_store(move |session| {
-            session.stage_circle_snapshot_publication(meta, meta_prepared, image, image_prepared)
+            session.stage_circle_snapshot_publication(meta, meta_prepared, rows, image_prepared)
         })
         .await
     }

@@ -14,17 +14,8 @@ impl StoreRecords<'_> {
         root: &coven_protocol::store_commit::StoreRootRef,
         tables: &[SyncedTable],
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-        audience: &coven_protocol::circle::Audience,
     ) -> Result<crate::CreatedSnapshot, crate::SnapshotImageError> {
-        // Test snapshots capture the live database without consuming its owner.
-        // Production capture consumes the separate accepted-history projection.
-        let copied = (|| {
-            let bytes = crate::connection_io::serialize_database_image(self.conn)?;
-            let mut connection = rusqlite::Connection::open_in_memory()?;
-            crate::connection_io::deserialize_database_image_into(&mut connection, &bytes)?;
-            Ok::<_, crate::SnapshotImageError>(connection)
-        })();
-        let connection = match copied {
+        let connection = match copy_live_database(self.conn) {
             Ok(connection) => connection,
             Err(error) => return image.finish(Err(error)),
         };
@@ -35,9 +26,38 @@ impl StoreRecords<'_> {
             root,
             tables,
             routing_encryption,
-            audience,
         )
     }
+
+    pub(crate) fn capture_circle_bootstrap_rows(
+        self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        tables: &[SyncedTable],
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<crate::CreatedCircleSnapshot, crate::SnapshotImageError> {
+        crate::store::store_session::snapshot_image::capture_circle_bootstrap_rows(
+            copy_live_database(self.conn)?,
+            self.store_dir,
+            crate::store::VerifiedStoreAuthority::default(),
+            root,
+            tables,
+            routing_encryption,
+            circle_id,
+        )
+    }
+}
+
+/// Test captures read the live database without consuming its owner.
+/// Production capture consumes the separate accepted-history projection.
+#[cfg(any(test, feature = "test-utils"))]
+fn copy_live_database(
+    source: &rusqlite::Connection,
+) -> Result<rusqlite::Connection, crate::SnapshotImageError> {
+    let bytes = crate::connection_io::serialize_database_image(source)?;
+    let mut connection = rusqlite::Connection::open_in_memory()?;
+    crate::connection_io::deserialize_database_image_into(&mut connection, &bytes)?;
+    Ok(connection)
 }
 
 impl StoreTransaction<'_, '_> {

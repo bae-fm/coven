@@ -251,10 +251,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let bootstrap_blobs = self
                         .verify_snapshot_blobs(request.circle_id, request.bootstrap_blobs())
                         .await?;
-                    let image_bytes = request
-                        .read_bootstrap_image()
-                        .await
-                        .map_err(CircleOperationError::from)?;
+                    let image_bytes = request.bootstrap_rows().to_vec();
                     let image_hash = ObjectHash::digest(&image_bytes);
                     let image_prefix =
                         coven_protocol::store_commit::circle_bootstrap_image_semantic_prefix(
@@ -271,7 +268,12 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         circle_encryption,
                     );
                     let bootstrap_prepared = self
-                        .prepare_circle_object(&image_context, &image_prefix, ".db", image_bytes)
+                        .prepare_circle_object(
+                            &image_context,
+                            &image_prefix,
+                            ".changeset",
+                            image_bytes,
+                        )
                         .await?;
                     let bootstrap = coven_protocol::circle::CircleBootstrapRef {
                         coverage: request.bootstrap_coverage().clone(),
@@ -611,10 +613,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let bootstrap_blobs = self
                         .verify_snapshot_blobs(request.circle_id, request.bootstrap_blobs())
                         .await?;
-                    let image_bytes = request
-                        .read_bootstrap_image()
-                        .await
-                        .map_err(CircleOperationError::from)?;
+                    let image_bytes = request.bootstrap_rows().to_vec();
                     let image_hash = ObjectHash::digest(&image_bytes);
                     let successor_encryption =
                         EncryptionService::from(MasterKeyring::from_serialized(&draft.keyring)?);
@@ -642,7 +641,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                                         successor_encryption.clone(),
                                     ),
                                     &image_prefix,
-                                    ".db",
+                                    ".changeset",
                                     image_bytes.clone(),
                                 )
                                 .await?;

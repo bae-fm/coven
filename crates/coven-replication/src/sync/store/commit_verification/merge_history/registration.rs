@@ -80,7 +80,7 @@ pub(super) fn validate_circle_snapshot_activated_reclaim_target(
         )
     );
     let expected_image = format!(
-        "{}.db",
+        "{}.changeset",
         super::store_commit::circle_snapshot_image_semantic_prefix(
             activation.circle_id,
             &device_id,

@@ -9,7 +9,7 @@ pub(crate) use publication::AuthorizedSnapshotPublication;
 
 pub use image::{PreparedDeviceJoinSnapshot, PreparedSnapshotBootstrap, SnapshotError};
 
-use coven_database::CreatedSnapshot;
+use coven_database::{CreatedCircleSnapshot, CreatedSnapshot};
 
 use tracing::info;
 
@@ -30,12 +30,12 @@ use coven_storage::CloudSyncObjectStorage;
 use std::sync::Arc;
 
 pub(crate) struct SnapshotCut {
-    snapshot: CreatedSnapshot,
+    snapshot: CreatedCircleSnapshot,
     coverage: CommitFrontier,
 }
 
 impl SnapshotCut {
-    pub(crate) fn new(snapshot: CreatedSnapshot, coverage: CommitFrontier) -> Self {
+    pub(crate) fn new(snapshot: CreatedCircleSnapshot, coverage: CommitFrontier) -> Self {
         Self { snapshot, coverage }
     }
 
@@ -43,21 +43,16 @@ impl SnapshotCut {
         self.snapshot.blobs()
     }
 
-    pub(crate) async fn read_image(&self) -> Result<Vec<u8>, coven_database::SnapshotImageError> {
-        self.snapshot.read_image().await
+    pub(crate) fn rows(&self) -> &[u8] {
+        self.snapshot.rows()
     }
 
     pub(crate) fn coverage(&self) -> &CommitFrontier {
         &self.coverage
     }
 
-    pub(crate) fn into_parts(self) -> (CreatedSnapshot, CommitFrontier) {
+    pub(crate) fn into_parts(self) -> (CreatedCircleSnapshot, CommitFrontier) {
         (self.snapshot, self.coverage)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn image_path_for_test(&self) -> &std::path::Path {
-        self.snapshot.image_path_for_test()
     }
 }
 

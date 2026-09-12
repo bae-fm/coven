@@ -436,7 +436,10 @@ impl DatabaseCore {
             blob_decls
                 .install_cleanup_guards(&conn)
                 .map_err(DbError::from)?;
-            gate::attach_empty_clone(&conn, &gates)
+            let gated_tables = gates
+                .gated_tables_parent_first(&conn)
+                .map_err(|error| DbError::context("install host transaction gate", error))?;
+            gate::attach_empty_clone(&conn, &gated_tables)
                 .map_err(|error| DbError::context("install host transaction gate", error))
         })?;
         timings.report();

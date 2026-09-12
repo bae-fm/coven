@@ -452,14 +452,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     ) -> crate::sync::store::circles::AuthorizedCircleWriter<'_, 'storage> {
         let database = self.database.clone();
         let storage = Arc::clone(self.storage);
-        let store_dir = self.store_dir;
         let root = self.store_root().clone();
         let local_writer = Arc::clone(&self.writer);
         crate::sync::store::circles::AuthorizedCircleWriter::from_parts(
             self,
             database,
             storage,
-            store_dir,
             root,
             local_writer,
         )

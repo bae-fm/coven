@@ -618,25 +618,32 @@ pub(super) fn pre_write_full_state_diff(
         full_state_diff(before, gates, direction)
     })
 }
-/// Attach a fresh empty in-memory db, recreate each gated table's schema in it
+/// Attach a fresh empty in-memory db, recreate each of `tables`' schema in it
 /// (copied verbatim from `sqlite_master` so a diff sees identical tables), run
 /// `f` against the clone, and always detach afterward. Both full-state diff
 /// directions share this setup; they differ only in which schema the diff session
-/// binds to. `f` receives the clone alias and the gated tables in parent-first
-/// order. A unique alias avoids colliding with any host-attached db.
+/// binds to. `f` receives the clone alias. A unique alias avoids colliding with
+/// any host-attached db.
+///
+/// A clone the surrounding host transaction already attached is borrowed rather
+/// than rebuilt, and it holds the tables that attach asked for — so a diff over
+/// a different set is refused rather than run against a clone missing them.
 pub(crate) fn with_empty_clone<R>(
     conn: &Connection,
-    gates: &Gates,
-    f: impl FnOnce(&str, &[String]) -> Result<R, GateError>,
+    tables: &[String],
+    f: impl FnOnce(&str) -> Result<R, GateError>,
 ) -> Result<R, GateError> {
     let alias = "coven_gate_empty";
     let owns_clone = !empty_clone_attached(conn)?;
-    let tables = if owns_clone {
-        attach_empty_clone(conn, gates)?
-    } else {
-        gates.gated_tables_parent_first(conn)?
-    };
-    let result = f(alias, &tables);
+    if owns_clone {
+        attach_empty_clone(conn, tables)?;
+    } else if empty_clone_tables(conn)? != tables.iter().cloned().collect::<HashSet<_>>() {
+        return Err(GateError::Sql(
+            "attached empty clone holds other tables than the diff requests".to_string(),
+            rusqlite::Error::InvalidQuery,
+        ));
+    }
+    let result = f(alias);
 
     // A clone created by this call is detached before returning. A borrowed clone
     // remains owned by the surrounding host transaction.
@@ -652,10 +659,7 @@ pub(crate) fn with_empty_clone<R>(
     result
 }
 
-pub(crate) fn attach_empty_clone(
-    conn: &Connection,
-    gates: &Gates,
-) -> Result<Vec<String>, GateError> {
+pub(crate) fn attach_empty_clone(conn: &Connection, tables: &[String]) -> Result<(), GateError> {
     let alias = "coven_gate_empty";
     if empty_clone_attached(conn)? {
         return Err(GateError::Sql(
@@ -665,16 +669,15 @@ pub(crate) fn attach_empty_clone(
     }
     execute_batch(conn, &format!("ATTACH DATABASE ':memory:' AS {alias}"))?;
     let prepared = (|| {
-        let tables = gates.gated_tables_parent_first(conn)?;
-        for table in &tables {
+        for table in tables {
             let create = create_table_sql(conn, table)?;
             let in_alias = rewrite_create_into_schema(&create, table, alias)?;
             execute_batch(conn, &in_alias)?;
         }
-        Ok(tables)
+        Ok(())
     })();
     match prepared {
-        Ok(tables) => Ok(tables),
+        Ok(()) => Ok(()),
         Err(operation) => match detach_empty_clone(conn) {
             Ok(()) => Err(operation),
             Err(cleanup) => Err(GateError::Cleanup {
@@ -683,6 +686,19 @@ pub(crate) fn attach_empty_clone(
             }),
         },
     }
+}
+
+/// The tables the attached clone holds, so a borrowed clone is only diffed
+/// against when it carries exactly the requested set.
+fn empty_clone_tables(conn: &Connection) -> Result<HashSet<String>, GateError> {
+    let mut statement = conn
+        .prepare("SELECT name FROM coven_gate_empty.sqlite_master WHERE type = 'table'")
+        .map_err(|source| GateError::Sql("prepare clone table list".to_string(), source))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|source| GateError::Sql("read clone table list".to_string(), source))?;
+    rows.collect::<Result<HashSet<_>, _>>()
+        .map_err(|source| GateError::Sql("read clone table name".to_string(), source))
 }
 
 fn detach_empty_clone(conn: &Connection) -> Result<(), GateError> {
@@ -731,7 +747,22 @@ pub(crate) fn full_state_diff(
     gates: &Gates,
     direction: FullStateDirection,
 ) -> Result<Vec<u8>, GateError> {
-    with_empty_clone(conn, gates, |alias, tables| {
+    let tables = gates.gated_tables_parent_first(conn)?;
+    full_state_changeset(conn, &tables, direction)
+}
+
+/// Every present row of `tables`, as one INSERT changeset: the tables diffed
+/// against an empty schema-identical clone.
+pub(crate) fn full_state_rows(conn: &Connection, tables: &[String]) -> Result<Vec<u8>, GateError> {
+    full_state_changeset(conn, tables, FullStateDirection::Inserts)
+}
+
+fn full_state_changeset(
+    conn: &Connection,
+    tables: &[String],
+    direction: FullStateDirection,
+) -> Result<Vec<u8>, GateError> {
+    with_empty_clone(conn, tables, |alias| {
         let (session_schema, from_schema) = match direction {
             FullStateDirection::Inserts => ("main", alias),
             FullStateDirection::Deletes => (alias, "main"),

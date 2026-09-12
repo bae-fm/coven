@@ -1331,7 +1331,7 @@ fn candidate_manifest_rejects_duplicate_circle_bootstraps_with_distinct_provider
     let image_hash = ObjectHash::digest(b"Circle bootstrap image");
     let control_hash = ObjectHash::digest(b"Circle access control");
     let image_key = format!(
-        "{}.db",
+        "{}.changeset",
         circle_bootstrap_image_semantic_prefix(
             circle_id,
             family,

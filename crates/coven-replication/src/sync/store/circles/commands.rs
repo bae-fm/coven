@@ -232,10 +232,8 @@ impl CircleAddMemberRequest {
         self.bootstrap.blobs()
     }
 
-    pub(super) async fn read_bootstrap_image(
-        &self,
-    ) -> Result<Vec<u8>, coven_database::SnapshotImageError> {
-        self.bootstrap.read_image().await
+    pub(super) fn bootstrap_rows(&self) -> &[u8] {
+        self.bootstrap.rows()
     }
 
     pub(super) fn bootstrap_coverage(&self) -> &coven_protocol::store_commit::CommitFrontier {
@@ -328,10 +326,8 @@ impl CircleFinalizeEpochCloseRequest {
         self.bootstrap.blobs()
     }
 
-    pub(super) async fn read_bootstrap_image(
-        &self,
-    ) -> Result<Vec<u8>, coven_database::SnapshotImageError> {
-        self.bootstrap.read_image().await
+    pub(super) fn bootstrap_rows(&self) -> &[u8] {
+        self.bootstrap.rows()
     }
 
     pub(super) fn bootstrap_coverage(&self) -> &coven_protocol::store_commit::CommitFrontier {

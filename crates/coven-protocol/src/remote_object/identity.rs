@@ -87,7 +87,8 @@ pub(super) fn validate_candidate_exclusive_identity(
             );
             if !canonical_semantic_bytes.is_empty()
                 || reference.image.object != identity.object
-                || reference.image.object.slot().logical_key() != format!("{expected_prefix}.db")
+                || reference.image.object.slot().logical_key()
+                    != format!("{expected_prefix}.changeset")
             {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }

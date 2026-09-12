@@ -392,7 +392,7 @@ impl ProtectedObjectDomain {
                     kind: "bootstraps",
                     component_count: 9,
                 },
-                extension: ".db",
+                extension: ".changeset",
             },
             Self::CircleEpochCloseIntent => ProtocolObjectMetadata {
                 aad_label: b"circle-epoch-close-intent",
@@ -440,7 +440,7 @@ impl ProtectedObjectDomain {
                     component_count: 5,
                     fixed_components: &[(0, "circles"), (2, "snapshot-images")],
                 }]),
-                extension: ".db",
+                extension: ".changeset",
             },
         }
     }

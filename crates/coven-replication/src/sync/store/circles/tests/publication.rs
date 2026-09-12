@@ -2021,8 +2021,12 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         successor_bootstrap.image.image_hash,
         "the retained bootstrap image hashes to its recorded image hash"
     );
-    let image = coven_database::DatabaseImageTest::from_bytes(retained_bootstrap.image_bytes())
-        .expect("open the successor bootstrap image");
+    let staged = StoreDatabase::new(&db)
+        .circle_bootstrap_rows_image_for_test(retained_bootstrap.image_bytes().to_vec())
+        .await
+        .expect("stage the successor bootstrap rows");
+    let image = coven_database::DatabaseImageTest::from_bytes(&staged)
+        .expect("open the staged successor bootstrap rows");
     let converges: bool = image
         .query_row(
             "SELECT EXISTS(

@@ -2,9 +2,9 @@ use super::*;
 
 fn circle_bootstrap_reference(
     source: &Database,
-    image: &[u8],
+    rows: &[u8],
 ) -> coven_protocol::circle::CircleBootstrapRef {
-    let image_hash = coven_protocol::store_commit::ObjectHash::digest(image);
+    let image_hash = coven_protocol::store_commit::ObjectHash::digest(rows);
     coven_protocol::circle::CircleBootstrapRef {
         coverage: CommitFrontier(BTreeMap::new()),
         schema_version: source.schema_version(),
@@ -13,15 +13,44 @@ fn circle_bootstrap_reference(
             image_hash,
             object: coven_protocol::objects::ExactObjectRef::new(
                 coven_protocol::objects::ObjectSlot::logical(
-                    "circle-bootstrap-routing.db".to_string(),
+                    "circle-bootstrap-routing.changeset".to_string(),
                 )
                 .expect("construct Circle bootstrap routing slot"),
-                image.len() as u64,
+                rows.len() as u64,
                 image_hash,
             ),
         },
         blobs: Vec::new(),
     }
+}
+
+/// The bootstrap rows staged on the capturing database's own schema, so a test
+/// reads what the payload states through the ordinary image readers.
+async fn staged_bootstrap_rows(
+    source: &Database,
+    rows: &[u8],
+) -> coven_database::DatabaseImageTest {
+    let staged = StoreDatabase::new(source)
+        .circle_bootstrap_rows_image_for_test(rows.to_vec())
+        .await
+        .expect("stage the Circle bootstrap rows");
+    coven_database::DatabaseImageTest::from_bytes(&staged).expect("open the staged bootstrap rows")
+}
+
+/// Stage a payload, edit the staged rows, and state the result as a payload
+/// again — how a test builds a bootstrap no honest capture would produce.
+async fn edit_bootstrap_rows(
+    source: &Database,
+    rows: Vec<u8>,
+    edit: impl FnOnce(&coven_database::DatabaseImageTest),
+) -> Vec<u8> {
+    let staged = staged_bootstrap_rows(source, &rows).await;
+    edit(&staged);
+    let edited = staged.into_bytes().expect("serialize the edited rows");
+    StoreDatabase::new(source)
+        .circle_bootstrap_rows_from_image_for_test(edited)
+        .await
+        .expect("state the edited rows as a bootstrap payload")
 }
 
 #[tokio::test]
@@ -38,22 +67,19 @@ async fn circle_bootstrap_verification_requires_authenticated_routing() {
     .await
     .expect("create Circle bootstrap routing Store");
     let circle_id = seed_scoped_snapshot_rows(&source, &store, &source_store_dir).await;
-    let image_dir = tempfile::tempdir().expect("Circle bootstrap routing image directory");
-    let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(&source)
+    let rows = StoreDatabase::new(&source)
         .capture_circle_snapshot_image_for_test(
             root,
-            image_path,
             coven_keys::encryption::EncryptionService::from_key([42; 32]),
             circle_id,
         )
         .await
-        .expect("create Circle bootstrap routing image");
-    let reference = circle_bootstrap_reference(&source, &image);
+        .expect("create Circle bootstrap routing rows");
+    let reference = circle_bootstrap_reference(&source, &rows);
 
     let error = StoreDatabase::new(&source)
-        .verify_circle_bootstrap_image(image, reference, circle_id, None)
+        .verify_circle_bootstrap_image(rows, reference, circle_id, None)
         .await
         .expect_err("scoped Circle bootstrap verification must require its routing key");
     assert!(
@@ -78,13 +104,10 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
     .await
     .expect("create Circle bootstrap Store-row Store");
     let circle_id = seed_scoped_snapshot_rows(&source, &store, &source_store_dir).await;
-    let image_dir = tempfile::tempdir().expect("Circle bootstrap Store-row image directory");
-    let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(&source)
+    let rows = StoreDatabase::new(&source)
         .capture_circle_snapshot_image_for_test(
             root,
-            image_path,
             coven_keys::encryption::EncryptionService::from_key([42; 32]),
             circle_id,
         )
@@ -104,7 +127,7 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
     let store_row_stamp = "0000000001008-0000-owner";
     let store_routing_id =
         coven_protocol::circle::row_routing_id(&routing_key, "documents", store_row_id).to_string();
-    let image = edit_snapshot_image(image_dir.path(), image, |connection| {
+    let rows = edit_bootstrap_rows(&source, rows, |connection| {
         connection
             .execute(
                 "INSERT INTO documents VALUES (?1, NULL, ?2, ?3)",
@@ -122,11 +145,12 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
         connection
             .install_audience_mirror(&store_routing_id, None, store_row_stamp)
             .expect("insert scoped Store audience mirror into Circle bootstrap");
-    });
-    let reference = circle_bootstrap_reference(&source, &image);
+    })
+    .await;
+    let reference = circle_bootstrap_reference(&source, &rows);
 
     let error = StoreDatabase::new(&source)
-        .verify_circle_bootstrap_image(image, reference, circle_id, Some(routing_key))
+        .verify_circle_bootstrap_image(rows, reference, circle_id, Some(routing_key))
         .await
         .expect_err("Circle bootstrap must reject a scoped Store row");
     assert!(
@@ -179,19 +203,16 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     .await
     .expect("create Circle bootstrap unscoped-row Store");
     let circle_id = create_snapshot_circle(&source, &store, &source_store_dir).await;
-    let image_dir = tempfile::tempdir().expect("Circle bootstrap unscoped image directory");
-    let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(&source)
+    let rows = StoreDatabase::new(&source)
         .capture_circle_snapshot_image_for_test(
             root,
-            image_path,
             coven_keys::encryption::EncryptionService::from_key([42; 32]),
             circle_id,
         )
         .await
-        .expect("create Circle bootstrap unscoped image");
-    let image = edit_snapshot_image(image_dir.path(), image, |connection| {
+        .expect("create Circle bootstrap unscoped rows");
+    let rows = edit_bootstrap_rows(&source, rows, |connection| {
         connection
             .execute(
                 "INSERT INTO settings VALUES (?1, ?2, ?3)",
@@ -202,8 +223,9 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
                 ),
             )
             .expect("insert unscoped row into Circle bootstrap");
-    });
-    let reference = circle_bootstrap_reference(&source, &image);
+    })
+    .await;
+    let reference = circle_bootstrap_reference(&source, &rows);
     let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
         StoreDatabase::new(&source)
@@ -216,7 +238,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     .expect("derive unscoped-row routing key");
 
     let error = StoreDatabase::new(&source)
-        .verify_circle_bootstrap_image(image, reference, circle_id, Some(routing_key))
+        .verify_circle_bootstrap_image(rows, reference, circle_id, Some(routing_key))
         .await
         .expect_err("Circle bootstrap must reject an unscoped synced row");
     assert!(
@@ -228,7 +250,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
 }
 
 #[tokio::test]
-async fn circle_snapshot_contains_only_its_rows_routes_and_mirrors() {
+async fn circle_snapshot_states_only_its_rows_routes_and_mirrors() {
     let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = open_scoped_snapshot_test_db(source_store_dir.clone());
     let store = crate::sync::test_helpers::TestStore::create(
@@ -242,20 +264,39 @@ async fn circle_snapshot_contains_only_its_rows_routes_and_mirrors() {
     .expect("create Circle snapshot Store");
     let circle_id = seed_scoped_snapshot_rows(&source, &store, &source_store_dir).await;
 
-    let image_dir = tempfile::tempdir().expect("Circle snapshot directory");
-    let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(&source)
+    let rows = StoreDatabase::new(&source)
         .capture_circle_snapshot_image_for_test(
             root,
-            image_path,
             coven_keys::encryption::EncryptionService::from_key([42; 32]),
             circle_id,
         )
         .await
-        .expect("create Circle snapshot image");
-    let inspected = coven_database::DatabaseImageTest::from_bytes(&image)
-        .expect("open inspected Circle snapshot");
+        .expect("create Circle snapshot rows");
+
+    let changes = coven_database::circle_bootstrap_changes_for_test(&rows)
+        .expect("read the Circle bootstrap changes");
+    assert!(
+        changes
+            .iter()
+            .all(|(_, operation, _)| operation == "insert"),
+        "a bootstrap states every row as an insert: {changes:?}"
+    );
+    assert_eq!(
+        changes
+            .iter()
+            .map(|(table, _, _)| table.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "_coven_audience".to_string(),
+            "_coven_row_routes".to_string(),
+            "documents".to_string(),
+            "paragraphs".to_string(),
+        ]),
+        "a bootstrap names only the Circle's projection tables"
+    );
+
+    let inspected = staged_bootstrap_rows(&source, &rows).await;
     let materialized = inspected
         .query_row(
             "SELECT
@@ -272,17 +313,7 @@ async fn circle_snapshot_contains_only_its_rows_routes_and_mirrors() {
             "Circle paragraph".to_string()
         )
     );
-    for (table, expected) in [
-        ("_coven_row_routes", 2),
-        ("_coven_audience", 2),
-        ("circle_current_state", 0),
-        ("protocol_state", 0),
-        ("remote_objects", 0),
-        ("blob_locators", 0),
-        ("row_blob_locators", 0),
-        ("retained_merge_materializations", 0),
-        ("retained_replay_objects", 0),
-    ] {
+    for (table, expected) in [("_coven_row_routes", 2), ("_coven_audience", 2)] {
         assert_eq!(
             inspected
                 .coven_table_row_count(coven_database::DatabaseTestTable::named(table))
@@ -375,19 +406,16 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
         .await
         .expect("commit Circle row with Store parent");
 
-    let image_dir = tempfile::tempdir().expect("Circle parent snapshot directory");
-    let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(&source)
+    let rows = StoreDatabase::new(&source)
         .capture_circle_snapshot_image_for_test(
             root,
-            image_path,
             coven_keys::encryption::EncryptionService::from_key([42; 32]),
             circle_id,
         )
         .await
         .expect("create Circle snapshot with Store parent");
-    let reference = circle_bootstrap_reference(&source, &image);
+    let reference = circle_bootstrap_reference(&source, &rows);
     let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
         StoreDatabase::new(&source)
@@ -398,31 +426,23 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
             .store_root_hash,
     )
     .expect("derive Circle parent routing key");
-    let image = StoreDatabase::new(&source)
-        .verify_circle_bootstrap_image(image, reference, circle_id, Some(routing_key))
+    let rows = StoreDatabase::new(&source)
+        .verify_circle_bootstrap_image(rows, reference, circle_id, Some(routing_key))
         .await
         .expect("verify Circle bootstrap with its required Store parent");
-    let inspected = coven_database::DatabaseImageTest::from_bytes(&image)
-        .expect("open inspected Circle parent snapshot");
-    let rows = inspected
+    let inspected = staged_bootstrap_rows(&source, &rows).await;
+    let installed = inspected
         .query_row(
             "SELECT
                      (SELECT group_concat(name, ',') FROM folders),
-                     (SELECT group_concat(body, ',') FROM documents),
-                     (SELECT COUNT(*) FROM pragma_foreign_key_check)",
+                     (SELECT group_concat(body, ',') FROM documents)",
             [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .expect("inspect Circle parent snapshot rows");
     assert_eq!(
-        rows,
-        ("kept".to_string(), "Circle document".to_string(), 0,)
+        installed,
+        ("kept".to_string(), "Circle document".to_string())
     );
     assert_eq!(
         inspected

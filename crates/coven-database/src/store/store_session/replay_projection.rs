@@ -133,10 +133,20 @@ impl ReplayProjectionResult {
         root: &coven_protocol::store_commit::StoreRootRef,
         tables: &[coven_protocol::synced_schema::SyncedTable],
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-        audience: &coven_protocol::circle::Audience,
     ) -> Result<crate::CreatedSnapshot, crate::SnapshotImageError> {
         self.projection
-            .capture_snapshot(image, root, tables, routing_encryption, audience)
+            .capture_snapshot(image, root, tables, routing_encryption)
+    }
+
+    pub(super) fn capture_circle_bootstrap_rows(
+        self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        tables: &[coven_protocol::synced_schema::SyncedTable],
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<crate::CreatedCircleSnapshot, crate::SnapshotImageError> {
+        self.projection
+            .capture_circle_bootstrap_rows(root, tables, routing_encryption, circle_id)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -238,16 +248,14 @@ impl ReplayProjection {
 
     pub(super) fn install_circle_bootstrap(
         &self,
-        image_bytes: &[u8],
+        rows: &[u8],
         coverage: &coven_protocol::circle::CircleBootstrapCoverageRef,
         synced_tables: &[coven_protocol::synced_schema::SyncedTable],
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<(), DbError> {
-        let mut source = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
-        crate::connection_io::deserialize_database_image_into(&mut source, image_bytes)
-            .map_err(|error| DbError::context("open retained Circle bootstrap image", error))?;
-        crate::store::verify_circle_bootstrap_connection(
-            &source,
+        let staged = crate::store::verify_circle_bootstrap_rows(
+            &self.connection,
+            rows,
             &coverage.bootstrap,
             coverage.circle_id,
             synced_tables,
@@ -263,9 +271,8 @@ impl ReplayProjection {
             .connection
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        crate::store::install_circle_bootstrap_connection_on(
+        staged.install_on(
             &transaction,
-            &source,
             synced_tables,
             &coverage.activation_commit,
             coverage.circle_id,
@@ -435,7 +442,6 @@ impl ReplayProjection {
         root: &coven_protocol::store_commit::StoreRootRef,
         tables: &[coven_protocol::synced_schema::SyncedTable],
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-        audience: &coven_protocol::circle::Audience,
     ) -> Result<crate::CreatedSnapshot, crate::SnapshotImageError> {
         image.capture_on(
             self.connection,
@@ -444,7 +450,24 @@ impl ReplayProjection {
             root,
             tables,
             routing_encryption,
-            audience,
+        )
+    }
+
+    pub(super) fn capture_circle_bootstrap_rows(
+        self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        tables: &[coven_protocol::synced_schema::SyncedTable],
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<crate::CreatedCircleSnapshot, crate::SnapshotImageError> {
+        super::snapshot_image::capture_circle_bootstrap_rows(
+            self.connection,
+            &self.store_dir,
+            VerifiedStoreAuthority::for_replay_baseline(self.baseline),
+            root,
+            tables,
+            routing_encryption,
+            circle_id,
         )
     }
 

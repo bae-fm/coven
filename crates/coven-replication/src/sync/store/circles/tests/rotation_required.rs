@@ -1122,8 +1122,12 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
         )
         .await
         .expect("cut the successor bootstrap from accepted history");
-    let image = coven_database::DatabaseImageTest::open(cut.image_path_for_test())
-        .expect("open the bootstrap image");
+    let staged = StoreDatabase::new(&fixture.db)
+        .circle_bootstrap_rows_image_for_test(cut.rows().to_vec())
+        .await
+        .expect("stage the successor bootstrap rows");
+    let image = coven_database::DatabaseImageTest::from_bytes(&staged)
+        .expect("open the staged bootstrap rows");
     let installed_ids = image
         .query("SELECT id FROM documents ORDER BY id", [], |row| {
             row.get::<_, String>(0)

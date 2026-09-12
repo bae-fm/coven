@@ -13,6 +13,7 @@ pub(crate) mod blob_transitions;
 pub mod candidate_records;
 pub(crate) mod circle_acknowledgements;
 pub(crate) mod circle_authority;
+pub(crate) mod circle_bootstrap_rows;
 pub(crate) mod circle_controls;
 pub(crate) mod circle_operations;
 pub(crate) mod circle_snapshot_publication;

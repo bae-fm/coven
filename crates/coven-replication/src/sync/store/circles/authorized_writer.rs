@@ -23,18 +23,15 @@ pub(crate) struct AuthorizedCircleWriter<'writer, 'storage> {
     writer: &'writer mut AuthorizedWriterOperation<'storage>,
     database: coven_database::StoreDatabase,
     storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
-    store_dir: &'storage coven_foundation::store_dir::StoreDir,
     root: coven_protocol::store_commit::StoreRootRef,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
 }
 
 impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         writer: &'writer mut AuthorizedWriterOperation<'storage>,
         database: coven_database::StoreDatabase,
         storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
-        store_dir: &'storage coven_foundation::store_dir::StoreDir,
         root: coven_protocol::store_commit::StoreRootRef,
         local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     ) -> Self {
@@ -42,7 +39,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             writer,
             database,
             storage,
-            store_dir,
             root,
             local_writer,
         }
@@ -76,7 +72,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             self.writer,
             self.database.clone(),
             self.storage.clone(),
-            self.store_dir,
             self.root.clone(),
             std::sync::Arc::clone(&self.local_writer),
         )

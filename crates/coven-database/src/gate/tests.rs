@@ -6,7 +6,7 @@ use rusqlite::session::Session as RqSession;
 use rusqlite::Connection;
 
 use super::model::TableGate;
-use super::outbound::{gate_outbound, with_empty_clone};
+use super::outbound::{attach_empty_clone, full_state_rows, gate_outbound, with_empty_clone};
 use coven_protocol::synced_schema::SyncedTable;
 
 /// A throwaway in-memory connection with `foreign_keys=ON`, for the gate
@@ -518,7 +518,8 @@ fn empty_clone_surfaces_detach_failure() {
     )
     .expect("gates");
 
-    let err = with_empty_clone(&c, &gates, |alias, _tables| {
+    let tables = gates.gated_tables_parent_first(&c).expect("gated tables");
+    let err = with_empty_clone(&c, &tables, |alias| {
         c.execute_batch(&format!(
             "BEGIN;
                  INSERT INTO {alias}.notes (id, _updated_at)
@@ -533,6 +534,58 @@ fn empty_clone_surfaces_detach_failure() {
         "unexpected error: {err}"
     );
     c.execute_batch("ROLLBACK; DETACH DATABASE coven_gate_empty")
+        .expect("cleanup clone");
+}
+
+/// A connection holding two independent tables, either of which a full-state
+/// diff can be asked for.
+fn two_table_conn() -> Connection {
+    let c = conn();
+    c.execute_test_sql(
+        "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                _updated_at TEXT NOT NULL
+            ) STRICT;
+         CREATE TABLE memos (
+                id TEXT PRIMARY KEY,
+                _updated_at TEXT NOT NULL
+            ) STRICT;
+         INSERT INTO notes VALUES ('n1', '0000000001000-0000-dev1');
+         INSERT INTO memos VALUES ('m1', '0000000001001-0000-dev1');",
+    );
+    c
+}
+
+#[test]
+fn borrowed_empty_clone_refuses_a_diff_over_other_tables() {
+    let c = two_table_conn();
+    attach_empty_clone(&c, &["notes".to_string()]).expect("attach the clone for notes");
+
+    let err = full_state_rows(&c, &["memos".to_string()])
+        .expect_err("a borrowed clone without the requested table must refuse the diff");
+
+    assert!(
+        err.to_string()
+            .contains("attached empty clone holds other tables than the diff requests"),
+        "unexpected error: {err}"
+    );
+    c.execute_batch("DETACH DATABASE coven_gate_empty")
+        .expect("cleanup clone");
+}
+
+#[test]
+fn borrowed_empty_clone_states_the_rows_of_the_tables_it_holds() {
+    let c = two_table_conn();
+    attach_empty_clone(&c, &["notes".to_string()]).expect("attach the clone for notes");
+
+    let rows = full_state_rows(&c, &["notes".to_string()])
+        .expect("a borrowed clone holding the requested table states its rows");
+
+    let changes = walk(&rows).expect("walk the stated rows");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].table, "notes");
+    assert_eq!(changes[0].op, ChangeOp::Insert);
+    c.execute_batch("DETACH DATABASE coven_gate_empty")
         .expect("cleanup clone");
 }
 

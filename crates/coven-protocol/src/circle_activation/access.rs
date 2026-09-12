@@ -56,13 +56,14 @@ impl VerifiedCircleImage {
         Ok(verified)
     }
 
-    /// Reconstruct a verified Circle image from stored bytes and an exact
+    /// Reconstruct a verified Circle bootstrap from stored bytes and an exact
     /// reference — the coverage-row and restore-selection path, which has no
-    /// access leaf (a standalone snapshot names none). The bytes are input to the
-    /// verifier, never trusted for being local: their digest must equal the
-    /// reference's image hash, and the caller separately runs
-    /// `verify_circle_bootstrap_image` against the retained control and routing
-    /// key for the full schema/routing/audience/blob-closure check.
+    /// access leaf (a standalone snapshot names none). The bytes are the
+    /// Circle's rows as a changeset; they are input to the verifier, never
+    /// trusted for being local: their digest must equal the reference's image
+    /// hash, and the caller separately runs `verify_circle_bootstrap_image`
+    /// against the retained control and routing key for the full
+    /// schema/routing/audience/blob-closure check.
     pub fn from_stored_image(
         circle_id: CircleId,
         control: CircleControlCoord,

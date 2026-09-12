@@ -1,6 +1,7 @@
 use super::*;
 
-/// Exact Circle database image offered when one recipient becomes active.
+/// Exact Circle bootstrap rows changeset offered when one recipient becomes
+/// active.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CircleBootstrapRef {
@@ -47,7 +48,7 @@ impl CircleBootstrapRef {
             &access.recipient_slot,
             self.image.image_hash,
         );
-        self.image.object.slot().logical_key() == format!("{semantic_prefix}.db")
+        self.image.object.slot().logical_key() == format!("{semantic_prefix}.changeset")
     }
 }
 

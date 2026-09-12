@@ -13,13 +13,12 @@ use tracing::warn;
 
 use super::{coverage_dominates, SnapshotCut, SnapshotError};
 use crate::sync::store::circles::bootstrap_blobs::CircleBootstrapBlobVerification;
-use coven_database::CreatedSnapshot;
+use coven_database::CreatedCircleSnapshot;
 
 pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
     writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
     database: coven_database::StoreDatabase,
     storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
-    store_dir: &'storage coven_foundation::store_dir::StoreDir,
     root: StoreRootRef,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
 }
@@ -615,7 +614,6 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
         database: coven_database::StoreDatabase,
         storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
-        store_dir: &'storage coven_foundation::store_dir::StoreDir,
         root: StoreRootRef,
         local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     ) -> Self {
@@ -623,7 +621,6 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             writer,
             database,
             storage,
-            store_dir,
             root,
             local_writer,
         }
@@ -636,12 +633,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     ) -> Result<SnapshotCut, coven_database::DbError> {
         let (snapshot, coverage) = self
             .database
-            .capture_circle_snapshot_cut(
-                self.root.clone(),
-                self.store_dir.as_ref().to_path_buf(),
-                routing_encryption.clone(),
-                circle_id,
-            )
+            .capture_circle_snapshot_cut(self.root.clone(), routing_encryption.clone(), circle_id)
             .await?;
         Ok(SnapshotCut::new(snapshot, coverage))
     }
@@ -662,7 +654,6 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .database
             .capture_circle_snapshot_at_cutoff(
                 root,
-                self.store_dir.as_ref().to_path_buf(),
                 routing_encryption,
                 routing_key,
                 circle_id,
@@ -789,7 +780,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     async fn push_circle_snapshot(
         &self,
         input: &coven_database::CircleAckPublicationInput,
-        snapshot: CreatedSnapshot,
+        snapshot: CreatedCircleSnapshot,
         coverage: CommitFrontier,
         schema_version: u32,
         created_at: String,
@@ -800,14 +791,13 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         let db = &database;
         let root = &self.root;
         let publication = self.writer.snapshot_publication().await;
-        // The image references only already-published Circle blobs, verified exact —
-        // the same closure a member-addition bootstrap image carries.
+        // The rows reference only already-published Circle blobs, verified exact —
+        // the same closure a member-addition bootstrap carries.
         let blobs = self
             .verify_snapshot_blobs(circle_id, snapshot.blobs())
             .await
             .map_err(SnapshotError::from)?;
-        let (image, _) = snapshot.into_parts();
-        let image_bytes = image.read().await.map_err(SnapshotError::from)?;
+        let (image_bytes, _) = snapshot.into_parts();
         let image_hash = ObjectHash::digest(&image_bytes);
         let image_context = input.protocol_context(
             root.store_root_hash,
@@ -817,11 +807,16 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .local_writer
             .circle_snapshot_image_semantic_prefix(circle_id, image_hash);
         let image_slot = storage
-            .allocate_protocol_slot(&image_context, &image_prefix, ".db")
+            .allocate_protocol_slot(&image_context, &image_prefix, ".changeset")
             .await
             .map_err(SnapshotError::Bucket)?;
         let image_prepared = storage
-            .prepare_protocol_object(&image_context, image_slot, &image_prefix, image_bytes)
+            .prepare_protocol_object(
+                &image_context,
+                image_slot,
+                &image_prefix,
+                image_bytes.clone(),
+            )
             .map_err(SnapshotError::Bucket)?;
         let bootstrap = CircleBootstrapRef {
             coverage,
@@ -908,7 +903,12 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             )
             .map_err(SnapshotError::Bucket)?;
         database
-            .stage_circle_snapshot_publication(meta.clone(), meta_prepared, image, image_prepared)
+            .stage_circle_snapshot_publication(
+                meta.clone(),
+                meta_prepared,
+                image_bytes,
+                image_prepared,
+            )
             .await
             .map_err(SnapshotError::from)?;
         let pending = database

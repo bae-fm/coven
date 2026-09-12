@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use super::snapshot_image::{snapshot_image_db_error, verify_circle_bootstrap_image};
+use super::circle_bootstrap_rows::verify_circle_bootstrap_image;
+use super::snapshot_image::snapshot_image_db_error;
 use super::*;
 use crate::*;
 
@@ -103,12 +104,11 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
 }
 
 impl StoreSession<'_> {
-    fn capture_shared_snapshot_cut(
+    fn capture_store_snapshot_cut(
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
         temp_dir: &Path,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-        audience: coven_protocol::circle::Audience,
     ) -> Result<
         (
             CreatedSnapshot,
@@ -116,6 +116,51 @@ impl StoreSession<'_> {
         ),
         DbError,
     > {
+        let synced_tables = self.synced_tables;
+        self.capture_accepted_projection(root, routing_encryption, |replay| {
+            SnapshotDatabaseImage::prepare_snapshot(temp_dir)
+                .and_then(|image| {
+                    replay.capture_snapshot(image, root, synced_tables, routing_encryption)
+                })
+                .map_err(snapshot_image_db_error)
+        })
+    }
+
+    fn capture_circle_snapshot_cut(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        routing_encryption: &coven_keys::encryption::EncryptionService,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<
+        (
+            CreatedCircleSnapshot,
+            coven_protocol::store_commit::CommitFrontier,
+        ),
+        DbError,
+    > {
+        let synced_tables = self.synced_tables;
+        self.capture_accepted_projection(root, Some(routing_encryption), |replay| {
+            replay
+                .capture_circle_bootstrap_rows(
+                    root,
+                    synced_tables,
+                    Some(routing_encryption),
+                    circle_id,
+                )
+                .map_err(snapshot_image_db_error)
+        })
+    }
+
+    /// Reconstruct the accepted Store history at its current frontier and hand
+    /// the projection to `capture`, which encodes it for its audience. The
+    /// projection is rolled back either way: a capture reads the accepted
+    /// history, it never advances the live database.
+    fn capture_accepted_projection<T>(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        capture: impl FnOnce(ReplayProjectionResult) -> Result<T, DbError>,
+    ) -> Result<(T, coven_protocol::store_commit::CommitFrontier), DbError> {
         let routing_key = if self.gates.has_scoped_graph() {
             let encryption = routing_encryption.ok_or_else(|| {
                 DbError::Message(
@@ -171,31 +216,19 @@ impl StoreSession<'_> {
                         .to_string(),
                 ));
             }
-            let snapshot = SnapshotDatabaseImage::prepare_snapshot(temp_dir)
-                .and_then(|image| {
-                    replay.capture_snapshot(
-                        image,
-                        root,
-                        transaction.synced_tables,
-                        routing_encryption,
-                        &audience,
-                    )
-                })
-                .map_err(snapshot_image_db_error)?;
-            Ok(StoreTransactionOutcome::Rollback((snapshot, coverage)))
+            let captured = capture(replay)?;
+            Ok(StoreTransactionOutcome::Rollback((captured, coverage)))
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn capture_circle_snapshot_at_cutoff(
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
-        temp_dir: &Path,
         routing_encryption: &coven_keys::encryption::EncryptionService,
         routing_key: &coven_protocol::circle::RowRoutingKey,
         circle_id: coven_protocol::circle::CircleId,
         cutoff: &coven_protocol::store_commit::CommitFrontier,
-    ) -> Result<CreatedSnapshot, DbError> {
+    ) -> Result<CreatedCircleSnapshot, DbError> {
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let replay =
             crate::store::store_session::StoreTransaction::new(&transaction, self.store_dir)
@@ -218,16 +251,13 @@ impl StoreSession<'_> {
                 "Circle close cutoff is not an exact retained Store frontier".to_string(),
             ));
         }
-        SnapshotDatabaseImage::prepare_snapshot(temp_dir)
-            .and_then(|image| {
-                replay.capture_snapshot(
-                    image,
-                    root,
-                    self.synced_tables,
-                    Some(routing_encryption),
-                    &coven_protocol::circle::Audience::Circle(circle_id),
-                )
-            })
+        replay
+            .capture_circle_bootstrap_rows(
+                root,
+                self.synced_tables,
+                Some(routing_encryption),
+                circle_id,
+            )
             .map_err(snapshot_image_db_error)
     }
 
@@ -237,7 +267,6 @@ impl StoreSession<'_> {
         root: &coven_protocol::store_commit::StoreRootRef,
         temp_dir: &Path,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-        audience: coven_protocol::circle::Audience,
     ) -> Result<Vec<u8>, DbError> {
         SnapshotDatabaseImage::prepare_snapshot(temp_dir)
             .and_then(|image| {
@@ -246,10 +275,27 @@ impl StoreSession<'_> {
                     root,
                     self.synced_tables,
                     routing_encryption,
-                    &audience,
                 )
             })
             .and_then(|snapshot| snapshot.into_parts().0.read_and_discard())
+            .map_err(snapshot_image_db_error)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn capture_circle_bootstrap_rows_for_test(
+        &self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        routing_encryption: &coven_keys::encryption::EncryptionService,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Vec<u8>, DbError> {
+        StoreRecords::new(self.conn, self.store_dir)
+            .capture_circle_bootstrap_rows(
+                root,
+                self.synced_tables,
+                Some(routing_encryption),
+                circle_id,
+            )
+            .map(|snapshot| snapshot.into_parts().0)
             .map_err(snapshot_image_db_error)
     }
 }
@@ -268,12 +314,7 @@ impl StoreDatabase {
         DbError,
     > {
         self.call_store(move |session| {
-            session.capture_shared_snapshot_cut(
-                &root,
-                &temp_dir,
-                routing_encryption.as_ref(),
-                coven_protocol::circle::Audience::Store,
-            )
+            session.capture_store_snapshot_cut(&root, &temp_dir, routing_encryption.as_ref())
         })
         .await
     }
@@ -281,41 +322,32 @@ impl StoreDatabase {
     pub async fn capture_circle_snapshot_cut(
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
-        temp_dir: PathBuf,
         routing_encryption: coven_keys::encryption::EncryptionService,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<
         (
-            CreatedSnapshot,
+            CreatedCircleSnapshot,
             coven_protocol::store_commit::CommitFrontier,
         ),
         DbError,
     > {
         self.call_store(move |session| {
-            session.capture_shared_snapshot_cut(
-                &root,
-                &temp_dir,
-                Some(&routing_encryption),
-                coven_protocol::circle::Audience::Circle(circle_id),
-            )
+            session.capture_circle_snapshot_cut(&root, &routing_encryption, circle_id)
         })
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn capture_circle_snapshot_at_cutoff(
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
-        temp_dir: PathBuf,
         routing_encryption: coven_keys::encryption::EncryptionService,
         routing_key: coven_protocol::circle::RowRoutingKey,
         circle_id: coven_protocol::circle::CircleId,
         cutoff: coven_protocol::store_commit::CommitFrontier,
-    ) -> Result<CreatedSnapshot, DbError> {
+    ) -> Result<CreatedCircleSnapshot, DbError> {
         self.call_store(move |session| {
             session.capture_circle_snapshot_at_cutoff(
                 &root,
-                &temp_dir,
                 &routing_encryption,
                 &routing_key,
                 circle_id,
@@ -334,6 +366,7 @@ impl StoreDatabase {
     ) -> Result<Vec<u8>, SnapshotImageError> {
         self.call_store(move |session| {
             let verification = verify_circle_bootstrap_image(
+                session.conn,
                 &image,
                 &reference,
                 circle_id,
@@ -354,12 +387,45 @@ impl StoreDatabase {
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<Vec<u8>, DbError> {
         self.call_store(move |session| {
-            session.capture_snapshot_image_for_test(
-                &root,
-                &temp_dir,
-                routing_encryption.as_ref(),
-                coven_protocol::circle::Audience::Store,
+            session.capture_snapshot_image_for_test(&root, &temp_dir, routing_encryption.as_ref())
+        })
+        .await
+    }
+
+    /// Stage one Circle bootstrap payload on this database's schema and hand
+    /// back the staged rows as a SQLite image, so a test can inspect what the
+    /// payload states with the ordinary image readers.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn circle_bootstrap_rows_image_for_test(
+        &self,
+        rows: Vec<u8>,
+    ) -> Result<Vec<u8>, DbError> {
+        self.call_store(move |session| {
+            super::circle_bootstrap_rows::StagedCircleRows::stage(
+                session.conn,
+                &rows,
+                session.synced_tables,
             )
+            .map_err(snapshot_image_db_error)?
+            .database_bytes()
+        })
+        .await
+    }
+
+    /// The inverse: re-encode a staged image's projection tables as a bootstrap
+    /// payload, so a test can edit staged rows and state the result.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn circle_bootstrap_rows_from_image_for_test(
+        &self,
+        image: Vec<u8>,
+    ) -> Result<Vec<u8>, DbError> {
+        self.call_store(move |session| {
+            let mut connection = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
+            crate::connection_io::deserialize_database_image_into(&mut connection, &image)?;
+            let projection_tables =
+                super::snapshot_image::circle_projection_tables(&connection, session.synced_tables)
+                    .map_err(snapshot_image_db_error)?;
+            crate::gate::full_state_rows(&connection, &projection_tables).map_err(DbError::from)
         })
         .await
     }
@@ -368,17 +434,11 @@ impl StoreDatabase {
     pub async fn capture_circle_snapshot_image_for_test(
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
-        temp_dir: PathBuf,
         routing_encryption: coven_keys::encryption::EncryptionService,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Vec<u8>, DbError> {
         self.call_store(move |session| {
-            session.capture_snapshot_image_for_test(
-                &root,
-                &temp_dir,
-                Some(&routing_encryption),
-                coven_protocol::circle::Audience::Circle(circle_id),
-            )
+            session.capture_circle_bootstrap_rows_for_test(&root, &routing_encryption, circle_id)
         })
         .await
     }

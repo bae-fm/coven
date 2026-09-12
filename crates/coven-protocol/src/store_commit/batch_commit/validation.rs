@@ -342,7 +342,7 @@ pub(super) fn validate_candidate_object_path(
             bootstrap,
         } => {
             let expected = format!(
-                "{}.db",
+                "{}.changeset",
                 circle_bootstrap_image_semantic_prefix(
                     *circle_id,
                     family,
