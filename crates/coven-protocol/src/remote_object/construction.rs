@@ -241,24 +241,6 @@ impl RemoteObjectRecord {
         )
     }
 
-    pub(crate) fn candidate_activated_device_exclusion_proposal(
-        reference: crate::store_commit::StoreDeviceExclusionProposalRef,
-        canonical_signed_bytes: &[u8],
-        stored_bytes: &[u8],
-        owner: StoreBatchCommitRef,
-    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
-        let object = reference.object.clone();
-        let semantic_hash = ObjectHash::digest(canonical_signed_bytes);
-        Self::candidate_activated_retained_authority(
-            RetainedAuthorityObjectDomain::DeviceExclusionProposal { reference },
-            semantic_hash,
-            object,
-            canonical_signed_bytes,
-            stored_bytes,
-            owner,
-        )
-    }
-
     pub(crate) fn candidate_activated_device_exclusion_outcome(
         reference: crate::store_commit::StoreDeviceExclusionOutcomeRef,
         canonical_signed_bytes: &[u8],

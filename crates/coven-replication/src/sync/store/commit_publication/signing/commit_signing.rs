@@ -412,6 +412,7 @@ impl LocalStoreWriter {
                 attempt_id,
                 registration: activated_registration,
                 transition,
+                ..
             } => sign_ops(
                 context,
                 write_id,
@@ -443,6 +444,7 @@ impl LocalStoreWriter {
             StoreOperationBatch::JoinActivation {
                 registration: activation,
                 transition,
+                ..
             } => sign_ops(
                 context,
                 write_id,
@@ -455,10 +457,7 @@ impl LocalStoreWriter {
                     ..StoreCommitOperationsInput::empty()
                 },
             ),
-            StoreOperationBatch::DeviceExclusionProposal {
-                proposal,
-                transition,
-            } => sign_ops(
+            StoreOperationBatch::DeviceExclusionProposal { transition, .. } => sign_ops(
                 context,
                 write_id,
                 registration_ref,
@@ -466,13 +465,13 @@ impl LocalStoreWriter {
                 signer,
                 StoreCommitOperationsInput {
                     control: Some(StoreControl { transition }),
-                    device_exclusion_proposals: vec![proposal.reference().clone()],
                     ..StoreCommitOperationsInput::empty()
                 },
             ),
             StoreOperationBatch::DeviceExclusionOutcome {
                 outcome,
                 transition,
+                ..
             } => sign_ops(
                 context,
                 write_id,
@@ -488,6 +487,7 @@ impl LocalStoreWriter {
             StoreOperationBatch::MergeMembershipActivation {
                 transition,
                 stream_activations,
+                ..
             } => sign_ops(
                 context,
                 write_id,

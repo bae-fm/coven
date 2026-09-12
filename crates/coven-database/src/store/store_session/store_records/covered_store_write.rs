@@ -72,7 +72,6 @@ impl StoreRecords<'_> {
             || !operations.device_join_attempt_decisions.is_empty()
             || !operations.provider_access_grants.is_empty()
             || !operations.device_registrations.is_empty()
-            || !operations.device_exclusion_proposals.is_empty()
             || !operations.device_exclusion_outcomes.is_empty()
             || !operations.stream_activations.is_empty()
             || !operations.circle_controls.is_empty()

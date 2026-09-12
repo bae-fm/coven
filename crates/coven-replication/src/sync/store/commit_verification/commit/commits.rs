@@ -205,41 +205,44 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(crate) async fn load_commit_device_operations(
         &mut self,
         commit: &StoreBatchCommit,
+        control_entry: Option<&MembershipEntry>,
         predecessor_state: &ResolvedStoreDeviceState,
         predecessor: &MembershipChain,
     ) -> Result<VerifiedStoreDeviceOperations, RegistrationLoadError> {
-        if commit.device_exclusion_proposals().is_empty()
-            && commit.device_exclusion_outcomes().is_empty()
-        {
-            return VerifiedStoreDeviceOperations::without_exclusions(commit)
+        let proposed = commit.proposed_device_exclusion(control_entry).cloned();
+        if proposed.is_none() && commit.device_exclusion_outcomes().is_empty() {
+            return VerifiedStoreDeviceOperations::without_exclusions(commit, control_entry)
                 .map_err(RegistrationLoadError::from);
         }
-        let mut proposals = Vec::with_capacity(commit.device_exclusion_proposals().len());
-        for reference in commit.device_exclusion_proposals() {
-            let opened = self
-                .load_device_exclusion_proposal(reference)
-                .await
-                .map_err(RegistrationLoadError::Object)?;
-            let proposal = &opened.object.value;
-            if !device_state_has_active_registration(predecessor_state, &proposal.target)
-                || !device_state_has_active_registration(
-                    predecessor_state,
-                    &proposal.owner_registration,
-                )
-                || !predecessor_verifies_owner(
-                    predecessor,
-                    &commit.membership_state,
-                    &opened.owner.author_pubkey,
-                    &proposal.owner_grant,
-                )
-            {
-                return Err(RegistrationLoadError::Invalid(
-                    "device exclusion proposal differs from its active predecessor authority"
-                        .to_string(),
-                ));
+        // The entry that carries the proposal is Owner-signed and its activating
+        // head author is the commit author, so the issuer's Owner authority is
+        // already established by the membership control verification. What
+        // remains is that both devices are active at the predecessor state.
+        let proposal_source = match &proposed {
+            Some(proposal) => {
+                if !device_state_has_active_registration(predecessor_state, &proposal.target)
+                    || !device_state_has_active_registration(
+                        predecessor_state,
+                        &commit.author_registration,
+                    )
+                {
+                    return Err(RegistrationLoadError::Invalid(
+                        "device exclusion proposal differs from its active predecessor authority"
+                            .to_string(),
+                    ));
+                }
+                let target = self
+                    .load_registration(&proposal.target)
+                    .await
+                    .map_err(RegistrationLoadError::Object)?
+                    .value;
+                Some(RetainedStoreDeviceExclusionProposal::from_exact(
+                    proposal.clone(),
+                    &target,
+                )?)
             }
-            proposals.push(RetainedStoreDeviceExclusionProposal::from_verified(&opened));
-        }
+            None => None,
+        };
         let mut outcomes = Vec::with_capacity(commit.device_exclusion_outcomes().len());
         for reference in commit.device_exclusion_outcomes() {
             if !device_state_has_pending_proposal(predecessor_state, reference.proposal()) {
@@ -248,12 +251,14 @@ impl<'a> StoreCommitVerifier<'a> {
                         .to_string(),
                 ));
             }
-            let proposal = self
-                .load_device_exclusion_proposal(reference.proposal())
+            let proposal = reference.proposal();
+            let target = self
+                .load_registration(&proposal.target)
                 .await
-                .map_err(RegistrationLoadError::Object)?;
+                .map_err(RegistrationLoadError::Object)?
+                .value;
             let outcome = self
-                .load_device_exclusion_outcome(reference, &proposal)
+                .load_device_exclusion_outcome(reference, proposal, &target)
                 .await
                 .map_err(RegistrationLoadError::Object)?;
             let (owner_registration, owner_grant) = match &outcome.object.value {
@@ -280,14 +285,14 @@ impl<'a> StoreCommitVerifier<'a> {
             outcomes.push(
                 RetainedStoreDeviceExclusionOutcome::from_verified(
                     reference,
-                    RetainedStoreDeviceExclusionProposal::from_verified(&proposal),
+                    RetainedStoreDeviceExclusionProposal::from_exact(proposal.clone(), &target)?,
                     &outcome,
                 )
                 .map_err(RegistrationLoadError::from)?,
             );
         }
-        RetainedStoreDeviceOperations::from_sources(proposals, outcomes)
-            .verify_for(self.root.reference(), commit)
+        RetainedStoreDeviceOperations::from_sources(proposal_source, outcomes)
+            .verify_for(self.root.reference(), commit, control_entry)
             .map_err(RegistrationLoadError::from)
     }
 

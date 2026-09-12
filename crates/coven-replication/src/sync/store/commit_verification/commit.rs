@@ -4,7 +4,7 @@ use super::merge_history::registration::{
 };
 use crate::sync::store::pull::*;
 use coven_database::{activated_merge_membership_remote_objects, MembershipAuthorityBytes};
-use coven_protocol::membership::{MembershipChain, MembershipHeadRef};
+use coven_protocol::membership::{MembershipChain, MembershipEntry, MembershipHeadRef};
 use coven_protocol::objects::{
     decode_protocol_object, verify_store_root, StoreObjectError, VerifiedObject,
 };
@@ -19,10 +19,9 @@ use coven_protocol::remote_object;
 use coven_protocol::store_commit::*;
 use coven_protocol::store_commit::{
     ack_slot_prefix, device_exclusion_outcome_semantic_prefix,
-    device_exclusion_proposal_semantic_prefix, founder_registration_semantic_prefix,
-    package_semantic_prefix, provider_access_grant_semantic_prefix, registration_semantic_prefix,
-    SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef,
-    StoreDeviceExclusionProposal, StoreDeviceExclusionProposalRef, StoreSnapshotRef,
+    founder_registration_semantic_prefix, package_semantic_prefix,
+    provider_access_grant_semantic_prefix, registration_semantic_prefix, SnapshotMeta, StoreAck,
+    StoreAckRef, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposal, StoreSnapshotRef,
 };
 use coven_storage::run_blocking_object_verification;
 use coven_storage::CloudSyncObjectStorage;

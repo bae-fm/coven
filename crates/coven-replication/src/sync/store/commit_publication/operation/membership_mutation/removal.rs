@@ -132,7 +132,9 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         let mut candidate = self.operation.prepare_candidate_for_write(
             plan,
             crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::MergeMembershipActivation {
-                transition: transition.transition.clone(), stream_activations: Vec::new(),
+                entry: transition.entry.clone(),
+                transition: transition.transition.clone(),
+                stream_activations: Vec::new(),
             },
             write_id,
         ).await.map_err(MembershipMutationError::from)?;

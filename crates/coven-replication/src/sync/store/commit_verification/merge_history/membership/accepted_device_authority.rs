@@ -359,14 +359,16 @@ impl AcceptedDeviceAuthority {
             else {
                 continue;
             };
-            let proposal = verifier
-                .load_device_exclusion_proposal(&exclusion.proposal)
+            let target = verifier
+                .load_registration(&exclusion.proposal.target)
                 .await
-                .map_err(map_membership_object_error)?;
+                .map_err(map_membership_object_error)?
+                .value;
             let outcome = verifier
                 .load_device_exclusion_outcome(
                     &StoreDeviceExclusionOutcomeRef::Excluded(exclusion.clone()),
-                    &proposal,
+                    &exclusion.proposal,
+                    &target,
                 )
                 .await
                 .map_err(map_membership_object_error)?;
@@ -667,30 +669,26 @@ impl AcceptedDeviceAuthority {
                     ..
                 } => recovery_effect(root, user_pubkey, grant_id, &acceptance.anchors.recovery)?,
                 StoreAuthorityChange::DeviceExclusionProposal { proposal } => {
-                    let loaded = verifier.load_device_exclusion_proposal(proposal).await?;
-                    if loaded.object.value.owner_registration != head.body.author_registration
-                        || loaded.object.value.owner_grant != entry.author_owner_grant
-                    {
-                        return Err(StorePullError::InvalidState(
-                            "snapshot exclusion proposal differs from its accepted authority author".into(),
-                        ));
-                    }
+                    let target = verifier.load_registration(&proposal.target).await?.value;
                     RetainedStoreDeviceOperations::from_sources(
-                        vec![RetainedStoreDeviceExclusionProposal::from_verified(&loaded)],
+                        Some(RetainedStoreDeviceExclusionProposal::from_exact(
+                            proposal.clone(),
+                            &target,
+                        )?),
                         Vec::new(),
                     )
                     .verify_for(
                         root.reference(),
                         &snapshot_proof(snapshot, reference, head, entry)?.commit_value,
+                        Some(entry),
                     )?
                     .accepted_effect()?
                 }
                 StoreAuthorityChange::DeviceExclusionOutcome { outcome } => {
-                    let proposal = verifier
-                        .load_device_exclusion_proposal(outcome.proposal())
-                        .await?;
+                    let proposal = outcome.proposal();
+                    let target = verifier.load_registration(&proposal.target).await?.value;
                     let loaded = verifier
-                        .load_device_exclusion_outcome(outcome, &proposal)
+                        .load_device_exclusion_outcome(outcome, proposal, &target)
                         .await?;
                     let (owner, grant) = match &loaded.object.value {
                         StoreDeviceExclusionOutcome::Excluded(value) => {
@@ -708,16 +706,20 @@ impl AcceptedDeviceAuthority {
                         ));
                     }
                     RetainedStoreDeviceOperations::from_sources(
-                        Vec::new(),
+                        None,
                         vec![RetainedStoreDeviceExclusionOutcome::from_verified(
                             outcome,
-                            RetainedStoreDeviceExclusionProposal::from_verified(&proposal),
+                            RetainedStoreDeviceExclusionProposal::from_exact(
+                                proposal.clone(),
+                                &target,
+                            )?,
                             &loaded,
                         )?],
                     )
                     .verify_for(
                         root.reference(),
                         &snapshot_proof(snapshot, reference, head, entry)?.commit_value,
+                        Some(entry),
                     )?
                     .accepted_effect()?
                 }

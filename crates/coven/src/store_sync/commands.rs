@@ -67,7 +67,7 @@ impl StoreSync {
     pub(crate) async fn propose_device_exclusion(
         &self,
         device_id: crate::StoreDeviceId,
-    ) -> Result<coven_protocol::store_commit::StoreDeviceExclusionProposalRef, SyncError> {
+    ) -> Result<coven_protocol::store_commit::StoreDeviceExclusionProposal, SyncError> {
         active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .propose_device_exclusion(device_id)
@@ -77,7 +77,7 @@ impl StoreSync {
 
     pub(crate) async fn cancel_device_exclusion(
         &self,
-        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
     ) -> Result<(), SyncError> {
         active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
@@ -88,7 +88,7 @@ impl StoreSync {
 
     pub(crate) async fn finalize_device_exclusion(
         &self,
-        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
     ) -> Result<(), SyncError> {
         active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?

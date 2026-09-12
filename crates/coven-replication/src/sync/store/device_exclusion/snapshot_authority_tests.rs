@@ -174,11 +174,13 @@ async fn assert_device_snapshot_claim_rejected(claim: DeviceSnapshotClaim) {
             .prepare_outcome(&proposal, OutcomeIntent::Exclude)
             .await
             .expect("prepare actual exclusion without accepting it");
-        let DurableStoreDeviceExclusionObject::Outcome {
+        let DurableStoreDeviceExclusionOutcome {
             reference: StoreDeviceExclusionOutcomeRef::Excluded(exclusion),
             prepared,
             ..
-        } = durable.object()
+        } = durable
+            .outcome()
+            .expect("prepared operation is not exclusion")
         else {
             panic!("prepared operation is not exclusion");
         };

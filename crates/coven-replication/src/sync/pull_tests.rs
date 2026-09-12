@@ -856,7 +856,6 @@ impl<'storage> PreparedPullCommit<'storage> {
                 device_join_attempt_decisions: self.commit.device_join_attempt_decisions().to_vec(),
                 provider_access_grants: self.commit.provider_access_grants().to_vec(),
                 device_registrations: self.commit.device_registrations().to_vec(),
-                device_exclusion_proposals: self.commit.device_exclusion_proposals().to_vec(),
                 device_exclusion_outcomes: self.commit.device_exclusion_outcomes().to_vec(),
                 stream_activations: self.commit.stream_activations().to_vec(),
                 circle_controls: self.commit.circle_controls().to_vec(),

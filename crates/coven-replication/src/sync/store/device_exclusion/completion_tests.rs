@@ -48,9 +48,9 @@ async fn complete_after_snapshot_retirement(continuation: CompletionContinuation
         .map(|record| record.reference().clone())
         .find(|reference| reference.device_id.to_string() != owner.device_id().as_str())
         .expect("peer registration");
-    // Proposal, authority entry, head, commit, publication entry, then its
-    // acceptance result. Check the exact slot after reaching this provider pause.
-    let (reached, release) = store.pause_after_exact_create_call(6);
+    // Authority entry, head, commit, publication entry, then its acceptance
+    // result. Check the exact slot after reaching this provider pause.
+    let (reached, release) = store.pause_after_exact_create_call(5);
     let mut publication = Box::pin(owner.propose_device_exclusion(&target));
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         tokio::select! {

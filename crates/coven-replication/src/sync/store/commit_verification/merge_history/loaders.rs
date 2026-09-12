@@ -135,22 +135,14 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
     }
 
-    pub(crate) async fn load_device_exclusion_proposal(
-        &self,
-        reference: &StoreDeviceExclusionProposalRef,
-    ) -> Result<VerifiedDeviceExclusionProposal, StoreObjectError> {
-        self.commit_verifier
-            .load_device_exclusion_proposal(reference)
-            .await
-    }
-
     pub(crate) async fn load_device_exclusion_outcome(
         &self,
         reference: &StoreDeviceExclusionOutcomeRef,
-        proposal: &VerifiedDeviceExclusionProposal,
+        proposal: &StoreDeviceExclusionProposal,
+        target: &StoreDeviceRegistration,
     ) -> Result<VerifiedDeviceExclusionOutcome, StoreObjectError> {
         self.commit_verifier
-            .load_device_exclusion_outcome(reference, proposal)
+            .load_device_exclusion_outcome(reference, proposal, target)
             .await
     }
 

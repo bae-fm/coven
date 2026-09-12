@@ -112,7 +112,7 @@ pub(crate) fn device_state_has_active_registration(
 
 pub(crate) fn device_state_has_pending_proposal(
     state: &ResolvedStoreDeviceState,
-    proposal: &super::store_commit::StoreDeviceExclusionProposalRef,
+    proposal: &super::store_commit::StoreDeviceExclusionProposal,
 ) -> bool {
     state
         .devices

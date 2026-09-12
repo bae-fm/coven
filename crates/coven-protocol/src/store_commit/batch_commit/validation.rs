@@ -49,10 +49,7 @@ pub(super) fn validate_commit_body(
             validate_device_join_attempt_decision_refs(&operations.device_join_attempt_decisions)?;
             validate_provider_access_refs(&operations.provider_access_grants)?;
             validate_device_registration_refs(&operations.device_registrations)?;
-            validate_device_exclusion_refs(
-                &operations.device_exclusion_proposals,
-                &operations.device_exclusion_outcomes,
-            )?;
+            validate_device_exclusion_refs(&operations.device_exclusion_outcomes)?;
             validate_stream_activations(
                 store_root_hash,
                 author,

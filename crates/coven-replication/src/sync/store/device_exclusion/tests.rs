@@ -27,7 +27,7 @@ fn open(path: &Path, device_id: &str) -> (Database, StoreDir) {
 }
 
 #[tokio::test]
-async fn uploaded_proposal_resumes_after_restart_and_target_can_cancel() {
+async fn staged_proposal_resumes_after_restart_and_target_can_cancel() {
     let directory = tempfile::tempdir().expect("exclusion test directory");
     let path = directory.path().join("store.sqlite");
     let signer = UserKeypair::generate();
@@ -49,10 +49,10 @@ async fn uploaded_proposal_resumes_after_restart_and_target_can_cancel() {
     )
     .await
     .expect("create exclusion test Store");
-    let reference = device
-        .stage_uploaded_device_exclusion_proposal_for_test()
+    let staged = device
+        .stage_device_exclusion_proposal_for_test()
         .await
-        .expect("stage uploaded exclusion proposal");
+        .expect("stage exclusion proposal");
     drop(device);
     drop(db);
 
@@ -76,7 +76,7 @@ async fn uploaded_proposal_resumes_after_restart_and_target_can_cancel() {
     assert!(matches!(
         result,
         StoreDeviceExclusionResult::ProposalActivated { proposal, .. }
-            if proposal == reference
+            if proposal == staged
     ));
     assert!(StoreDatabase::new(&reopened)
         .active_outbound_store_device_exclusion()
@@ -114,10 +114,10 @@ async fn uploaded_proposal_resumes_after_restart_and_target_can_cancel() {
         let (candidate_staged, resume_candidate) = reopened
             .arm_test_pause(coven_database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged);
         let cancel_device = reopened_store.clone();
-        let cancel_reference = reference.clone();
+        let cancel_proposal = staged.clone();
         let cancellation_task = tokio::spawn(async move {
             cancel_device
-                .cancel_device_exclusion(&cancel_reference)
+                .cancel_device_exclusion(&cancel_proposal)
                 .await
         });
         candidate_staged.notified().await;
@@ -345,13 +345,10 @@ async fn occupied_outcome_releases_unuploaded_membership_candidate_objects() {
         else {
             panic!("expected accepted cancellation");
         };
-        let DurableStoreDeviceExclusionObject::Outcome {
-            reference: intended,
-            ..
-        } = pending.object()
-        else {
-            panic!("expected prepared cancellation");
-        };
+        let intended = &pending
+            .outcome()
+            .expect("expected prepared cancellation")
+            .reference;
         assert_ne!(intended, &winner);
         assert_eq!(intended.object().slot(), winner.object().slot());
         let result = peer_writer
@@ -386,6 +383,359 @@ async fn occupied_outcome_releases_unuploaded_membership_candidate_objects() {
                 "the unuploaded losing object has no remaining owner"
             );
         }
+    })
+    .await;
+}
+
+/// A commit whose control entry issues a proposal carries nothing else about
+/// devices. The entry is the only place the proposal lives, so a commit that
+/// disagrees with it has no second object to fall back on.
+#[tokio::test]
+async fn a_proposal_entry_that_disagrees_with_its_commit_is_refused() {
+    use coven_protocol::store_commit::{
+        RetainedStoreDeviceExclusionProposal, RetainedStoreDeviceOperations, StoreBatchCommit,
+        StoreCommitOperationsInput, VerifiedStoreDeviceOperations,
+    };
+    use coven_storage::CloudSyncObjectStorage;
+
+    Box::pin(async {
+        let owner_dir = crate::sync::test_helpers::test_store_dir();
+        let owner_db = crate::sync::test_helpers::open_test_db(owner_dir.clone());
+        let signer = UserKeypair::generate();
+        let home = crate::sync::test_helpers::test_cloud_home();
+        let (store, storage) = TestStore::create_with_connection(
+            &owner_db,
+            owner_dir.clone(),
+            "exclusion-entry-disagreement",
+            signer.clone(),
+            home.clone(),
+        )
+        .await
+        .expect("create exclusion Store");
+        let owner = store
+            .bind_device_in(&owner_db, owner_dir.clone(), &signer)
+            .await
+            .expect("bind owner");
+        let peer_dir = crate::sync::test_helpers::test_store_dir();
+        let peer_db = crate::sync::test_helpers::open_test_db(peer_dir.clone());
+        store
+            .activate_joined_device(
+                &owner_db,
+                owner_dir,
+                &peer_db,
+                peer_dir,
+                &signer,
+                "2026-09-08T00:00:00Z",
+            )
+            .await
+            .expect("activate another Owner device");
+        let database = StoreDatabase::new(&owner_db);
+        let target = database
+            .activated_store_device_registration_records()
+            .await
+            .expect("read active registrations")
+            .into_iter()
+            .map(|registration| registration.reference().clone())
+            .find(|registration| registration.device_id.to_string() != owner.device_id().as_str())
+            .expect("peer registration");
+
+        // Stage the real proposal candidate and stop before its first upload, so
+        // the Owner-signed entry and its commit are both genuine.
+        home.fail_exact_create_before_call(1);
+        owner
+            .propose_device_exclusion(&target)
+            .await
+            .expect_err("interrupt the proposal before its authority upload");
+        let operation = database
+            .active_outbound_store_device_exclusion()
+            .await
+            .expect("read exclusion journal")
+            .expect("the staged proposal owns the journal");
+        let DurableStoreDeviceExclusionOperation::ProposalPrepared {
+            proposal,
+            candidate,
+        } = operation
+        else {
+            panic!("staged operation is not a proposal");
+        };
+        let entry = candidate
+            .prepared_membership_publication()
+            .expect("staged candidate owns its membership publication")
+            .entry;
+        let root = store.root();
+        let author = database
+            .activated_store_device_registration(candidate.commit.author_registration.clone())
+            .await
+            .expect("read the proposing device");
+        let target_registration = database
+            .activated_store_device_registration(proposal.target.clone())
+            .await
+            .expect("read the target device");
+        let device_signer = author
+            .value()
+            .device_signer(&signer)
+            .expect("proposing device signer");
+        let retained = || {
+            RetainedStoreDeviceExclusionProposal::from_exact(
+                proposal.clone(),
+                target_registration.value(),
+            )
+            .expect("retain the proposal against its target registration")
+        };
+        RetainedStoreDeviceOperations::from_sources(Some(retained()), Vec::new())
+            .verify_for(&root, &candidate.commit, Some(&entry))
+            .expect("the staged commit agrees with the entry that issues its proposal");
+
+        let outcome = StoreDeviceExclusionOutcome::Cancelled(
+            coven_protocol::store_commit::StoreDeviceExclusionCancellation::signed(
+                proposal.clone(),
+                author.reference().clone(),
+                entry.author_owner_grant.clone(),
+                author.value(),
+                &device_signer,
+            )
+            .expect("sign a cancellation of the staged proposal"),
+        );
+        let prefix = device_exclusion_outcome_semantic_prefix(
+            proposal.target.device_id,
+            proposal.proposal_id,
+        );
+        let context = ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreDeviceExclusionOutcome,
+        );
+        let prepared = storage
+            .prepare_protocol_object(
+                &context,
+                proposal.outcome_slot.clone(),
+                &prefix,
+                outcome.to_bytes(),
+            )
+            .expect("prepare the outcome at the proposal's slot");
+        let outcome_ref = StoreDeviceExclusionOutcomeRef::from_outcome(
+            &outcome,
+            &proposal,
+            prepared.reference().clone(),
+        )
+        .expect("exact outcome reference");
+
+        let original = candidate.commit.clone();
+        let operations = original
+            .operations()
+            .expect("the proposal commit carries operations");
+        let altered = StoreBatchCommit::signed_operations(
+            original.store_root_hash,
+            original.write_id.clone(),
+            candidate.reference.coord.clone(),
+            original.author_registration.clone(),
+            author.value(),
+            original.order.clone(),
+            original.publication_base().clone(),
+            original.membership_state.clone(),
+            original.device_state.clone(),
+            original
+                .operations_membership_authority()
+                .expect("the proposal commit carries membership authority"),
+            StoreCommitOperationsInput {
+                control: operations.control.clone(),
+                device_exclusion_outcomes: vec![outcome_ref],
+                ..StoreCommitOperationsInput::empty()
+            },
+            &device_signer,
+        )
+        .expect("the general batch signer permits a control beside an outcome");
+
+        assert!(
+            RetainedStoreDeviceOperations::from_sources(Some(retained()), Vec::new())
+                .verify_for(&root, &altered, Some(&entry))
+                .is_err()
+        );
+        assert!(VerifiedStoreDeviceOperations::without_exclusions(&altered, Some(&entry)).is_err());
+    })
+    .await;
+}
+
+/// Nothing but the accepted membership entries records a proposal, so a reader
+/// that starts from the published snapshot alone still sees it pending.
+#[tokio::test]
+async fn a_cold_reader_rebuilds_pending_proposals_from_accepted_entries() {
+    Box::pin(async {
+        let owner_dir = crate::sync::test_helpers::test_store_dir();
+        let owner_db = crate::sync::test_helpers::open_test_db(owner_dir.clone());
+        let signer = UserKeypair::generate();
+        let (store, storage) = TestStore::create_with_connection(
+            &owner_db,
+            owner_dir.clone(),
+            "exclusion-cold-reader",
+            signer.clone(),
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await
+        .expect("create exclusion Store");
+        let owner = store
+            .bind_device_in(&owner_db, owner_dir.clone(), &signer)
+            .await
+            .expect("bind owner");
+        let peer_dir = crate::sync::test_helpers::test_store_dir();
+        let peer_db = crate::sync::test_helpers::open_test_db(peer_dir.clone());
+        store
+            .activate_joined_device(
+                &owner_db,
+                owner_dir,
+                &peer_db,
+                peer_dir,
+                &signer,
+                "2026-09-08T00:00:00Z",
+            )
+            .await
+            .expect("activate another Owner device");
+        let database = StoreDatabase::new(&owner_db);
+        let target = database
+            .activated_store_device_registration_records()
+            .await
+            .expect("read active registrations")
+            .into_iter()
+            .map(|registration| registration.reference().clone())
+            .find(|registration| registration.device_id.to_string() != owner.device_id().as_str())
+            .expect("peer registration");
+        let proposal = match owner
+            .propose_device_exclusion(&target)
+            .await
+            .expect("publish proposal")
+        {
+            StoreDeviceExclusionResult::ProposalActivated { proposal, .. } => proposal,
+            other => panic!("expected activated proposal, got {other:?}"),
+        };
+        owner
+            .publish_snapshot_generation_for_test()
+            .await
+            .expect("publish a snapshot covering the pending proposal");
+        let root = store.root();
+        let selected = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
+            .open_pinned(storage.as_ref(), &root)
+            .await
+            .expect("open cold verifier")
+            .load_current_accepted_snapshot()
+            .await
+            .expect("a cold reader rebuilds the proposal from accepted authority entries");
+        let record = selected
+            .snapshot
+            .meta
+            .state
+            .devices
+            .devices
+            .get(&target.device_id)
+            .expect("the snapshot carries the target device");
+        assert!(matches!(
+            record.proposals.get(&proposal.proposal_id),
+            Some(StoreDeviceProposalState::Pending { proposal: pending }) if pending == &proposal
+        ));
+        assert!(
+            !store.exact_creates().iter().any(|slot| slot
+                .logical_key()
+                .starts_with("store-v1/device-exclusion-proposals/")),
+            "a proposal writes no object of its own"
+        );
+    })
+    .await;
+}
+
+/// Every control-carrying batch names the entry its control was prepared from,
+/// so a locally authored batch whose entry proposes an exclusion cannot pass the
+/// device-operation check by being some other kind of batch.
+#[tokio::test]
+async fn a_locally_authored_control_entry_that_proposes_is_refused() {
+    use crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch;
+    use coven_storage::CloudSyncObjectStorage;
+
+    Box::pin(async {
+        let owner_dir = crate::sync::test_helpers::test_store_dir();
+        let owner_db = crate::sync::test_helpers::open_test_db(owner_dir.clone());
+        let signer = UserKeypair::generate();
+        let (store, storage) = TestStore::create_with_connection(
+            &owner_db,
+            owner_dir.clone(),
+            "exclusion-proposing-control-entry",
+            signer.clone(),
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await
+        .expect("create exclusion Store");
+        let owner = store
+            .bind_device_in(&owner_db, owner_dir.clone(), &signer)
+            .await
+            .expect("bind owner");
+        let peer_dir = crate::sync::test_helpers::test_store_dir();
+        let peer_db = crate::sync::test_helpers::open_test_db(peer_dir.clone());
+        store
+            .activate_joined_device(
+                &owner_db,
+                owner_dir,
+                &peer_db,
+                peer_dir,
+                &signer,
+                "2026-09-08T00:00:00Z",
+            )
+            .await
+            .expect("activate another Owner device");
+        let target = StoreDatabase::new(&owner_db)
+            .activated_store_device_registration_records()
+            .await
+            .expect("read active registrations")
+            .into_iter()
+            .map(|registration| registration.reference().clone())
+            .find(|registration| registration.device_id.to_string() != owner.device_id().as_str())
+            .expect("peer registration");
+
+        let mut writer = owner.authorize_writer().await.expect("authorize owner");
+        let plan = writer
+            .prepare_plan()
+            .await
+            .expect("reserve an author position");
+        let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
+            b"locally authored proposing control entry",
+        ));
+        let prefix = device_exclusion_outcome_semantic_prefix(target.device_id, proposal_id);
+        let context = ProtocolObjectContext::signed_plaintext(
+            plan.root().store_root_hash,
+            ProtocolObjectDomain::StoreDeviceExclusionOutcome,
+        );
+        let outcome_slot = storage
+            .allocate_protocol_slot(&context, &prefix, ".json")
+            .await
+            .expect("reserve the outcome slot");
+        let proposal = StoreDeviceExclusionProposal {
+            proposal_id,
+            target,
+            outcome_slot,
+        };
+        let transition = writer
+            .prepare_authority_change(
+                plan.membership(),
+                coven_protocol::membership::StoreAuthorityChange::DeviceExclusionProposal {
+                    proposal,
+                },
+            )
+            .await
+            .expect("prepare the proposing authority change");
+
+        let error = writer
+            .prepare_candidate(
+                &plan,
+                StoreOperationBatch::MergeMembershipActivation {
+                    entry: transition.entry.clone(),
+                    transition: transition.transition.clone(),
+                    stream_activations: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("a membership-activation batch cannot issue an exclusion proposal");
+        assert!(
+            error
+                .to_string()
+                .contains("Store device state differs from its signed predecessor state"),
+            "{error}"
+        );
     })
     .await;
 }

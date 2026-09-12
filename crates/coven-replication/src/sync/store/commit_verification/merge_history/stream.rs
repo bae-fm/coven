@@ -288,8 +288,20 @@ impl<'a> MergeHistoryVerifier<'a> {
                             .to_string(),
                     ));
                 }
+                let control_entry = match commit.control() {
+                    Some(store_commit::StoreControl { transition }) => Some(
+                        self.commit_verifier
+                            .membership_objects()
+                            .load_entry(&transition.body.entry)
+                            .await
+                            .map_err(StorePullError::Object)?
+                            .value,
+                    ),
+                    None => None,
+                };
                 let operations = Box::pin(self.commit_verifier.load_commit_device_operations(
                     &commit,
+                    control_entry.as_ref(),
                     &authorized_predecessor,
                     &membership,
                 ))

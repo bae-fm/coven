@@ -4,13 +4,13 @@ use super::*;
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreDeviceProposalState {
     Pending {
-        proposal: StoreDeviceExclusionProposalRef,
+        proposal: StoreDeviceExclusionProposal,
     },
     Cancelled {
         outcome: StoreDeviceExclusionCancellationRef,
     },
     Superseded {
-        proposal: StoreDeviceExclusionProposalRef,
+        proposal: StoreDeviceExclusionProposal,
         terminals: Vec<StoreDeviceExclusionRef>,
     },
 }
@@ -166,25 +166,22 @@ impl ResolvedStoreDeviceState {
 
     pub fn propose_exclusion(
         &self,
-        reference: StoreDeviceExclusionProposalRef,
-        proposal: &StoreDeviceExclusionProposal,
+        proposal: StoreDeviceExclusionProposal,
     ) -> Result<Self, StoreProtocolError> {
-        reference.verify_proposal(proposal)?;
+        proposal.validate()?;
         let record = self
             .devices
-            .get(&reference.target.device_id)
+            .get(&proposal.target.device_id)
             .ok_or(StoreProtocolError::DeviceStateMismatch)?;
-        if record.registration != reference.target
+        if record.registration != proposal.target
             || !matches!(record.status, StoreDeviceStatus::Active)
-            || record.proposals.contains_key(&reference.proposal_id)
+            || record.proposals.contains_key(&proposal.proposal_id)
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         Self::merge([
             self.clone(),
-            Self::exclusion_effect(StoreDeviceProposalState::Pending {
-                proposal: reference,
-            })?,
+            Self::exclusion_effect(StoreDeviceProposalState::Pending { proposal })?,
         ])
     }
 

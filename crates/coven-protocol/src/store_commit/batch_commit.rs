@@ -121,11 +121,6 @@ impl StoreBatchCommit {
                     .map(|activation| activation.registration.object.clone()),
             )
             .chain(
-                self.device_exclusion_proposals()
-                    .iter()
-                    .map(|reference| reference.object.clone()),
-            )
-            .chain(
                 self.device_exclusion_outcomes()
                     .iter()
                     .map(|reference| reference.object().clone()),
@@ -203,10 +198,19 @@ impl StoreBatchCommit {
         }
     }
 
-    pub fn device_exclusion_proposals(&self) -> &[StoreDeviceExclusionProposalRef] {
-        self.operations().map_or(&[], |operations| {
-            operations.device_exclusion_proposals.as_slice()
-        })
+    /// The exclusion proposal this commit's control entry issues, when the
+    /// entry is a `DeviceExclusionProposal`. Callers pass the entry the commit's
+    /// control transition names; this only projects it.
+    pub fn proposed_device_exclusion<'a>(
+        &self,
+        control_entry: Option<&'a MembershipEntry>,
+    ) -> Option<&'a StoreDeviceExclusionProposal> {
+        let entry = control_entry?;
+        self.control()?;
+        match &entry.change {
+            StoreAuthorityChange::DeviceExclusionProposal { proposal } => Some(proposal),
+            _ => None,
+        }
     }
 
     pub fn device_exclusion_outcomes(&self) -> &[StoreDeviceExclusionOutcomeRef] {

@@ -342,14 +342,6 @@ pub(super) fn validate_retained_authority_identity(
             }
             identity.object.verify(canonical_semantic_bytes)?;
         }
-        RetainedAuthorityObjectDomain::DeviceExclusionProposal { reference } => {
-            let proposal: crate::store_commit::StoreDeviceExclusionProposal =
-                serde_json::from_slice(canonical_semantic_bytes)?;
-            reference.verify_proposal(&proposal)?;
-            if reference.object != identity.object {
-                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-            }
-        }
         RetainedAuthorityObjectDomain::DeviceExclusionOutcome { reference } => {
             let outcome: crate::store_commit::StoreDeviceExclusionOutcome =
                 serde_json::from_slice(canonical_semantic_bytes)?;

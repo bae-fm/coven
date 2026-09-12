@@ -481,8 +481,16 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
             }
             let acceptance = accepted_transition.install_on(self.store, &commit)?;
             let retained = if materialize {
-                let device_operations = VerifiedStoreDeviceOperations::without_exclusions(&commit)
-                    .map_err(DbError::from)?;
+                let device_operations = VerifiedStoreDeviceOperations::without_exclusions(
+                    &commit,
+                    operation
+                        .store_commit
+                        .history_evidence
+                        .membership_proof
+                        .as_ref()
+                        .map(|proof| &proof.entry_value),
+                )
+                .map_err(DbError::from)?;
                 let materialization = VerifiedMergeMaterialization::verify(
                     &root,
                     &commit,

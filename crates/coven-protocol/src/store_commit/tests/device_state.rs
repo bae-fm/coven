@@ -23,19 +23,103 @@ fn merge_cut_reference(
     )
 }
 
-fn terminal_ref(fixture: &Fixture, identity_byte: u8) -> StoreDeviceExclusionRef {
+fn proposal_value(fixture: &Fixture, identity_byte: u8) -> StoreDeviceExclusionProposal {
     let proposal_id =
         StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(&[identity_byte]));
-    StoreDeviceExclusionRef {
-        proposal: StoreDeviceExclusionProposalRef {
-            proposal_id,
-            target: fixture.registration_ref.clone(),
-            proposal_hash: ObjectHash::digest(&[identity_byte, 1]),
-            object: exact(
-                format!("test/terminal-proposal/{identity_byte}.json"),
-                &[identity_byte, 1],
-            ),
+    proposal_for(fixture, proposal_id)
+}
+
+fn proposal_for(
+    fixture: &Fixture,
+    proposal_id: StoreDeviceExclusionProposalId,
+) -> StoreDeviceExclusionProposal {
+    StoreDeviceExclusionProposal {
+        proposal_id,
+        target: fixture.registration_ref.clone(),
+        outcome_slot: slot(format!(
+            "{}.json",
+            device_exclusion_outcome_semantic_prefix(
+                fixture.registration_ref.device_id,
+                proposal_id,
+            )
+        )),
+    }
+}
+
+/// A Store control whose exact membership entry issues `proposal`, and that
+/// entry. The entry is what a reader projects the proposal out of.
+fn proposing_control(
+    fixture: &Fixture,
+    proposal: &StoreDeviceExclusionProposal,
+) -> (MembershipEntry, StoreControl) {
+    let store_id = fixture.root_ref.store_root_id.to_string();
+    let author_pubkey = keys::public_key_hex(&fixture.signer);
+    let entry: MembershipEntry = Signed::sign(
+        crate::membership::MembershipEntryBody {
+            store_id: store_id.clone(),
+            author_pubkey: author_pubkey.clone(),
+            author_owner_grant: fixture.root.descriptor.founder_grant.clone(),
+            stream_id: AuthorStreamId::from_bytes([7; 32]),
+            seq: 2,
+            previous_hash: None,
+            dependencies: Vec::new(),
+            created_at: "0000000002000-0000-device-a".to_string(),
+            change: StoreAuthorityChange::DeviceExclusionProposal {
+                proposal: proposal.clone(),
+            },
+            provider_admin: None,
         },
+        &fixture.signer,
+    );
+    let coord = entry.coord();
+    let entry_bytes = serde_json::to_vec(&entry).expect("serialize proposing entry");
+    let entry_ref = MembershipEntryRef {
+        coord: coord.clone(),
+        object: exact(
+            format!(
+                "{}.json",
+                membership_entry_semantic_prefix(
+                    &coord.author_pubkey,
+                    &coord.author_owner_grant,
+                    coord.stream_id,
+                    coord.seq,
+                    coord.entry_hash,
+                )
+            ),
+            &entry_bytes,
+        ),
+    };
+    let control = StoreControl {
+        transition: crate::membership::MergeMembershipHeadTransition {
+            body: crate::membership::MembershipHeadBody {
+                author_registration: fixture.registration_ref.clone(),
+                entry: entry_ref,
+                predecessor: None,
+                successor: SuccessorLink {
+                    activation: StreamActivation::grant_authorized(
+                        fixture.root_ref.store_root_hash,
+                        fixture.registration_ref.clone(),
+                        fixture.root.descriptor.founder_grant.clone(),
+                        GrantStreamAnchor::StoreMembership {
+                            first_slot: slot(
+                                "store-v1/membership/heads/proposing/1.json".to_string(),
+                            ),
+                        },
+                    )
+                    .activation_id(),
+                    predecessor: None,
+                    next_slot: slot("store-v1/membership/heads/proposing/2.json".to_string()),
+                },
+            },
+            head_slot: slot("store-v1/membership/heads/proposing/head.json".to_string()),
+        },
+    };
+    (entry, control)
+}
+
+fn terminal_ref(fixture: &Fixture, identity_byte: u8) -> StoreDeviceExclusionRef {
+    StoreDeviceExclusionRef {
+        proposal: proposal_value(fixture, identity_byte),
         outcome_hash: ObjectHash::digest(&[identity_byte, 2]),
         object: exact(
             format!("test/terminal/{identity_byte}.json"),
@@ -88,7 +172,7 @@ fn acknowledgement_cut_join_remains_componentwise_maximum() {
 }
 
 #[test]
-fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
+fn exclusion_proposals_and_outcomes_drive_the_exact_pending_and_terminal_states() {
     let fixture = fixture();
     let resolved = ResolvedStoreDeviceState::founder(
         &fixture.root_ref,
@@ -108,54 +192,16 @@ fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
         .registration
         .device_signer(&fixture.signer)
         .expect("founder device signer");
-    let proposal = StoreDeviceExclusionProposal::signed(
-        fixture.root_ref.store_root_hash,
-        proposal_id,
-        fixture.registration_ref.clone(),
-        &fixture.registration,
-        slot(outcome_key.clone()),
-        fixture.registration_ref.clone(),
-        fixture.root.descriptor.founder_grant.clone(),
-        &fixture.registration,
-        &device_signer,
-    )
-    .expect("sign exclusion proposal");
-    let proposal_bytes = proposal.to_bytes();
-    let proposal_ref = StoreDeviceExclusionProposalRef::from_proposal(
-        &proposal,
-        exact(
-            format!(
-                "{}.json",
-                device_exclusion_proposal_semantic_prefix(
-                    fixture.registration_ref.device_id,
-                    proposal_id,
-                    proposal.proposal_hash(),
-                )
-            ),
-            &proposal_bytes,
-        ),
-    )
-    .expect("exact exclusion proposal ref");
-    let parsed = StoreDeviceExclusionProposal::parse_at(
-        &proposal_bytes,
-        &proposal_ref,
-        &fixture.registration,
-        &fixture.registration,
-    )
-    .expect("parse exclusion proposal");
-    assert_eq!(parsed, proposal);
+    let proposal = proposal_for(&fixture, proposal_id);
+    proposal.validate().expect("canonical exclusion proposal");
 
     let pending = resolved
-        .propose_exclusion(proposal_ref.clone(), &proposal)
+        .propose_exclusion(proposal.clone())
         .expect("activate exclusion proposal");
-    assert!(device_state_has_exact_pending_proposal(
-        &pending,
-        &proposal_ref
-    ));
+    assert!(device_state_has_exact_pending_proposal(&pending, &proposal));
 
     let cancellation = StoreDeviceExclusionCancellation::signed(
-        proposal_ref.clone(),
-        &proposal,
+        proposal.clone(),
         fixture.registration_ref.clone(),
         fixture.root.descriptor.founder_grant.clone(),
         &fixture.registration,
@@ -194,8 +240,7 @@ fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
     ));
 
     let exclusion = StoreDeviceExclusion::signed(
-        proposal_ref.clone(),
-        &proposal,
+        proposal.clone(),
         fixture.registration_ref.clone(),
         &fixture.registration,
         fixture.registration_ref.clone(),
@@ -393,41 +438,11 @@ fn retained_device_operations_reopen_the_exact_exclusion_sources() {
         .registration
         .device_signer(&fixture.signer)
         .expect("founder device signer");
-    let proposal = StoreDeviceExclusionProposal::signed(
-        fixture.root_ref.store_root_hash,
-        proposal_id,
-        fixture.registration_ref.clone(),
-        &fixture.registration,
-        slot(outcome_key.clone()),
-        fixture.registration_ref.clone(),
-        fixture.root.descriptor.founder_grant.clone(),
-        &fixture.registration,
-        &device_signer,
-    )
-    .expect("sign retained exclusion proposal");
-    let proposal_bytes = proposal.to_bytes();
-    let proposal_ref = StoreDeviceExclusionProposalRef::from_proposal(
-        &proposal,
-        exact(
-            format!(
-                "{}.json",
-                device_exclusion_proposal_semantic_prefix(
-                    fixture.registration_ref.device_id,
-                    proposal_id,
-                    proposal.proposal_hash(),
-                )
-            ),
-            &proposal_bytes,
-        ),
-    )
-    .expect("exact retained exclusion proposal");
-    let proposal_source = RetainedStoreDeviceExclusionProposal::from_exact(
-        proposal_ref.clone(),
-        &proposal,
-        &fixture.registration,
-        &fixture.registration,
-    )
-    .expect("retain exclusion proposal");
+    let proposal = proposal_for(&fixture, proposal_id);
+    let proposal_source =
+        RetainedStoreDeviceExclusionProposal::from_exact(proposal.clone(), &fixture.registration)
+            .expect("retain exclusion proposal");
+    let (proposal_entry, proposal_control) = proposing_control(&fixture, &proposal);
     let proposal_commit = StoreBatchCommit::signed_operations(
         fixture.root_ref.store_root_hash,
         WriteId::from_generated("retained-proposal".to_string()),
@@ -443,38 +458,34 @@ fn retained_device_operations_reopen_the_exact_exclusion_sources() {
             .operations_membership_authority()
             .expect("fixture carries membership authority"),
         StoreCommitOperationsInput {
-            device_exclusion_proposals: vec![proposal_ref.clone()],
+            control: Some(proposal_control),
             ..StoreCommitOperationsInput::empty()
         },
         &device_signer,
     )
     .expect("sign retained proposal commit");
     let retained_proposal =
-        RetainedStoreDeviceOperations::from_sources(vec![proposal_source.clone()], Vec::new());
+        RetainedStoreDeviceOperations::from_sources(Some(proposal_source.clone()), Vec::new());
     let verified_proposal = retained_proposal
-        .verify_for(&fixture.root_ref, &proposal_commit)
+        .verify_for(&fixture.root_ref, &proposal_commit, Some(&proposal_entry))
         .expect("verify retained proposal input");
-    assert_eq!(
-        verified_proposal
-            .proposals()
-            .next()
-            .map(|(reference, value)| (reference.clone(), value.clone())),
-        Some((proposal_ref.clone(), proposal.clone()))
-    );
+    assert_eq!(verified_proposal.proposal(), Some(&proposal));
+    assert!(retained_proposal
+        .verify_for(&fixture.root_ref, &proposal_commit, None)
+        .is_err());
     let mut tampered_proposal =
         serde_json::to_value(&retained_proposal).expect("encode retained proposal");
-    tampered_proposal["proposals"][0]["canonical_proposal"]
+    tampered_proposal["proposal"]["canonical_target_registration"]
         .as_array_mut()
-        .expect("canonical proposal bytes")
+        .expect("canonical target registration bytes")
         .push(serde_json::Value::from(b' '));
     let tampered_proposal: RetainedStoreDeviceOperations =
         serde_json::from_value(tampered_proposal).expect("decode tampered retained proposal");
     assert!(tampered_proposal
-        .verify_for(&fixture.root_ref, &proposal_commit)
+        .verify_for(&fixture.root_ref, &proposal_commit, Some(&proposal_entry))
         .is_err());
     let exclusion = StoreDeviceExclusion::signed(
-        proposal_ref,
-        &proposal,
+        proposal.clone(),
         fixture.registration_ref.clone(),
         &fixture.registration,
         fixture.registration_ref.clone(),
@@ -519,12 +530,12 @@ fn retained_device_operations_reopen_the_exact_exclusion_sources() {
         &device_signer,
     )
     .expect("sign retained exclusion commit");
-    let retained = RetainedStoreDeviceOperations::from_sources(Vec::new(), vec![outcome_source]);
+    let retained = RetainedStoreDeviceOperations::from_sources(None, vec![outcome_source]);
     let encoded = serde_json::to_vec(&retained).expect("encode retained device operations");
     let decoded: RetainedStoreDeviceOperations =
         serde_json::from_slice(&encoded).expect("decode retained device operations");
     let verified = decoded
-        .verify_for(&fixture.root_ref, &commit)
+        .verify_for(&fixture.root_ref, &commit, None)
         .expect("verify retained device operations");
     assert_eq!(verified.to_retained(), retained);
     let StoreDeviceExclusionOutcomeRef::Excluded(expected_exclusion) = outcome_ref else {
@@ -539,10 +550,14 @@ fn retained_device_operations_reopen_the_exact_exclusion_sources() {
         .push(serde_json::Value::from(b' '));
     let tampered: RetainedStoreDeviceOperations =
         serde_json::from_value(tampered).expect("decode tampered retained operations");
-    assert!(tampered.verify_for(&fixture.root_ref, &commit).is_err());
+    assert!(tampered
+        .verify_for(&fixture.root_ref, &commit, None)
+        .is_err());
 
-    let missing = RetainedStoreDeviceOperations::from_sources(Vec::new(), Vec::new());
-    assert!(missing.verify_for(&fixture.root_ref, &commit).is_err());
+    let missing = RetainedStoreDeviceOperations::from_sources(None, Vec::new());
+    assert!(missing
+        .verify_for(&fixture.root_ref, &commit, None)
+        .is_err());
 
     let mut other_registration = fixture.registration.clone();
     other_registration.body_mut().author_pubkey.push('0');
@@ -551,12 +566,40 @@ fn retained_device_operations_reopen_the_exact_exclusion_sources() {
         serde_json::to_value(other_registration.to_bytes()).expect("encode registration bytes");
     let substituted: RetainedStoreDeviceOperations =
         serde_json::from_value(substituted).expect("decode substituted retained operations");
-    assert!(substituted.verify_for(&fixture.root_ref, &commit).is_err());
+    assert!(substituted
+        .verify_for(&fixture.root_ref, &commit, None)
+        .is_err());
+}
+
+#[test]
+fn a_proposal_with_a_relocated_outcome_slot_is_rejected() {
+    let fixture = fixture();
+    let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
+        b"relocated outcome slot proposal",
+    ));
+    let mut proposal = proposal_for(&fixture, proposal_id);
+    let canonical = proposal.outcome_slot.logical_key().to_string();
+    proposal.outcome_slot = slot("store-v1/device-exclusion-outcomes/elsewhere.json".to_string());
+    assert!(matches!(
+        proposal.validate(),
+        Err(StoreProtocolError::RelocatedSlot { expected, actual })
+            if expected == canonical
+                && actual == "store-v1/device-exclusion-outcomes/elsewhere.json"
+    ));
+    let resolved = ResolvedStoreDeviceState::founder(
+        &fixture.root_ref,
+        fixture.registration_ref.clone(),
+        &fixture.root.descriptor.founder_pubkey,
+        fixture.root.descriptor.founder_grant.clone(),
+        &fixture.root.descriptor.founder_recovery,
+    )
+    .expect("founder device state");
+    assert!(resolved.propose_exclusion(proposal).is_err());
 }
 
 fn device_state_has_exact_pending_proposal(
     state: &ResolvedStoreDeviceState,
-    expected: &StoreDeviceExclusionProposalRef,
+    expected: &StoreDeviceExclusionProposal,
 ) -> bool {
     state
             .devices

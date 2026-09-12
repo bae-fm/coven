@@ -494,8 +494,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         let commit_ref = candidate.commit_ref();
         let author = candidate.author();
         let device_operations = merge_candidate.device_operations.clone();
-        if !commit.device_exclusion_proposals().is_empty()
-            || !commit.device_exclusion_outcomes().is_empty()
+        if device_operations.proposal().is_some() || !commit.device_exclusion_outcomes().is_empty()
         {
             let predecessor_state = self.history.verified_predecessor_state(commit)?;
             let predecessor_cut = commit

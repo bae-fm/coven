@@ -460,7 +460,7 @@ impl Store {
         &self,
         device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<
-        coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        coven_protocol::store_commit::StoreDeviceExclusionProposal,
         device_exclusion::StoreDeviceExclusionError,
     > {
         let mut writer = self.authorize_exclusion_writer().await?;
@@ -469,7 +469,7 @@ impl Store {
 
     pub(crate) async fn cancel_device_exclusion_proposal(
         &self,
-        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
     ) -> Result<(), device_exclusion::StoreDeviceExclusionError> {
         let mut writer = self.authorize_exclusion_writer().await?;
         device_exclusion::cancel_proposal(&mut writer, proposal).await
@@ -477,7 +477,7 @@ impl Store {
 
     pub(crate) async fn finalize_device_exclusion_proposal(
         &self,
-        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
     ) -> Result<(), device_exclusion::StoreDeviceExclusionError> {
         let mut writer = self.authorize_exclusion_writer().await?;
         device_exclusion::finalize_proposal(&mut writer, proposal).await
@@ -498,7 +498,7 @@ impl Store {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn cancel_device_exclusion(
         &self,
-        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
     ) -> Result<
         device_exclusion::StoreDeviceExclusionResult,
         device_exclusion::StoreDeviceExclusionError,
@@ -510,7 +510,7 @@ impl Store {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn finalize_device_exclusion(
         &self,
-        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
     ) -> Result<
         device_exclusion::StoreDeviceExclusionResult,
         device_exclusion::StoreDeviceExclusionError,
@@ -530,14 +530,14 @@ impl Store {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn stage_uploaded_device_exclusion_proposal_for_test(
+    pub(crate) async fn stage_device_exclusion_proposal_for_test(
         &self,
     ) -> Result<
-        coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        coven_protocol::store_commit::StoreDeviceExclusionProposal,
         device_exclusion::StoreDeviceExclusionError,
     > {
         let mut writer = self.authorize_exclusion_writer().await?;
-        device_exclusion::stage_uploaded_proposal_for_test(&self.database, &mut writer).await
+        device_exclusion::stage_proposal_for_test(&mut writer).await
     }
 
     async fn authorize_exclusion_writer(

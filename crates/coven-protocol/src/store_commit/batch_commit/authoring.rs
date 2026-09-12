@@ -219,7 +219,6 @@ impl StoreBatchCommit {
             device_join_attempt_decisions,
             provider_access_grants,
             device_registrations,
-            device_exclusion_proposals,
             device_exclusion_outcomes,
             stream_activations,
             circle_controls,
@@ -257,7 +256,7 @@ impl StoreBatchCommit {
         validate_device_join_attempt_decision_refs(&device_join_attempt_decisions)?;
         validate_provider_access_refs(&provider_access_grants)?;
         validate_device_registration_refs(&device_registrations)?;
-        validate_device_exclusion_refs(&device_exclusion_proposals, &device_exclusion_outcomes)?;
+        validate_device_exclusion_refs(&device_exclusion_outcomes)?;
         validate_stream_activations(
             store_root_hash,
             &author_registration,
@@ -301,7 +300,6 @@ impl StoreBatchCommit {
             device_join_attempt_decisions,
             provider_access_grants,
             device_registrations,
-            device_exclusion_proposals,
             device_exclusion_outcomes,
             stream_activations,
             circle_controls,

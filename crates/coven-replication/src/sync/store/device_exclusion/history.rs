@@ -1,5 +1,5 @@
 use coven_protocol::store_commit::{
-    StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposalRef,
+    StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposal, StoreDeviceRegistration,
 };
 
 pub(crate) struct DeviceExclusionHistory<'operation, 'storage> {
@@ -11,29 +11,17 @@ impl<'operation, 'storage> DeviceExclusionHistory<'operation, 'storage> {
         Self { history }
     }
 
-    pub(super) async fn load_proposal(
-        &mut self,
-        reference: &StoreDeviceExclusionProposalRef,
-    ) -> Result<
-        coven_protocol::store_commit::VerifiedDeviceExclusionProposal,
-        super::StoreDeviceExclusionError,
-    > {
-        self.history
-            .load_device_exclusion_proposal(reference)
-            .await
-            .map_err(super::StoreDeviceExclusionError::from)
-    }
-
     pub(super) async fn load_outcome(
         &mut self,
         reference: &StoreDeviceExclusionOutcomeRef,
-        proposal: &coven_protocol::store_commit::VerifiedDeviceExclusionProposal,
+        proposal: &StoreDeviceExclusionProposal,
+        target: &StoreDeviceRegistration,
     ) -> Result<
         coven_protocol::store_commit::VerifiedDeviceExclusionOutcome,
         super::StoreDeviceExclusionError,
     > {
         self.history
-            .load_device_exclusion_outcome(reference, proposal)
+            .load_device_exclusion_outcome(reference, proposal, target)
             .await
             .map_err(super::StoreDeviceExclusionError::from)
     }

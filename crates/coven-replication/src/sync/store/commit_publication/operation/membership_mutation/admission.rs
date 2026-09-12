@@ -480,6 +480,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .prepare_candidate_for_write(
                 operation_plan,
                 commit_plan::StoreOperationBatch::MergeMembershipActivation {
+                    entry: transition.entry.clone(),
                     transition: transition.transition.clone(),
                     stream_activations: Vec::new(),
                 },

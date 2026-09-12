@@ -16,19 +16,42 @@ impl fmt::Display for StoreDeviceExclusionProposalId {
     }
 }
 
+/// A proposal to exclude one Store device. Carried by the Owner-signed
+/// membership entry that issues it: the issuing device is that entry's
+/// activating head author, the issuing Owner grant is the entry's author grant,
+/// and the Store root is the activating commit's.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StoreDeviceExclusionProposalRef {
+pub struct StoreDeviceExclusionProposal {
     pub proposal_id: StoreDeviceExclusionProposalId,
     pub target: StoreDeviceRegistrationRef,
-    pub proposal_hash: ObjectHash,
-    pub object: ExactObjectRef,
+    /// The exact slot any outcome of this proposal must occupy. The slot is
+    /// allocated once, at proposal time, so competing outcomes race for one
+    /// object and the first upload wins.
+    pub outcome_slot: ObjectSlot,
+}
+
+impl StoreDeviceExclusionProposal {
+    /// The outcome slot's logical key is fixed by the target and proposal id.
+    pub fn validate(&self) -> Result<(), StoreProtocolError> {
+        let expected = format!(
+            "{}.json",
+            device_exclusion_outcome_semantic_prefix(self.target.device_id, self.proposal_id)
+        );
+        if self.outcome_slot.logical_key() != expected {
+            return Err(StoreProtocolError::RelocatedSlot {
+                expected,
+                actual: self.outcome_slot.logical_key().to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreDeviceExclusionRef {
-    pub proposal: StoreDeviceExclusionProposalRef,
+    pub proposal: StoreDeviceExclusionProposal,
     pub outcome_hash: ObjectHash,
     pub object: ExactObjectRef,
 }
@@ -36,7 +59,7 @@ pub struct StoreDeviceExclusionRef {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreDeviceExclusionCancellationRef {
-    pub proposal: StoreDeviceExclusionProposalRef,
+    pub proposal: StoreDeviceExclusionProposal,
     pub outcome_hash: ObjectHash,
     pub object: ExactObjectRef,
 }
@@ -49,21 +72,13 @@ pub enum StoreDeviceExclusionOutcomeRef {
 }
 
 #[derive(Debug)]
-pub struct VerifiedDeviceExclusionProposal {
-    pub reference: StoreDeviceExclusionProposalRef,
-    pub object: crate::objects::VerifiedObject<StoreDeviceExclusionProposal>,
-    pub target: StoreDeviceRegistration,
-    pub owner: StoreDeviceRegistration,
-}
-
-#[derive(Debug)]
 pub struct VerifiedDeviceExclusionOutcome {
     pub object: crate::objects::VerifiedObject<StoreDeviceExclusionOutcome>,
     pub owner: StoreDeviceRegistration,
 }
 
 impl StoreDeviceExclusionOutcomeRef {
-    pub fn proposal(&self) -> &StoreDeviceExclusionProposalRef {
+    pub fn proposal(&self) -> &StoreDeviceExclusionProposal {
         match self {
             Self::Excluded(reference) => &reference.proposal,
             Self::Cancelled(reference) => &reference.proposal,
@@ -82,9 +97,7 @@ impl StoreDeviceExclusionOutcomeRef {
         proposal: &StoreDeviceExclusionProposal,
         object: ExactObjectRef,
     ) -> Result<Self, StoreProtocolError> {
-        if object.slot() != &proposal.outcome_slot
-            || outcome.proposal().proposal_id != proposal.proposal_id
-        {
+        if object.slot() != &proposal.outcome_slot || outcome.proposal() != proposal {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         Ok(match outcome {
@@ -113,24 +126,6 @@ impl StoreDeviceExclusionOutcomeRef {
     }
 }
 
-/// The wire body of a device-exclusion proposal. Every field here is signed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreDeviceExclusionProposalBody {
-    pub store_root_hash: ObjectHash,
-    pub proposal_id: StoreDeviceExclusionProposalId,
-    pub target: StoreDeviceRegistrationRef,
-    pub outcome_slot: ObjectSlot,
-    pub owner_registration: StoreDeviceRegistrationRef,
-    pub owner_grant: MembershipGrantId,
-}
-
-impl SignedBody for StoreDeviceExclusionProposalBody {
-    const DOMAIN: &'static [u8] = DEVICE_EXCLUSION_PROPOSAL_DOMAIN;
-}
-
-pub type StoreDeviceExclusionProposal = Signed<StoreDeviceExclusionProposalBody>;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreDeviceExclusionOutcome {
@@ -144,7 +139,7 @@ pub enum StoreDeviceExclusionOutcome {
 #[serde(deny_unknown_fields)]
 pub struct StoreDeviceExclusionCancellationBody {
     pub store_root_hash: ObjectHash,
-    pub proposal: StoreDeviceExclusionProposalRef,
+    pub proposal: StoreDeviceExclusionProposal,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
 }
@@ -160,7 +155,7 @@ pub type StoreDeviceExclusionCancellation = Signed<StoreDeviceExclusionCancellat
 #[serde(deny_unknown_fields)]
 pub struct StoreDeviceExclusionBody {
     pub store_root_hash: ObjectHash,
-    pub proposal: StoreDeviceExclusionProposalRef,
+    pub proposal: StoreDeviceExclusionProposal,
     pub target: StoreDeviceRegistrationRef,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
@@ -172,150 +167,17 @@ impl SignedBody for StoreDeviceExclusionBody {
 
 pub type StoreDeviceExclusion = Signed<StoreDeviceExclusionBody>;
 
-impl StoreDeviceExclusionProposal {
-    #[allow(clippy::too_many_arguments)]
-    pub fn signed(
-        store_root_hash: ObjectHash,
-        proposal_id: StoreDeviceExclusionProposalId,
-        target: StoreDeviceRegistrationRef,
-        target_registration: &StoreDeviceRegistration,
-        outcome_slot: ObjectSlot,
-        owner_registration: StoreDeviceRegistrationRef,
-        owner_grant: MembershipGrantId,
-        owner: &StoreDeviceRegistration,
-        owner_device_signer: &UserKeypair,
-    ) -> Result<Self, StoreProtocolError> {
-        owner_registration.verify_registration(owner)?;
-        target.verify_registration(target_registration)?;
-        if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey
-            || owner.store_root.store_root_hash != store_root_hash
-            || target_registration.store_root.store_root_hash != store_root_hash
-        {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        let expected_outcome = format!(
-            "{}.json",
-            device_exclusion_outcome_semantic_prefix(target.device_id, proposal_id)
-        );
-        if outcome_slot.logical_key() != expected_outcome {
-            return Err(StoreProtocolError::RelocatedSlot {
-                expected: expected_outcome,
-                actual: outcome_slot.logical_key().to_string(),
-            });
-        }
-        Ok(Signed::sign(
-            StoreDeviceExclusionProposalBody {
-                store_root_hash,
-                proposal_id,
-                target,
-                outcome_slot,
-                owner_registration,
-                owner_grant,
-            },
-            owner_device_signer,
-        ))
-    }
-
-    pub fn proposal_hash(&self) -> ObjectHash {
-        self.hash()
-    }
-
-    pub fn parse_at(
-        bytes: &[u8],
-        expected: &StoreDeviceExclusionProposalRef,
-        target: &StoreDeviceRegistration,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<Self, StoreProtocolError> {
-        let proposal: Self = crate::objects::decode_protocol_object(bytes)?;
-        expected.verify_proposal(&proposal)?;
-        proposal.target.verify_registration(target)?;
-        proposal.owner_registration.verify_registration(owner)?;
-        let expected_outcome = format!(
-            "{}.json",
-            device_exclusion_outcome_semantic_prefix(
-                proposal.target.device_id,
-                proposal.proposal_id,
-            )
-        );
-        if proposal.outcome_slot.logical_key() != expected_outcome {
-            return Err(StoreProtocolError::RelocatedSlot {
-                expected: expected_outcome,
-                actual: proposal.outcome_slot.logical_key().to_string(),
-            });
-        }
-        if proposal.store_root_hash != owner.store_root.store_root_hash
-            || proposal.store_root_hash != target.store_root.store_root_hash
-        {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        proposal.verify_by(&owner.device_signing_pubkey)?;
-        Ok(proposal)
-    }
-}
-
-impl StoreDeviceExclusionProposalRef {
-    pub fn from_proposal(
-        proposal: &StoreDeviceExclusionProposal,
-        object: ExactObjectRef,
-    ) -> Result<Self, StoreProtocolError> {
-        let reference = Self {
-            proposal_id: proposal.proposal_id,
-            target: proposal.target.clone(),
-            proposal_hash: proposal.proposal_hash(),
-            object,
-        };
-        reference.validate_path()?;
-        Ok(reference)
-    }
-
-    pub fn validate_path(&self) -> Result<(), StoreProtocolError> {
-        let expected = format!(
-            "{}.json",
-            device_exclusion_proposal_semantic_prefix(
-                self.target.device_id,
-                self.proposal_id,
-                self.proposal_hash,
-            )
-        );
-        if self.object.slot().logical_key() != expected {
-            return Err(StoreProtocolError::RelocatedSlot {
-                expected,
-                actual: self.object.slot().logical_key().to_string(),
-            });
-        }
-        Ok(())
-    }
-
-    pub fn verify_proposal(
-        &self,
-        proposal: &StoreDeviceExclusionProposal,
-    ) -> Result<(), StoreProtocolError> {
-        self.validate_path()?;
-        if self.proposal_id != proposal.proposal_id
-            || self.target != proposal.target
-            || self.proposal_hash != proposal.proposal_hash()
-        {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-        Ok(())
-    }
-}
-
 impl StoreDeviceExclusionCancellation {
     pub fn signed(
-        proposal: StoreDeviceExclusionProposalRef,
-        proposal_value: &StoreDeviceExclusionProposal,
+        proposal: StoreDeviceExclusionProposal,
         owner_registration: StoreDeviceRegistrationRef,
         owner_grant: MembershipGrantId,
         owner: &StoreDeviceRegistration,
         owner_device_signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
+        proposal.validate()?;
         owner_registration.verify_registration(owner)?;
-        if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey
-            || proposal.proposal_hash != proposal_value.proposal_hash()
-            || proposal.target != proposal_value.target
-            || proposal_value.store_root_hash != owner.store_root.store_root_hash
-        {
+        if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey {
             return Err(StoreProtocolError::InvalidSignature);
         }
         Ok(Signed::sign(
@@ -335,10 +197,8 @@ impl StoreDeviceExclusionCancellation {
 }
 
 impl StoreDeviceExclusion {
-    #[allow(clippy::too_many_arguments)]
     pub fn signed(
-        proposal: StoreDeviceExclusionProposalRef,
-        proposal_value: &StoreDeviceExclusionProposal,
+        proposal: StoreDeviceExclusionProposal,
         target: StoreDeviceRegistrationRef,
         target_registration: &StoreDeviceRegistration,
         owner_registration: StoreDeviceRegistrationRef,
@@ -346,12 +206,11 @@ impl StoreDeviceExclusion {
         owner: &StoreDeviceRegistration,
         owner_device_signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
+        proposal.validate()?;
         owner_registration.verify_registration(owner)?;
         target.verify_registration(target_registration)?;
         if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey
             || proposal.target != target
-            || proposal.proposal_hash != proposal_value.proposal_hash()
-            || proposal.target != proposal_value.target
             || target_registration.store_root.store_root_hash != owner.store_root.store_root_hash
         {
             return Err(StoreProtocolError::InvalidSignature);
@@ -381,7 +240,7 @@ impl StoreDeviceExclusionOutcome {
         }
     }
 
-    pub fn proposal(&self) -> &StoreDeviceExclusionProposalRef {
+    pub fn proposal(&self) -> &StoreDeviceExclusionProposal {
         match self {
             Self::Excluded(exclusion) => &exclusion.proposal,
             Self::Cancelled(cancellation) => &cancellation.proposal,
@@ -400,9 +259,7 @@ impl StoreDeviceExclusionOutcome {
         owner: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
         let outcome: Self = crate::objects::decode_protocol_object(bytes)?;
-        if outcome.proposal().proposal_id != proposal.proposal_id
-            || outcome.proposal().proposal_hash != proposal.proposal_hash()
-            || outcome.proposal().target != proposal.target
+        if outcome.proposal() != proposal
             || expected.proposal() != outcome.proposal()
             || expected.object().slot() != &proposal.outcome_slot
             || expected.outcome_hash() != outcome.outcome_hash()
@@ -413,7 +270,7 @@ impl StoreDeviceExclusionOutcome {
             Self::Excluded(exclusion) => {
                 exclusion.target.verify_registration(target)?;
                 exclusion.owner_registration.verify_registration(owner)?;
-                if exclusion.store_root_hash != proposal.store_root_hash
+                if exclusion.store_root_hash != owner.store_root.store_root_hash
                     || exclusion.store_root_hash != target.store_root.store_root_hash
                     || exclusion.target != proposal.target
                 {
@@ -423,7 +280,7 @@ impl StoreDeviceExclusionOutcome {
             }
             Self::Cancelled(cancellation) => {
                 cancellation.owner_registration.verify_registration(owner)?;
-                if cancellation.store_root_hash != proposal.store_root_hash {
+                if cancellation.store_root_hash != owner.store_root.store_root_hash {
                     return Err(StoreProtocolError::InvalidSignature);
                 }
                 cancellation.verify_by(&owner.device_signing_pubkey)?;

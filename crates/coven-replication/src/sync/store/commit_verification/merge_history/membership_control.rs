@@ -320,19 +320,17 @@ impl<'a> MergeHistoryVerifier<'a> {
                 registration,
             } => Some(
                 commit.device_registrations() == std::slice::from_ref(registration)
-                    && commit.device_exclusion_proposals().is_empty()
                     && commit.device_exclusion_outcomes().is_empty(),
             ),
             protocol_membership::StoreAuthorityChange::DeviceExclusionProposal { proposal } => {
+                proposal.validate().map_err(StorePullError::Protocol)?;
                 Some(
-                    commit.device_exclusion_proposals() == std::slice::from_ref(proposal)
-                        && commit.device_exclusion_outcomes().is_empty()
+                    commit.device_exclusion_outcomes().is_empty()
                         && commit.device_registrations().is_empty(),
                 )
             }
             protocol_membership::StoreAuthorityChange::DeviceExclusionOutcome { outcome } => Some(
                 commit.device_exclusion_outcomes() == std::slice::from_ref(outcome)
-                    && commit.device_exclusion_proposals().is_empty()
                     && commit.device_registrations().is_empty(),
             ),
             _ => None,

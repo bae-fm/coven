@@ -200,7 +200,15 @@ impl DeviceJoinBootstrapPlan {
                     .map_err(DbError::from)?;
                 let device_operations = carried
                     .device_operations
-                    .verify_for(root, commit.value())
+                    .verify_for(
+                        root,
+                        commit.value(),
+                        carried
+                            .history_evidence
+                            .membership_proof
+                            .as_ref()
+                            .map(|proof| &proof.entry_value),
+                    )
                     .map_err(DbError::from)?;
                 Ok(DeviceJoinBootstrapCommit {
                     reference: carried.reference,

@@ -293,6 +293,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .history
             .load_local_device_operations(
                 &verified_commit,
+                history_evidence
+                    .membership_proof
+                    .as_ref()
+                    .map(|proof| &proof.entry_value),
                 &authorization.membership,
                 &authorization.device_state_ref,
                 authorization.device_state,
@@ -558,18 +562,22 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let retained_device_operations = match &batch {
             commit_plan::StoreOperationBatch::DeviceExclusionProposal { proposal, .. } => Some(
                 coven_protocol::store_commit::RetainedStoreDeviceOperations::from_sources(
-                    vec![proposal.clone()],
+                    Some(proposal.clone()),
                     Vec::new(),
                 ),
             ),
             commit_plan::StoreOperationBatch::DeviceExclusionOutcome { outcome, .. } => Some(
                 coven_protocol::store_commit::RetainedStoreDeviceOperations::from_sources(
-                    Vec::new(),
+                    None,
                     vec![outcome.clone()],
                 ),
             ),
             _ => None,
         };
+        // Every control-carrying batch names the entry its control was prepared
+        // from, so a locally authored control is read out of the same entry a
+        // remote reader would project it from.
+        let control_entry = batch.control_entry().cloned();
         let (commit, registration_activation) = plan.sign_batch(write_id, batch)?;
         let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             plan.root().store_root_hash,
@@ -617,11 +625,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .unwrap_or_default();
         let device_operations = match retained_device_operations {
             Some(retained) => retained
-                .verify_for(plan.root(), &common.commit)
+                .verify_for(plan.root(), &common.commit, control_entry.as_ref())
                 .map_err(StoreError::from)?,
             None => {
                 coven_protocol::store_commit::VerifiedStoreDeviceOperations::without_exclusions(
                     &common.commit,
+                    control_entry.as_ref(),
                 )
                 .map_err(StoreError::from)?
             }

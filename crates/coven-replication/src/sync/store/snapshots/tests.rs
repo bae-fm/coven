@@ -104,10 +104,9 @@ async fn retained_snapshot_authority_rejects_changed_device_body_with_unchanged_
         .into_authority();
     authority.validate().expect("original authority validates");
 
-    let proposal_bytes = b"exclusion absent from the signed snapshot";
-    let proposal_hash = ObjectHash::digest(proposal_bytes);
-    let proposal_id =
-        coven_protocol::store_commit::StoreDeviceExclusionProposalId::from_hash(proposal_hash);
+    let proposal_id = coven_protocol::store_commit::StoreDeviceExclusionProposalId::from_hash(
+        ObjectHash::digest(b"exclusion absent from the signed snapshot"),
+    );
     let founder_device_id = authority.founder_registration.device_id;
     let founder = authority
         .metadata
@@ -117,25 +116,19 @@ async fn retained_snapshot_authority_rejects_changed_device_body_with_unchanged_
         .devices
         .get_mut(&founder_device_id)
         .expect("snapshot contains founder");
-    let proposal = coven_protocol::store_commit::StoreDeviceExclusionProposalRef {
+    let proposal = coven_protocol::store_commit::StoreDeviceExclusionProposal {
         proposal_id,
         target: founder.registration.clone(),
-        proposal_hash,
-        object: coven_protocol::objects::ExactObjectRef::new(
-            coven_protocol::objects::ObjectSlot::logical(format!(
-                "{}.json",
-                coven_protocol::store_commit::device_exclusion_proposal_semantic_prefix(
-                    founder.registration.device_id,
-                    proposal_id,
-                    proposal_hash,
-                ),
-            ))
-            .expect("valid proposal slot"),
-            proposal_bytes.len() as u64,
-            proposal_hash,
-        ),
+        outcome_slot: coven_protocol::objects::ObjectSlot::logical(format!(
+            "{}.json",
+            coven_protocol::store_commit::device_exclusion_outcome_semantic_prefix(
+                founder.registration.device_id,
+                proposal_id,
+            ),
+        ))
+        .expect("valid outcome slot"),
     };
-    proposal.validate_path().expect("valid proposal reference");
+    proposal.validate().expect("valid proposal value");
     founder.proposals.insert(
         proposal_id,
         coven_protocol::store_commit::StoreDeviceProposalState::Pending { proposal },

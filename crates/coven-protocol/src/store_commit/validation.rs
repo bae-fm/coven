@@ -217,14 +217,6 @@ pub fn device_join_cleanup_receipt_semantic_prefix(attempt_id: DeviceJoinAttempt
     format!("{STORE_DEVICE_JOIN_CLEANUP_RECEIPT_PREFIX}{attempt_id}")
 }
 
-pub fn device_exclusion_proposal_semantic_prefix(
-    target: StoreDeviceId,
-    proposal_id: StoreDeviceExclusionProposalId,
-    proposal_hash: ObjectHash,
-) -> String {
-    format!("{STORE_DEVICE_EXCLUSION_PROPOSAL_PREFIX}{target}/{proposal_id}/{proposal_hash}")
-}
-
 pub fn device_exclusion_outcome_semantic_prefix(
     target: StoreDeviceId,
     proposal_id: StoreDeviceExclusionProposalId,

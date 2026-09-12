@@ -11,7 +11,6 @@ pub enum ProtectedObjectDomain {
     DeviceJoinAbandonment,
     DeviceJoinCleanupReceipt,
     DeviceJoinTransport,
-    StoreDeviceExclusionProposal,
     StoreDeviceExclusionOutcome,
     StoreReclaimEvidence,
     StoreReclaimAuthorization,
@@ -232,14 +231,6 @@ impl ProtectedObjectDomain {
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
                     component_count: 4,
                     fixed_components: &[(0, "store-v1"), (1, "device-join-transport")],
-                }]),
-                extension: ".json",
-            },
-            Self::StoreDeviceExclusionProposal => ProtocolObjectMetadata {
-                aad_label: b"store-device-exclusion-proposal",
-                path: ProtocolPathRule::Exact(&[ExactPathShape {
-                    component_count: 5,
-                    fixed_components: &[(0, "store-v1"), (1, "device-exclusion-proposals")],
                 }]),
                 extension: ".json",
             },
@@ -506,8 +497,6 @@ impl ProtocolObjectDomain {
     /// seal, so the storage layer stores them as it received them.
     pub const DeviceJoinTransport: RecipientSealedProtocolObjectDomain =
         RecipientSealedProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinTransport);
-    pub const StoreDeviceExclusionProposal: SignedStoreProtocolObjectDomain =
-        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceExclusionProposal);
     pub const StoreDeviceExclusionOutcome: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceExclusionOutcome);
     pub const StoreReclaimEvidence: StoreEncryptedProtocolObjectDomain =

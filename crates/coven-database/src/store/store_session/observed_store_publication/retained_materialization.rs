@@ -277,7 +277,15 @@ impl StoreDatabase {
         let device_operations = input
             .activation
             .device_operations
-            .verify_for(root, &commit)
+            .verify_for(
+                root,
+                &commit,
+                input
+                    .history_evidence
+                    .membership_proof
+                    .as_ref()
+                    .map(|proof| &proof.entry_value),
+            )
             .map_err(DbError::from)?;
         let local_identity = match records.local_activated_registration_ref()? {
             Some(reference) => Some(match introduced_registration(&reference)? {

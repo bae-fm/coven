@@ -28,37 +28,9 @@ impl LocalStoreWriter {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn sign_device_exclusion_proposal(
-        &self,
-        root_hash: coven_protocol::store_commit::ObjectHash,
-        proposal_id: coven_protocol::store_commit::StoreDeviceExclusionProposalId,
-        target: coven_protocol::store_commit::StoreDeviceRegistrationRef,
-        target_registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-        outcome_slot: coven_protocol::objects::ObjectSlot,
-        owner_grant: coven_protocol::membership::MembershipGrantId,
-    ) -> Result<
-        coven_protocol::store_commit::StoreDeviceExclusionProposal,
-        crate::sync::store::StoreError,
-    > {
-        coven_protocol::store_commit::StoreDeviceExclusionProposal::signed(
-            root_hash,
-            proposal_id,
-            target,
-            target_registration,
-            outcome_slot,
-            self.registration.reference().clone(),
-            owner_grant,
-            self.registration.value(),
-            &self.device_signer,
-        )
-        .map_err(crate::sync::store::StoreError::from)
-    }
-
     pub(crate) fn sign_device_exclusion_cancellation(
         &self,
-        proposal: coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
-        proposal_value: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
+        proposal: coven_protocol::store_commit::StoreDeviceExclusionProposal,
         owner_grant: coven_protocol::membership::MembershipGrantId,
     ) -> Result<
         coven_protocol::store_commit::StoreDeviceExclusionCancellation,
@@ -66,7 +38,6 @@ impl LocalStoreWriter {
     > {
         coven_protocol::store_commit::StoreDeviceExclusionCancellation::signed(
             proposal,
-            proposal_value,
             self.registration.reference().clone(),
             owner_grant,
             self.registration.value(),
@@ -77,18 +48,14 @@ impl LocalStoreWriter {
 
     pub(crate) fn retain_device_exclusion_proposal(
         &self,
-        reference: coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
-        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
+        proposal: coven_protocol::store_commit::StoreDeviceExclusionProposal,
         target: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<
         coven_protocol::store_commit::RetainedStoreDeviceExclusionProposal,
         coven_protocol::store_commit::StoreProtocolError,
     > {
         coven_protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_exact(
-            reference,
-            proposal,
-            target,
-            self.registration.value(),
+            proposal, target,
         )
     }
 
@@ -109,11 +76,9 @@ impl LocalStoreWriter {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign_device_exclusion(
         &self,
-        proposal: coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
-        proposal_value: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
+        proposal: coven_protocol::store_commit::StoreDeviceExclusionProposal,
         target: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         target_registration: &coven_protocol::store_commit::StoreDeviceRegistration,
         owner_grant: coven_protocol::membership::MembershipGrantId,
@@ -121,7 +86,6 @@ impl LocalStoreWriter {
     {
         coven_protocol::store_commit::StoreDeviceExclusion::signed(
             proposal,
-            proposal_value,
             target,
             target_registration,
             self.registration.reference().clone(),

@@ -16,29 +16,58 @@ pub(crate) enum StoreOperationBatch {
     SamePrincipalDeviceJoin {
         attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
         registration: Box<ActivatedStoreDeviceRegistration>,
+        entry: super::membership::MembershipEntry,
         transition: super::membership::MergeMembershipHeadTransition,
     },
     Abandonment(coven_protocol::store_commit::DeviceJoinAbandonmentRef),
     AbandonCandidates(Vec<coven_protocol::store_commit::CandidateCleanupManifest>),
     JoinActivation {
         registration: Box<ActivatedStoreDeviceRegistration>,
+        entry: super::membership::MembershipEntry,
         transition: super::membership::MergeMembershipHeadTransition,
     },
     DeviceExclusionProposal {
         proposal: super::store_commit::RetainedStoreDeviceExclusionProposal,
+        entry: super::membership::MembershipEntry,
         transition: super::membership::MergeMembershipHeadTransition,
     },
     DeviceExclusionOutcome {
         outcome: super::store_commit::RetainedStoreDeviceExclusionOutcome,
+        entry: super::membership::MembershipEntry,
         transition: super::membership::MergeMembershipHeadTransition,
     },
     ReclaimAuthorization(Box<coven_protocol::reclaim::ReclaimAuthorizationRef>),
     ReclaimCompletion(coven_protocol::reclaim::ReclaimCompletion),
     OwnerPromotionRequest(super::store_commit::OwnerPromotionRequest),
     MergeMembershipActivation {
+        entry: super::membership::MembershipEntry,
         transition: super::membership::MergeMembershipHeadTransition,
         stream_activations: Vec<super::store_commit::StreamActivation>,
     },
+}
+
+impl StoreOperationBatch {
+    /// The membership entry this batch's control transition was prepared from,
+    /// for the batches that carry a control. A batch without one authors no
+    /// membership control at all.
+    pub(crate) fn control_entry(&self) -> Option<&super::membership::MembershipEntry> {
+        match self {
+            Self::SamePrincipalDeviceJoin { entry, .. }
+            | Self::JoinActivation { entry, .. }
+            | Self::DeviceExclusionProposal { entry, .. }
+            | Self::DeviceExclusionOutcome { entry, .. }
+            | Self::MergeMembershipActivation { entry, .. } => Some(entry),
+            Self::Circle { .. }
+            | Self::Acknowledgement { .. }
+            | Self::ProviderAccessGrant(_)
+            | Self::Attempt(_)
+            | Self::Abandonment(_)
+            | Self::AbandonCandidates(_)
+            | Self::ReclaimAuthorization(_)
+            | Self::ReclaimCompletion(_)
+            | Self::OwnerPromotionRequest(_) => None,
+        }
+    }
 }
 
 pub struct StoreOperationCommitPlan {
@@ -219,12 +248,11 @@ impl StoreOperationCommitPlan {
 
     pub(crate) fn retain_device_exclusion_proposal(
         &self,
-        reference: super::store_commit::StoreDeviceExclusionProposalRef,
-        proposal: &super::store_commit::StoreDeviceExclusionProposal,
+        proposal: super::store_commit::StoreDeviceExclusionProposal,
         target: &super::store_commit::StoreDeviceRegistration,
     ) -> Result<super::store_commit::RetainedStoreDeviceExclusionProposal, StoreError> {
         self.writer
-            .retain_device_exclusion_proposal(reference, proposal, target)
+            .retain_device_exclusion_proposal(proposal, target)
             .map_err(StoreError::from)
     }
 
@@ -283,51 +311,24 @@ impl StoreOperationCommitPlan {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn sign_device_exclusion_proposal(
-        &self,
-        proposal_id: super::store_commit::StoreDeviceExclusionProposalId,
-        target: super::store_commit::StoreDeviceRegistrationRef,
-        target_registration: &super::store_commit::StoreDeviceRegistration,
-        outcome_slot: coven_protocol::objects::ObjectSlot,
-        owner_grant: super::membership::MembershipGrantId,
-    ) -> Result<super::store_commit::StoreDeviceExclusionProposal, StoreError> {
-        self.writer.sign_device_exclusion_proposal(
-            self.root.store_root_hash,
-            proposal_id,
-            target,
-            target_registration,
-            outcome_slot,
-            owner_grant,
-        )
-    }
-
     pub(crate) fn sign_device_exclusion_cancellation(
         &self,
-        proposal: super::store_commit::StoreDeviceExclusionProposalRef,
-        proposal_value: &super::store_commit::StoreDeviceExclusionProposal,
+        proposal: super::store_commit::StoreDeviceExclusionProposal,
         owner_grant: super::membership::MembershipGrantId,
     ) -> Result<super::store_commit::StoreDeviceExclusionCancellation, StoreError> {
         self.writer
-            .sign_device_exclusion_cancellation(proposal, proposal_value, owner_grant)
+            .sign_device_exclusion_cancellation(proposal, owner_grant)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign_device_exclusion(
         &self,
-        proposal: super::store_commit::StoreDeviceExclusionProposalRef,
-        proposal_value: &super::store_commit::StoreDeviceExclusionProposal,
+        proposal: super::store_commit::StoreDeviceExclusionProposal,
         target: super::store_commit::StoreDeviceRegistrationRef,
         target_registration: &super::store_commit::StoreDeviceRegistration,
         owner_grant: super::membership::MembershipGrantId,
     ) -> Result<super::store_commit::StoreDeviceExclusion, StoreError> {
-        self.writer.sign_device_exclusion(
-            proposal,
-            proposal_value,
-            target,
-            target_registration,
-            owner_grant,
-        )
+        self.writer
+            .sign_device_exclusion(proposal, target, target_registration, owner_grant)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

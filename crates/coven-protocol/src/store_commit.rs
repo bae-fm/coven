@@ -107,8 +107,6 @@ pub(crate) const STORE_DEVICE_REGISTRATION_PREFIX: &str = "store-v1/devices/";
 pub(crate) const STORE_DEVICE_JOIN_ABANDONMENT_PREFIX: &str = "store-v1/device-join-abandonments/";
 pub(crate) const STORE_DEVICE_JOIN_CLEANUP_RECEIPT_PREFIX: &str =
     "store-v1/device-join-cleanup-receipts/";
-pub(crate) const STORE_DEVICE_EXCLUSION_PROPOSAL_PREFIX: &str =
-    "store-v1/device-exclusion-proposals/";
 pub(crate) const STORE_DEVICE_EXCLUSION_OUTCOME_PREFIX: &str =
     "store-v1/device-exclusion-outcomes/";
 pub(crate) const STORE_PROVIDER_ACCESS_GRANT_PREFIX: &str = "store-v1/provider-access/grants/";
@@ -123,7 +121,6 @@ const STORE_PROTOCOL_ROOT_DOMAIN: &[u8] = b"coven.store-protocol-root.v1\0";
 const COMMIT_DOMAIN: &[u8] = b"coven.store-batch-commit.v1\0";
 const REGISTRATION_DOMAIN: &[u8] = b"coven.store-device-registration.v1\0";
 const DEVICE_READINESS_DOMAIN: &[u8] = b"coven.device-readiness.v1\0";
-const DEVICE_EXCLUSION_PROPOSAL_DOMAIN: &[u8] = b"coven.store-device-exclusion-proposal.v1\0";
 const DEVICE_EXCLUSION_DOMAIN: &[u8] = b"coven.store-device-exclusion.v1\0";
 const DEVICE_EXCLUSION_CANCELLATION_DOMAIN: &[u8] =
     b"coven.store-device-exclusion-cancellation.v1\0";

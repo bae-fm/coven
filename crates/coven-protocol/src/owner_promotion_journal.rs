@@ -238,7 +238,6 @@ fn finalization_publication(
         device_join_attempt_decisions: Vec::new(),
         provider_access_grants: Vec::new(),
         device_registrations: Vec::new(),
-        device_exclusion_proposals: Vec::new(),
         device_exclusion_outcomes: Vec::new(),
         stream_activations: expected_activations,
         circle_controls: Vec::new(),

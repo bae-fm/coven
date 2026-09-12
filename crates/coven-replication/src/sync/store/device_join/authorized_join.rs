@@ -95,11 +95,13 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 StoreOperationBatch::SamePrincipalDeviceJoin {
                     attempt_id: request.approval().request.offer.attempt_id,
                     registration: Box::new(registration),
+                    entry: transition.entry.clone(),
                     transition: transition.transition.clone(),
                 }
             }
             OwnerJoinPublication::JoinActivation { .. } => StoreOperationBatch::JoinActivation {
                 registration: Box::new(registration),
+                entry: transition.entry.clone(),
                 transition: transition.transition.clone(),
             },
             _ => return Err(DeviceJoinError::JournalConflict),

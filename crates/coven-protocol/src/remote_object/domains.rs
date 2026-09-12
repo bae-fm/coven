@@ -324,9 +324,6 @@ pub enum RetainedAuthorityObjectDomain {
         promotion_id: crate::store_commit::OwnerPromotionId,
         activation: crate::store_commit::OwnerPromotionRequestActivation,
     },
-    DeviceExclusionProposal {
-        reference: crate::store_commit::StoreDeviceExclusionProposalRef,
-    },
     DeviceExclusionOutcome {
         reference: crate::store_commit::StoreDeviceExclusionOutcomeRef,
     },

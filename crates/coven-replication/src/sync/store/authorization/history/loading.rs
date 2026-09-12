@@ -145,13 +145,20 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn load_local_device_operations(
         &mut self,
         verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        control_entry: Option<&coven_protocol::membership::MembershipEntry>,
         membership: &MembershipChain,
         state_ref: &StoreDeviceStateRef,
         state: ResolvedStoreDeviceState,
     ) -> Result<coven_protocol::store_commit::VerifiedStoreDeviceOperations, pull::StorePullError>
     {
         self.history_verifier
-            .load_local_device_operations(verified_commit, membership, state_ref, state)
+            .load_local_device_operations(
+                verified_commit,
+                control_entry,
+                membership,
+                state_ref,
+                state,
+            )
             .await
     }
 

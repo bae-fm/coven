@@ -2,10 +2,7 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedStoreDeviceOperations {
-    proposals: Vec<(
-        RetainedStoreDeviceExclusionProposal,
-        StoreDeviceExclusionProposal,
-    )>,
+    proposal: Option<RetainedStoreDeviceExclusionProposal>,
     outcomes: Vec<VerifiedStoreDeviceExclusionOutcome>,
 }
 
@@ -31,17 +28,17 @@ struct RetainedStoreDeviceRegistrationActivation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedStoreDeviceOperations {
-    proposals: Vec<RetainedStoreDeviceExclusionProposal>,
+    /// A commit issues at most one exclusion proposal, through its control
+    /// entry.
+    proposal: Option<RetainedStoreDeviceExclusionProposal>,
     outcomes: Vec<RetainedStoreDeviceExclusionOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedStoreDeviceExclusionProposal {
-    reference: StoreDeviceExclusionProposalRef,
-    canonical_proposal: Vec<u8>,
+    proposal: StoreDeviceExclusionProposal,
     canonical_target_registration: Vec<u8>,
-    canonical_owner_registration: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,17 +59,8 @@ pub enum RetainedStoreDeviceExclusionOutcome {
 }
 
 impl VerifiedStoreDeviceOperations {
-    pub fn proposals(
-        &self,
-    ) -> impl ExactSizeIterator<
-        Item = (
-            &StoreDeviceExclusionProposalRef,
-            &StoreDeviceExclusionProposal,
-        ),
-    > {
-        self.proposals
-            .iter()
-            .map(|(source, proposal)| (&source.reference, proposal))
+    pub fn proposal(&self) -> Option<&StoreDeviceExclusionProposal> {
+        self.proposal.as_ref().map(|source| &source.proposal)
     }
 
     pub fn exclusions(&self) -> impl Iterator<Item = &StoreDeviceExclusionRef> {
@@ -87,66 +75,56 @@ impl VerifiedStoreDeviceOperations {
     pub(crate) fn from_retained_sources(
         root: &StoreRootRef,
         commit: &StoreBatchCommit,
-        proposals: Vec<RetainedStoreDeviceExclusionProposal>,
+        control_entry: Option<&MembershipEntry>,
+        proposal: Option<RetainedStoreDeviceExclusionProposal>,
         outcomes: Vec<RetainedStoreDeviceExclusionOutcome>,
     ) -> Result<Self, StoreProtocolError> {
-        let proposal_refs = proposals
-            .iter()
-            .map(|source| source.reference.clone())
-            .collect::<Vec<_>>();
         let outcome_refs = outcomes
             .iter()
             .map(RetainedStoreDeviceExclusionOutcome::wire_reference)
             .collect::<Vec<_>>();
-        if proposal_refs.as_slice() != commit.device_exclusion_proposals()
+        if proposal.as_ref().map(|source| &source.proposal)
+            != commit.proposed_device_exclusion(control_entry)
             || outcome_refs.as_slice() != commit.device_exclusion_outcomes()
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         let retained = RetainedStoreDeviceOperations {
-            proposals: proposals.clone(),
+            proposal: proposal.clone(),
             outcomes: outcomes.clone(),
         };
-        let proposals = proposals
-            .into_iter()
-            .map(|source| {
-                let proposal = source.verify(root)?;
-                Ok((source, proposal))
-            })
-            .collect::<Result<Vec<_>, StoreProtocolError>>()?;
+        if let Some(source) = &proposal {
+            source.verify(root)?;
+        }
         let outcomes = outcomes
             .into_iter()
             .map(|source| source.verify(root))
             .collect::<Result<Vec<_>, StoreProtocolError>>()?;
-        let verified = Self {
-            proposals,
-            outcomes,
-        };
+        let verified = Self { proposal, outcomes };
         if verified.to_retained() != retained {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         Ok(verified)
     }
 
-    pub fn without_exclusions(commit: &StoreBatchCommit) -> Result<Self, StoreProtocolError> {
-        if !commit.device_exclusion_proposals().is_empty()
+    pub fn without_exclusions(
+        commit: &StoreBatchCommit,
+        control_entry: Option<&MembershipEntry>,
+    ) -> Result<Self, StoreProtocolError> {
+        if commit.proposed_device_exclusion(control_entry).is_some()
             || !commit.device_exclusion_outcomes().is_empty()
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         Ok(Self {
-            proposals: Vec::new(),
+            proposal: None,
             outcomes: Vec::new(),
         })
     }
 
     pub fn to_retained(&self) -> RetainedStoreDeviceOperations {
         RetainedStoreDeviceOperations {
-            proposals: self
-                .proposals
-                .iter()
-                .map(|(source, _)| source.clone())
-                .collect(),
+            proposal: self.proposal.clone(),
             outcomes: self
                 .outcomes
                 .iter()
@@ -161,8 +139,8 @@ impl VerifiedStoreDeviceOperations {
         predecessor: ResolvedStoreDeviceState,
     ) -> Result<ResolvedStoreDeviceState, StoreProtocolError> {
         let mut state = predecessor;
-        for (source, proposal) in &self.proposals {
-            state = state.propose_exclusion(source.reference.clone(), proposal)?;
+        if let Some(source) = &self.proposal {
+            state = state.propose_exclusion(source.proposal.clone())?;
         }
         for outcome in &self.outcomes {
             state = match outcome {
@@ -181,12 +159,12 @@ impl VerifiedStoreDeviceOperations {
     /// publication is accepted. This does not establish their issuer authority
     /// or recheck transition preconditions at a later snapshot boundary.
     pub fn accepted_effect(&self) -> Result<ResolvedStoreDeviceState, StoreProtocolError> {
-        let proposals =
-            self.proposals
-                .iter()
-                .map(|(source, _)| StoreDeviceProposalState::Pending {
-                    proposal: source.reference.clone(),
-                });
+        let proposal = self
+            .proposal
+            .iter()
+            .map(|source| StoreDeviceProposalState::Pending {
+                proposal: source.proposal.clone(),
+            });
         let outcomes = self.outcomes.iter().map(|outcome| match outcome {
             VerifiedStoreDeviceExclusionOutcome::Excluded(source) => {
                 let exclusion = source.exclusion_reference();
@@ -202,7 +180,7 @@ impl VerifiedStoreDeviceOperations {
             }
         });
         ResolvedStoreDeviceState::merge(
-            proposals
+            proposal
                 .chain(outcomes)
                 .map(ResolvedStoreDeviceState::exclusion_effect)
                 .collect::<Result<Vec<_>, _>>()?,
@@ -273,24 +251,23 @@ impl RetainedStoreDeviceRegistrationActivation {
 
 impl RetainedStoreDeviceOperations {
     pub fn from_sources(
-        proposals: Vec<RetainedStoreDeviceExclusionProposal>,
+        proposal: Option<RetainedStoreDeviceExclusionProposal>,
         outcomes: Vec<RetainedStoreDeviceExclusionOutcome>,
     ) -> Self {
-        Self {
-            proposals,
-            outcomes,
-        }
+        Self { proposal, outcomes }
     }
 
     pub fn verify_for(
         &self,
         root: &StoreRootRef,
         commit: &StoreBatchCommit,
+        control_entry: Option<&MembershipEntry>,
     ) -> Result<VerifiedStoreDeviceOperations, StoreProtocolError> {
         VerifiedStoreDeviceOperations::from_retained_sources(
             root,
             commit,
-            self.proposals.clone(),
+            control_entry,
+            self.proposal.clone(),
             self.outcomes.clone(),
         )
     }
@@ -298,84 +275,29 @@ impl RetainedStoreDeviceOperations {
 
 impl RetainedStoreDeviceExclusionProposal {
     pub fn from_exact(
-        reference: StoreDeviceExclusionProposalRef,
-        proposal: &StoreDeviceExclusionProposal,
+        proposal: StoreDeviceExclusionProposal,
         target: &StoreDeviceRegistration,
-        owner: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
         let retained = Self {
-            reference,
-            canonical_proposal: proposal.to_bytes(),
+            proposal,
             canonical_target_registration: target.to_bytes(),
-            canonical_owner_registration: owner.to_bytes(),
         };
-        let opened = retained.verify_with_registrations(&target.store_root)?;
-        if opened.object.value != *proposal || opened.target != *target || opened.owner != *owner {
+        let opened = retained.verify(&target.store_root)?;
+        if opened != *target {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         Ok(retained)
     }
 
-    pub fn from_verified(proposal: &VerifiedDeviceExclusionProposal) -> Self {
-        Self {
-            reference: proposal.reference.clone(),
-            canonical_proposal: proposal.object.bytes.clone(),
-            canonical_target_registration: proposal.target.to_bytes(),
-            canonical_owner_registration: proposal.owner.to_bytes(),
-        }
-    }
-
-    pub fn reference(&self) -> &StoreDeviceExclusionProposalRef {
-        &self.reference
-    }
-
-    fn verify(
-        &self,
-        root: &StoreRootRef,
-    ) -> Result<StoreDeviceExclusionProposal, StoreProtocolError> {
-        self.verify_with_registrations(root)
-            .map(|proposal| proposal.object.value)
-    }
-
-    fn verify_with_registrations(
-        &self,
-        root: &StoreRootRef,
-    ) -> Result<VerifiedDeviceExclusionProposal, StoreProtocolError> {
-        self.reference.object.verify(&self.canonical_proposal)?;
-        let unverified: StoreDeviceExclusionProposal =
-            serde_json::from_slice(&self.canonical_proposal)?;
-        if unverified.to_bytes() != self.canonical_proposal {
-            return Err(StoreProtocolError::Malformed(
-                "retained Store device exclusion proposal is not canonically encoded".to_string(),
-            ));
-        }
-        let target = verify_retained_registration(
+    /// Reopen the retained target registration and check the proposal's slot
+    /// shape, returning the registration the proposal names.
+    fn verify(&self, root: &StoreRootRef) -> Result<StoreDeviceRegistration, StoreProtocolError> {
+        self.proposal.validate()?;
+        verify_retained_registration(
             root,
-            &unverified.target,
+            &self.proposal.target,
             &self.canonical_target_registration,
-        )?;
-        let owner = verify_retained_registration(
-            root,
-            &unverified.owner_registration,
-            &self.canonical_owner_registration,
-        )?;
-        let proposal = StoreDeviceExclusionProposal::parse_at(
-            &self.canonical_proposal,
-            &self.reference,
-            &target,
-            &owner,
-        )?;
-        Ok(VerifiedDeviceExclusionProposal {
-            reference: self.reference.clone(),
-            object: crate::objects::VerifiedObject {
-                value: proposal,
-                bytes: self.canonical_proposal.clone(),
-                semantic_hash: self.reference.proposal_hash,
-                object: self.reference.object.clone(),
-            },
-            target,
-            owner,
-        })
+        )
     }
 }
 
@@ -499,7 +421,7 @@ impl RetainedStoreDeviceExclusionOutcome {
                 ),
             };
         reference.object().verify(canonical_outcome)?;
-        let proposal = proposal_source.verify_with_registrations(root)?;
+        let target = proposal_source.verify(root)?;
         let unverified: StoreDeviceExclusionOutcome = serde_json::from_slice(canonical_outcome)?;
         if unverified.to_bytes() != *canonical_outcome {
             return Err(StoreProtocolError::Malformed(
@@ -517,8 +439,8 @@ impl RetainedStoreDeviceExclusionOutcome {
         let outcome = StoreDeviceExclusionOutcome::parse_at(
             canonical_outcome,
             &reference,
-            &proposal.object.value,
-            &proposal.target,
+            &proposal_source.proposal,
+            &target,
             &owner,
         )?;
         match (&self, outcome) {

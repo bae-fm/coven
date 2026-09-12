@@ -583,6 +583,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .prepare_candidate(
                 plan,
                 StoreOperationBatch::MergeMembershipActivation {
+                    entry: transition.entry.clone(),
                     transition: transition.transition.clone(),
                     stream_activations,
                 },

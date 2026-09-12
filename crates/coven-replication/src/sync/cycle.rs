@@ -928,7 +928,7 @@ impl SyncComponents {
         &self,
         device_id: coven_protocol::StoreDeviceId,
     ) -> Result<
-        coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        coven_protocol::store_commit::StoreDeviceExclusionProposal,
         super::store::StoreDeviceExclusionError,
     > {
         self.store
@@ -938,14 +938,14 @@ impl SyncComponents {
 
     pub(crate) async fn cancel_device_exclusion(
         &self,
-        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
     ) -> Result<(), super::store::StoreDeviceExclusionError> {
         self.store.cancel_device_exclusion_proposal(proposal).await
     }
 
     pub(crate) async fn finalize_device_exclusion(
         &self,
-        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
     ) -> Result<(), super::store::StoreDeviceExclusionError> {
         self.store
             .finalize_device_exclusion_proposal(proposal)

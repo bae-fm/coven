@@ -1566,15 +1566,13 @@ mod test_device {
             self.store.device_exclusion_operations_for_test().await
         }
 
-        pub async fn stage_uploaded_device_exclusion_proposal_for_test(
+        pub async fn stage_device_exclusion_proposal_for_test(
             &self,
         ) -> Result<
-            coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+            coven_protocol::store_commit::StoreDeviceExclusionProposal,
             crate::sync::store::StoreDeviceExclusionError,
         > {
-            self.store
-                .stage_uploaded_device_exclusion_proposal_for_test()
-                .await
+            self.store.stage_device_exclusion_proposal_for_test().await
         }
 
         pub async fn propose_device_exclusion(
@@ -1589,7 +1587,7 @@ mod test_device {
 
         pub async fn cancel_device_exclusion(
             &self,
-            proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+            proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
         ) -> Result<
             crate::sync::store::StoreDeviceExclusionResult,
             crate::sync::store::StoreDeviceExclusionError,
@@ -1599,7 +1597,7 @@ mod test_device {
 
         pub async fn finalize_device_exclusion(
             &self,
-            proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+            proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
         ) -> Result<
             crate::sync::store::StoreDeviceExclusionResult,
             crate::sync::store::StoreDeviceExclusionError,
@@ -2338,7 +2336,7 @@ mod test_device {
         pub async fn prepare_peer_exclusion(
             &self,
             target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-        ) -> coven_protocol::store_commit::StoreDeviceExclusionProposalRef {
+        ) -> coven_protocol::store_commit::StoreDeviceExclusionProposal {
             let proposal = match self
                 .propose_device_exclusion(target)
                 .await
@@ -2376,7 +2374,7 @@ mod test_device {
 
         pub async fn activate_peer_exclusion(
             &self,
-            proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+            proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
         ) -> coven_protocol::store_commit::StoreDeviceExclusionRef {
             let result = self
                 .finalize_device_exclusion(proposal)

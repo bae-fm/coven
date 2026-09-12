@@ -181,7 +181,6 @@ impl PreparedOwnerJoinPublication {
         })?;
         let has_unrelated_operation = operations.acknowledgement.is_some()
             || !operations.circle_acknowledgements.is_empty()
-            || !operations.device_exclusion_proposals.is_empty()
             || !operations.device_exclusion_outcomes.is_empty()
             || !operations.stream_activations.is_empty()
             || !operations.circle_controls.is_empty()

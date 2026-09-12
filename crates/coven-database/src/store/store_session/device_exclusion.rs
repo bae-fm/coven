@@ -5,7 +5,7 @@ use crate::mark_remote_object_uploaded_on;
 use crate::store::StoreSession;
 use crate::ActiveStorePublication;
 use coven_protocol::device_exclusion_journal::{
-    DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
+    DurableStoreDeviceExclusionOperation, DurableStoreDeviceExclusionOutcome,
     StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
 };
 use coven_protocol::remote_object::{
@@ -412,9 +412,9 @@ impl StoreDatabase {
         operation
             .validate()
             .map_err(store_device_exclusion_journal_error)?;
-        if !matches!(
+        if matches!(
             operation,
-            DurableStoreDeviceExclusionOperation::CandidatePrepared { .. }
+            DurableStoreDeviceExclusionOperation::Completed(_)
         ) {
             return Err(DbError::Message(
                 "a new Store-device exclusion journal must own its exact activation candidate"
@@ -439,13 +439,18 @@ impl StoreDatabase {
     pub async fn complete_outbound_store_device_exclusion_slot_loss(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
-        winner: DurableStoreDeviceExclusionObject,
+        winner: DurableStoreDeviceExclusionOutcome,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
+        let intended = expected
+            .outcome()
+            .ok_or_else(|| {
+                DbError::Message(
+                    "a Store-device exclusion proposal occupies no outcome slot".to_string(),
+                )
+            })?
+            .clone();
         let next = DurableStoreDeviceExclusionOperation::Completed(
-            StoreDeviceExclusionCompletion::OutcomeSlotOccupied {
-                intended: expected.object().clone(),
-                winner,
-            },
+            StoreDeviceExclusionCompletion::OutcomeSlotOccupied { intended, winner },
         );
         next.validate()
             .map_err(store_device_exclusion_journal_error)?;

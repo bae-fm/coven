@@ -869,8 +869,13 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
             }
         };
         let reference = verified_commit.reference();
-        let device_operations =
-            VerifiedStoreDeviceOperations::without_exclusions(verified_commit.value())?;
+        let device_operations = VerifiedStoreDeviceOperations::without_exclusions(
+            verified_commit.value(),
+            history_evidence
+                .membership_proof
+                .as_ref()
+                .map(|proof| &proof.entry_value),
+        )?;
         let circle_activations =
             VerifiedCircleActivations::membership_control(verified_commit.value(), reference)?;
         let retained = self

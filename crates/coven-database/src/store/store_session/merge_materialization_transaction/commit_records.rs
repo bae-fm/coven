@@ -489,8 +489,14 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let commit = verified_commit.value();
         let commit_ref = verified_commit.reference();
-        let device_operations =
-            VerifiedStoreDeviceOperations::without_exclusions(commit).map_err(DbError::from)?;
+        let device_operations = VerifiedStoreDeviceOperations::without_exclusions(
+            commit,
+            history_evidence
+                .membership_proof
+                .as_ref()
+                .map(|proof| &proof.entry_value),
+        )
+        .map_err(DbError::from)?;
         let circle_activations =
             VerifiedCircleActivations::none(commit, commit_ref).map_err(DbError::from)?;
         let materialization = VerifiedMergeMaterialization::verify(

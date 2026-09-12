@@ -495,7 +495,6 @@ pub struct StoreCommitOperations {
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
     pub provider_access_grants: Vec<crate::provider::StoreMemberProviderAccessGrantRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
-    pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
     pub device_exclusion_outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
     pub stream_activations: Vec<StreamActivation>,
     pub circle_controls: Vec<CircleControlRef>,
@@ -523,7 +522,6 @@ impl StoreCommitOperations {
             && self.device_join_attempt_decisions.is_empty()
             && self.provider_access_grants.is_empty()
             && self.device_registrations.is_empty()
-            && self.device_exclusion_proposals.is_empty()
             && self.device_exclusion_outcomes.is_empty()
             && self.circle_controls.len() == 1
             && self.store_package.is_none()
@@ -538,7 +536,6 @@ impl StoreCommitOperations {
             device_join_attempt_decisions,
             provider_access_grants,
             device_registrations,
-            device_exclusion_proposals,
             device_exclusion_outcomes,
             stream_activations,
             circle_controls,
@@ -549,7 +546,6 @@ impl StoreCommitOperations {
             && device_join_attempt_decisions.is_empty()
             && provider_access_grants.is_empty()
             && device_registrations.is_empty()
-            && device_exclusion_proposals.is_empty()
             && device_exclusion_outcomes.is_empty()
             && stream_activations.is_empty()
             && circle_controls.is_empty()
@@ -583,7 +579,6 @@ pub struct StoreCommitOperationsInput<'a> {
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
     pub provider_access_grants: Vec<crate::provider::StoreMemberProviderAccessGrantRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
-    pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
     pub device_exclusion_outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
     pub stream_activations: Vec<StreamActivation>,
     pub circle_controls: Vec<CircleControlRef>,
@@ -601,7 +596,6 @@ impl StoreCommitOperationsInput<'_> {
             device_join_attempt_decisions: Vec::new(),
             provider_access_grants: Vec::new(),
             device_registrations: Vec::new(),
-            device_exclusion_proposals: Vec::new(),
             device_exclusion_outcomes: Vec::new(),
             stream_activations: Vec::new(),
             circle_controls: Vec::new(),

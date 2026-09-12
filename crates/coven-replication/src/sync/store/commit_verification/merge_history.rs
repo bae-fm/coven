@@ -22,8 +22,7 @@ use coven_protocol::store_commit::{
 };
 use coven_protocol::store_commit::{
     SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef,
-    StoreDeviceExclusionProposalRef, StoreSnapshotRef, VerifiedDeviceExclusionOutcome,
-    VerifiedDeviceExclusionProposal,
+    StoreDeviceExclusionProposal, StoreSnapshotRef, VerifiedDeviceExclusionOutcome,
 };
 use coven_protocol::{membership as protocol_membership, provider, store_commit};
 use std::collections::{BTreeMap, BTreeSet};
@@ -172,6 +171,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn load_local_device_operations(
         &mut self,
         verified_commit: &VerifiedStoreBatchCommit,
+        control_entry: Option<&protocol_membership::MembershipEntry>,
         membership: &MembershipChain,
         state_ref: &StoreDeviceStateRef,
         state: ResolvedStoreDeviceState,
@@ -182,10 +182,10 @@ impl<'a> MergeHistoryVerifier<'a> {
             ));
         }
         let commit = verified_commit.value();
-        if commit.device_exclusion_proposals().is_empty()
+        if commit.proposed_device_exclusion(control_entry).is_none()
             && commit.device_exclusion_outcomes().is_empty()
         {
-            return VerifiedStoreDeviceOperations::without_exclusions(commit)
+            return VerifiedStoreDeviceOperations::without_exclusions(commit, control_entry)
                 .map_err(StorePullError::Protocol);
         }
         if state_ref != &commit.device_state {
@@ -195,10 +195,12 @@ impl<'a> MergeHistoryVerifier<'a> {
             ));
         }
         verify_merge_membership_state_ref(&commit.membership_state, membership, &state)?;
-        Box::pin(
-            self.commit_verifier
-                .load_commit_device_operations(commit, &state, membership),
-        )
+        Box::pin(self.commit_verifier.load_commit_device_operations(
+            commit,
+            control_entry,
+            &state,
+            membership,
+        ))
         .await
         .map_err(StorePullError::from)
     }

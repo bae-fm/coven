@@ -164,7 +164,7 @@ pub enum StoreAuthorityChange {
         registration: super::store_commit::ActivatedStoreDeviceRegistrationRef,
     },
     DeviceExclusionProposal {
-        proposal: super::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: super::store_commit::StoreDeviceExclusionProposal,
     },
     DeviceExclusionOutcome {
         outcome: super::store_commit::StoreDeviceExclusionOutcomeRef,

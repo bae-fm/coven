@@ -53,14 +53,9 @@ fn every_protocol_domain_requires_its_exact_path_grammar() {
             cross_domain: "store-v1/device-join-abandonments/attempt",
         },
         DomainPathCase {
-            domain: ProtectedObjectDomain::StoreDeviceExclusionProposal,
-            valid: &["store-v1/device-exclusion-proposals/device/proposal/hash"],
-            cross_domain: "store-v1/device-exclusion-outcomes/device/proposal",
-        },
-        DomainPathCase {
             domain: ProtectedObjectDomain::StoreDeviceExclusionOutcome,
             valid: &["store-v1/device-exclusion-outcomes/device/proposal"],
-            cross_domain: "store-v1/device-exclusion-proposals/device/proposal/hash",
+            cross_domain: "store-v1/device-join-abandonments/attempt",
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::StoreReclaimEvidence,

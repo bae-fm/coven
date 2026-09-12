@@ -390,7 +390,7 @@ impl SyncLoopHandle {
         &self,
         device_id: coven_protocol::StoreDeviceId,
     ) -> Result<
-        coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        coven_protocol::store_commit::StoreDeviceExclusionProposal,
         crate::sync::store::StoreDeviceExclusionError,
     > {
         self.inner
@@ -401,7 +401,7 @@ impl SyncLoopHandle {
 
     pub async fn cancel_device_exclusion(
         &self,
-        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
     ) -> Result<(), crate::sync::store::StoreDeviceExclusionError> {
         self.inner
             .components
@@ -411,7 +411,7 @@ impl SyncLoopHandle {
 
     pub async fn finalize_device_exclusion(
         &self,
-        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposal,
     ) -> Result<(), crate::sync::store::StoreDeviceExclusionError> {
         self.inner
             .components

@@ -15,32 +15,16 @@ pub(super) fn validate_device_registration_refs(
 }
 
 pub(super) fn validate_device_exclusion_refs(
-    proposals: &[StoreDeviceExclusionProposalRef],
     outcomes: &[StoreDeviceExclusionOutcomeRef],
 ) -> Result<(), StoreProtocolError> {
-    if proposals.windows(2).any(|pair| pair[0] >= pair[1])
-        || outcomes.windows(2).any(|pair| pair[0] >= pair[1])
-    {
+    if outcomes.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(StoreProtocolError::DeviceStateMismatch);
     }
     let mut ids = BTreeSet::new();
-    for proposal in proposals {
-        proposal.validate_path()?;
-        if !ids.insert(proposal.proposal_id) {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-    }
     for outcome in outcomes {
         let proposal = outcome.proposal();
-        proposal.validate_path()?;
-        let expected = format!(
-            "{}.json",
-            device_exclusion_outcome_semantic_prefix(
-                proposal.target.device_id,
-                proposal.proposal_id,
-            )
-        );
-        if outcome.object().slot().logical_key() != expected || !ids.insert(proposal.proposal_id) {
+        proposal.validate()?;
+        if outcome.object().slot() != &proposal.outcome_slot || !ids.insert(proposal.proposal_id) {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
     }

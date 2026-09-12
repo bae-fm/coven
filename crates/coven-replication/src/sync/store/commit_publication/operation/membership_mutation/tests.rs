@@ -212,7 +212,9 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     let candidate = writer.prepare_candidate(
         &plan,
         crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::MergeMembershipActivation {
-            transition: prepared.transition.clone(), stream_activations: Vec::new(),
+            entry: prepared.entry.clone(),
+            transition: prepared.transition.clone(),
+            stream_activations: Vec::new(),
         },
     ).await.expect("prepare exact activation candidate");
     let mut substituted_head = writer
