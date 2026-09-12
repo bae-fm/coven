@@ -228,28 +228,26 @@ impl DatabaseTestSql<'_> {
             .map_err(|error| DbError::context("parse Store write partition hash", error))
     }
 
-    pub(crate) fn row_and_private_routing_presence(
+    /// Whether the row and its Store audience mirror are present, the mirror
+    /// found by the routing id the row itself derives.
+    pub(crate) fn row_and_mirror_presence(
         &self,
         table: &str,
         row_id: &str,
-    ) -> Result<(bool, bool, bool), DbError> {
+        generation_one_key: [u8; 32],
+    ) -> Result<(bool, bool), DbError> {
+        let routing_id = self
+            .row_routing_id(generation_one_key, table, row_id)?
+            .to_string();
         let table_name = crate::quote_ident(table);
         self.query_row(
             &format!(
                 "SELECT
                    EXISTS(SELECT 1 FROM {table_name} WHERE id = ?1),
-                   EXISTS(
-                       SELECT 1 FROM _coven_row_routes
-                       WHERE table_name = ?2 AND row_id = ?1
-                   ),
-                   EXISTS(
-                       SELECT 1 FROM _coven_audience AS audience
-                       JOIN _coven_row_routes AS route USING (routing_id)
-                       WHERE route.table_name = ?2 AND route.row_id = ?1
-                   )"
+                   EXISTS(SELECT 1 FROM _coven_audience WHERE routing_id = ?2)"
             ),
-            rusqlite::params![row_id, table],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            rusqlite::params![row_id, routing_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(DbError::from)
     }
@@ -288,11 +286,10 @@ impl DatabaseTestSql<'_> {
         table_row_count(self.connection, table)
     }
 
-    pub(crate) fn scoped_store_state_counts(&self) -> Result<[i64; 4], DbError> {
+    pub(crate) fn scoped_store_state_counts(&self) -> Result<[i64; 3], DbError> {
         Ok([
             self.table_row_count(DatabaseTestTable::named("store_writes"))?,
             self.table_row_count(DatabaseTestTable::named("store_write_partitions"))?,
-            self.table_row_count(DatabaseTestTable::named("_coven_row_routes"))?,
             self.table_row_count(DatabaseTestTable::named("_coven_audience"))?,
         ])
     }
@@ -458,31 +455,46 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub(crate) fn document_circle_route(
+    /// A document row's audience, the routing id it derives, and the stamp of
+    /// the mirror that holds it.
+    pub(crate) fn document_circle_mirror(
         &self,
         row_id: &str,
+        generation_one_key: [u8; 32],
     ) -> Result<(String, String, String), DbError> {
+        let routing_id = self
+            .row_routing_id(generation_one_key, "documents", row_id)?
+            .to_string();
         self.connection
             .query_row(
-                "SELECT document.audience, route.routing_id, route._updated_at
+                "SELECT document.audience, audience._updated_at
                  FROM documents AS document
-                 JOIN _coven_row_routes AS route
-                   ON route.table_name = 'documents' AND route.row_id = document.id
+                 JOIN _coven_audience AS audience ON audience.routing_id = ?2
                  WHERE document.id = ?1",
-                [row_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                rusqlite::params![row_id, &routing_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
+            .map(|(audience, stamp)| (audience, routing_id, stamp))
             .map_err(DbError::from)
     }
 
-    pub(crate) fn corrupt_live_document_route_id(&self, row_id: &str) -> Result<(), DbError> {
+    /// Rewrite a live document row's audience mirror to a routing id no row
+    /// derives, leaving the row without a mirror and the mirror without a row.
+    pub(crate) fn corrupt_live_document_mirror_id(
+        &self,
+        row_id: &str,
+        generation_one_key: [u8; 32],
+    ) -> Result<(), DbError> {
+        let routing_id = self
+            .row_routing_id(generation_one_key, "documents", row_id)?
+            .to_string();
         self.connection
             .execute(
-                "UPDATE _coven_row_routes
+                "UPDATE _coven_audience
                  SET routing_id =
                      '0000000000000000000000000000000000000000000000000000000000000000'
-                 WHERE table_name = 'documents' AND row_id = ?1",
-                [row_id],
+                 WHERE routing_id = ?1",
+                [routing_id],
             )
             .map(|_| ())
             .map_err(DbError::from)
@@ -577,7 +589,6 @@ impl DatabaseTestSql<'_> {
     ) -> Result<
         (
             Option<(Option<String>, String, String)>,
-            Option<(String, String)>,
             Option<(Option<String>, String)>,
         ),
         DbError,
@@ -594,16 +605,6 @@ impl DatabaseTestSql<'_> {
             )
             .optional()
             .map_err(DbError::from)?;
-        let route = self
-            .connection
-            .query_row(
-                "SELECT routing_id, _updated_at FROM _coven_row_routes
-                 WHERE table_name = 'notes' AND row_id = ?1",
-                [row_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(DbError::from)?;
         let mirror = self
             .connection
             .query_row(
@@ -613,7 +614,7 @@ impl DatabaseTestSql<'_> {
             )
             .optional()
             .map_err(DbError::from)?;
-        Ok((row, route, mirror))
+        Ok((row, mirror))
     }
 
     pub(crate) fn row_routing_id(
@@ -920,20 +921,17 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub(crate) fn scoped_routing_counts(
+    pub(crate) fn circle_mirror_count(
         &self,
         circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<(i64, i64), DbError> {
-        let routes = table_row_count(
-            self.connection,
-            DatabaseTestTable::named("_coven_row_routes"),
-        )?;
-        let mirrors = self.connection.query_row(
-            "SELECT COUNT(*) FROM _coven_audience WHERE circle_id = ?1",
-            [circle_id.to_string()],
-            |row| row.get(0),
-        )?;
-        Ok((routes, mirrors))
+    ) -> Result<i64, DbError> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*) FROM _coven_audience WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
     }
 
     pub(crate) fn cleanup_intent_copy_identities(&self) -> Result<Vec<String>, DbError> {

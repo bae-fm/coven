@@ -120,23 +120,6 @@ impl DatabaseImageTest {
         table_row_count(&self.connection, table)
     }
 
-    pub fn install_row_route(
-        &self,
-        routing_id: &str,
-        table: &str,
-        row_id: &str,
-        row_stamp: &str,
-    ) -> Result<(), DbError> {
-        self.connection
-            .execute(
-                "INSERT INTO _coven_row_routes
-                 (routing_id, table_name, row_id, _updated_at) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![routing_id, table, row_id, row_stamp],
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-    }
-
     pub fn install_audience_mirror(
         &self,
         routing_id: &str,
@@ -153,17 +136,26 @@ impl DatabaseImageTest {
             .map_err(DbError::from)
     }
 
-    pub fn corrupt_document_route_id(&self) -> Result<(), DbError> {
-        self.connection
+    /// Rewrite one audience mirror to a routing id no row derives, so the mirror
+    /// names no row and its row has no mirror. The caller supplies the routing
+    /// id because deriving it needs the Store root the image does not carry.
+    pub fn corrupt_mirror_id(&self, routing_id: &str) -> Result<(), DbError> {
+        let updated = self
+            .connection
             .execute(
-                "UPDATE _coven_row_routes
+                "UPDATE _coven_audience
                  SET routing_id =
                      '0000000000000000000000000000000000000000000000000000000000000000'
-                 WHERE table_name = 'documents'",
-                [],
+                 WHERE routing_id = ?1",
+                [routing_id],
             )
-            .map(|_| ())
-            .map_err(DbError::from)
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError::Message(format!(
+                "image holds no audience mirror for {routing_id}"
+            )));
+        }
+        Ok(())
     }
 
     pub fn replace_first_circle_audience(&self, circle_id: Option<&str>) -> Result<(), DbError> {

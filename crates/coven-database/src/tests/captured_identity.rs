@@ -46,14 +46,9 @@ async fn captured_routing_rows_do_not_hide_invalid_host_identity_or_escape_rollb
                 // rows. Seed that input through internal SQL authority while
                 // exercising the real host transaction and identity boundary.
                 crate::with_coven_sql_authority(|| -> rusqlite::Result<()> {
-                    let routing_id = "a".repeat(64);
                     sql.execute(
                         "INSERT INTO _coven_audience VALUES (?1, NULL, ?2)",
-                        (&routing_id, &stamp),
-                    )?;
-                    sql.execute(
-                        "INSERT INTO _coven_row_routes VALUES (?1, 'notes', ?2, ?3)",
-                        (&routing_id, "018f0000-0000-7000-8000-000000000001", &stamp),
+                        ("a".repeat(64), &stamp),
                     )?;
                     Ok(())
                 })?;
@@ -77,7 +72,6 @@ async fn captured_routing_rows_do_not_hide_invalid_host_identity_or_escape_rollb
     for table in [
         "notes",
         "_coven_audience",
-        "_coven_row_routes",
         "store_writes",
         "store_write_partitions",
     ] {

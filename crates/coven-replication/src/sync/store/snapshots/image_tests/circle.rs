@@ -135,14 +135,6 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
             )
             .expect("insert scoped Store row into Circle bootstrap");
         connection
-            .install_row_route(
-                &store_routing_id,
-                "documents",
-                store_row_id,
-                store_row_stamp,
-            )
-            .expect("insert scoped Store row route into Circle bootstrap");
-        connection
             .install_audience_mirror(&store_routing_id, None, store_row_stamp)
             .expect("insert scoped Store audience mirror into Circle bootstrap");
     })
@@ -250,7 +242,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
 }
 
 #[tokio::test]
-async fn circle_snapshot_states_only_its_rows_routes_and_mirrors() {
+async fn circle_snapshot_states_only_its_rows_and_mirrors() {
     let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = open_scoped_snapshot_test_db(source_store_dir.clone());
     let store = crate::sync::test_helpers::TestStore::create(
@@ -289,7 +281,6 @@ async fn circle_snapshot_states_only_its_rows_routes_and_mirrors() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
             "_coven_audience".to_string(),
-            "_coven_row_routes".to_string(),
             "documents".to_string(),
             "paragraphs".to_string(),
         ]),
@@ -313,15 +304,12 @@ async fn circle_snapshot_states_only_its_rows_routes_and_mirrors() {
             "Circle paragraph".to_string()
         )
     );
-    for (table, expected) in [("_coven_row_routes", 2), ("_coven_audience", 2)] {
-        assert_eq!(
-            inspected
-                .coven_table_row_count(coven_database::DatabaseTestTable::named(table))
-                .expect("count Circle snapshot Coven rows"),
-            expected,
-            "unexpected {table} row count"
-        );
-    }
+    assert_eq!(
+        inspected
+            .coven_table_row_count(coven_database::DatabaseTestTable::named("_coven_audience"))
+            .expect("count Circle snapshot audience mirrors"),
+        2,
+    );
 }
 
 #[tokio::test]
@@ -443,14 +431,6 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
     assert_eq!(
         installed,
         ("kept".to_string(), "Circle document".to_string())
-    );
-    assert_eq!(
-        inspected
-            .coven_table_row_count(coven_database::DatabaseTestTable::named(
-                "_coven_row_routes",
-            ))
-            .expect("count Circle parent routes"),
-        1
     );
     assert_eq!(
         inspected

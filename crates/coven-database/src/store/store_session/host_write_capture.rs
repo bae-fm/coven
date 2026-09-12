@@ -777,12 +777,10 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     .map_err(E::from)?;
             }
             if gates.has_scoped_graph() {
-                for table in ["_coven_audience", "_coven_row_routes"] {
-                    journal
-                        .attach(Some(table))
-                        .map_err(DbError::from)
-                        .map_err(E::from)?;
-                }
+                journal
+                    .attach(Some("_coven_audience"))
+                    .map_err(DbError::from)
+                    .map_err(E::from)?;
             }
             let value = f(&tx)?;
             let mut captured = StoreDatabase::drain_host_change_journal(

@@ -516,7 +516,7 @@ fn connected_component(
 /// connection. Retraction must read both row values and foreign-key edges from
 /// that state: the captured write is allowed to change either while moving the
 /// rows to Local.
-fn with_pre_write_synced_projection<R>(
+pub(super) fn with_pre_write_synced_projection<R>(
     conn: &Connection,
     gates: &Gates,
     changeset: &[u8],

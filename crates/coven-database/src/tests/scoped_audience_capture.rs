@@ -200,7 +200,6 @@ struct ReparentRollbackState {
     descendant_count: i64,
     writes: i64,
     partitions: i64,
-    routes: Vec<(String, String, String)>,
     mirror: Vec<(String, Option<String>)>,
 }
 
@@ -220,11 +219,6 @@ fn reparent_rollback_state(
     )?;
     let writes = row_count(conn, "store_writes")?;
     let partitions = row_count(conn, "store_write_partitions")?;
-    let routes = text_triples(
-        conn,
-        "SELECT routing_id, table_name, row_id FROM _coven_row_routes
-                 ORDER BY routing_id",
-    )?;
     let mirror = audience_mirror(conn)?;
     Ok(ReparentRollbackState {
         account,
@@ -232,7 +226,6 @@ fn reparent_rollback_state(
         descendant_count,
         writes,
         partitions,
-        routes,
         mirror,
     })
 }
@@ -244,7 +237,6 @@ struct ScopedAncestorRollbackState {
     details: Vec<(String, String, String)>,
     writes: i64,
     partitions: i64,
-    routes: Vec<(String, String, String)>,
     mirror: Vec<(String, Option<String>)>,
 }
 
@@ -265,11 +257,6 @@ fn scoped_ancestor_rollback_state(
     )?;
     let writes = row_count(conn, "store_writes")?;
     let partitions = row_count(conn, "store_write_partitions")?;
-    let routes = text_triples(
-        conn,
-        "SELECT table_name, row_id, routing_id FROM _coven_row_routes
-                 ORDER BY table_name, row_id",
-    )?;
     let mirror = audience_mirror(conn)?;
     Ok(ScopedAncestorRollbackState {
         folders,
@@ -277,7 +264,6 @@ fn scoped_ancestor_rollback_state(
         details,
         writes,
         partitions,
-        routes,
         mirror,
     })
 }
@@ -305,9 +291,8 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     let authority =
         crate::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
     let (circle_id, control_coord) = authority.seed_active_circle(CIRCLE_LABEL);
-    let store_account_route = authority.scoped_routing_id("accounts", "store-account");
-    let circle_account_route = authority.scoped_routing_id("accounts", "circle-account");
-    let local_account_route = authority.scoped_routing_id("accounts", "local-account");
+    let store_account_routing_id = authority.scoped_routing_id("accounts", "store-account");
+    let circle_account_routing_id = authority.scoped_routing_id("accounts", "circle-account");
     drop(authority);
 
     let write_circle_id = circle_id.clone();
@@ -341,8 +326,8 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     })
     .expect("read public affected rows");
     assert!(
-        !affected_rows.contains("_coven_audience") && !affected_rows.contains("_coven_row_routes"),
-        "private routing tables must not appear in the public write receipt"
+        !affected_rows.contains("_coven_audience"),
+        "the audience mirror must not appear in the public write receipt"
     );
 
     assert_eq!(partitions.len(), 3);
@@ -358,7 +343,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     assert!(!contains_bytes(&store.2, b"circle-account"));
     assert!(!contains_bytes(&store.2, b"local-account"));
     let store_changes = crate::walk_changeset(&store.2).expect("walk Store partition");
-    for routing_id in [&store_account_route, &circle_account_route] {
+    for routing_id in [&store_account_routing_id, &circle_account_routing_id] {
         assert!(store_changes.iter().any(|change| {
             change.table == "_coven_audience"
                 && change.op == coven_foundation::changeset::ChangeOp::Insert
@@ -372,11 +357,13 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     assert!(!contains_bytes(&circle.2, b"store-account"));
     assert!(!contains_bytes(&circle.2, b"local-account"));
     let circle_changes = crate::walk_changeset(&circle.2).expect("walk Circle partition");
-    assert!(circle_changes.iter().any(|change| {
-        change.table == "_coven_row_routes"
-            && change.op == coven_foundation::changeset::ChangeOp::Insert
-            && change.pk() == Some(&circle_account_route)
-    }));
+    assert!(
+        circle_changes
+            .iter()
+            .all(|change| !crate::is_routing_table(&change.table)),
+        "the Store mirror is the only routing a partition carries, and it travels in the Store \
+         partition",
+    );
     let local = partition("local");
     assert_eq!(local.1, None);
     assert!(contains_bytes(&local.2, b"local-account"));
@@ -392,43 +379,14 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     assert!(
         local_changes
             .iter()
-            .all(|change| change.table != "_coven_row_routes"),
+            .all(|change| !crate::is_routing_table(&change.table)),
         "Local routing metadata must remain in the local database"
     );
 
-    let routes = inspect_database(&store_dir, |conn| {
-        let routes = text_triples(
-            conn,
-            "SELECT routing_id, table_name, row_id
-                 FROM _coven_row_routes ORDER BY row_id",
-        )?;
-        let mirror = audience_mirror(conn)?;
-        Ok((routes, mirror))
-    })
-    .expect("read deterministic scoped routes");
-    assert_eq!(
-        routes.0,
-        vec![
-            (
-                circle_account_route.clone(),
-                "accounts".to_string(),
-                "circle-account".to_string(),
-            ),
-            (
-                local_account_route,
-                "accounts".to_string(),
-                "local-account".to_string(),
-            ),
-            (
-                store_account_route.clone(),
-                "accounts".to_string(),
-                "store-account".to_string(),
-            ),
-        ]
-    );
-    assert_eq!(routes.1.len(), 2, "Local rows have no Store mirror");
-    assert!(routes.1.contains(&(store_account_route, None)));
-    assert!(routes.1.contains(&(circle_account_route, Some(circle_id))));
+    let mirror = inspect_database(&store_dir, audience_mirror).expect("read the audience mirror");
+    assert_eq!(mirror.len(), 2, "Local rows have no Store mirror");
+    assert!(mirror.contains(&(store_account_routing_id, None)));
+    assert!(mirror.contains(&(circle_account_routing_id, Some(circle_id))));
 }
 
 #[tokio::test]
@@ -464,8 +422,9 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
     let authority =
         crate::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
     let (circle_id, _control) = authority.seed_active_circle(CIRCLE_LABEL);
-    let store_account_route = authority.scoped_routing_id("accounts", "store-account");
-    let store_transaction_route = authority.scoped_routing_id("transactions", "store-transaction");
+    let store_account_routing_id = authority.scoped_routing_id("accounts", "store-account");
+    let store_transaction_routing_id =
+        authority.scoped_routing_id("transactions", "store-transaction");
     drop(authority);
 
     capture(&writes, |sql| {
@@ -560,7 +519,7 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
     let move_write_id = moved.write_id.to_string();
     let move_partitions = audience_partition_changesets(&store_dir, &move_write_id)
         .expect("read Store to Circle move partitions");
-    let (host_audience, child_count, routes, mirror) = inspect_database(&store_dir, move |conn| {
+    let (host_audience, child_count, mirror) = inspect_database(&store_dir, move |conn| {
         let audience = conn.query_row(
             "SELECT audience FROM accounts WHERE id = 'store-account'",
             [],
@@ -571,36 +530,19 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
             [],
             |row| row.get::<_, i64>(0),
         )?;
-        let routes = text_triples(
-            conn,
-            "SELECT routing_id, table_name, row_id
-                     FROM _coven_row_routes ORDER BY row_id",
-        )?;
         let mirror = audience_mirror(conn)?;
-        Ok((audience, child_count, routes, mirror))
+        Ok((audience, child_count, mirror))
     })
     .expect("read Store to Circle move partitions");
 
     assert_eq!(host_audience.as_deref(), Some(circle_id.as_str()));
     assert_eq!(child_count, 1);
-    assert_eq!(
-        routes,
-        vec![
-            (
-                store_account_route.clone(),
-                "accounts".to_string(),
-                "store-account".to_string(),
-            ),
-            (
-                store_transaction_route.clone(),
-                "transactions".to_string(),
-                "store-transaction".to_string(),
-            ),
-        ]
-    );
     let mut expected_mirror = vec![
-        (store_transaction_route.clone(), Some(circle_id.clone())),
-        (store_account_route.clone(), Some(circle_id.clone())),
+        (
+            store_transaction_routing_id.clone(),
+            Some(circle_id.clone()),
+        ),
+        (store_account_routing_id.clone(), Some(circle_id.clone())),
     ];
     expected_mirror.sort();
     assert_eq!(
@@ -627,13 +569,12 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
             && change.op == coven_foundation::changeset::ChangeOp::Insert
             && change.pk() == Some("store-transaction")
     }));
-    for routing_id in [&store_account_route, &store_transaction_route] {
-        assert!(circle_changes.iter().any(|change| {
-            change.table == "_coven_row_routes"
-                && change.op == coven_foundation::changeset::ChangeOp::Insert
-                && change.pk() == Some(routing_id)
-        }));
-    }
+    assert!(
+        circle_changes
+            .iter()
+            .all(|change| !crate::is_routing_table(&change.table)),
+        "the destination materialization carries rows, not routing",
+    );
     let store = move_partitions
         .iter()
         .find(|(audience, _)| audience == "store")
@@ -642,7 +583,7 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
     assert!(store_changes
         .iter()
         .all(|change| change.table != "accounts" && change.table != "transactions"));
-    for routing_id in [&store_account_route, &store_transaction_route] {
+    for routing_id in [&store_account_routing_id, &store_transaction_routing_id] {
         assert!(store_changes.iter().any(|change| {
             change.table == "_coven_audience"
                 && change.op == coven_foundation::changeset::ChangeOp::Update
@@ -725,14 +666,13 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
                 [rejected_id],
                 |row| row.get::<_, i64>(0),
             )?;
-            let routes = row_count(conn, "_coven_row_routes")?;
             let mirror = row_count(conn, "_coven_audience")?;
             let writes = row_count(conn, "store_writes")?;
             let partitions = row_count(conn, "store_write_partitions")?;
-            Ok((host_rows, routes, mirror, writes, partitions))
+            Ok((host_rows, mirror, writes, partitions))
         })
         .expect("read state after rejected scoped write");
-        assert_eq!(state, (0, 0, 0, 0, 0), "{id} left durable state");
+        assert_eq!(state, (0, 0, 0, 0), "{id} left durable state");
     }
 }
 
@@ -769,14 +709,16 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     let authority =
         crate::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
     let (circle_id, _control) = authority.seed_active_circle(CIRCLE_LABEL);
-    let local_move_account_route = authority.scoped_routing_id("accounts", "local-move-account");
-    let local_move_transaction_route =
+    let local_move_account_routing_id =
+        authority.scoped_routing_id("accounts", "local-move-account");
+    let local_move_transaction_routing_id =
         authority.scoped_routing_id("transactions", "local-move-transaction");
-    let store_move_account_route = authority.scoped_routing_id("accounts", "store-move-account");
-    let store_move_transaction_route =
+    let store_move_account_routing_id =
+        authority.scoped_routing_id("accounts", "store-move-account");
+    let store_move_transaction_routing_id =
         authority.scoped_routing_id("transactions", "store-move-transaction");
-    let deleted_account_route = authority.scoped_routing_id("accounts", "deleted-account");
-    let deleted_transaction_route =
+    let deleted_account_routing_id = authority.scoped_routing_id("accounts", "deleted-account");
+    let deleted_transaction_routing_id =
         authority.scoped_routing_id("transactions", "deleted-transaction");
     drop(authority);
 
@@ -804,11 +746,6 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     .expect("seed three Circle subtrees");
 
     let before_failure = inspect_database(&store_dir, |conn| {
-        let routes = text_quads(
-            conn,
-            "SELECT routing_id, table_name, row_id, _updated_at
-                     FROM _coven_row_routes ORDER BY routing_id",
-        )?;
         let mirror = conn.query(
             "SELECT routing_id, circle_id, _updated_at
                      FROM _coven_audience ORDER BY routing_id",
@@ -823,7 +760,7 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         )?;
         let writes = row_count(conn, "store_writes")?;
         let partitions = row_count(conn, "store_write_partitions")?;
-        Ok((routes, mirror, writes, partitions))
+        Ok((mirror, writes, partitions))
     })
     .expect("read state before injected failure");
     let fault = rusqlite::Connection::open(store_dir.db_path()).expect("open fault injector");
@@ -852,11 +789,6 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
             [],
             |row| row.get::<_, String>(0),
         )?;
-        let routes = text_quads(
-            conn,
-            "SELECT routing_id, table_name, row_id, _updated_at
-                     FROM _coven_row_routes ORDER BY routing_id",
-        )?;
         let mirror = conn.query(
             "SELECT routing_id, circle_id, _updated_at
                      FROM _coven_audience ORDER BY routing_id",
@@ -871,14 +803,13 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         )?;
         let writes = row_count(conn, "store_writes")?;
         let partitions = row_count(conn, "store_write_partitions")?;
-        Ok((audience, routes, mirror, writes, partitions))
+        Ok((audience, mirror, writes, partitions))
     })
     .expect("read rolled-back Circle transition");
     assert_eq!(after_failure.0, circle_id);
     assert_eq!(after_failure.1, before_failure.0);
     assert_eq!(after_failure.2, before_failure.1);
     assert_eq!(after_failure.3, before_failure.2);
-    assert_eq!(after_failure.4, before_failure.3);
     fault
         .execute_batch("DROP TRIGGER fail_circle_transition_partition;")
         .expect("remove Circle transition partition failure");
@@ -904,22 +835,16 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         .expect("read Circle-to-Local transition partitions");
     let local_raw_changeset = captured_changeset(&store_dir, &local_write_id)
         .expect("read Circle-to-Local captured changeset");
-    let (local_routes, local_mirror_count) = inspect_database(&store_dir, move |conn| {
-        let routes = conn.query(
-            "SELECT routing_id, row_id FROM _coven_row_routes
-                     WHERE row_id IN ('local-move-account', 'local-move-transaction')
-                     ORDER BY row_id",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        let mirror_count = conn.query_row(
-            "SELECT count(*) FROM _coven_audience audience
-                 JOIN _coven_row_routes route USING (routing_id)
-                 WHERE route.row_id IN ('local-move-account', 'local-move-transaction')",
-            [],
+    let local_mirror_routing_ids = [
+        local_move_account_routing_id.clone(),
+        local_move_transaction_routing_id.clone(),
+    ];
+    let local_mirror_count = inspect_database(&store_dir, move |conn| {
+        conn.query_row(
+            "SELECT count(*) FROM _coven_audience WHERE routing_id IN (?1, ?2)",
+            [&local_mirror_routing_ids[0], &local_mirror_routing_ids[1]],
             |row| row.get::<_, i64>(0),
-        )?;
-        Ok((routes, mirror_count))
+        )
     })
     .expect("read Circle-to-Local transition");
     assert_eq!(local_partitions.len(), 2);
@@ -954,22 +879,23 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
             id,
         ));
     }
-    for route in [&local_move_account_route, &local_move_transaction_route] {
-        assert!(has_change(
-            &local_retention,
-            "_coven_row_routes",
-            coven_foundation::changeset::ChangeOp::Insert,
-            route,
-        ));
-    }
+    assert!(
+        local_retention
+            .iter()
+            .all(|change| !crate::is_routing_table(&change.table)),
+        "the Local retention image carries rows, not routing",
+    );
     let store_mirror_retract =
         crate::walk_changeset(&local_partition("store").1).expect("walk Store mirror");
-    for route in [&local_move_account_route, &local_move_transaction_route] {
+    for routing_id in [
+        &local_move_account_routing_id,
+        &local_move_transaction_routing_id,
+    ] {
         assert!(has_change(
             &store_mirror_retract,
             "_coven_audience",
             coven_foundation::changeset::ChangeOp::Delete,
-            route
+            routing_id
         ));
     }
     assert_ne!(local_raw_changeset, local_partition("store").1);
@@ -984,23 +910,10 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     assert!(raw_changes
         .iter()
         .any(|change| change.table == "_coven_audience"));
-    assert!(raw_changes
-        .iter()
-        .any(|change| change.table == "_coven_row_routes"));
     assert_eq!(
-        local_routes,
-        vec![
-            (
-                local_move_account_route.clone(),
-                "local-move-account".to_string(),
-            ),
-            (
-                local_move_transaction_route.clone(),
-                "local-move-transaction".to_string(),
-            ),
-        ]
+        local_mirror_count, 0,
+        "a component moved Local keeps no Store audience mirror",
     );
-    assert_eq!(local_mirror_count, 0);
 
     let store_move = capture(&writes, |sql| {
         sql.execute(
@@ -1015,24 +928,18 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     let store_write_id = store_move.write_id.to_string();
     let store_partitions = audience_partition_changesets(&store_dir, &store_write_id)
         .expect("read Circle-to-Store transition partitions");
-    let (store_routes, store_mirror) = inspect_database(&store_dir, move |conn| {
-        let routes = conn.query(
-            "SELECT routing_id, row_id FROM _coven_row_routes
-                     WHERE row_id IN ('store-move-account', 'store-move-transaction')
-                     ORDER BY row_id",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        let mirror = conn.query(
-            "SELECT audience.routing_id, audience.circle_id
-                     FROM _coven_audience audience
-                     JOIN _coven_row_routes route USING (routing_id)
-                     WHERE route.row_id IN ('store-move-account', 'store-move-transaction')
-                     ORDER BY audience.routing_id",
-            [],
+    let store_mirror_routing_ids = [
+        store_move_account_routing_id.clone(),
+        store_move_transaction_routing_id.clone(),
+    ];
+    let store_mirror = inspect_database(&store_dir, move |conn| {
+        conn.query(
+            "SELECT routing_id, circle_id FROM _coven_audience
+                     WHERE routing_id IN (?1, ?2)
+                     ORDER BY routing_id",
+            [&store_mirror_routing_ids[0], &store_mirror_routing_ids[1]],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-        )?;
-        Ok((routes, mirror))
+        )
     })
     .expect("read Circle-to-Store transition");
     assert_eq!(store_partitions.len(), 1);
@@ -1062,22 +969,9 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         coven_foundation::changeset::ChangeOp::Insert,
         "store-move-transaction"
     ));
-    assert_eq!(
-        store_routes,
-        vec![
-            (
-                store_move_account_route.clone(),
-                "store-move-account".to_string(),
-            ),
-            (
-                store_move_transaction_route.clone(),
-                "store-move-transaction".to_string(),
-            ),
-        ]
-    );
     let mut expected_store_mirror = vec![
-        (store_move_transaction_route.clone(), None),
-        (store_move_account_route.clone(), None),
+        (store_move_transaction_routing_id.clone(), None),
+        (store_move_account_routing_id.clone(), None),
     ];
     expected_store_mirror.sort();
     assert_eq!(store_mirror, expected_store_mirror);
@@ -1089,13 +983,13 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     .await
     .expect("delete Circle subtree");
     let delete_write_id = deleted.write_id.to_string();
-    let deleted_routes_for_query = [
-        deleted_account_route.clone(),
-        deleted_transaction_route.clone(),
+    let deleted_routing_ids_for_query = [
+        deleted_account_routing_id.clone(),
+        deleted_transaction_routing_id.clone(),
     ];
     let delete_partitions = audience_partition_changesets(&store_dir, &delete_write_id)
         .expect("read Circle delete partitions");
-    let (host_count, route_count, mirror_count) = inspect_database(&store_dir, move |conn| {
+    let (host_count, mirror_count) = inspect_database(&store_dir, move |conn| {
         let host_count = conn.query_row(
             "SELECT
                     (SELECT count(*) FROM accounts WHERE id = 'deleted-account') +
@@ -1103,17 +997,15 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
             [],
             |row| row.get::<_, i64>(0),
         )?;
-        let route_count = conn.query_row(
-            "SELECT count(*) FROM _coven_row_routes WHERE routing_id IN (?1, ?2)",
-            [&deleted_routes_for_query[0], &deleted_routes_for_query[1]],
-            |row| row.get::<_, i64>(0),
-        )?;
         let mirror_count = conn.query_row(
             "SELECT count(*) FROM _coven_audience WHERE routing_id IN (?1, ?2)",
-            [&deleted_routes_for_query[0], &deleted_routes_for_query[1]],
+            [
+                &deleted_routing_ids_for_query[0],
+                &deleted_routing_ids_for_query[1],
+            ],
             |row| row.get::<_, i64>(0),
         )?;
-        Ok((host_count, route_count, mirror_count))
+        Ok((host_count, mirror_count))
     })
     .expect("read Circle delete transition");
     assert_eq!(delete_partitions.len(), 2);
@@ -1139,23 +1031,23 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     assert!(
         circle_delete
             .iter()
-            .all(|change| change.table != "_coven_row_routes"),
+            .all(|change| !crate::is_routing_table(&change.table)),
         "routing metadata must never be deleted through a private audience"
     );
     let store_delete =
         crate::walk_changeset(&delete_partition("store").1).expect("walk Store delete");
-    for route in [&deleted_account_route, &deleted_transaction_route] {
+    for routing_id in [&deleted_account_routing_id, &deleted_transaction_routing_id] {
         assert!(has_change(
             &store_delete,
             "_coven_audience",
             coven_foundation::changeset::ChangeOp::Delete,
-            route
+            routing_id
         ));
     }
     assert!(delete_partitions
         .iter()
         .all(|(audience, _)| audience != "local"));
-    assert_eq!((host_count, route_count, mirror_count), (0, 0, 0));
+    assert_eq!((host_count, mirror_count), (0, 0));
 }
 
 #[tokio::test]
@@ -1380,9 +1272,8 @@ async fn validates_every_outgoing_synced_fk_audience() {
         let before = inspect_database(&store_dir, move |conn| {
             let writes = row_count(conn, "store_writes")?;
             let partitions = row_count(conn, "store_write_partitions")?;
-            let routes = row_count(conn, "_coven_row_routes")?;
             let mirror = row_count(conn, "_coven_audience")?;
-            Ok((writes, partitions, routes, mirror))
+            Ok((writes, partitions, mirror))
         })
         .expect("read state before rejected relationship");
 
@@ -1414,14 +1305,13 @@ async fn validates_every_outgoing_synced_fk_audience() {
             )?;
             let writes = row_count(conn, "store_writes")?;
             let partitions = row_count(conn, "store_write_partitions")?;
-            let routes = row_count(conn, "_coven_row_routes")?;
             let mirror = row_count(conn, "_coven_audience")?;
-            Ok((host_rows, writes, partitions, routes, mirror))
+            Ok((host_rows, writes, partitions, mirror))
         })
         .expect("read state after rejected relationship");
         assert_eq!(
             after,
-            (0, before.0, before.1, before.2, before.3),
+            (0, before.0, before.1, before.2),
             "{description} left durable state"
         );
     }
@@ -1544,16 +1434,6 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
     .await
     .expect("seed inherited reparenting cases");
 
-    let before_routes = inspect_database(&store_dir, move |conn| {
-        text_triples(
-            conn,
-            "SELECT table_name, row_id, routing_id FROM _coven_row_routes
-                 WHERE table_name IN ('transactions', 'line_items')
-                 ORDER BY table_name, row_id",
-        )
-    })
-    .expect("read routes before reparent");
-
     let moved = capture(&writes, |sql| {
         sql.execute(
             "UPDATE transactions SET account_id = 'circle-b-account', _updated_at = ?1
@@ -1567,17 +1447,6 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
     let write_id = moved.write_id.to_string();
     let partitions = audience_partition_changesets(&store_dir, &write_id)
         .expect("read inherited reparent partitions");
-    let after_routes = inspect_database(&store_dir, move |conn| {
-        let after_routes = text_triples(
-            conn,
-            "SELECT table_name, row_id, routing_id FROM _coven_row_routes
-                     WHERE table_name IN ('transactions', 'line_items')
-                     ORDER BY table_name, row_id",
-        )?;
-        Ok(after_routes)
-    })
-    .expect("read inherited reparent result");
-
     let partition = |audience: &str| {
         partitions
             .iter()
@@ -1775,18 +1644,6 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
         .execute_batch("DROP TRIGGER fail_inherited_reparent_partition;")
         .expect("remove inherited reparent journal failure");
     drop(fault);
-
-    let final_routes = inspect_database(&store_dir, move |conn| {
-        text_triples(
-            conn,
-            "SELECT table_name, row_id, routing_id FROM _coven_row_routes
-                     WHERE table_name IN ('transactions', 'line_items')
-                     ORDER BY table_name, row_id",
-        )
-    })
-    .expect("read routes after inherited reparent matrix");
-    assert_eq!(after_routes, before_routes);
-    assert_eq!(final_routes, before_routes);
 }
 
 #[tokio::test]

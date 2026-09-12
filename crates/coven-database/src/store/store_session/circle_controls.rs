@@ -66,10 +66,15 @@ impl StoreSession<'_> {
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,
         accepted_transition: crate::StoreCommitPublicationOutcome,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<Option<crate::OwnedVerifiedMergeMaterialization>, DbError> {
         self.verified_store_transaction(move |transaction| {
-            let materialization =
-                transaction.activate_circle_operation(journal, verified, accepted_transition)?;
+            let materialization = transaction.activate_circle_operation(
+                journal,
+                verified,
+                accepted_transition,
+                routing_key,
+            )?;
             Ok(StoreTransactionOutcome::Commit(materialization))
         })
     }
@@ -367,6 +372,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,
         accepted_transition: crate::StoreCommitPublicationOutcome,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<Option<crate::OwnedVerifiedMergeMaterialization>, DbError> {
         let authority = &mut *self.authority;
         let gates = self.gates;
@@ -531,15 +537,16 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
         let active_owner =
             ActiveStorePublicationOwner::CircleOperation(journal.operation_id.clone());
         let active_candidate = operation.commit_ref().clone();
-        // A deletion the local device authored prunes its own rows,
-        // routes, and blob bindings in this activation transaction.
-        // Recording the verified activation above already removed its
-        // live access cache while retaining the control activation spine.
+        // A deletion the local device authored prunes its own rows, audience
+        // mirrors, and blob bindings in this activation transaction. Recording
+        // the verified activation above already removed its live access cache
+        // while retaining the control activation spine.
         if store_transaction.circle_current_state_is_deleted(creation.circle_id)? {
             crate::prune_ineligible_scoped_rows(
                 tx,
                 gates,
                 &std::collections::BTreeSet::from([creation.circle_id]),
+                routing_key,
             )
             .map_err(DbError::from)?;
         }
@@ -720,9 +727,15 @@ impl StoreDatabase {
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,
         accepted_transition: crate::StoreCommitPublicationOutcome,
+        routing_key: Option<coven_protocol::circle::RowRoutingKey>,
     ) -> Result<Option<crate::OwnedVerifiedMergeMaterialization>, DbError> {
         self.call_store(move |session| {
-            session.activate_circle_operation(journal, verified, accepted_transition)
+            session.activate_circle_operation(
+                journal,
+                verified,
+                accepted_transition,
+                routing_key.as_ref(),
+            )
         })
         .await
     }

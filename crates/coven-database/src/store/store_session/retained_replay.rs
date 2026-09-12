@@ -345,10 +345,6 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         "_coven_audience",
         ReplayTableDisposition::ReplaceWhenRouting,
     ),
-    (
-        "_coven_row_routes",
-        ReplayTableDisposition::ReplaceWhenRouting,
-    ),
 ];
 
 pub fn projection_table_names(include_routing: bool) -> Vec<String> {

@@ -86,10 +86,10 @@ pub(crate) use audience::{
     active_circle_control, align_inbound_scoped_root_audiences, audience_moves,
     capture_routing_changes, filter_inbound_circle_changeset, filter_inbound_store_rows,
     filter_snapshot_circle_changeset, live_row_audience, normalize_inbound_store_changeset,
-    partition_outbound, prune_ineligible_scoped_rows, prune_private_routes_without_rows,
-    recorded_host_changeset, retain_projection_rows, retain_snapshot_audience_rows,
-    validate_accepted_foreign_key_closure, validate_scoped_foreign_key_audiences,
-    validate_snapshot_routing_state, PartitionedAudienceWrite,
+    partition_outbound, prune_ineligible_scoped_rows, recorded_host_changeset,
+    retain_projection_rows, retain_snapshot_audience_rows, validate_accepted_foreign_key_closure,
+    validate_scoped_foreign_key_audiences, validate_snapshot_routing_state,
+    PartitionedAudienceWrite,
 };
 pub use audience::{
     is_routing_table, store_audience_transitions, AudienceMove, AudiencePartition,
@@ -221,6 +221,15 @@ pub enum GateError {
         source: coven_protocol::synced_schema::RowIdentityError,
     },
     MissingChangesetPrimaryKey(String),
+    /// A captured write deleted a scoped row that held a public audience, but
+    /// this device has no mirror saying which one. The mirror is the only record
+    /// of where the row was, so the deletion cannot be routed to the audience
+    /// that holds it.
+    UnmirroredDeletedRow {
+        table: String,
+        row_id: String,
+        audience: coven_protocol::circle::Audience,
+    },
     MissingAudienceRow {
         table: String,
         row_id: String,
@@ -339,6 +348,14 @@ impl std::fmt::Display for GateError {
             GateError::MissingChangesetPrimaryKey(table) => {
                 write!(f, "scoped changeset row in {table} has no primary key")
             }
+            GateError::UnmirroredDeletedRow {
+                table,
+                row_id,
+                audience,
+            } => write!(
+                f,
+                "deleted scoped row {table}.{row_id} was in {audience:?} but has no Store audience mirror"
+            ),
             GateError::MissingAudienceRow { table, row_id } => {
                 write!(
                     f,

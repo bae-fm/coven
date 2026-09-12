@@ -173,6 +173,7 @@ impl PreparedStoreSnapshot {
                         &local_image,
                         transaction.gates,
                         &covered_suffix,
+                        routing_key.as_ref(),
                     )
                     .map_err(|error| DbError::context("checkpoint Local rows", error))?;
                 transaction

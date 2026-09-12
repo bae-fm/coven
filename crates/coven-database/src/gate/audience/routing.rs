@@ -1,3 +1,4 @@
+use super::inbound::winning_store_audience;
 use super::partitioning::*;
 use super::*;
 
@@ -39,81 +40,38 @@ pub(crate) fn capture_routing_changes(
         })?;
 
     let transitions = routing_transitions(conn, changeset, gates)?;
-    let mut deleted_rows = BTreeMap::new();
-    let mut private_route_rows = BTreeMap::<Audience, Vec<(String, String, String, String)>>::new();
+    // The mirror is where a deleted row's audience is recorded, and the writes
+    // below remove it, so every deletion is answered first.
+    let deleted_rows = deleted_row_audiences(conn, changeset, gates, key, &transitions)?;
     for ((table, row_id), transition) in transitions {
         let routing_id = row_routing_id(key, &table, &row_id).to_string();
-        let (audience, stamp) = match transition {
-            RoutingTransition::Set { audience, stamp } => (audience, Some(stamp)),
-            RoutingTransition::Delete => {
-                let audience = stored_route_audience(conn, &routing_id, &table, &row_id)?;
-                deleted_rows.insert((table.clone(), row_id.clone()), audience.clone());
-                (audience, None)
-            }
+        // A deletion and a move to Local both leave the row with no public
+        // audience, so both retract the mirror.
+        let mirrored = match transition {
+            RoutingTransition::Delete => None,
+            RoutingTransition::Set { audience, stamp } => match audience {
+                Audience::Local => None,
+                Audience::Store => Some((None, stamp)),
+                Audience::Circle(circle_id) => Some((Some(circle_id.to_string()), stamp)),
+            },
         };
-        let Some(stamp) = stamp else {
+        let Some((circle_id, stamp)) = mirrored else {
             conn.execute(
                 "DELETE FROM _coven_audience WHERE routing_id = ?1",
                 [&routing_id],
             )
             .map_err(|source| GateError::Sql("delete Store audience mirror".to_string(), source))?;
-            conn.execute(
-                "DELETE FROM _coven_row_routes WHERE routing_id = ?1",
-                [&routing_id],
-            )
-            .map_err(|source| GateError::Sql("delete private row route".to_string(), source))?;
             continue;
         };
         conn.execute(
-            "INSERT INTO _coven_row_routes
-             (routing_id, table_name, row_id, _updated_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(table_name, row_id) DO UPDATE SET
-                 routing_id = excluded.routing_id,
+            "INSERT INTO _coven_audience (routing_id, circle_id, _updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(routing_id) DO UPDATE SET
+                 circle_id = excluded.circle_id,
                  _updated_at = excluded._updated_at",
-            (&routing_id, &table, &row_id, &stamp),
+            (&routing_id, circle_id, &stamp),
         )
-        .map_err(|source| GateError::Sql("persist private row route".to_string(), source))?;
-        if audience != Audience::Local {
-            private_route_rows
-                .entry(audience.clone())
-                .or_default()
-                .push((
-                    routing_id.clone(),
-                    table.clone(),
-                    row_id.clone(),
-                    stamp.clone(),
-                ));
-        }
-        match audience {
-            Audience::Local => {
-                conn.execute(
-                    "DELETE FROM _coven_audience WHERE routing_id = ?1",
-                    [&routing_id],
-                )
-                .map_err(|source| {
-                    GateError::Sql("remove Local row from Store mirror".to_string(), source)
-                })?;
-            }
-            Audience::Store | Audience::Circle(_) => {
-                let circle_id = match audience {
-                    Audience::Circle(circle_id) => Some(circle_id.to_string()),
-                    Audience::Store => None,
-                    Audience::Local => unreachable!(),
-                };
-                conn.execute(
-                    "INSERT INTO _coven_audience (routing_id, circle_id, _updated_at)
-                     VALUES (?1, ?2, ?3)
-                     ON CONFLICT(routing_id) DO UPDATE SET
-                         circle_id = excluded.circle_id,
-                         _updated_at = excluded._updated_at",
-                    (&routing_id, circle_id, &stamp),
-                )
-                .map_err(|source| {
-                    GateError::Sql("persist Store audience mirror".to_string(), source)
-                })?;
-            }
-        }
+        .map_err(|source| GateError::Sql("persist Store audience mirror".to_string(), source))?;
     }
 
     let mut out = Vec::new();
@@ -123,52 +81,58 @@ pub(crate) fn capture_routing_changes(
             operation: "extract routing journal".to_string(),
             source,
         })?;
-    let private_routes = private_route_rows
-        .into_iter()
-        .map(|(audience, rows)| Ok((audience, private_route_insert_changeset(&rows)?)))
-        .collect::<Result<BTreeMap<_, _>, GateError>>()?;
     Ok(RoutingChanges {
         store_mirror: out,
-        private_routes,
         deleted_rows,
     })
 }
 
-pub(crate) fn private_route_insert_changeset(
-    rows: &[(String, String, String, String)],
-) -> Result<Vec<u8>, GateError> {
-    let conn = Connection::open_in_memory()
-        .map_err(|source| GateError::Sql("open private route image".to_string(), source))?;
-    crate::apply_coven_routing_schema(&conn)
-        .map_err(|source| GateError::Sql("create private route image".to_string(), source))?;
-    let mut session =
-        rusqlite::session::Session::new(&conn).map_err(|source| GateError::Session {
-            operation: "create private route image".to_string(),
-            source,
-        })?;
-    session
-        .attach(Some("_coven_row_routes"))
-        .map_err(|source| GateError::Session {
-            operation: "attach private route image".to_string(),
-            source,
-        })?;
-    for (routing_id, table, row_id, stamp) in rows {
-        conn.execute(
-            "INSERT INTO _coven_row_routes
-             (routing_id, table_name, row_id, _updated_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            (routing_id, table, row_id, stamp),
-        )
-        .map_err(|source| GateError::Sql("insert private route image".to_string(), source))?;
+/// Where each row this write deletes was before the write, read from the public
+/// mirror it is about to lose. A row with no mirror never had a public audience,
+/// which is only true of a Local row — resolved on the state before this write,
+/// because the same write can move the row's scoped root to Local while deleting
+/// the row, and the live value then describes the move rather than the row's
+/// standing audience. Anything else is a mirror that went missing, which no
+/// later pass can reconstruct.
+fn deleted_row_audiences(
+    conn: &Connection,
+    changeset: &[u8],
+    gates: &Gates,
+    key: &RowRoutingKey,
+    transitions: &BTreeMap<(String, String), RoutingTransition>,
+) -> Result<BTreeMap<(String, String), Audience>, GateError> {
+    let mut audiences = BTreeMap::new();
+    let mut unmirrored = Vec::new();
+    for ((table, row_id), transition) in transitions {
+        if !matches!(transition, RoutingTransition::Delete) {
+            continue;
+        }
+        let routing_id = row_routing_id(key, table, row_id).to_string();
+        match winning_store_audience(conn, &routing_id)? {
+            Some(audience) => {
+                audiences.insert((table.clone(), row_id.clone()), audience);
+            }
+            None => unmirrored.push((table.clone(), row_id.clone())),
+        }
     }
-    let mut changeset = Vec::new();
-    session
-        .changeset_strm(&mut changeset)
-        .map_err(|source| GateError::Session {
-            operation: "extract private route image".to_string(),
-            source,
-        })?;
-    Ok(changeset)
+    if unmirrored.is_empty() {
+        return Ok(audiences);
+    }
+    with_pre_write_synced_projection(conn, gates, changeset, |before| {
+        for (table, row_id) in &unmirrored {
+            let audience = live_row_audience(before, gates, table, row_id)?;
+            if audience != Audience::Local {
+                return Err(GateError::UnmirroredDeletedRow {
+                    table: table.clone(),
+                    row_id: row_id.clone(),
+                    audience,
+                });
+            }
+            audiences.insert((table.clone(), row_id.clone()), Audience::Local);
+        }
+        Ok(())
+    })?;
+    Ok(audiences)
 }
 
 pub(crate) enum RoutingTransition {
@@ -356,40 +320,6 @@ pub(crate) fn live_row_stamp(
         GateError::MissingAudienceRow {
             table: table.to_string(),
             row_id: row_id.to_string(),
-        }
-    })
-}
-
-pub(crate) fn stored_route_audience(
-    conn: &Connection,
-    routing_id: &str,
-    table: &str,
-    row_id: &str,
-) -> Result<Audience, GateError> {
-    let mirror = query_row_optional(
-        conn,
-        "SELECT audience.routing_id IS NOT NULL, audience.circle_id
-         FROM _coven_row_routes AS route
-         LEFT JOIN _coven_audience AS audience
-           ON audience.routing_id = route.routing_id
-         WHERE route.routing_id = ?1
-           AND route.table_name = ?2
-           AND route.row_id = ?3",
-        (routing_id, table, row_id),
-        |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
-    )?
-    .ok_or_else(|| GateError::MissingAudienceRow {
-        table: table.to_string(),
-        row_id: row_id.to_string(),
-    })?;
-    if !mirror.0 {
-        return Ok(Audience::Local);
-    }
-    Audience::from_column(mirror.1.as_deref()).map_err(|source| {
-        GateError::InvalidAudienceEncoding {
-            table: table.to_string(),
-            value: mirror.1,
-            source,
         }
     })
 }

@@ -498,6 +498,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn delete_circle(
         &mut self,
         circle_id: CircleId,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<(), CircleOperationError> {
         if self
             .database
@@ -553,7 +554,22 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             }
         }
         drop(plan);
-        self.publisher().publish(&operation_id, None).await
+        // Activating the deletion prunes the Circle's scoped rows and the audience
+        // mirrors that name them, and a mirror is found by the routing id its row
+        // derives — so the deletion carries the key even though it distributes no
+        // rows of its own.
+        let routing_key = routing_encryption
+            .map(|encryption| {
+                coven_protocol::circle::derive_row_routing_key(
+                    encryption,
+                    self.writer.store_root().store_root_hash,
+                )
+            })
+            .transpose()
+            .map_err(CircleOperationError::from)?;
+        self.publisher()
+            .publish(&operation_id, routing_key.as_ref())
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]

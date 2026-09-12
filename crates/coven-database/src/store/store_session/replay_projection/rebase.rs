@@ -7,6 +7,7 @@ impl ReplayProjection {
         live: &mut VerifiedStoreTransaction<'_, '_, '_, '_>,
         effect: crate::MergeReplayWriteEffect,
         publication_base: &StorePublicationBase,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<(), DbError> {
         let source = StoreRecords::new(live.store.transaction, live.store.store_dir);
         let (original_hash, encoded_facts): (String, String) = live.store.transaction.query_row(
@@ -41,7 +42,6 @@ impl ReplayProjection {
             }
             if live.gates.has_scoped_graph() {
                 capture.attach(Some("_coven_audience"))?;
-                capture.attach(Some("_coven_row_routes"))?;
             }
             let mut private_rows = materializer.capture_replay_rows(live.gates, &schema)?;
             materializer.apply_unaccepted_replay_effect(
@@ -50,6 +50,7 @@ impl ReplayProjection {
                 effect.clone(),
                 schema,
                 live.gates,
+                routing_key,
                 &mut private_rows,
             )?;
             let actual = crate::capture_changeset(&mut capture)?;

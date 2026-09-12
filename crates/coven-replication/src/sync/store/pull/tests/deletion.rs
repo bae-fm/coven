@@ -137,7 +137,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
 
     // The member pulls the deletion (and the late pre-deletion package) and
-    // converges identically: rows, routes, and the late package are gone.
+    // converges identically: rows, mirrors, and the late package are gone.
     fixture
         .pull_member()
         .await
@@ -146,10 +146,6 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     assert!(pruned.row.is_none(), "the member's Circle row is pruned");
-    assert!(
-        pruned.route.is_none(),
-        "the member's private route is pruned"
-    );
     assert!(
         member_database
             .scoped_routing_state_for_test(READD_EFFECTIVE_ACCESS_ROW_ID)

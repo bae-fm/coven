@@ -12,7 +12,8 @@ use super::model::{
 use super::outbound::{
     deleted_or_live_parent, fk_parent_row, full_state_diff, gate_store_outbound,
     pre_write_full_state_diff, query_column_present, query_column_text, row_id_for_column_value,
-    DeletedAudiences, DeletedParent, FkParentRow, FullStateDirection, UnresolvedAudience,
+    with_pre_write_synced_projection, DeletedAudiences, DeletedParent, FkParentRow,
+    FullStateDirection, UnresolvedAudience,
 };
 use super::{
     all_row_ids, query_mapped_rows, query_row_optional, CircleControlFailure, GateError,
@@ -40,12 +41,12 @@ pub(crate) use partitioning::{
 };
 pub(crate) use routing::{active_circle_control, capture_routing_changes, live_row_audience};
 pub(crate) use snapshot_pruning::{
-    prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_projection_rows,
-    retain_snapshot_audience_rows, validate_snapshot_routing_state,
+    prune_ineligible_scoped_rows, retain_projection_rows, retain_snapshot_audience_rows,
+    validate_snapshot_routing_state,
 };
 
 pub fn is_routing_table(table: &str) -> bool {
-    matches!(table, "_coven_audience" | "_coven_row_routes")
+    table == "_coven_audience"
 }
 
 /// Remove capture-generated routing rows before reapplying the host's recorded
@@ -122,7 +123,6 @@ impl CirclePartitionControl {
 
 pub struct RoutingChanges {
     store_mirror: Vec<u8>,
-    private_routes: BTreeMap<Audience, Vec<u8>>,
     deleted_rows: BTreeMap<(String, String), Audience>,
 }
 
@@ -141,7 +141,6 @@ impl RoutingChanges {
     pub fn empty() -> Self {
         Self {
             store_mirror: Vec::new(),
-            private_routes: BTreeMap::new(),
             deleted_rows: BTreeMap::new(),
         }
     }

@@ -770,7 +770,7 @@ impl<'store> StoreRecords<'store> {
                 "SELECT
                      (SELECT COUNT(*) FROM documents),
                      (SELECT COUNT(*) FROM paragraphs),
-                     (SELECT COUNT(*) FROM _coven_row_routes)",
+                     (SELECT COUNT(*) FROM _coven_audience)",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -783,7 +783,7 @@ impl<'store> StoreRecords<'store> {
             .query_row(
                 "SELECT
                      (SELECT COUNT(*) FROM documents),
-                     (SELECT COUNT(*) FROM _coven_row_routes),
+                     (SELECT COUNT(*) FROM _coven_audience),
                      (SELECT ordinary FROM documents)",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -867,8 +867,14 @@ impl<'store> StoreRecords<'store> {
         local_image: &[u8],
         gates: &crate::Gates,
         covered_suffix: &[crate::MergeReplayWriteEffect],
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<Vec<u8>, DbError> {
-        self.received_snapshot_image_with_local_rows_records(local_image, gates, covered_suffix)
+        self.received_snapshot_image_with_local_rows_records(
+            local_image,
+            gates,
+            covered_suffix,
+            routing_key,
+        )
     }
 }
 

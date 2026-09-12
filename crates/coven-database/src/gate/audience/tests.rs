@@ -2,7 +2,7 @@ use super::inbound::*;
 use super::routing::*;
 use super::*;
 use coven_protocol::synced_schema::{RowIdentity, SyncedTable};
-use rusqlite::session::{ConflictAction, Session};
+use rusqlite::session::Session;
 
 fn routing_schema(conn: &Connection) {
     conn.execute_batch(
@@ -16,13 +16,6 @@ fn routing_schema(conn: &Connection) {
                  routing_id TEXT PRIMARY KEY,
                  circle_id TEXT,
                  _updated_at TEXT NOT NULL
-             ) STRICT;
-             CREATE TABLE _coven_row_routes (
-                 routing_id TEXT PRIMARY KEY,
-                 table_name TEXT NOT NULL,
-                 row_id TEXT NOT NULL,
-                 _updated_at TEXT NOT NULL,
-                 UNIQUE(table_name, row_id)
              ) STRICT;
              CREATE TABLE row_blob_locators (
                  table_name TEXT NOT NULL,
@@ -62,6 +55,10 @@ fn store_transitions(
             .map(|(routing_id, audience, stamp)| (routing_id, (audience, stamp)))
             .collect(),
     }
+}
+
+fn no_held_rows() -> BTreeSet<(String, String)> {
+    BTreeSet::new()
 }
 
 /// Capturing a write's routing is the write that installs its audience mirror,
@@ -113,14 +110,164 @@ fn capturing_a_write_s_routing_publishes_its_mirror_once() {
     );
 }
 
+/// A deleted row's audience is the one its public mirror names. The row itself
+/// is gone by the time routing is captured, so nothing else on the device still
+/// says where the deletion has to travel.
+#[test]
+fn a_deleted_scoped_row_reports_its_mirrored_audience() {
+    let conn = Connection::open_in_memory().expect("open connection");
+    routing_schema(&conn);
+    let gates = note_gates(&conn);
+    let key = routing_key();
+    let routing_id = row_routing_id(&key, "notes", "row").to_string();
+    conn.execute("INSERT INTO notes VALUES ('row', NULL, 'body', '1')", [])
+        .expect("insert the Store row");
+    conn.execute(
+        "INSERT INTO _coven_audience VALUES (?1, NULL, '1')",
+        [&routing_id],
+    )
+    .expect("install the Store audience mirror");
+    let mut session = Session::new(&conn).expect("create session");
+    session.attach(Some("notes")).expect("attach notes");
+    conn.execute("DELETE FROM notes WHERE id = 'row'", [])
+        .expect("delete the Store row");
+    let mut changeset = Vec::new();
+    session
+        .changeset_strm(&mut changeset)
+        .expect("extract the delete");
+    drop(session);
+
+    let routing =
+        capture_routing_changes(&conn, &changeset, &gates, &key).expect("capture the deletion");
+    assert_eq!(
+        routing
+            .deleted_rows
+            .get(&("notes".to_string(), "row".to_string())),
+        Some(&Audience::Store),
+    );
+    let mirrors: i64 = conn
+        .query_row("SELECT COUNT(*) FROM _coven_audience", [], |row| row.get(0))
+        .expect("count mirrors");
+    assert_eq!(mirrors, 0, "the deletion removes the row's mirror");
+}
+
+/// One write can move a scoped root to Local and delete one of its children.
+/// The child's deletion still belongs to the audience the child was in, which
+/// the mirror records — the root's post-write value describes where the rest of
+/// the component went, not where this row's removal has to be published.
+#[test]
+fn a_child_deleted_while_its_parent_moves_local_keeps_its_prior_audience() {
+    let conn = Connection::open_in_memory().expect("open connection");
+    routing_schema(&conn);
+    conn.execute_batch(
+        "CREATE TABLE comments (
+             id TEXT PRIMARY KEY,
+             note_id TEXT NOT NULL REFERENCES notes(id),
+             body TEXT,
+             _updated_at TEXT NOT NULL
+         ) STRICT;",
+    )
+    .expect("create the child table");
+    let gates = Gates::from_tables(
+        &conn,
+        &[
+            SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience"),
+            SyncedTable::new("comments", RowIdentity::IndependentUuid)
+                .inherits_audience_through("note_id"),
+        ],
+    )
+    .expect("build scoped gates");
+    let key = routing_key();
+    conn.execute_batch(
+        "INSERT INTO notes VALUES ('root', NULL, 'root', '1');
+         INSERT INTO comments VALUES ('child', 'root', 'child', '1');",
+    )
+    .expect("install the Store subtree");
+    for (table, row_id) in [("notes", "root"), ("comments", "child")] {
+        conn.execute(
+            "INSERT INTO _coven_audience VALUES (?1, NULL, '1')",
+            [row_routing_id(&key, table, row_id).to_string()],
+        )
+        .expect("install the Store audience mirror");
+    }
+    let mut session = Session::new(&conn).expect("create session");
+    for table in ["notes", "comments"] {
+        session.attach(Some(table)).expect("attach table");
+    }
+    conn.execute_batch(
+        "DELETE FROM comments WHERE id = 'child';
+         UPDATE notes SET audience = 'local', _updated_at = '2' WHERE id = 'root';",
+    )
+    .expect("retire the child and take the root private");
+    let mut changeset = Vec::new();
+    session
+        .changeset_strm(&mut changeset)
+        .expect("extract the write");
+    drop(session);
+
+    let routing =
+        capture_routing_changes(&conn, &changeset, &gates, &key).expect("capture the write");
+    assert_eq!(
+        routing
+            .deleted_rows
+            .get(&("comments".to_string(), "child".to_string())),
+        Some(&Audience::Store),
+    );
+}
+
+/// A deleted row with no mirror never had a public audience, which is only true
+/// of a Local row. A missing mirror for a row that was in one is a state no
+/// later pass can reconstruct, so the capture refuses it.
+#[test]
+fn a_deleted_scoped_row_without_a_mirror_must_have_been_local() {
+    let key = routing_key();
+    let delete_note = |audience: Option<&str>| {
+        let conn = Connection::open_in_memory().expect("open connection");
+        routing_schema(&conn);
+        let gates = note_gates(&conn);
+        conn.execute(
+            "INSERT INTO notes VALUES ('row', ?1, 'body', '1')",
+            [audience],
+        )
+        .expect("insert the row");
+        let mut session = Session::new(&conn).expect("create session");
+        session.attach(Some("notes")).expect("attach notes");
+        conn.execute("DELETE FROM notes WHERE id = 'row'", [])
+            .expect("delete the row");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract the delete");
+        drop(session);
+        capture_routing_changes(&conn, &changeset, &gates, &key).map(|routing| routing.deleted_rows)
+    };
+
+    let error = delete_note(None).expect_err("an unmirrored Store row must be refused");
+    assert!(
+        matches!(
+            &error,
+            GateError::UnmirroredDeletedRow {
+                table,
+                row_id,
+                audience,
+            } if table == "notes" && row_id == "row" && audience == &Audience::Store
+        ),
+        "{error}",
+    );
+
+    let deleted = delete_note(Some("local")).expect("a Local row needs no mirror");
+    assert_eq!(
+        deleted.get(&("notes".to_string(), "row".to_string())),
+        Some(&Audience::Local),
+    );
+}
+
 #[test]
 fn inbound_circle_filter_keeps_only_rows_owned_by_its_winning_mirror() {
     let source = Connection::open_in_memory().expect("open source");
     routing_schema(&source);
     let mut session = Session::new(&source).expect("create source session");
-    for table in ["notes", "_coven_row_routes"] {
-        session.attach(Some(table)).expect("attach source table");
-    }
+    session.attach(Some("notes")).expect("attach source table");
     let first = CircleId::from_bytes([1; 16]);
     let second = CircleId::from_bytes([2; 16]);
     let key = routing_key();
@@ -138,18 +285,6 @@ fn inbound_circle_filter_keeps_only_rows_owned_by_its_winning_mirror() {
             ("second", first.to_string()),
         )
         .expect("insert second note");
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'first', '1')",
-            [&first_route],
-        )
-        .expect("insert first route");
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'second', '1')",
-            [&second_route],
-        )
-        .expect("insert second route");
     let mut changeset = Vec::new();
     session
         .changeset_strm(&mut changeset)
@@ -187,18 +322,16 @@ fn inbound_circle_filter_keeps_only_rows_owned_by_its_winning_mirror() {
         &changeset,
         first,
         &transitions,
+        &no_held_rows(),
         &note_gates(&target),
         &key,
     )
     .expect("filter first Circle package");
     let rows = crate::walk_changeset(&filtered).expect("walk filtered changeset");
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 1, "{rows:?}");
     assert!(rows
         .iter()
         .any(|row| row.table == "notes" && row.pk() == Some("first")));
-    assert!(rows
-        .iter()
-        .any(|row| { row.table == "_coven_row_routes" && row.pk() == Some(first_route.as_str()) }));
 }
 
 #[test]
@@ -227,6 +360,7 @@ fn inbound_circle_filter_rejects_a_store_mirror_change() {
         &changeset,
         CircleId::from_bytes([1; 16]),
         &StoreAudienceTransitions::default(),
+        &no_held_rows(),
         &note_gates(&target),
         &routing_key(),
     )
@@ -234,347 +368,55 @@ fn inbound_circle_filter_rejects_a_store_mirror_change() {
     assert!(matches!(error, GateError::InvalidInboundAudiencePackage(_)));
 }
 
+/// A package states rows of the tables the receiver declares, and the audience
+/// mirror. Anything else names a table this device has no routing contract for.
 #[test]
-fn inbound_circle_filter_rejects_a_route_for_an_unscoped_table() {
-    let source = Connection::open_in_memory().expect("open source");
-    routing_schema(&source);
-    let mut session = Session::new(&source).expect("create source session");
-    session
-        .attach(Some("_coven_row_routes"))
-        .expect("attach private routes");
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES ('route', 'unknown', 'row', '1')",
-            [],
-        )
-        .expect("insert undeclared route");
-    let mut changeset = Vec::new();
-    session
-        .changeset_strm(&mut changeset)
-        .expect("extract route changeset");
-    let target = Connection::open_in_memory().expect("open target");
-    routing_schema(&target);
-    let circle = CircleId::from_bytes([1; 16]);
-    target
-        .execute(
-            "INSERT INTO _coven_audience VALUES ('route', ?1, '2')",
-            [circle.to_string()],
-        )
-        .expect("install winning mirror");
-
-    let error = filter_inbound_circle_changeset(
-        &target,
-        &changeset,
-        circle,
-        &StoreAudienceTransitions::default(),
-        &note_gates(&target),
-        &routing_key(),
-    )
-    .expect_err("Circle package route must name a scoped table");
-    assert!(matches!(error, GateError::InvalidInboundAudiencePackage(_)));
-}
-
-#[test]
-fn inbound_circle_filter_rejects_a_private_route_update() {
+fn inbound_package_rejects_an_undeclared_table() {
     let source = Connection::open_in_memory().expect("open source");
     routing_schema(&source);
     source
         .execute_batch(
-            "CREATE TABLE tasks (
-                     id TEXT PRIMARY KEY,
-                     audience TEXT,
-                     body TEXT,
-                     _updated_at TEXT NOT NULL
-                 ) STRICT;",
+            "CREATE TABLE strays (
+                 id TEXT PRIMARY KEY,
+                 body TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
         )
-        .expect("create second scoped table");
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES ('route', 'notes', 'row', '1')",
-            [],
-        )
-        .expect("seed private route");
+        .expect("create an undeclared table");
     let mut session = Session::new(&source).expect("create source session");
     session
-        .attach(Some("_coven_row_routes"))
-        .expect("attach private routes");
+        .attach(Some("strays"))
+        .expect("attach the undeclared table");
     source
-        .execute(
-            "UPDATE _coven_row_routes
-                 SET table_name = 'tasks', row_id = 'row2', _updated_at = '2'
-                 WHERE routing_id = 'route'",
-            [],
-        )
-        .expect("update private route");
+        .execute("INSERT INTO strays VALUES ('row', 'body', '1')", [])
+        .expect("insert an undeclared row");
     let mut changeset = Vec::new();
     session
         .changeset_strm(&mut changeset)
-        .expect("extract route update");
-
+        .expect("extract the undeclared changeset");
     let target = Connection::open_in_memory().expect("open target");
     routing_schema(&target);
-    target
-        .execute_batch(
-            "CREATE TABLE tasks (
-                     id TEXT PRIMARY KEY,
-                     audience TEXT,
-                     body TEXT,
-                     _updated_at TEXT NOT NULL
-                 ) STRICT;",
-        )
-        .expect("create second scoped table");
-    let circle = CircleId::from_bytes([1; 16]);
-    target
-        .execute(
-            "INSERT INTO _coven_audience VALUES ('route', ?1, '2')",
-            [circle.to_string()],
-        )
-        .expect("install winning mirror");
-    let gates = Gates::from_tables(
-        &target,
-        &[
-            SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience"),
-            SyncedTable::new("tasks", RowIdentity::IndependentUuid).scoped_by("audience"),
-        ],
-    )
-    .expect("build scoped gates");
 
     let error = filter_inbound_circle_changeset(
         &target,
         &changeset,
-        circle,
+        CircleId::from_bytes([1; 16]),
         &StoreAudienceTransitions::default(),
-        &gates,
-        &routing_key(),
-    )
-    .expect_err("private routes must be complete INSERT images");
-    assert!(matches!(error, GateError::InvalidInboundAudiencePackage(_)));
-}
-
-#[test]
-fn inbound_circle_filter_rejects_a_private_route_delete() {
-    let source = Connection::open_in_memory().expect("open source");
-    routing_schema(&source);
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES ('route', 'notes', 'row', '1')",
-            [],
-        )
-        .expect("seed private route");
-    let mut session = Session::new(&source).expect("create source session");
-    session
-        .attach(Some("_coven_row_routes"))
-        .expect("attach private routes");
-    source
-        .execute(
-            "DELETE FROM _coven_row_routes WHERE routing_id = 'route'",
-            [],
-        )
-        .expect("delete private route");
-    let mut changeset = Vec::new();
-    session
-        .changeset_strm(&mut changeset)
-        .expect("extract route delete");
-
-    let target = Connection::open_in_memory().expect("open target");
-    routing_schema(&target);
-    let circle = CircleId::from_bytes([1; 16]);
-    target
-        .execute(
-            "INSERT INTO _coven_audience VALUES ('route', ?1, '2')",
-            [circle.to_string()],
-        )
-        .expect("install winning mirror");
-
-    let error = filter_inbound_circle_changeset(
-        &target,
-        &changeset,
-        circle,
-        &StoreAudienceTransitions::default(),
+        &no_held_rows(),
         &note_gates(&target),
         &routing_key(),
     )
-    .expect_err("private routes must be complete INSERT images");
-    assert!(matches!(error, GateError::InvalidInboundAudiencePackage(_)));
-}
-
-#[test]
-fn inbound_circle_filter_rejects_a_duplicate_private_route() {
-    let key = routing_key();
-    let routing_id = row_routing_id(&key, "notes", "row").to_string();
-    // Two authenticated INSERT images for the same (table, row_id). A session
-    // cannot capture both — the UNIQUE(table_name, row_id) constraint refuses
-    // the second — so concatenate two single-route changesets to forge the
-    // duplicate a malicious package could carry on the wire.
-    let mut changeset = private_route_insert_changeset(&[(
-        routing_id.clone(),
-        "notes".to_string(),
-        "row".to_string(),
-        "1".to_string(),
-    )])
-    .expect("build first route image");
-    changeset.extend(
-        private_route_insert_changeset(&[(
-            routing_id.clone(),
-            "notes".to_string(),
-            "row".to_string(),
-            "1".to_string(),
-        )])
-        .expect("build second route image"),
-    );
-
-    let target = Connection::open_in_memory().expect("open target");
-    routing_schema(&target);
-    let circle = CircleId::from_bytes([1; 16]);
-    target
-        .execute(
-            "INSERT INTO _coven_audience VALUES (?1, ?2, '1')",
-            (&routing_id, circle.to_string()),
-        )
-        .expect("install winning mirror");
-    let transitions = store_transitions([(
-        routing_id.clone(),
-        Audience::Circle(circle),
-        "1".to_string(),
-    )]);
-
-    let error = filter_inbound_circle_changeset(
-        &target,
-        &changeset,
-        circle,
-        &transitions,
-        &note_gates(&target),
-        &key,
-    )
-    .expect_err("a package must not carry two routes for one row");
+    .expect_err("a package must only name declared tables");
     assert!(
         error
             .to_string()
-            .contains("duplicate private route for notes.row"),
-        "{error}"
+            .contains("package names undeclared table strays"),
+        "{error}",
     );
 }
 
 #[test]
-fn inbound_private_route_must_authenticate_its_table_and_row() {
-    let source = Connection::open_in_memory().expect("open source");
-    routing_schema(&source);
-    let mut session = Session::new(&source).expect("create source session");
-    for table in ["notes", "_coven_row_routes"] {
-        session.attach(Some(table)).expect("attach source table");
-    }
-    source
-        .execute("INSERT INTO notes VALUES ('row', NULL, 'body', '1')", [])
-        .expect("insert scoped row");
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
-            ["0".repeat(64)],
-        )
-        .expect("insert forged private route");
-    let mut changeset = Vec::new();
-    session
-        .changeset_strm(&mut changeset)
-        .expect("extract forged route package");
-
-    let target = Connection::open_in_memory().expect("open target");
-    routing_schema(&target);
-    let error = normalize_inbound_store_changeset(
-        &target,
-        &changeset,
-        &note_gates(&target),
-        &routing_key(),
-    )
-    .expect_err("forged private route id must be rejected");
-    assert!(error
-        .to_string()
-        .contains("does not authenticate notes.row"));
-}
-
-#[test]
-fn inbound_private_route_must_accompany_its_complete_row_insert() {
-    let source = Connection::open_in_memory().expect("open source");
-    routing_schema(&source);
-    let key = routing_key();
-    let routing_id = row_routing_id(&key, "notes", "row").to_string();
-    let mut session = Session::new(&source).expect("create source session");
-    session
-        .attach(Some("_coven_row_routes"))
-        .expect("attach private routes");
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
-            [&routing_id],
-        )
-        .expect("insert orphan private route");
-    let mut changeset = Vec::new();
-    session
-        .changeset_strm(&mut changeset)
-        .expect("extract orphan route package");
-
-    let target = Connection::open_in_memory().expect("open target");
-    routing_schema(&target);
-    let error = normalize_inbound_store_changeset(&target, &changeset, &note_gates(&target), &key)
-        .expect_err("orphan private route must be rejected");
-    assert!(error.to_string().contains("has no complete row INSERT"));
-}
-
-#[test]
-fn inbound_private_route_uses_its_audience_transition_stamp() {
-    let source = Connection::open_in_memory().expect("open source");
-    routing_schema(&source);
-    let key = routing_key();
-    let routing_id = row_routing_id(&key, "notes", "row").to_string();
-    let circle = CircleId::from_bytes([1; 16]);
-    let mut session = Session::new(&source).expect("create source session");
-    for table in ["notes", "_coven_row_routes"] {
-        session.attach(Some(table)).expect("attach source table");
-    }
-    source
-        .execute(
-            "INSERT INTO notes VALUES ('row', ?1, 'body', '1')",
-            [circle.to_string()],
-        )
-        .expect("insert scoped row with an older content stamp");
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '2')",
-            [&routing_id],
-        )
-        .expect("insert private route with the audience transition stamp");
-    let mut changeset = Vec::new();
-    session
-        .changeset_strm(&mut changeset)
-        .expect("extract Circle package");
-
-    let target = Connection::open_in_memory().expect("open target");
-    routing_schema(&target);
-    target
-        .execute(
-            "INSERT INTO _coven_audience VALUES (?1, ?2, '2')",
-            (&routing_id, circle.to_string()),
-        )
-        .expect("install winning audience transition");
-
-    let filtered = filter_inbound_circle_changeset(
-        &target,
-        &changeset,
-        circle,
-        &store_transitions([(routing_id, Audience::Circle(circle), "2".to_string())]),
-        &note_gates(&target),
-        &key,
-    )
-    .expect("route stamp follows the audience transition, not row content");
-    assert_eq!(
-        crate::walk_changeset(&filtered)
-            .expect("walk filtered Circle package")
-            .len(),
-        2
-    );
-}
-
-#[test]
-fn inbound_circle_filter_omits_an_authenticated_route_after_a_newer_move() {
+fn inbound_scoped_insert_is_omitted_after_a_newer_move() {
     let source = Connection::open_in_memory().expect("open source");
     routing_schema(&source);
     let key = routing_key();
@@ -582,21 +424,13 @@ fn inbound_circle_filter_omits_an_authenticated_route_after_a_newer_move() {
     let old_circle = CircleId::from_bytes([1; 16]);
     let new_circle = CircleId::from_bytes([2; 16]);
     let mut session = Session::new(&source).expect("create source session");
-    for table in ["notes", "_coven_row_routes"] {
-        session.attach(Some(table)).expect("attach source table");
-    }
+    session.attach(Some("notes")).expect("attach source table");
     source
         .execute(
             "INSERT INTO notes VALUES ('row', ?1, 'old move', '1')",
             [old_circle.to_string()],
         )
         .expect("insert old destination row");
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
-            [&routing_id],
-        )
-        .expect("insert old destination route");
     let mut changeset = Vec::new();
     session
         .changeset_strm(&mut changeset)
@@ -615,6 +449,7 @@ fn inbound_circle_filter_omits_an_authenticated_route_after_a_newer_move() {
         &changeset,
         old_circle,
         &store_transitions([(routing_id, Audience::Circle(old_circle), "1".to_string())]),
+        &no_held_rows(),
         &note_gates(&target),
         &key,
     )
@@ -664,7 +499,7 @@ fn inbound_store_filter_omits_a_stale_edit_after_a_circle_move() {
 }
 
 #[test]
-fn inbound_private_route_must_match_its_store_transition_audience() {
+fn inbound_scoped_insert_must_match_its_store_transition_audience() {
     let source = Connection::open_in_memory().expect("open source");
     routing_schema(&source);
     let key = routing_key();
@@ -672,21 +507,13 @@ fn inbound_private_route_must_match_its_store_transition_audience() {
     let package_circle = CircleId::from_bytes([1; 16]);
     let transition_circle = CircleId::from_bytes([2; 16]);
     let mut session = Session::new(&source).expect("create source session");
-    for table in ["notes", "_coven_row_routes"] {
-        session.attach(Some(table)).expect("attach source table");
-    }
+    session.attach(Some("notes")).expect("attach source table");
     source
         .execute(
             "INSERT INTO notes VALUES ('row', ?1, 'body', '1')",
             [package_circle.to_string()],
         )
         .expect("insert packaged Circle row");
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
-            [&routing_id],
-        )
-        .expect("insert packaged private route");
     let mut changeset = Vec::new();
     session
         .changeset_strm(&mut changeset)
@@ -709,6 +536,7 @@ fn inbound_private_route_must_match_its_store_transition_audience() {
             Audience::Circle(transition_circle),
             "1".to_string(),
         )]),
+        &no_held_rows(),
         &note_gates(&target),
         &key,
     )
@@ -728,21 +556,13 @@ fn inbound_scoped_row_must_match_its_package_audience() {
     let package_circle = CircleId::from_bytes([1; 16]);
     let row_circle = CircleId::from_bytes([2; 16]);
     let mut session = Session::new(&source).expect("create source session");
-    for table in ["notes", "_coven_row_routes"] {
-        session.attach(Some(table)).expect("attach source table");
-    }
+    session.attach(Some("notes")).expect("attach source table");
     source
         .execute(
             "INSERT INTO notes VALUES ('row', ?1, 'body', '1')",
             [row_circle.to_string()],
         )
         .expect("insert row for a different Circle");
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
-            [&routing_id],
-        )
-        .expect("insert private route");
     let mut changeset = Vec::new();
     session
         .changeset_strm(&mut changeset)
@@ -765,6 +585,7 @@ fn inbound_scoped_row_must_match_its_package_audience() {
             Audience::Circle(package_circle),
             "1".to_string(),
         )]),
+        &no_held_rows(),
         &note_gates(&target),
         &key,
     )
@@ -775,126 +596,88 @@ fn inbound_scoped_row_must_match_its_package_audience() {
         .contains("different audience than its row value"));
 }
 
+/// A scoped row INSERT never establishes the row's identity by itself. Without
+/// an audience transition in the same Store package, the receiver has to
+/// already know the row: a mirror, the live row, or a row a replay holds and
+/// has yet to re-materialize. Otherwise a package could name any row id and
+/// have it land.
 #[test]
-fn inbound_private_route_is_rebuilt_as_canonical_text() {
-    let source = Connection::open_in_memory().expect("open source");
-    source
-        .execute_batch(
-            "CREATE TABLE notes (
-                     id TEXT PRIMARY KEY,
-                     audience TEXT,
-                     body TEXT,
-                     _updated_at TEXT NOT NULL
-                 ) STRICT;
-                 CREATE TABLE _coven_row_routes (
-                     routing_id PRIMARY KEY,
-                     table_name,
-                     row_id,
-                     _updated_at,
-                     UNIQUE(table_name, row_id)
-                 );
-                 CREATE TABLE _coven_audience (
-                     routing_id TEXT PRIMARY KEY,
-                     circle_id TEXT,
-                     _updated_at TEXT NOT NULL
-                 );",
-        )
-        .expect("create source schema with untyped private routes");
-    let key = routing_key();
-    let routing_id = row_routing_id(&key, "notes", "row").to_string();
-    let mut session = Session::new(&source).expect("create source session");
-    for table in ["notes", "_coven_audience", "_coven_row_routes"] {
-        session.attach(Some(table)).expect("attach source table");
-    }
-    source
-        .execute("INSERT INTO notes VALUES ('row', NULL, 'body', '1')", [])
-        .expect("insert scoped row");
-    source
-        .execute(
-            "INSERT INTO _coven_row_routes VALUES (?1, ?2, ?3, ?4)",
-            (
-                routing_id.as_bytes().to_vec(),
-                b"notes".to_vec(),
-                b"row".to_vec(),
-                b"1".to_vec(),
-            ),
-        )
-        .expect("insert byte-valued private route");
-    source
-        .execute(
-            "INSERT INTO _coven_audience VALUES (?1, NULL, '1')",
-            [&routing_id],
-        )
-        .expect("insert Store audience transition");
-    let mut changeset = Vec::new();
-    session
-        .changeset_strm(&mut changeset)
-        .expect("extract byte-valued route package");
-
-    let target = Connection::open_in_memory().expect("open target");
-    routing_schema(&target);
-    let normalized =
-        normalize_inbound_store_changeset(&target, &changeset, &note_gates(&target), &key)
-            .expect("normalize authenticated private route");
-    for part in [normalized.mirror, normalized.rows] {
-        target
-            .apply_strm(
-                &mut &part[..],
-                None::<fn(&str) -> bool>,
-                |_conflict, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
-            )
-            .expect("apply normalized package");
-    }
-    let types = target
-        .query_row(
-            "SELECT typeof(routing_id), typeof(table_name), typeof(row_id), typeof(_updated_at)
-                 FROM _coven_row_routes",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        )
-        .expect("read normalized private route types");
-    assert_eq!(
-        types,
-        (
-            "text".to_string(),
-            "text".to_string(),
-            "text".to_string(),
-            "text".to_string(),
-        )
-    );
-}
-
-#[test]
-fn inbound_scoped_row_insert_must_have_a_private_route() {
+fn inbound_scoped_insert_without_a_transition_needs_a_prior_identity() {
     let source = Connection::open_in_memory().expect("open source");
     routing_schema(&source);
+    let key = routing_key();
+    let circle = CircleId::from_bytes([1; 16]);
+    let other_circle = CircleId::from_bytes([2; 16]);
+    let routing_id = row_routing_id(&key, "notes", "row").to_string();
     let mut session = Session::new(&source).expect("create source session");
-    session.attach(Some("notes")).expect("attach scoped table");
+    session.attach(Some("notes")).expect("attach source table");
     source
-        .execute("INSERT INTO notes VALUES ('row', NULL, 'body', '1')", [])
-        .expect("insert unbound scoped row");
+        .execute(
+            "INSERT INTO notes VALUES ('row', ?1, 'body', '1')",
+            [circle.to_string()],
+        )
+        .expect("insert the packaged row");
     let mut changeset = Vec::new();
     session
         .changeset_strm(&mut changeset)
-        .expect("extract unbound row package");
+        .expect("extract the package");
 
-    let target = Connection::open_in_memory().expect("open target");
-    routing_schema(&target);
-    let error = normalize_inbound_store_changeset(
-        &target,
-        &changeset,
-        &note_gates(&target),
-        &routing_key(),
-    )
-    .expect_err("unbound scoped row must be rejected");
-    assert!(error.to_string().contains("has no private route"));
+    let filter = |target: &Connection, held: &BTreeSet<(String, String)>| {
+        filter_inbound_circle_changeset(
+            target,
+            &changeset,
+            circle,
+            &StoreAudienceTransitions::default(),
+            held,
+            &note_gates(target),
+            &key,
+        )
+    };
+
+    let unknown = Connection::open_in_memory().expect("open target");
+    routing_schema(&unknown);
+    let error = filter(&unknown, &no_held_rows())
+        .expect_err("a row this device has never held must be refused");
+    assert!(
+        error.to_string().contains(
+            "scoped row INSERT notes.row has no Store audience transition and no prior identity"
+        ),
+        "{error}",
+    );
+
+    let mirrored = Connection::open_in_memory().expect("open target");
+    routing_schema(&mirrored);
+    mirrored
+        .execute(
+            "INSERT INTO _coven_audience VALUES (?1, ?2, '1')",
+            (&routing_id, other_circle.to_string()),
+        )
+        .expect("install a mirror for another audience");
+    assert!(
+        crate::walk_changeset(
+            &filter(&mirrored, &no_held_rows()).expect("a mirrored row has an identity")
+        )
+        .expect("walk the filtered package")
+        .is_empty(),
+        "the winning mirror names another audience, so the row is omitted",
+    );
+
+    let local = Connection::open_in_memory().expect("open target");
+    routing_schema(&local);
+    local
+        .execute("INSERT INTO notes VALUES ('row', 'local', 'mine', '1')", [])
+        .expect("hold the row Local");
+    assert!(
+        crate::walk_changeset(&filter(&local, &no_held_rows()).expect("a live row is an identity"))
+            .expect("walk the filtered package")
+            .is_empty(),
+        "a Local row has no winning mirror, so the package is omitted",
+    );
+
+    let holding = Connection::open_in_memory().expect("open target");
+    routing_schema(&holding);
+    let held = BTreeSet::from([("notes".to_string(), "row".to_string())]);
+    filter(&holding, &held).expect("a held private row carries the identity through its replay");
 }
 
 #[test]
@@ -905,11 +688,6 @@ fn store_snapshot_routing_stamp_is_independent_from_content_stamp() {
     let routing_id = row_routing_id(&key, "notes", "row").to_string();
     conn.execute("INSERT INTO notes VALUES ('row', NULL, 'edited', '2')", [])
         .expect("insert content-edited Store row");
-    conn.execute(
-        "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
-        [&routing_id],
-    )
-    .expect("insert private route at the audience-transition stamp");
     conn.execute(
         "INSERT INTO _coven_audience VALUES (?1, NULL, '1')",
         [&routing_id],
@@ -924,8 +702,9 @@ fn store_snapshot_routing_stamp_is_independent_from_content_stamp() {
 fn audience_prune_removes_stale_scoped_subtrees_and_keeps_local_rows() {
     let conn = Connection::open_in_memory().expect("open target");
     routing_schema(&conn);
+    let key = routing_key();
     conn.execute_batch(
-            "PRAGMA foreign_keys = ON;
+        "PRAGMA foreign_keys = ON;
              CREATE TABLE comments (
                  id TEXT PRIMARY KEY,
                  note_id TEXT NOT NULL REFERENCES notes(id),
@@ -933,22 +712,15 @@ fn audience_prune_removes_stale_scoped_subtrees_and_keeps_local_rows() {
                  _updated_at TEXT NOT NULL
              ) STRICT;
              INSERT INTO notes VALUES ('local', 'local', 'local', '1');
-             INSERT INTO comments VALUES ('local-child', 'local', 'local', '1');
-             INSERT INTO _coven_row_routes VALUES ('local-route', 'notes', 'local', '1');
-             INSERT INTO _coven_row_routes VALUES ('local-child-route', 'comments', 'local-child', '1');
-             INSERT INTO _coven_row_routes VALUES ('orphan-route', 'notes', 'absent', '1');",
-        )
-        .expect("install scoped rows");
+             INSERT INTO comments VALUES ('local-child', 'local', 'local', '1');",
+    )
+    .expect("install scoped rows");
     conn.execute(
         "INSERT INTO notes VALUES ('stale', ?1, 'stale', '1')",
         [CircleId::from_bytes([1; 16]).to_string()],
     )
     .expect("install stale root");
-    conn.execute_batch(
-            "INSERT INTO comments VALUES ('stale-child', 'stale', 'stale', '1');
-             INSERT INTO _coven_row_routes VALUES ('stale-route', 'notes', 'stale', '1');
-             INSERT INTO _coven_row_routes VALUES ('stale-child-route', 'comments', 'stale-child', '1');",
-        )
+    conn.execute_batch("INSERT INTO comments VALUES ('stale-child', 'stale', 'stale', '1');")
         .expect("install stale subtree");
     let inactive = CircleId::from_bytes([2; 16]);
     conn.execute(
@@ -957,13 +729,11 @@ fn audience_prune_removes_stale_scoped_subtrees_and_keeps_local_rows() {
     )
     .expect("install inactive root");
     conn.execute(
-        "INSERT INTO _coven_row_routes VALUES ('inactive-route', 'notes', 'inactive', '1')",
-        [],
-    )
-    .expect("install inactive route");
-    conn.execute(
-        "INSERT INTO _coven_audience VALUES ('inactive-route', ?1, '1')",
-        [inactive.to_string()],
+        "INSERT INTO _coven_audience VALUES (?1, ?2, '1')",
+        (
+            row_routing_id(&key, "notes", "inactive").to_string(),
+            inactive.to_string(),
+        ),
     )
     .expect("install matching inactive mirror");
     let tables = vec![
@@ -973,7 +743,7 @@ fn audience_prune_removes_stale_scoped_subtrees_and_keeps_local_rows() {
     ];
     let gates = Gates::from_tables(&conn, &tables).expect("build scoped gates");
 
-    prune_ineligible_scoped_rows(&conn, &gates, &BTreeSet::from([inactive]))
+    prune_ineligible_scoped_rows(&conn, &gates, &BTreeSet::from([inactive]), Some(&key))
         .expect("prune stale scoped rows");
 
     let notes: i64 = conn
@@ -982,10 +752,5 @@ fn audience_prune_removes_stale_scoped_subtrees_and_keeps_local_rows() {
     let comments: i64 = conn
         .query_row("SELECT COUNT(*) FROM comments", [], |row| row.get(0))
         .expect("count comments");
-    let routes: i64 = conn
-        .query_row("SELECT COUNT(*) FROM _coven_row_routes", [], |row| {
-            row.get(0)
-        })
-        .expect("count routes");
-    assert_eq!((notes, comments, routes), (1, 1, 2));
+    assert_eq!((notes, comments), (1, 1));
 }

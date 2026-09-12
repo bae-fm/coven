@@ -386,10 +386,10 @@ async fn discarding_a_scoped_write_reverses_its_private_routing_rows() {
         coven_database::BlockedWriteDiscard::Discarded(vec![receipt.write_id])
     );
     let state = db
-        .row_and_private_routing_presence_for_test("accounts", "discarded-circle-account")
+        .row_and_mirror_presence_for_test("accounts", "discarded-circle-account", [7; 32])
         .await
         .expect("read discarded scoped state");
-    assert_eq!(state, (false, false, false));
+    assert_eq!(state, (false, false));
 }
 
 #[tokio::test]
@@ -402,9 +402,9 @@ async fn discarding_a_scoped_move_restores_its_original_routing() {
             )
             .await;
         let routing = db
-            .private_routing_state_for_test()
+            .audience_mirror_state_for_test()
             .await
-            .expect("read private routes and audience mirrors");
+            .expect("read the audience mirror");
         (rows, routing)
     }
 
@@ -467,7 +467,7 @@ async fn discarding_a_scoped_move_restores_its_original_routing() {
         assert_eq!(
             state(&db).await,
             before,
-            "discard must restore the host row, private route, and Store mirror together"
+            "discard must restore the host row and its Store mirror together"
         );
         assert_eq!(
             database
@@ -700,9 +700,12 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
     assert!(destination_rows.iter().any(|row| {
         row.table == "accounts" && row.op == coven_foundation::changeset::ChangeOp::Insert
     }));
-    assert!(destination_rows.iter().any(|row| {
-        row.table == "_coven_row_routes" && row.op == coven_foundation::changeset::ChangeOp::Insert
-    }));
+    assert!(
+        destination_rows
+            .iter()
+            .all(|row| !coven_database::is_routing_table(&row.table)),
+        "the destination materialization carries rows; routing travels in the Store partition",
+    );
     assert!(destination_rows
         .iter()
         .all(|row| row.op != coven_foundation::changeset::ChangeOp::Delete));

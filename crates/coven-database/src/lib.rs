@@ -198,7 +198,7 @@ pub(crate) use gate::{
     active_circle_control, align_inbound_scoped_root_audiences, audience_moves,
     capture_routing_changes, filter_inbound_circle_changeset, filter_inbound_store_rows,
     live_row_audience, normalize_inbound_store_changeset, partition_outbound,
-    prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_snapshot_audience_rows,
+    prune_ineligible_scoped_rows, retain_snapshot_audience_rows,
     validate_scoped_foreign_key_audiences, validate_snapshot_routing_state,
 };
 #[cfg(any(test, feature = "test-utils"))]

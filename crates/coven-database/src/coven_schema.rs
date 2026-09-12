@@ -610,16 +610,6 @@ macro_rules! coven_routing_tables {
     _updated_at TEXT NOT NULL
 "
         );
-        $visit!(
-            _coven_row_routes,
-            "
-    routing_id TEXT PRIMARY KEY,
-    table_name TEXT NOT NULL,
-    row_id TEXT NOT NULL,
-    _updated_at TEXT NOT NULL,
-    UNIQUE (table_name, row_id)
-"
-        );
     };
 }
 
@@ -939,9 +929,9 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
     Ok(())
 }
 
-/// Create the audience mirror and private route map. A snapshot already carries
-/// these schemas, so creation is idempotent; the caller validates their exact
-/// shape before committing initialization.
+/// Create the audience mirror. A snapshot already carries this schema, so
+/// creation is idempotent; the caller validates its exact shape before
+/// committing initialization.
 pub(crate) fn apply_coven_routing_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     macro_rules! apply_table {
         ($name:ident, $columns:expr) => {

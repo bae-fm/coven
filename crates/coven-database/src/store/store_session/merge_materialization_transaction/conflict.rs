@@ -85,12 +85,10 @@ impl TableSchema {
     ) -> Result<Self, DbError> {
         let mut tables = synced_tables.to_vec();
         if gates.has_scoped_graph() {
-            for table in ["_coven_audience", "_coven_row_routes"] {
-                tables.push(SyncedTable::new(
-                    table,
-                    coven_protocol::synced_schema::RowIdentity::SharedKey,
-                ));
-            }
+            tables.push(SyncedTable::new(
+                "_coven_audience",
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
+            ));
         }
         Self::from_db(conn, &tables)
     }

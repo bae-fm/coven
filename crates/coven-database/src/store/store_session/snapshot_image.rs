@@ -624,7 +624,7 @@ fn project(
             .delete_gated_false(&transaction)
             .map_err(SnapshotImageError::from)?,
         coven_protocol::circle::Audience::Circle(_) => {
-            crate::retain_snapshot_audience_rows(&transaction, &gates, audience)
+            crate::retain_snapshot_audience_rows(&transaction, &gates, audience, routing_key)
                 .map_err(SnapshotImageError::from)?;
         }
         coven_protocol::circle::Audience::Local => {
@@ -634,8 +634,6 @@ fn project(
         }
     }
     if let Some(routing_key) = routing_key {
-        crate::prune_private_routes_without_rows(&transaction, &gates)
-            .map_err(SnapshotImageError::from)?;
         crate::validate_snapshot_routing_state(&transaction, &gates, routing_key, audience)
             .map_err(SnapshotImageError::from)?;
     }
@@ -754,7 +752,7 @@ pub(super) fn capture_circle_bootstrap_rows(
 }
 
 /// The tables a Circle bootstrap states: every declared synced table, plus the
-/// routing tables when the schema carries them (a database whose host declares
+/// audience mirror when the schema carries it (a database whose host declares
 /// no scoped table has none). One order the capture, the staging and the
 /// install all use.
 pub(super) fn circle_projection_tables(
@@ -772,7 +770,7 @@ pub(super) fn circle_projection_tables(
         .map(|table| table.name().to_string())
         .collect::<Vec<_>>();
     projection.extend(
-        ["_coven_audience", "_coven_row_routes"]
+        ["_coven_audience"]
             .into_iter()
             .filter(|routing| present.iter().any(|table| table == routing))
             .map(str::to_string),
@@ -788,7 +786,6 @@ pub(super) fn snapshot_image_db_error(error: SnapshotImageError) -> DbError {
 
 const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
     "_coven_audience",
-    "_coven_row_routes",
     "remote_objects",
     "blob_locators",
     "row_blob_locators",

@@ -418,7 +418,7 @@ async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
         .store1()
         .await
         .circles()
-        .delete_circle(fixture.circle_id)
+        .delete_circle(fixture.circle_id, Some(&routing()))
         .await
         .expect_err("deleting a conflicted Circle is refused");
     assert!(
@@ -440,7 +440,7 @@ async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
         .store1()
         .await
         .circles()
-        .delete_circle(fixture.circle_id)
+        .delete_circle(fixture.circle_id, Some(&routing()))
         .await
         .expect("delete the resolved Circle");
     let device1 = fixture.circles_device1().await;
@@ -454,7 +454,7 @@ async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
         .store1()
         .await
         .circles()
-        .delete_circle(fixture.circle_id)
+        .delete_circle(fixture.circle_id, Some(&routing()))
         .await
         .expect_err("deleting an already-deleted Circle is refused");
     assert!(

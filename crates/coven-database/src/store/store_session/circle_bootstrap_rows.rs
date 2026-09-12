@@ -105,14 +105,13 @@ impl StagedCircleRows {
         Ok(Self { scratch })
     }
 
-    /// Install these rows, their routes, and their blob graph onto `conn`
-    /// directly — no transaction of its own. `conn` is the caller's active
-    /// transaction: the pull replay wraps this in a fresh throwaway
-    /// transaction; the snapshot-restore installer runs it inside the single
-    /// install transaction alongside the Store image, so the whole set commits
-    /// or rolls back together. Foreign keys are deferred to that outer commit,
-    /// matching the final foreign-key validation the install runs over the
-    /// installed union.
+    /// Install these rows and their blob graph onto `conn` directly — no
+    /// transaction of its own. `conn` is the caller's active transaction: the
+    /// pull replay wraps this in a fresh throwaway transaction; the
+    /// snapshot-restore installer runs it inside the single install transaction
+    /// alongside the Store image, so the whole set commits or rolls back
+    /// together. Foreign keys are deferred to that outer commit, matching the
+    /// final foreign-key validation the install runs over the installed union.
     pub(crate) fn install_on(
         &self,
         conn: &Connection,
@@ -126,68 +125,58 @@ impl StagedCircleRows {
             .map_err(|error| DbError::context("Circle bootstrap projection tables", error))?;
         conn.pragma_update(None, "defer_foreign_keys", "ON")
             .map_err(DbError::from)?;
-        // The bootstrap is this Circle's whole state at its coverage, so every row
-        // it names it also supersedes. The target can already hold one: a restore
-        // carries the routing tables wholesale, and a replay base built from a
-        // baseline image holds the rows that stood before the bootstrap — including
-        // a row that was in the Store audience and has since moved into the Circle.
-        // Clearing what the image restates makes the install the same operation
-        // whatever it lands on, rather than one that only works onto an empty base.
-        let superseded = if projection_tables
-            .iter()
-            .any(|table| table == "_coven_row_routes")
-        {
-            crate::query_mapped_rows(
+        // The bootstrap is this Circle's whole state at its coverage, so every
+        // scoped row it names it also supersedes. The target can already hold
+        // one: a restore carries the audience mirror wholesale, and a replay
+        // base built from a baseline image holds the rows that stood before the
+        // bootstrap — including a row that was in the Store audience and has
+        // since moved into the Circle. Clearing what the image restates makes
+        // the install the same operation whatever it lands on, rather than one
+        // that only works onto an empty base. An unscoped Store ancestor the
+        // image carries for foreign-key closure belongs to the Store and is
+        // never superseded here.
+        let gates = crate::Gates::from_tables(conn, synced_tables)
+            .map_err(|error| DbError::context("Circle bootstrap gates", error))?;
+        for table in gates.scoped_table_names() {
+            let quoted = crate::quote_ident(&table);
+            let row_ids = crate::query_mapped_rows(
                 source,
-                "SELECT table_name, row_id FROM _coven_row_routes",
+                &format!("SELECT id FROM {quoted} ORDER BY id"),
                 [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )?
-        } else {
-            Vec::new()
-        };
-        for (table, row_id) in &superseded {
-            if !projection_tables.contains(table) {
-                return Err(DbError::Message(format!(
-                    "Circle {circle_id} bootstrap routes a row in unprojected table {table:?}"
-                )));
+                |row| row.get::<_, String>(0),
+            )?;
+            for row_id in row_ids {
+                conn.execute(&format!("DELETE FROM {quoted} WHERE id = ?1"), [&row_id])
+                    .map_err(DbError::from)?;
             }
-            conn.execute(
-                &format!("DELETE FROM {} WHERE id = ?1", crate::quote_ident(table)),
-                [row_id],
-            )
-            .map_err(DbError::from)?;
-            // The audience row is keyed by the routing id, which only the route
-            // names, so it goes before the route that finds it.
-            conn.execute(
-                "DELETE FROM _coven_audience WHERE routing_id IN (
-                     SELECT routing_id FROM _coven_row_routes
-                     WHERE table_name = ?1 AND row_id = ?2
-                 )",
-                rusqlite::params![table, row_id],
-            )
-            .map_err(DbError::from)?;
-            conn.execute(
-                "DELETE FROM _coven_row_routes WHERE table_name = ?1 AND row_id = ?2",
-                rusqlite::params![table, row_id],
-            )
-            .map_err(DbError::from)?;
+        }
+        if projection_tables
+            .iter()
+            .any(|table| table == "_coven_audience")
+        {
+            // A verified Circle image's mirrors are exactly the derived ids of
+            // its scoped rows, so its own mirror ids name what it supersedes.
+            let superseded_mirrors = crate::query_mapped_rows(
+                source,
+                "SELECT routing_id FROM _coven_audience ORDER BY routing_id",
+                [],
+                |row| row.get::<_, String>(0),
+            )?;
+            for routing_id in superseded_mirrors {
+                conn.execute(
+                    "DELETE FROM _coven_audience WHERE routing_id = ?1",
+                    [&routing_id],
+                )
+                .map_err(DbError::from)?;
+            }
         }
         for table in &projection_tables {
-            // The routing tables are deterministic in the row they describe, so a
-            // target that already holds an entry holds the same one — a restore
-            // carries them wholesale. Skipping a re-insert there is not papering
-            // over a conflict; the data tables above have had everything this
-            // bootstrap restates cleared, so they insert exactly once.
-            let ignore_existing = table == "_coven_audience" || table == "_coven_row_routes";
-            crate::copy_table_with_conflicts(source, conn, table, ignore_existing).map_err(
-                |error| {
-                    DbError::context(
-                        format!("install exact Circle {} bootstrap table {table}", circle_id),
-                        error,
-                    )
-                },
-            )?;
+            crate::copy_table_with_conflicts(source, conn, table, false).map_err(|error| {
+                DbError::context(
+                    format!("install exact Circle {circle_id} bootstrap table {table}"),
+                    error,
+                )
+            })?;
         }
         super::pull_replay::install_circle_bootstrap_remote_objects_from_reference_on(
             conn,

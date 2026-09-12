@@ -1223,7 +1223,10 @@ impl SyncComponents {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<(), super::store::CircleOperationError> {
-        self.store.circles().delete_circle(circle_id).await
+        self.store
+            .circles()
+            .delete_circle(circle_id, self.routing_encryption.as_ref())
+            .await
     }
 
     pub(crate) async fn add_circle_member(

@@ -446,7 +446,12 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 .require_published()?;
             let materialization = self
                 .database
-                .activate_circle_operation(journal, verified, accepted_transition)
+                .activate_circle_operation(
+                    journal,
+                    verified,
+                    accepted_transition,
+                    routing_key.cloned(),
+                )
                 .await?;
             if let Some(materialization) = materialization {
                 self.writer

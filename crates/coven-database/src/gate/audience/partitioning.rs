@@ -213,38 +213,6 @@ pub(crate) fn partition_outbound(
                 FullStateDirection::Inserts,
                 Audience::Local,
             )?;
-            let local_routes = local_retained_rows
-                .iter()
-                .filter(|(table, _)| gates.table_is_scoped(table))
-                .map(|(table, row_id)| {
-                    query_row_optional(
-                        conn,
-                        "SELECT routing_id, table_name, row_id, _updated_at
-                         FROM _coven_row_routes
-                         WHERE table_name = ?1 AND row_id = ?2",
-                        (table, row_id),
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, String>(2)?,
-                                row.get::<_, String>(3)?,
-                            ))
-                        },
-                    )?
-                    .ok_or_else(|| GateError::MissingAudienceRow {
-                        table: table.clone(),
-                        row_id: row_id.clone(),
-                    })
-                })
-                .collect::<Result<Vec<_>, GateError>>()?;
-            if !local_routes.is_empty() {
-                let routes = private_route_insert_changeset(&local_routes)?;
-                for_each_change(&routes, |iter, _row| {
-                    groups.group(Audience::Local)?.group.add_change(iter)?;
-                    Ok(())
-                })?;
-            }
         }
         if !ancestor_inserts.is_empty() {
             groups.add_materialization(
@@ -272,17 +240,6 @@ pub(crate) fn partition_outbound(
             groups.group(Audience::Store)?.group.add_change(iter)?;
             Ok(())
         })?;
-        for (audience, routes) in &routing.private_routes {
-            for_each_change(routes, |iter, row| {
-                if row.table != "_coven_row_routes" || row.op != ffi::SQLITE_INSERT {
-                    return Err(GateError::InvalidInboundAudiencePackage(
-                        "generated private routes must be complete INSERT images".to_string(),
-                    ));
-                }
-                groups.group(audience.clone())?.group.add_change(iter)?;
-                Ok(())
-            })?;
-        }
         let partitions = groups.finish()?;
         validate_store_partition_foreign_key_closure(conn, gates, &shared, &partitions)?;
         Ok(PartitionedAudienceWrite {

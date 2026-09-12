@@ -193,7 +193,6 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     assert_eq!(state.row, None);
-    assert_eq!(state.route, None);
     assert!(StoreDatabase::new(&member_database)
         .get_circles(
             &coven_keys::keys::public_key_hex(&fixture.member),
@@ -249,7 +248,6 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     assert_eq!(reopened_state.row, None);
-    assert_eq!(reopened_state.route, None);
     assert_eq!(
         reopened_state.mirror,
         Some((

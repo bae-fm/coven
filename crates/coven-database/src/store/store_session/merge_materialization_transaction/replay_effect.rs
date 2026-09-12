@@ -1,6 +1,7 @@
 use super::*;
 
 impl MergeMaterializationTransaction<'_, '_> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_unaccepted_replay_effect_inner(
         &self,
         authority: &mut dyn VerifiedStoreLookup,
@@ -8,10 +9,12 @@ impl MergeMaterializationTransaction<'_, '_> {
         effect: crate::MergeReplayWriteEffect,
         schema: std::sync::Arc<TableSchema>,
         gates: &crate::Gates,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         replay_rows: &mut ReplayRows,
     ) -> Result<(), DbError> {
         self.validate_unaccepted_circle_context(authority, root, &effect)?;
-        let public_rows = replay_effect_public_rows(self.store.transaction, &effect)?;
+        let public_rows =
+            replay_effect_public_rows(self.store.transaction, gates, &effect, routing_key)?;
         let local_rows = replay_effect_local_rows(&effect)?;
         let changed_rows = replay_effect_rows(&effect)?;
         if let Some((table, row_id)) =
@@ -144,10 +147,12 @@ impl MergeMaterializationTransaction<'_, '_> {
         effect: crate::MergeReplayWriteEffect,
         schema: std::sync::Arc<TableSchema>,
         gates: &crate::Gates,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         commit: &StoreBatchCommitRef,
         replay_rows: &mut ReplayRows,
     ) -> Result<Option<crate::MaterializationHold>, DbError> {
-        let public_rows = replay_effect_public_rows(self.store.transaction, &effect)?;
+        let public_rows =
+            replay_effect_public_rows(self.store.transaction, gates, &effect, routing_key)?;
         let local_rows = replay_effect_local_rows(&effect)?;
         if let Some((table, row_id)) =
             self.local_write_would_change_shared_row(gates, &public_rows, &local_rows)?

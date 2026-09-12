@@ -21,10 +21,7 @@ fn every_coven_table_has_one_retained_replay_disposition() {
             .difference(&without_routing)
             .cloned()
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "_coven_audience".to_string(),
-            "_coven_row_routes".to_string(),
-        ])
+        BTreeSet::from(["_coven_audience".to_string()])
     );
 }
 

@@ -41,7 +41,6 @@ pub type OutboxAttempt = (i64, Option<String>, Option<String>);
 #[derive(Debug, PartialEq, Eq)]
 pub struct ScopedRoutingStateForTest {
     pub row: Option<(Option<String>, String, String)>,
-    pub route: Option<(String, String)>,
     pub mirror: Option<(Option<String>, String)>,
 }
 

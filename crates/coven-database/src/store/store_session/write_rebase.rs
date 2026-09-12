@@ -68,10 +68,10 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
                 .as_ref()
                 .is_some_and(|candidate| candidate.publication_base == base)
             {
-                replay.restore_unaccepted_write(self, effect)?;
+                replay.restore_unaccepted_write(self, effect, routing_key)?;
                 continue;
             }
-            replay.rebase_write(self, effect, &base)?;
+            replay.rebase_write(self, effect, &base, routing_key)?;
             if let Some(candidate) = candidate {
                 self.retire_rebased_candidate(&write_id, snapshot, candidate)?;
             }

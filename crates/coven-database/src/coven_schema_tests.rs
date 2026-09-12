@@ -541,13 +541,14 @@ fn prepared_blob_identity_is_the_exact_remote_object() {
 fn routing_tables_are_strict_without_rowid() {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
     apply_coven_routing_schema(&conn).expect("apply routing schema");
-    for name in ["_coven_audience", "_coven_row_routes"] {
-        let sql = format!("PRAGMA table_list({})", crate::quote_ident(name));
-        let (wr, strict): (i64, i64) = conn
-            .query_row(&sql, [], |row| Ok((row.get(4)?, row.get(5)?)))
-            .expect("table_list");
-        assert_eq!((wr, strict), (1, 1), "{name}");
-    }
+    let sql = format!(
+        "PRAGMA table_list({})",
+        crate::quote_ident("_coven_audience")
+    );
+    let (without_rowid, strict): (i64, i64) = conn
+        .query_row(&sql, [], |row| Ok((row.get(4)?, row.get(5)?)))
+        .expect("table_list");
+    assert_eq!((without_rowid, strict), (1, 1));
 }
 
 #[test]

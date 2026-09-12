@@ -183,9 +183,13 @@ impl<'store> StoreCircleCommands<'store> {
     pub(crate) async fn delete_circle(
         &self,
         circle_id: CircleId,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<(), CircleOperationError> {
         let mut writer = self.writer().await?;
-        writer.circles().delete_circle(circle_id).await
+        writer
+            .circles()
+            .delete_circle(circle_id, routing_encryption)
+            .await
     }
 }
 

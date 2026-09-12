@@ -14,6 +14,7 @@ impl StoreRecords<'_> {
         local_image: &[u8],
         gates: &crate::Gates,
         covered_suffix: &[crate::MergeReplayWriteEffect],
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<Vec<u8>, DbError> {
         let baseline = load_replay_baseline_on(self)?
             .ok_or_else(|| DbError::Message("received snapshot has no replay image".into()))?;
@@ -28,13 +29,13 @@ impl StoreRecords<'_> {
         // Only effects beyond the captured prefix can transfer its Local rows.
         // Their Local partitions remain in the journal for ordered replay.
         for effect in covered_suffix {
-            for row in replay_effect_public_rows(&local, effect)? {
+            for row in replay_effect_public_rows(&local, gates, effect, routing_key)? {
                 folded_rows.remove(&row);
             }
         }
         let image_local_rows = local_rows(&image, gates)?;
         ReplaySql::begin(&local)?.run(|| {
-            crate::gate::retain_projection_rows(&local, gates, &folded_rows)?;
+            crate::gate::retain_projection_rows(&local, gates, &folded_rows, routing_key)?;
             Ok(())
         })?;
         ReplaySql::begin(&image)?.run(|| {
@@ -45,12 +46,6 @@ impl StoreRecords<'_> {
                     &format!("DELETE FROM {} WHERE id = ?1", crate::quote_ident(&table)),
                     [&row_id],
                 )?;
-                if gates.has_scoped_graph() {
-                    image.execute(
-                        "DELETE FROM _coven_row_routes WHERE table_name = ?1 AND row_id = ?2",
-                        (&table, &row_id),
-                    )?;
-                }
             }
             for (table, row_id) in &folded_rows {
                 let exists: bool = image.query_row(
@@ -69,10 +64,7 @@ impl StoreRecords<'_> {
             }
             let mut tables = gates.sorted_synced_table_names();
             if gates.has_scoped_graph() {
-                tables.extend([
-                    "_coven_row_routes".to_string(),
-                    "_coven_audience".to_string(),
-                ]);
+                tables.push("_coven_audience".to_string());
             }
             for table in tables {
                 crate::copy_table_with_conflicts(&local, &image, &table, false)?;

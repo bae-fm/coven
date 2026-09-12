@@ -838,7 +838,6 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
                     progressive_state,
                     coven_database::ScopedRoutingStateForTest {
                         row: None,
-                        route: None,
                         mirror: None,
                     },
                     "{conflict:?} must remove every remote routing representation"

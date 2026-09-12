@@ -395,7 +395,7 @@ blob ciphertext after no live row or retained replay input still owns it.
 
 An Owner deletes a Circle with an Owner-signed terminal control transition.
 Activation reduces the Circle's current state to `Deleted` and, in the same pull
-transaction, prunes its materialized rows, private routes, blob bindings, and
+transaction, prunes its materialized rows, audience mirrors, blob bindings, and
 access/roster/metadata caches, while retaining the control spine needed to
 verify historical commits and reclamation. `list` reports the Circle as
 `Deleted` rather than omitting it.

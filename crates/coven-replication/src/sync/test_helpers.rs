@@ -2526,7 +2526,15 @@ mod test_device {
             &self,
             circle_id: coven_protocol::CircleId,
         ) -> Result<(), crate::sync::store::CircleOperationError> {
-            self.store.circles().delete_circle(circle_id).await
+            self.store
+                .circles()
+                .delete_circle(
+                    circle_id,
+                    Some(&coven_keys::encryption::EncryptionService::from_key(
+                        [42; 32],
+                    )),
+                )
+                .await
         }
 
         pub async fn load_circle_activations(

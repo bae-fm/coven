@@ -62,6 +62,7 @@ impl ReplayProjectionResult {
         &self,
         live: &mut VerifiedStoreTransaction<'_, '_, '_, '_>,
         effect: crate::MergeReplayWriteEffect,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<(), DbError> {
         let projection = &self.projection;
         let schema = projection.table_schema(live.synced_tables, live.gates)?;
@@ -75,6 +76,7 @@ impl ReplayProjectionResult {
                 effect,
                 schema,
                 live.gates,
+                routing_key,
                 &mut private_rows,
             )
         })?;
@@ -86,8 +88,10 @@ impl ReplayProjectionResult {
         transaction: &mut VerifiedStoreTransaction<'_, '_, '_, '_>,
         effect: crate::MergeReplayWriteEffect,
         base: &coven_protocol::store_commit::StorePublicationBase,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<(), DbError> {
-        self.projection.rebase_write(transaction, effect, base)
+        self.projection
+            .rebase_write(transaction, effect, base, routing_key)
     }
 
     pub(super) fn watched_outcome(&self) -> Option<WatchedReplayOutcome> {
@@ -335,6 +339,7 @@ impl ReplayProjection {
         Ok(applied)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_write_effect(
         &self,
         authority: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
@@ -342,6 +347,7 @@ impl ReplayProjection {
         effect: crate::MergeReplayWriteEffect,
         schema: std::sync::Arc<TableSchema>,
         gates: &crate::Gates,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         private_rows: &mut super::merge_materialization_transaction::ReplayRows,
     ) -> Result<(), DbError> {
         let transaction = self
@@ -358,6 +364,7 @@ impl ReplayProjection {
             effect,
             schema,
             gates,
+            routing_key,
             &mut next_private_rows,
         )?;
         transaction.commit().map_err(DbError::from)?;

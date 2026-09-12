@@ -263,6 +263,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         self.capture_replay_rows_inner(gates, schema)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_unaccepted_replay_effect(
         &self,
         authority: &mut dyn VerifiedStoreLookup,
@@ -270,6 +271,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         effect: crate::MergeReplayWriteEffect,
         schema: std::sync::Arc<TableSchema>,
         gates: &crate::Gates,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         replay_rows: &mut ReplayRows,
     ) -> Result<(), DbError> {
         self.apply_unaccepted_replay_effect_inner(
@@ -278,6 +280,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             effect,
             schema,
             gates,
+            routing_key,
             replay_rows,
         )
     }
@@ -571,11 +574,24 @@ pub(crate) fn test_install_winning_blob_bindings(
     .install_winning_blob_bindings(gates, synced_tables, package, activation, winning_rows)
 }
 
+/// The rows a replay effect states publicly: every row of its Store and Circle
+/// partitions, plus the row each audience mirror change names.
+///
+/// A mirror change is keyed by a routing id, and the row it decides is usually
+/// one the effect itself carries — a transition's row lands in its audience
+/// partition, a moved component in its destination materialization. A component
+/// retained Local is the exception: its rows travel in the Local partition,
+/// which the canonical replay drops from an accepted write's effect, so the
+/// mirror retraction arrives with no row image beside it. Those resolve against
+/// the scoped rows the connection holds, enumerated once and only when the
+/// effect's own partitions left an id unresolved.
 pub(super) fn replay_effect_public_rows(
-    connection: &rusqlite::Connection,
+    conn: &rusqlite::Connection,
+    gates: &crate::Gates,
     effect: &crate::MergeReplayWriteEffect,
+    routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
 ) -> Result<BTreeSet<(String, String)>, DbError> {
-    let changes = effect
+    let public_changes = effect
         .partitions
         .store
         .iter()
@@ -585,41 +601,69 @@ pub(super) fn replay_effect_public_rows(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    let routes = changes
-        .iter()
-        .filter(|change| change.table == "_coven_row_routes")
-        .filter_map(|change| {
-            Some((
-                change.pk()?.to_string(),
-                (change.col(1)?.to_string(), change.col(2)?.to_string()),
-            ))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut represented = changes
+    let mut represented = public_changes
         .iter()
         .filter(|change| !crate::is_routing_table(&change.table))
         .filter_map(|change| Some((change.table.clone(), change.pk()?.to_string())))
         .collect::<BTreeSet<_>>();
-    for routing_id in changes
+    let mirror_ids = public_changes
         .iter()
         .filter(|change| change.table == "_coven_audience")
-        .filter_map(|change| change.pk())
+        .filter_map(|change| change.pk().map(str::to_string))
+        .collect::<Vec<_>>();
+    if mirror_ids.is_empty() {
+        return Ok(represented);
+    }
+    let routing_key = routing_key.ok_or_else(|| {
+        DbError::Message("scoped replay effect requires the row-routing key".to_string())
+    })?;
+    let mut rows_by_routing_id = BTreeMap::new();
+    for partition in effect
+        .partitions
+        .store
+        .iter()
+        .chain(effect.partitions.circles.iter())
+        .chain(effect.partitions.local.iter())
     {
-        if let Some(row) = routes.get(routing_id) {
-            represented.insert(row.clone());
-            continue;
+        for change in crate::walk_changeset(&partition.changeset)? {
+            if crate::is_routing_table(&change.table) {
+                continue;
+            }
+            let Some(row_id) = change.pk() else {
+                continue;
+            };
+            rows_by_routing_id.insert(
+                coven_protocol::circle::row_routing_id(routing_key, &change.table, row_id)
+                    .to_string(),
+                (change.table.clone(), row_id.to_string()),
+            );
         }
-        let rows = crate::query_mapped_rows(
-            connection,
-            "SELECT table_name, row_id FROM _coven_row_routes WHERE routing_id = ?1",
-            [routing_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        let [row] = rows.as_slice() else {
-            return Err(DbError::Message(format!(
-                "local replay public audience row {routing_id} has no exact row route"
-            )));
-        };
+    }
+    if mirror_ids
+        .iter()
+        .any(|routing_id| !rows_by_routing_id.contains_key(routing_id))
+    {
+        for table in gates.scoped_table_names() {
+            let sql = format!(
+                "SELECT {id} FROM {table} ORDER BY {id}",
+                id = crate::quote_ident("id"),
+                table = crate::quote_ident(&table),
+            );
+            for row_id in crate::query_mapped_rows(conn, &sql, [], |row| row.get::<_, String>(0))? {
+                rows_by_routing_id.insert(
+                    coven_protocol::circle::row_routing_id(routing_key, &table, &row_id)
+                        .to_string(),
+                    (table.clone(), row_id),
+                );
+            }
+        }
+    }
+    for routing_id in mirror_ids {
+        let row = rows_by_routing_id.get(&routing_id).ok_or_else(|| {
+            DbError::Message(format!(
+                "replay effect audience row {routing_id} names no scoped row"
+            ))
+        })?;
         represented.insert(row.clone());
     }
     Ok(represented)

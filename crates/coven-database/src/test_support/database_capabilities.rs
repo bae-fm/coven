@@ -570,15 +570,18 @@ impl Database {
             .await
     }
 
-    pub async fn row_and_private_routing_presence_for_test(
+    pub async fn row_and_mirror_presence_for_test(
         &self,
         table: &str,
         row_id: &str,
-    ) -> Result<(bool, bool, bool), DbError> {
+        generation_one_key: [u8; 32],
+    ) -> Result<(bool, bool), DbError> {
         let table = table.to_string();
         let row_id = row_id.to_string();
-        self.test_sql(move |database| database.row_and_private_routing_presence(&table, &row_id))
-            .await
+        self.test_sql(move |database| {
+            database.row_and_mirror_presence(&table, &row_id, generation_one_key)
+        })
+        .await
     }
 
     pub async fn store_write_row_and_only_partition_for_test(
@@ -657,22 +660,26 @@ impl Database {
             .await
     }
 
-    pub async fn document_circle_route_for_test(
+    pub async fn document_circle_mirror_for_test(
         &self,
         row_id: &str,
+        generation_one_key: [u8; 32],
     ) -> Result<(String, String, String), DbError> {
         let row_id = row_id.to_string();
-        self.test_sql(move |database| database.document_circle_route(&row_id))
+        self.test_sql(move |database| database.document_circle_mirror(&row_id, generation_one_key))
             .await
     }
 
-    pub async fn corrupt_live_document_route_id_for_test(
+    pub async fn corrupt_live_document_mirror_id_for_test(
         &self,
         row_id: &str,
+        generation_one_key: [u8; 32],
     ) -> Result<(), DbError> {
         let row_id = row_id.to_string();
-        self.test_sql(move |database| database.corrupt_live_document_route_id(&row_id))
-            .await
+        self.test_sql(move |database| {
+            database.corrupt_live_document_mirror_id(&row_id, generation_one_key)
+        })
+        .await
     }
 
     pub async fn materialization_graph_counts_for_test(&self) -> Result<(i64, i64, i64), DbError> {
@@ -734,11 +741,11 @@ impl Database {
             .await
     }
 
-    pub async fn scoped_routing_counts_for_test(
+    pub async fn circle_mirror_count_for_test(
         &self,
         circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<(i64, i64), DbError> {
-        self.test_sql(move |database| database.scoped_routing_counts(circle_id))
+    ) -> Result<i64, DbError> {
+        self.test_sql(move |database| database.circle_mirror_count(circle_id))
             .await
     }
 

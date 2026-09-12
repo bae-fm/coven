@@ -145,6 +145,13 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     ) -> Result<MergeSubsetOutcome, DbError> {
         let conn = self.store.transaction;
         let mut winning_rows = Vec::new();
+        // A row a replay is still holding privately keeps its identity through
+        // the package that re-states it, before the replay re-materializes it.
+        let held_rows = private_rows
+            .private
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
         match package.audience() {
             PackageAudience::Store if gates.has_scoped_graph() => {
                 let routing_key = routing_key.ok_or_else(|| {
@@ -155,6 +162,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 let inbound = crate::normalize_inbound_store_changeset(
                     conn,
                     package.changeset(),
+                    &held_rows,
                     gates,
                     routing_key,
                 )
@@ -245,6 +253,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     package.changeset(),
                     *circle_id,
                     store_audience_transitions,
+                    &held_rows,
                     gates,
                     routing_key,
                 )
@@ -423,6 +432,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 effect,
                 schema.clone(),
                 gates,
+                routing_key,
                 commit_ref,
                 &mut next_private_rows,
             )? {
@@ -459,7 +469,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .attach(Some(table.name()))
                 .map_err(DbError::from)?;
         }
-        crate::prune_ineligible_scoped_rows(conn, gates, &inactive_circles)
+        crate::prune_ineligible_scoped_rows(conn, gates, &inactive_circles, routing_key)
             .map_err(DbError::from)?;
         crate::validate_scoped_foreign_key_audiences(conn, gates).map_err(DbError::from)?;
         let mut removal_changeset = Vec::new();

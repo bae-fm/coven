@@ -286,18 +286,18 @@ impl Database {
             .expect("commit scoped host write");
     }
 
-    pub async fn private_routing_state_for_test(&self) -> Result<String, DbError> {
+    pub async fn audience_mirror_state_for_test(&self) -> Result<String, DbError> {
         self.test_sql(|database| {
-            database.query_row(
-                "SELECT json_array(
-                    (SELECT json_group_array(json_array(routing_id, table_name, row_id, _updated_at))
-                     FROM (SELECT * FROM _coven_row_routes ORDER BY routing_id)),
-                    (SELECT json_group_array(json_array(routing_id, circle_id, _updated_at))
-                     FROM (SELECT * FROM _coven_audience ORDER BY routing_id)))",
-                [],
-                |row| row.get(0),
-            ).map_err(DbError::from)
-        }).await
+            database
+                .query_row(
+                    "SELECT json_group_array(json_array(routing_id, circle_id, _updated_at))
+                     FROM (SELECT * FROM _coven_audience ORDER BY routing_id)",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
     }
 
     pub async fn scoped_routing_state_for_test(
@@ -306,8 +306,8 @@ impl Database {
     ) -> crate::ScopedRoutingStateForTest {
         let row_id = row_id.to_string();
         self.test_sql(move |database| {
-            let (row, route, mirror) = database.scoped_note_routing_state(&row_id, [42; 32])?;
-            Ok(crate::ScopedRoutingStateForTest { row, route, mirror })
+            let (row, mirror) = database.scoped_note_routing_state(&row_id, [42; 32])?;
+            Ok(crate::ScopedRoutingStateForTest { row, mirror })
         })
         .await
         .expect("read scoped routing state")
@@ -881,7 +881,7 @@ impl Database {
         .await
     }
 
-    pub async fn scoped_store_state_counts_for_test(&self) -> Result<[i64; 4], DbError> {
+    pub async fn scoped_store_state_counts_for_test(&self) -> Result<[i64; 3], DbError> {
         self.test_sql(|database| database.scoped_store_state_counts())
             .await
     }

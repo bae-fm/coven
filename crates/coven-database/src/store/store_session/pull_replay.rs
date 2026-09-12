@@ -5,7 +5,7 @@ use coven_protocol::remote_object;
 use coven_protocol::store_commit::StoreBatchCommitRef;
 use coven_protocol::synced_schema::SyncedTable;
 
-/// Install one verified Circle bootstrap's rows, routes, and blob graph onto
+/// Install one verified Circle bootstrap's rows and blob graph onto
 /// `conn` directly — no transaction of its own. `conn` is the caller's active
 /// transaction: the pull replay wraps this in a fresh throwaway transaction; the
 /// snapshot-restore installer runs it inside the single install transaction

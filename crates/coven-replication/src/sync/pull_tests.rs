@@ -3493,7 +3493,7 @@ fn open_scoped_circle_test_db(
 }
 
 #[tokio::test]
-async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
+async fn merge_pull_applies_circle_rows_and_mirrors_atomically() {
     let owner = UserKeypair::generate();
     let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = open_scoped_circle_test_db(source_store_dir.clone());
@@ -3560,11 +3560,11 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
             .test_row_exists(&format!("SELECT 1 FROM comments WHERE id = '{comment_id}'"))
             .await
     );
-    let (routes, mirrors): (i64, i64) = target
-        .scoped_routing_counts_for_test(circle_id)
+    let mirrors: i64 = target
+        .circle_mirror_count_for_test(circle_id)
         .await
         .expect("read pulled routing state");
-    assert_eq!((routes, mirrors), (2, 2));
+    assert_eq!(mirrors, 2);
     assert!(
         result
             .row_changes

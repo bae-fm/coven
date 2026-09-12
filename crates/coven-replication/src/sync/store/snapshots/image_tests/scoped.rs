@@ -3,7 +3,7 @@ use super::*;
 #[derive(Clone, Copy)]
 enum ScopedSnapshotImage {
     Valid,
-    UnauthenticatedRoute,
+    MirrorNamingNoRow,
     CircleRow,
     InvalidCircleMirror,
     OrphanStoreMirror,
@@ -55,38 +55,46 @@ impl PublishedScopedSnapshot {
             .expect("create published scoped snapshot image");
         let image = match image_kind {
             ScopedSnapshotImage::Valid => image,
-            ScopedSnapshotImage::UnauthenticatedRoute => {
+            ScopedSnapshotImage::MirrorNamingNoRow => {
+                let routing_key = coven_protocol::circle::derive_row_routing_key(
+                    &coven_keys::encryption::EncryptionService::from_key([42; 32]),
+                    store.root().store_root_hash,
+                )
+                .expect("derive the published snapshot routing key");
+                let routing_id = coven_protocol::circle::row_routing_id(
+                    &routing_key,
+                    "documents",
+                    "01890a5d-ac96-774b-bcce-b302099c3f74",
+                )
+                .to_string();
                 edit_snapshot_image(image_dir.path(), image, |connection| {
                     connection
-                        .corrupt_document_route_id()
-                        .expect("tamper private route id");
+                        .corrupt_mirror_id(&routing_id)
+                        .expect("tamper the document audience mirror id");
                 })
             }
             ScopedSnapshotImage::CircleRow => {
-                let route = source
-                    .document_circle_route_for_test("2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7")
+                // A Store image preserves every audience mirror, so the Circle
+                // row's own mirror already stands in it; only the row is added.
+                let mirror = source
+                    .document_circle_mirror_for_test(
+                        "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
+                        [42; 32],
+                    )
                     .await
-                    .expect("load Circle row route");
+                    .expect("load the Circle row audience mirror");
                 edit_snapshot_image(image_dir.path(), image, |connection| {
                     connection
                         .execute(
                             "INSERT INTO documents VALUES (?1, ?2, ?3, ?4)",
                             (
                                 "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
-                                &route.0,
+                                &mirror.0,
                                 "Circle document",
-                                &route.2,
+                                &mirror.2,
                             ),
                         )
                         .expect("insert Circle row into Store snapshot");
-                    connection
-                        .install_row_route(
-                            &route.1,
-                            "documents",
-                            "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
-                            &route.2,
-                        )
-                        .expect("insert Circle private route into Store snapshot");
                 })
             }
             ScopedSnapshotImage::InvalidCircleMirror => {
@@ -155,13 +163,13 @@ impl PublishedScopedSnapshot {
 }
 
 #[tokio::test]
-async fn snapshot_preserves_authenticated_routes_for_every_scoped_row() {
+async fn snapshot_preserves_a_mirror_for_every_scoped_row() {
     let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = open_scoped_snapshot_test_db(source_store_dir.clone());
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
         source_store_dir.clone(),
-        "snapshot-authenticated-routes",
+        "snapshot-scoped-row-mirrors",
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
@@ -184,11 +192,6 @@ async fn snapshot_preserves_authenticated_routes_for_every_scoped_row() {
         .expect("create scoped snapshot image");
     let inspected = coven_database::DatabaseImageTest::from_bytes(&image)
         .expect("open inspected scoped snapshot");
-    let routes = inspected
-        .coven_table_row_count(coven_database::DatabaseTestTable::named(
-            "_coven_row_routes",
-        ))
-        .expect("count snapshot private routes");
     let mirrors = inspected
         .coven_table_row_count(coven_database::DatabaseTestTable::named("_coven_audience"))
         .expect("count snapshot audience mirrors");
@@ -202,29 +205,29 @@ async fn snapshot_preserves_authenticated_routes_for_every_scoped_row() {
         )
         .expect("count scoped snapshot rows");
     assert_eq!(materialized, (1, 1));
-    assert_eq!((routes, mirrors), (2, 4), "Store root {:?}", store.root());
+    assert_eq!(mirrors, 4, "Store root {:?}", store.root());
 }
 
 #[tokio::test]
-async fn snapshot_refuses_an_unauthenticated_live_private_route() {
+async fn snapshot_refuses_a_live_mirror_that_names_no_row() {
     let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = open_scoped_snapshot_test_db(source_store_dir.clone());
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
         source_store_dir.clone(),
-        "snapshot-invalid-live-route",
+        "snapshot-invalid-live-mirror",
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await
-    .expect("create invalid-live-route Store");
+    .expect("create invalid-live-mirror Store");
     seed_scoped_snapshot_rows(&source, &store, &source_store_dir).await;
     source
-        .corrupt_live_document_route_id_for_test("01890a5d-ac96-774b-bcce-b302099c3f74")
+        .corrupt_live_document_mirror_id_for_test("01890a5d-ac96-774b-bcce-b302099c3f74", [42; 32])
         .await
-        .expect("corrupt live private route");
+        .expect("corrupt the live document audience mirror");
 
-    let image_dir = tempfile::tempdir().expect("invalid-live-route snapshot directory");
+    let image_dir = tempfile::tempdir().expect("invalid-live-mirror snapshot directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
     let result = StoreDatabase::new(&source)
@@ -237,29 +240,27 @@ async fn snapshot_refuses_an_unauthenticated_live_private_route() {
         )
         .await;
     let error = match result {
-        Ok(_) => panic!("unauthenticated live private route must block snapshot creation"),
+        Ok(_) => panic!("a mirror that names no row must block snapshot creation"),
         Err(error) => error,
     };
     assert!(
-        error
-            .to_string()
-            .contains("private route id does not authenticate"),
+        error.to_string().contains("has no Store audience mirror"),
         "{error}"
     );
     assert_eq!(
         std::fs::read_dir(image_dir.path())
-            .expect("read invalid-live-route snapshot directory")
+            .expect("read invalid-live-mirror snapshot directory")
             .count(),
         0,
-        "route validation fails before creating snapshot files"
+        "routing validation fails before creating snapshot files"
     );
 }
 
 #[tokio::test]
-async fn bootstrap_installs_a_valid_scoped_snapshot_with_authenticated_routes() {
-    let store_id = "snapshot-valid-private-routes";
+async fn bootstrap_installs_a_valid_scoped_snapshot() {
+    let store_id = "snapshot-valid-scoped-routing";
     let fixture = PublishedScopedSnapshot::publish(store_id, ScopedSnapshotImage::Valid).await;
-    let destination = tempfile::tempdir().expect("valid-route bootstrap destination");
+    let destination = tempfile::tempdir().expect("valid scoped bootstrap destination");
     let database_path = destination.path().join("store.db");
     let database = fixture
         .open(&database_path)
@@ -269,11 +270,16 @@ async fn bootstrap_installs_a_valid_scoped_snapshot_with_authenticated_routes() 
         .scoped_snapshot_counts_for_test()
         .await
         .expect("inspect valid scoped bootstrap");
-    assert_eq!(counts, (1, 1, 2));
+    assert_eq!(
+        counts,
+        (1, 1, 4),
+        "the installed Store image keeps a mirror per shared row, including the \
+         Circle rows it does not carry",
+    );
 }
 
 #[tokio::test]
-async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
+async fn bootstrap_migrates_before_validating_scoped_snapshot_routing() {
     const DOCUMENT_SCHEMA: &str = "CREATE TABLE documents (
              id TEXT PRIMARY KEY,
              audience TEXT,
@@ -403,26 +409,24 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
 }
 
 #[tokio::test]
-async fn bootstrap_rejects_a_signed_snapshot_with_an_unauthenticated_private_route() {
-    let store_id = "snapshot-invalid-private-route";
+async fn bootstrap_rejects_a_signed_snapshot_whose_mirror_names_no_row() {
+    let store_id = "snapshot-mirror-names-no-row";
     let fixture =
-        PublishedScopedSnapshot::publish(store_id, ScopedSnapshotImage::UnauthenticatedRoute).await;
-    let destination = tempfile::tempdir().expect("route-tamper bootstrap destination");
+        PublishedScopedSnapshot::publish(store_id, ScopedSnapshotImage::MirrorNamingNoRow).await;
+    let destination = tempfile::tempdir().expect("mirror-tamper bootstrap destination");
     let database_path = destination.path().join("store.db");
     let result = fixture.open(&database_path).await;
     let error = match result {
-        Ok(_) => panic!("unauthenticated private route must block bootstrap"),
+        Ok(_) => panic!("a mirror that names no row must block bootstrap"),
         Err(error) => error,
     };
     assert!(
-        error
-            .to_string()
-            .contains("private route id does not authenticate"),
+        error.to_string().contains("has no Store audience mirror"),
         "{error}"
     );
     assert!(
         !database_path.exists(),
-        "failed bootstrap removes the unauthenticated database image"
+        "failed bootstrap removes the invalid database image"
     );
 }
 

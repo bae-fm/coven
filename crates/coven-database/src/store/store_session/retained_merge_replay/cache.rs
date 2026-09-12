@@ -672,6 +672,7 @@ impl RetainedReplayCache {
                 root,
                 &schema,
                 gates,
+                routing_key,
                 &mut private_rows,
                 &mut replay_journal,
                 &applied,
@@ -886,6 +887,7 @@ impl RetainedReplayCache {
                                 root,
                                 &schema,
                                 gates,
+                                routing_key,
                                 &mut private_rows,
                                 &mut replay_journal,
                                 &applied,
@@ -949,6 +951,7 @@ impl RetainedReplayCache {
                 root,
                 &schema,
                 gates,
+                routing_key,
                 &mut private_rows,
                 &mut replay_journal,
                 &applied,
@@ -977,12 +980,14 @@ impl RetainedReplayCache {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drain_replay_journal(
     replay: &ReplayProjection,
     authority: &mut dyn VerifiedStoreLookup,
     root: &StoreRootRef,
     schema: &std::sync::Arc<TableSchema>,
     gates: &crate::Gates,
+    routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     private_rows: &mut crate::store::store_session::merge_materialization_transaction::ReplayRows,
     journal: &mut std::collections::VecDeque<crate::MergeReplayWrite>,
     applied: &BTreeSet<StoreBatchCommitRef>,
@@ -1014,7 +1019,15 @@ fn drain_replay_journal(
         let Some(effect) = effect else {
             return Ok(());
         };
-        replay.apply_write_effect(authority, root, effect, schema.clone(), gates, private_rows)?;
+        replay.apply_write_effect(
+            authority,
+            root,
+            effect,
+            schema.clone(),
+            gates,
+            routing_key,
+            private_rows,
+        )?;
         journal.pop_front();
     }
 }

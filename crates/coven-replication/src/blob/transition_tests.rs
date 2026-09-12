@@ -263,19 +263,13 @@ async fn assert_scoped_flip_journaled_atomically(
             .expect("inspect Store partition"),
         "the audience partition and its parent write commit together",
     );
-    let has_routes = db
-        .table_has_rows_for_test(coven_database::DatabaseTestTable::named(
-            "_coven_row_routes",
-        ))
-        .await
-        .expect("inspect scoped routes");
     let has_mirrors = db
         .table_has_rows_for_test(coven_database::DatabaseTestTable::named("_coven_audience"))
         .await
         .expect("inspect scoped mirrors");
     assert!(
-        !has_routes && !has_mirrors,
-        "a boolean-gated Store row does not invent scoped row routes or mirrors",
+        !has_mirrors,
+        "a boolean-gated Store row does not invent a scoped audience mirror",
     );
     let changesets = db
         .store_partition_changesets_for_test()
@@ -309,7 +303,7 @@ async fn assert_scoped_flip_journaled_atomically(
     assert!(
         !tables
             .iter()
-            .any(|table| matches!(table.as_str(), "_coven_audience" | "_coven_row_routes")),
+            .any(|table| coven_database::is_routing_table(table)),
         "the Store partition contains no unrelated scoped routing rows: {tables:?}",
     );
 }
