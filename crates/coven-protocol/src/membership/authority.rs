@@ -1,5 +1,14 @@
 use super::*;
 
+/// One sealed keyring a member may open: the entry that carries it and the
+/// keyring generation that entry establishes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ActivatedSealedKey {
+    pub coord: MembershipCoord,
+    pub generation: u64,
+    pub key: SealedStoreKey,
+}
+
 impl MembershipChain {
     /// Membership changes consume the resolved grant and key authority they
     /// were prepared against. Unrelated device controls do not change that
@@ -110,54 +119,69 @@ impl MembershipChain {
         members.into_iter().collect()
     }
 
-    pub fn active_wrapped_keys_for(&self, recipient_pubkey: &str) -> Vec<WrappedStoreKeyRef> {
+    pub fn active_sealed_keys_for(&self, recipient_pubkey: &str) -> Vec<ActivatedSealedKey> {
         let active_grants = self.active_grant_ids(recipient_pubkey);
         self.entries_with_coords()
             .filter(|(coord, _)| self.included.contains(*coord))
-            .flat_map(|(_, entry)| match &entry.change {
+            .filter_map(|(coord, entry)| match &entry.change {
                 StoreAuthorityChange::SetMember {
+                    user_pubkey,
                     grant_id,
-                    wrapped_key,
+                    sealed_key,
                     ..
-                } if active_grants.contains(grant_id) => std::slice::from_ref(wrapped_key),
-                StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.as_slice(),
+                } if user_pubkey == recipient_pubkey && active_grants.contains(grant_id) => {
+                    Some(ActivatedSealedKey {
+                        coord: coord.clone(),
+                        generation: membership_causal_generation(
+                            &self.entries,
+                            &entry.dependencies,
+                        ),
+                        key: sealed_key.clone(),
+                    })
+                }
+                StoreAuthorityChange::RemoveMember {
+                    rotation_generation,
+                    sealed_keys,
+                    ..
+                } => sealed_keys
+                    .get(recipient_pubkey)
+                    .map(|key| ActivatedSealedKey {
+                        coord: coord.clone(),
+                        generation: *rotation_generation,
+                        key: key.clone(),
+                    }),
                 StoreAuthorityChange::Founder { .. }
                 | StoreAuthorityChange::SetMember { .. }
                 | StoreAuthorityChange::DeviceRegistrationActivation { .. }
                 | StoreAuthorityChange::DeviceExclusionProposal { .. }
                 | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-                | StoreAuthorityChange::ProviderAdmin => &[],
+                | StoreAuthorityChange::ProviderAdmin => None,
             })
-            .filter(|reference| reference.recipient_pubkey == recipient_pubkey)
-            .cloned()
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
     }
 
-    pub fn wrapped_key_authority_for(
+    pub fn sealed_key_authority_for(
         &self,
         recipient_pubkey: &str,
-    ) -> Result<Vec<WrappedStoreKeyRef>, MembershipError> {
+    ) -> Result<Vec<ActivatedSealedKey>, MembershipError> {
         let active_grants = self.active_grants_for(recipient_pubkey);
-        for (index, (rotation_coord, entry)) in self
+        for (rotation_coord, entry) in self
             .entries_with_coords()
-            .enumerate()
-            .filter(|(_, (coord, _))| self.included.contains(*coord))
+            .filter(|(coord, _)| self.included.contains(*coord))
         {
-            let StoreAuthorityChange::RemoveMember { wrapped_keys, .. } = &entry.change else {
+            let StoreAuthorityChange::RemoveMember {
+                rotation_generation,
+                sealed_keys,
+                ..
+            } = &entry.change
+            else {
                 continue;
             };
-            if wrapped_keys
-                .iter()
-                .any(|reference| reference.recipient_pubkey == recipient_pubkey)
-            {
+            if sealed_keys.contains_key(recipient_pubkey) {
                 continue;
             }
-            let rotation_generation = wrapped_keys
-                .first()
-                .ok_or(MembershipError::InvalidWrappedKeys(index))?
-                .generation;
             let covered_by_later_grant = !active_grants.is_empty()
                 && active_grants.iter().all(|(active_grant, _)| {
                     let Some((_, creation)) = self.entries_with_coords().find(|(_, entry)| {
@@ -169,22 +193,39 @@ impl MembershipChain {
                     }) else {
                         return false;
                     };
-                    let StoreAuthorityChange::SetMember { wrapped_key, .. } = &creation.change
-                    else {
-                        return false;
-                    };
-                    wrapped_key.generation >= rotation_generation
+                    membership_causal_generation(&self.entries, &creation.dependencies)
+                        >= *rotation_generation
                         && causal_grants::history_closure(&self.entries, &creation.dependencies)
                             .contains(rotation_coord)
                 });
             if !covered_by_later_grant {
-                return Err(MembershipError::MissingWrappedKeyCoverage {
+                return Err(MembershipError::MissingSealedKeyCoverage {
                     recipient_pubkey: recipient_pubkey.to_string(),
                     rotation: Box::new(rotation_coord.clone()),
                 });
             }
         }
-        Ok(self.active_wrapped_keys_for(recipient_pubkey))
+        Ok(self.active_sealed_keys_for(recipient_pubkey))
+    }
+
+    /// The keyring generation this entry establishes: a grant carries the
+    /// keyring at its causal generation; a removal rotates to its own.
+    pub fn keyring_generation_of(&self, entry: &MembershipEntry) -> Option<u64> {
+        match &entry.change {
+            StoreAuthorityChange::SetMember { .. } => Some(membership_causal_generation(
+                &self.entries,
+                &entry.dependencies,
+            )),
+            StoreAuthorityChange::RemoveMember {
+                rotation_generation,
+                ..
+            } => Some(*rotation_generation),
+            StoreAuthorityChange::Founder { .. }
+            | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+            | StoreAuthorityChange::DeviceExclusionProposal { .. }
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::ProviderAdmin => None,
+        }
     }
 
     pub fn current_member_provider_email(&self, pubkey: &str) -> Option<&str> {

@@ -18,31 +18,6 @@ impl LocalStoreWriter {
         chain.signed_change_in_stream(&self.identity, stream_id, change, timestamp)
     }
 
-    pub(crate) async fn seal_keyring_for_member(
-        &self,
-        store_id: String,
-        recipient: String,
-        recipient_key: [u8; coven_keys::keys::CURVE25519_PUBLICKEYBYTES],
-        keyring: coven_keys::encryption::EncryptionService,
-    ) -> Result<
-        coven_protocol::wrapped_store_key::WrappedStoreKey,
-        crate::sync::store::membership::MembershipMutationError,
-    > {
-        let signer = self.identity.clone();
-        coven_foundation::blocking::run(move || {
-            coven_protocol::wrapped_store_key::WrappedStoreKey::seal_keyring(
-                &store_id,
-                &recipient,
-                &recipient_key,
-                &keyring,
-                &signer,
-            )
-            .map_err(crate::sync::store::membership::MembershipMutationError::Encryption)
-        })
-        .await
-        .map_err(crate::sync::store::membership::MembershipMutationError::Blocking)?
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign_set_member(
         &self,
@@ -51,40 +26,21 @@ impl LocalStoreWriter {
         member_pubkey: String,
         member_email: Option<String>,
         role: coven_protocol::membership::MemberRole,
-        wrapped_key: coven_protocol::wrapped_store_key::WrappedStoreKeyRef,
+        sealed_key: coven_protocol::membership::SealedStoreKey,
         timestamp: String,
     ) -> Result<
         coven_protocol::membership::MembershipEntry,
         coven_protocol::membership::MembershipError,
     > {
-        chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
+        chain.signed_set_member_with_anchor_and_sealed_key_in_stream(
             &self.identity,
             stream_id,
             member_pubkey,
             member_email,
             role,
             None,
-            wrapped_key,
+            sealed_key,
             timestamp,
-        )
-    }
-
-    pub(crate) fn seal_keyring(
-        &self,
-        store_id: &str,
-        recipient: &str,
-        recipient_key: &[u8; coven_keys::keys::CURVE25519_PUBLICKEYBYTES],
-        keyring: &coven_keys::encryption::EncryptionService,
-    ) -> Result<
-        coven_protocol::wrapped_store_key::WrappedStoreKey,
-        coven_keys::encryption::EncryptionError,
-    > {
-        coven_protocol::wrapped_store_key::WrappedStoreKey::seal_keyring(
-            store_id,
-            recipient,
-            recipient_key,
-            keyring,
-            &self.identity,
         )
     }
 
@@ -94,7 +50,7 @@ impl LocalStoreWriter {
         chain: &coven_protocol::membership::MembershipChain,
         stream_id: coven_protocol::membership::AuthorStreamId,
         revokee_pubkey: String,
-        wrapped_keys: Vec<coven_protocol::wrapped_store_key::WrappedStoreKeyRef>,
+        sealed_keys: std::collections::BTreeMap<String, coven_protocol::membership::SealedStoreKey>,
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
         timestamp: String,
     ) -> Result<
@@ -105,7 +61,7 @@ impl LocalStoreWriter {
             &self.identity,
             stream_id,
             revokee_pubkey,
-            wrapped_keys,
+            sealed_keys,
             device_state,
             timestamp,
         )
@@ -116,17 +72,17 @@ impl LocalStoreWriter {
         chain: &coven_protocol::membership::MembershipChain,
         stream_id: coven_protocol::membership::AuthorStreamId,
         revokee_pubkey: String,
-        wrapped_keys: Vec<coven_protocol::wrapped_store_key::WrappedStoreKeyRef>,
+        sealed_keys: std::collections::BTreeMap<String, coven_protocol::membership::SealedStoreKey>,
         timestamp: String,
     ) -> Result<
         coven_protocol::membership::MembershipEntry,
         coven_protocol::membership::MembershipError,
     > {
-        chain.signed_remove_member_with_wrapped_keys_in_stream(
+        chain.signed_remove_member_with_sealed_keys_in_stream(
             &self.identity,
             stream_id,
             revokee_pubkey,
-            wrapped_keys,
+            sealed_keys,
             timestamp,
         )
     }
@@ -230,7 +186,7 @@ impl LocalStoreWriter {
         root: &coven_protocol::store_commit::StoreRootRef,
         candidate: &coven_protocol::store_commit::StoreDeviceRegistration,
         acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
-        wrapped_key: coven_protocol::wrapped_store_key::WrappedStoreKeyRef,
+        sealed_key: coven_protocol::membership::SealedStoreKey,
         timestamp: String,
     ) -> Result<
         coven_protocol::membership::MembershipEntry,
@@ -242,7 +198,7 @@ impl LocalStoreWriter {
             candidate,
             acceptance,
             &self.identity,
-            wrapped_key,
+            sealed_key,
             timestamp,
         )
     }

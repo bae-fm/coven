@@ -605,7 +605,7 @@ impl MembershipChain {
 
         validate_provider_admin_controls(entries)?;
         validate_membership_retirement_barriers(entries)?;
-        validate_membership_wrapped_keys(entries)?;
+        validate_membership_sealed_keys(entries)?;
         let reduced = reduce_store_membership(entries)?;
         let provider_admin = crate::provider::ProviderAdminState::reduce_merge(
             provider_admin_genesis,

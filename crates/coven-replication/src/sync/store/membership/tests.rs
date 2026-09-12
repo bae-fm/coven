@@ -167,7 +167,7 @@ async fn retrying_the_same_admission_reuses_the_active_membership_grant() {
     let second = fixture.admit_member(&member, MemberRole::Member).await;
 
     assert_eq!(fixture.load().await.head_refs(), first_heads);
-    assert_eq!(second.wrapped_key, first.wrapped_key);
+    assert_eq!(second.grant_id, first.grant_id);
     assert_eq!(second.membership_floor, first.membership_floor);
     assert_eq!(second.join_info, first.join_info);
 }

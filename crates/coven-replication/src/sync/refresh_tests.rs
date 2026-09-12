@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::sync::store::authorization::load_wrapped_store_key;
+use crate::sync::store::open_store_keyring;
 use crate::sync::store::MembershipOpsError;
 use crate::sync::test_helpers::{pubkey_hex, TestCustody, TestStore};
 use coven_foundation::clock::SystemClock;
@@ -21,7 +21,6 @@ use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::MasterKeyCustody;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::membership::{MemberRole, MembershipChain};
-use coven_protocol::wrapped_store_key::{WrappedStoreKey, WrappedStoreKeyRef};
 use coven_storage::CloudSyncObjectStorage;
 use coven_storage::{CloudCipher, CloudSyncCipherStateAccess, PendingRotation};
 
@@ -67,16 +66,6 @@ trait RefreshTestStoreOps {
         db: &coven_database::Database,
         db_store_dir: coven_foundation::store_dir::StoreDir,
     ) -> MembershipChain;
-
-    async fn create_unreferenced_wrapped_key(
-        &self,
-        cloud_storage: &coven_storage::CloudSyncConnection,
-        owner_db: &coven_database::Database,
-        owner_db_store_dir: coven_foundation::store_dir::StoreDir,
-        recipient: &UserKeypair,
-        encryption: &EncryptionService,
-        signer: &UserKeypair,
-    ) -> WrappedStoreKeyRef;
 }
 
 impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
@@ -178,38 +167,6 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
             .await
             .expect("read exact refresh membership chain")
     }
-
-    async fn create_unreferenced_wrapped_key(
-        &self,
-        cloud_storage: &coven_storage::CloudSyncConnection,
-        owner_db: &coven_database::Database,
-        owner_db_store_dir: coven_foundation::store_dir::StoreDir,
-        recipient: &UserKeypair,
-        encryption: &EncryptionService,
-        signer: &UserKeypair,
-    ) -> WrappedStoreKeyRef {
-        let recipient_pubkey = pubkey_hex(recipient);
-        let wrapped = WrappedStoreKey::seal_keyring(
-            &self.root().store_root_id.to_string(),
-            &recipient_pubkey,
-            &recipient.to_x25519_public_key(),
-            encryption,
-            signer,
-        )
-        .expect("seal wrapped Store key");
-        let prepared = self
-            .bind_device(owner_db, owner_db_store_dir.clone(), signer)
-            .await
-            .expect("bind wrapped-key publication Store")
-            .prepare_wrapped_key(&recipient_pubkey, wrapped)
-            .await
-            .expect("prepare exact wrapped Store key");
-        cloud_storage
-            .create_protocol_object(&prepared.object)
-            .await
-            .expect("create exact wrapped Store key");
-        prepared.reference
-    }
 }
 
 struct ExactStoreFixture {
@@ -280,140 +237,21 @@ impl crate::sync::test_helpers::StorageInterceptor for MembershipReadCounter {
 }
 
 /// A non-rotating running device B adopts a rotated store key on its next cycle,
-/// with no restart. Device A removes a member, which rotates the key and re-wraps
-/// an immutable key object for B and names it in the removal authority; B's next
-/// the next sync cycle reads that exact object, authenticates it, and swaps
-/// its live cipher — so it can now decrypt content sealed under the new key, and
-/// its keyring holds the new key for the next restart.
+/// with no restart. Device A removes a member, which rotates the key and seals
+/// the rotated keyring to B inside the signed removal entry; B's next sync cycle
+/// opens that sealed key and swaps its live cipher — so it can now decrypt
+/// content sealed under the new key, and its keyring holds the new key for the
+/// next restart.
 ///
-/// Mutation proof: drop the wrapped-key re-fetch from the refresh and B
-/// keeps its old cipher — the post-rotation key never reaches it and the final
-/// fingerprint assertion fails. (Asserted here by checking B's live cipher and
-/// keyring both hold the rotated key, which only the adoption can produce.)
+/// Mutation proof: drop the sealed-key re-read from the refresh and B keeps its
+/// old cipher — the post-rotation key never reaches it and the final fingerprint
+/// assertion fails. (Asserted here by checking B's live cipher and keyring both
+/// hold the rotated key, which only the adoption can produce.)
 #[path = "refresh_membership_tests.rs"]
 mod membership;
 
-/// Creating a wrapped key cannot make it active. Until membership authority
-/// names its exact reference, refresh ignores it and continues with the
-/// authorized keyring.
 #[tokio::test]
-async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
-    let owner = UserKeypair::generate();
-    let device_b = UserKeypair::generate();
-    let old_key: [u8; 32] = [31u8; 32];
-    let rotated_key: [u8; 32] = [32u8; 32];
-
-    // The cloud is the owner's, so a changeset it serves is authored by a member
-    // the pull will authorize against the chain.
-    let encryption = EncryptionService::from_key(old_key);
-    let ExactStoreFixture {
-        store: storage,
-        cloud_storage,
-        db: owner_db,
-        db_store_dir: owner_db_store_dir,
-    } = exact_store(&owner, &encryption).await;
-    storage
-        .admit_exact_member(
-            &owner_db,
-            owner_db_store_dir.clone(),
-            &owner,
-            &device_b,
-            MemberRole::Member,
-            &encryption,
-        )
-        .await;
-    let chain = storage
-        .load_exact_chain(&owner_db, owner_db_store_dir.clone())
-        .await;
-    let pending_keyring = EncryptionService::from_key(old_key)
-        .with_appended_generation(2, rotated_key)
-        .unwrap();
-    let unreferenced = storage
-        .create_unreferenced_wrapped_key(
-            &cloud_storage,
-            &owner_db,
-            owner_db_store_dir.clone(),
-            &device_b,
-            &pending_keyring,
-            &owner,
-        )
-        .await;
-    assert!(
-        !chain
-            .active_wrapped_keys_for(&pubkey_hex(&device_b))
-            .contains(&unreferenced),
-        "creating an exact object does not activate it",
-    );
-
-    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
-    let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
-    let running_b = storage
-        .activate_joined_device(
-            &owner_db,
-            owner_db_store_dir.clone(),
-            &db_b,
-            db_b_store_dir.clone(),
-            &device_b,
-            "0000000001000-0000-refresh",
-        )
-        .await
-        .expect("activate exact joined test device");
-
-    // A peer changeset waiting to be pulled, so the cycle proving it "completes"
-    // also proves the pull ran and applied it while sealing was paused.
-    owner_db
-        .execute_test_host_write(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('peer1', 'FromOwner', NULL, 1, '0000000005000-0000-A', '2026-01-01')",
-        )
-        .await;
-    let owner_device = storage
-        .bind_device(&owner_db, owner_db_store_dir, &owner)
-        .await
-        .expect("bind the publishing owner");
-    assert!(owner_device
-        .prepare_pending_store_write()
-        .await
-        .expect("prepare owner row"));
-    assert_eq!(
-        owner_device
-            .drain_store_writes()
-            .await
-            .expect("publish owner row"),
-        1
-    );
-
-    let ks_b = TestCustody::default();
-    ks_b.set_initial_key(old_key);
-    let result = running_b
-        .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
-        .await
-        .expect("an unreferenced wrapped key does not affect the cycle");
-
-    assert_eq!(
-        result.changesets_applied, 1,
-        "the pull still applies a peer's changeset",
-    );
-    assert_eq!(result.rotation_pending, None);
-    assert_eq!(
-        running_b
-            .current_keyring_for_test()
-            .expect("B retains encrypted storage")
-            .seal_key(),
-        old_key,
-        "an unreferenced key must not replace the live cipher",
-    );
-    load_wrapped_store_key(
-        &*cloud_storage,
-        storage.root().store_root_hash,
-        &unreferenced,
-    )
-    .await
-    .expect("the ignored exact object remains readable by its exact reference");
-}
-
-#[tokio::test]
-async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
+async fn a_pre_rotation_sealed_key_does_not_roll_the_device_back() {
     let owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
     let victim = UserKeypair::generate();
@@ -422,7 +260,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     let encryption = EncryptionService::from_key(old_key);
     let ExactStoreFixture {
         store: storage,
-        cloud_storage,
+        cloud_storage: _,
         db: owner_db,
         db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
@@ -446,11 +284,15 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
             &encryption,
         )
         .await;
-    let old_reference = chain
-        .active_wrapped_keys_for(&pubkey_hex(&device_b))
-        .into_iter()
-        .next()
-        .expect("admit activates the initial exact wrapped key");
+    assert_eq!(
+        chain
+            .active_sealed_keys_for(&pubkey_hex(&device_b))
+            .into_iter()
+            .map(|sealed| sealed.generation)
+            .collect::<Vec<_>>(),
+        vec![coven_keys::encryption::INITIAL_KEY_GENERATION],
+        "the admission activates the pre-rotation sealed key",
+    );
 
     let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
     let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
@@ -479,10 +321,8 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         )
         .await
         .expect("revoke rotates key");
-    let new_key = crate::sync::store::StoreKeyrings::new(&*cloud_storage, storage.root().clone())
-        .open(&owner, &rotated_membership)
-        .await
-        .expect("open the exact accepted rotation wraps");
+    let new_key = open_store_keyring(&owner, &rotated_membership)
+        .expect("open the exact accepted rotation keys");
 
     running_b
         .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
@@ -496,18 +336,12 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         new_key.current_generation()
     );
 
-    load_wrapped_store_key(
-        &*cloud_storage,
-        storage.root().store_root_hash,
-        &old_reference,
-    )
-    .await
-    .expect("the retained pre-rotation object remains readable");
-
+    // The pre-rotation sealed key stays activated by the retained grant entry,
+    // so every later cycle opens it again alongside the rotation.
     running_b
         .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
         .await
-        .expect("replayed old wrapped key is ignored");
+        .expect("the retained pre-rotation sealed key is merged, not adopted");
 
     assert_eq!(
         running_b
@@ -515,7 +349,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
             .expect("B retains encrypted storage")
             .seal_key(),
         new_key.key_bytes(),
-        "a replayed older wrapped key must not roll the device back",
+        "the older sealed key must not roll the device back",
     );
     assert_eq!(
         running_b
@@ -538,7 +372,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     let encryption = EncryptionService::from_key(old_key);
     let ExactStoreFixture {
         store: storage,
-        cloud_storage,
+        cloud_storage: _,
         db: owner_db,
         db_store_dir: owner_db_store_dir,
     } = exact_store(&founder, &encryption).await;
@@ -624,10 +458,8 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     ))
     .await
     .expect("second owner can revoke");
-    let new_key = crate::sync::store::StoreKeyrings::new(&*cloud_storage, storage.root().clone())
-        .open(&second_owner, &rotated_membership)
-        .await
-        .expect("open the exact accepted rotation wraps");
+    let new_key = open_store_keyring(&second_owner, &rotated_membership)
+        .expect("open the exact accepted rotation keys");
 
     Box::pin(running_b.run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None))
         .await
@@ -653,7 +485,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
 
     let ExactStoreFixture {
         store: storage,
-        cloud_storage,
+        cloud_storage: _,
         db: founder_db,
         db_store_dir: founder_db_store_dir,
     } = exact_store(&founder, &initial).await;
@@ -754,11 +586,8 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         )
         .await
         .expect("founder publishes one rotation fork");
-    let founder_rotation =
-        crate::sync::store::StoreKeyrings::new(&*cloud_storage, storage.root().clone())
-            .open(&founder, founder_writer.membership())
-            .await
-            .expect("open the founder's accepted fork before the competing rotation");
+    let founder_rotation = open_store_keyring(&founder, founder_writer.membership())
+        .expect("open the founder's accepted fork before the competing rotation");
     second_owner_writer
         .revoke_member_without_local_adoption_for_test(
             &pubkey_hex(&second_victim),
@@ -803,11 +632,8 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
     ))
     .await
     .expect("founder rotates after observing both forks");
-    let next_rotation =
-        crate::sync::store::StoreKeyrings::new(&*cloud_storage, storage.root().clone())
-            .open(&founder, &rotated_membership)
-            .await
-            .expect("open the exact accepted rotation wraps");
+    let next_rotation = open_store_keyring(&founder, &rotated_membership)
+        .expect("open the exact accepted rotation keys");
 
     assert_eq!(
         next_rotation.key_count(),
@@ -827,7 +653,7 @@ async fn removed_owner_key_is_not_adopted() {
     let encryption = EncryptionService::from_key(current_key);
     let ExactStoreFixture {
         store: storage,
-        cloud_storage,
+        cloud_storage: _,
         db: owner_db,
         db_store_dir: owner_db_store_dir,
     } = exact_store(&founder, &encryption).await;
@@ -902,10 +728,8 @@ async fn removed_owner_key_is_not_adopted() {
         )
         .await
         .expect("second owner removes founder through exact membership graph");
-    let rotated = crate::sync::store::StoreKeyrings::new(&*cloud_storage, storage.root().clone())
-        .open(&second_owner, &rotated_membership)
-        .await
-        .expect("open the exact accepted rotation wraps");
+    let rotated = open_store_keyring(&second_owner, &rotated_membership)
+        .expect("open the exact accepted rotation keys");
 
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(rotated.key_bytes());
@@ -919,91 +743,8 @@ async fn removed_owner_key_is_not_adopted() {
             .expect("B retains encrypted storage")
             .seal_key(),
         rotated.key_bytes(),
-        "a removed owner's retained historical wrap is not active",
+        "a removed owner's retained historical sealed key is not active",
     );
-}
-
-/// A valid exact object signed by an attacker has no authority. Refresh does not
-/// discover objects by listing paths, so the object is ignored unless a valid
-/// membership entry names its exact reference.
-#[tokio::test]
-async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
-    let owner = UserKeypair::generate();
-    let attacker = UserKeypair::generate();
-    let device_b = UserKeypair::generate();
-    let real_key: [u8; 32] = [22u8; 32];
-
-    let encryption = EncryptionService::from_key(real_key);
-    let ExactStoreFixture {
-        store: storage,
-        cloud_storage,
-        db: owner_db,
-        db_store_dir: owner_db_store_dir,
-    } = exact_store(&owner, &encryption).await;
-    storage
-        .admit_exact_member(
-            &owner_db,
-            owner_db_store_dir.clone(),
-            &owner,
-            &device_b,
-            MemberRole::Member,
-            &encryption,
-        )
-        .await;
-
-    let forged_key: [u8; 32] = [0xCDu8; 32];
-    let forged = storage
-        .create_unreferenced_wrapped_key(
-            &cloud_storage,
-            &owner_db,
-            owner_db_store_dir.clone(),
-            &device_b,
-            &EncryptionService::from_key(forged_key),
-            &attacker,
-        )
-        .await;
-
-    // B holds its real key (live + keyring) and pins the owner.
-    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
-    let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
-    let running_b = storage
-        .activate_joined_device(
-            &owner_db,
-            owner_db_store_dir.clone(),
-            &db_b,
-            db_b_store_dir.clone(),
-            &device_b,
-            "0000000001000-0000-refresh",
-        )
-        .await
-        .expect("activate exact joined test device");
-    let ks_b = TestCustody::default();
-    ks_b.set_initial_key(real_key);
-    running_b
-        .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
-        .await
-        .expect("an unreferenced attacker object does not affect refresh");
-
-    // Critically, B did NOT swap its cipher to the attacker's key.
-    assert_eq!(
-        running_b
-            .current_keyring_for_test()
-            .expect("B retains encrypted storage")
-            .seal_key(),
-        real_key,
-        "B keeps its real key; the unauthenticated forged key is never adopted",
-    );
-    assert_ne!(
-        running_b
-            .current_keyring_for_test()
-            .expect("B retains encrypted storage")
-            .seal_key(),
-        forged_key,
-        "the attacker's key was rejected",
-    );
-    load_wrapped_store_key(&*cloud_storage, storage.root().store_root_hash, &forged)
-        .await
-        .expect("the ignored attacker object exists at its exact reference");
 }
 
 /// For an owner-pinned store, a chain the refresh can't load must abort the
@@ -1224,8 +965,8 @@ fn cipher_generation(cipher: &RwLock<CloudCipher>) -> u64 {
 /// own typed error, marks this device's rotation-pending gate (so it seals
 /// nothing new for the cloud in the meantime — see `rotation_pending_tests`), and
 /// both remedies it names converge without losing the rotation: the device's next
-/// sync cycle adopts the key from its own `keys/{self}` wrap, and retrying the
-/// removal re-derives and re-adopts it.
+/// sync cycle adopts the key from the removal entry's sealed key for itself, and
+/// retrying the removal re-derives and re-adopts it.
 #[tokio::test]
 async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     let owner = UserKeypair::generate(); // this device — performs the removal

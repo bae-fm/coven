@@ -17,8 +17,10 @@ pub enum MembershipMutationError {
     Crypto(String),
     #[error("membership mutation encryption: {0}")]
     Encryption(#[from] coven_keys::encryption::EncryptionError),
-    #[error("membership mutation wrapped keyring: {0}")]
-    WrappedKeyring(#[from] coven_protocol::wrapped_store_key::WrappedKeyringError),
+    #[error("membership mutation sealed Store key: {0}")]
+    SealedKey(#[from] coven_protocol::membership::SealedStoreKeyError),
+    #[error("membership mutation sealing: {0}")]
+    SealedKeySeal(#[from] coven_protocol::membership::SealedStoreKeySealError),
     #[error("membership mutation JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("membership mutation history: {0}")]

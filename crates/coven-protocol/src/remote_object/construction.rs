@@ -241,22 +241,6 @@ impl RemoteObjectRecord {
         )
     }
 
-    pub(crate) fn candidate_exclusive_merge_membership_wrapped_store_key(
-        family: CandidateFamilyId,
-        reference: crate::wrapped_store_key::WrappedStoreKeyRef,
-        canonical_signed_bytes: &[u8],
-        stored_bytes: &[u8],
-        owner: StoreBatchCommitRef,
-    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
-        Self::candidate_exclusive_retained_authority(
-            family,
-            CandidateExclusiveObjectDomain::MergeMembershipWrappedStoreKey { family, reference },
-            canonical_signed_bytes,
-            stored_bytes,
-            owner,
-        )
-    }
-
     pub(crate) fn candidate_activated_device_exclusion_proposal(
         reference: crate::store_commit::StoreDeviceExclusionProposalRef,
         canonical_signed_bytes: &[u8],

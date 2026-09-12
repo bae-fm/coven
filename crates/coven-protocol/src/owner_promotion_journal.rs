@@ -43,7 +43,6 @@ use crate::store_commit::{
     RetainedOwnerPromotionRequestPublication, StoreDeviceRegistrationRef, StreamActivation,
     StreamAnchorDomain,
 };
-use crate::wrapped_store_key::PreparedWrappedStoreKey;
 
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,7 +76,6 @@ pub enum OwnerPromotionJournalState {
     },
     MergeHeadPrepared {
         acceptance: OwnerPromotionAcceptance,
-        wrapped_key: PreparedWrappedStoreKey,
         candidate: Box<PreparedStoreOperationCommit>,
     },
     Finalized {
@@ -167,14 +165,6 @@ fn nonactivation_matches_request(
             && commit.membership_state == request.predecessor_membership
             && commit.device_state == request.predecessor_devices
     })
-}
-
-fn wrapped_key_matches_acceptance(
-    wrapped_key: &PreparedWrappedStoreKey,
-    acceptance: &OwnerPromotionAcceptance,
-) -> bool {
-    wrapped_key.validate().is_ok()
-        && wrapped_key.reference.recipient_pubkey == acceptance.request.member_pubkey
 }
 
 fn publication_matches_acceptance(
@@ -427,15 +417,15 @@ impl OwnerPromotionJournal {
             }
             OwnerPromotionJournalState::MergeHeadPrepared {
                 acceptance,
-                wrapped_key,
                 candidate,
             } => {
                 let publication = finalization_publication(candidate, acceptance)?;
                 self.acceptance_has_closed_shape(acceptance)
-                    && wrapped_key_matches_acceptance(wrapped_key, acceptance)
+                    // The journal binds the sealed recipient to the acceptance here:
+                    // the entry it will publish grants the accepted member.
                     && matches!(&publication.entry.change,
-                        crate::membership::StoreAuthorityChange::SetMember { wrapped_key: expected, .. }
-                            if expected == &wrapped_key.reference)
+                        crate::membership::StoreAuthorityChange::SetMember { user_pubkey, .. }
+                            if user_pubkey == &acceptance.request.member_pubkey)
             }
             OwnerPromotionJournalState::Finalized {
                 acceptance,
@@ -614,17 +604,14 @@ impl OwnerPromotionJournal {
             (
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance,
-                    wrapped_key,
                     candidate,
                 },
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance: successor,
-                    wrapped_key: successor_key,
                     candidate: successor_candidate,
                 },
             ) => {
                 acceptance == successor
-                    && wrapped_key.reference == successor_key.reference
                     && same_prepared_membership_candidate(candidate, successor_candidate)
             }
             (
@@ -724,12 +711,9 @@ impl OwnerPromotionJournalPredecessor {
                     &candidate.commit,
                 )?]
             }
-            OwnerPromotionJournalState::MergeHeadPrepared {
-                wrapped_key,
-                candidate,
-                ..
-            } => candidate
-                .merge_membership_activation_remote_objects(std::slice::from_ref(wrapped_key))?,
+            OwnerPromotionJournalState::MergeHeadPrepared { candidate, .. } => {
+                candidate.merge_membership_activation_remote_objects()?
+            }
             _ => Vec::new(),
         };
         let next_value = serde_json::to_string(next)?;

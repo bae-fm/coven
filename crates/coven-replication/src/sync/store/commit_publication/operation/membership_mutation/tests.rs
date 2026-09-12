@@ -90,7 +90,7 @@ async fn a_retained_writer_verifies_control_after_another_writer_advances_its_da
         .values()
         .any(|tip| tip == &predecessor));
     let remotes = candidate
-        .merge_membership_activation_remote_objects(std::slice::from_ref(&admission.wrapped_key))
+        .merge_membership_activation_remote_objects()
         .unwrap();
     writer
         .publish_membership_authority(candidate, &remotes)

@@ -33,18 +33,6 @@ pub(super) fn validate_candidate_exclusive_identity(
                 canonical_semantic_bytes,
             )
         }
-        CandidateExclusiveObjectDomain::MergeMembershipWrappedStoreKey { reference, .. } => {
-            validate_retained_authority_identity(
-                &RetainedAuthorityObjectRef {
-                    domain: RetainedAuthorityObjectDomain::MergeMembershipWrappedStoreKey {
-                        reference: reference.clone(),
-                    },
-                    semantic_hash: identity.semantic_hash,
-                    object: identity.object.clone(),
-                },
-                canonical_semantic_bytes,
-            )
-        }
         CandidateExclusiveObjectDomain::StorePackage { reference } => {
             validate_package_reference(reference, None, canonical_semantic_bytes, &identity.object)
         }
@@ -268,14 +256,6 @@ pub(super) fn validate_retained_authority_identity(
                 || acknowledgement.ack_hash() != reference.ack_hash
                 || reference.object != identity.object
             {
-                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-            }
-        }
-        RetainedAuthorityObjectDomain::MergeMembershipWrappedStoreKey { reference } => {
-            let wrapped: crate::wrapped_store_key::WrappedStoreKey =
-                serde_json::from_slice(canonical_semantic_bytes)?;
-            reference.validate_value(&wrapped, canonical_semantic_bytes)?;
-            if reference.object != identity.object {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }

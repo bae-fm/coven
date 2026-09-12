@@ -8,7 +8,6 @@ mod candidate_cleanup;
 pub(crate) mod history;
 mod history_construction;
 pub(crate) mod keyring;
-pub(crate) use keyring::load_wrapped_store_key;
 #[cfg(test)]
 mod recovery_blob_tests;
 #[cfg(test)]
@@ -27,7 +26,8 @@ pub(crate) use candidate_cleanup::{
 };
 use history::AuthorizedStoreHistory;
 pub use history_construction::HistoryConstructionAuthority;
-pub use keyring::StoreKeyrings;
+pub(crate) use keyring::open_store_keyring_or;
+pub use keyring::{open_granted_store_keyring, open_store_keyring};
 pub use registration::StoreRegistrationError;
 use registration_outbox::RegistrationOutbox;
 
@@ -281,7 +281,6 @@ impl Store {
             storage.as_ref(),
             root.reference().clone(),
         );
-        let keyrings = keyring::StoreKeyrings::new(storage.as_ref(), root.reference().clone());
         let blob_cache =
             crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
         AuthorizedStoreHistory::new(
@@ -292,7 +291,6 @@ impl Store {
             blob_cache,
             history_verifier,
             blob_source,
-            keyrings,
         )
         .finish_initialization(identity)
         .await
@@ -586,8 +584,6 @@ impl Store {
             self.storage.as_ref(),
             self.root.reference().clone(),
         );
-        let keyrings =
-            keyring::StoreKeyrings::new(self.storage.as_ref(), self.root.reference().clone());
         let mut history = AuthorizedStoreHistory::new(
             self.database.clone(),
             self.routing_encryption.clone(),
@@ -596,7 +592,6 @@ impl Store {
             self.blob_cache.clone(),
             history_verifier,
             blob_source,
-            keyrings,
         );
         history.seed_retained_history().await.map_err(|error| {
             SyncCycleFailure::operation("load installed Store history authority", error)

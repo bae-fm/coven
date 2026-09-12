@@ -26,7 +26,6 @@ use super::store_commit::{
     OwnerPromotionRequestActivation, OwnerPromotionRequestBody, OwnerRecoveryNodeRef,
     OwnerRecoveryPosition,
 };
-use super::wrapped_store_key::WrappedStoreKeyRef;
 use crate::objects::ExactObjectRef;
 use coven_keys::keys::{self, UserKeypair};
 
@@ -38,17 +37,24 @@ mod head_acceptance;
 mod head_predecessor;
 pub use head_predecessor::MembershipHeadPredecessor;
 mod reduction;
+mod sealed_key;
 
 pub use head_acceptance::{
     membership_head_acceptance_semantic_prefix, MembershipHeadAcceptance,
     MembershipHeadAcceptanceBody, MembershipHeadAcceptanceIssuer,
 };
 
+#[cfg(any(test, feature = "test-utils"))]
+pub use entry::founder_entry;
 pub use entry::{
     derive_founder_stream_id, derive_grant_id, founder_entry_for_creation, verify_membership_entry,
 };
+
+pub use authority::ActivatedSealedKey;
 #[cfg(any(test, feature = "test-utils"))]
-pub use entry::{founder_entry, test_wrapped_key_ref};
+pub use sealed_key::test_sealed_store_key;
+pub use sealed_key::{SealedStoreKey, SealedStoreKeyError, SealedStoreKeySealError};
+
 use reduction::*;
 
 const MEMBERSHIP_ENTRY_DOMAIN: &[u8] = b"coven.store-membership-entry.v1\0";
@@ -140,7 +146,8 @@ pub enum StoreAuthorityChange {
         retirement_barriers: BTreeMap<MembershipGrantId, MergeMembershipGrantRetirementBarrier>,
         #[serde(skip_serializing_if = "Option::is_none")]
         retirement_device_state: Option<StoreDeviceStateRef>,
-        wrapped_key: WrappedStoreKeyRef,
+        /// The Store keyring at this entry's causal generation, sealed to `user_pubkey`.
+        sealed_key: SealedStoreKey,
     },
     RemoveMember {
         user_pubkey: String,
@@ -148,7 +155,10 @@ pub enum StoreAuthorityChange {
         retirement_barriers: BTreeMap<MembershipGrantId, MergeMembershipGrantRetirementBarrier>,
         #[serde(skip_serializing_if = "Option::is_none")]
         retirement_device_state: Option<StoreDeviceStateRef>,
-        wrapped_keys: Vec<WrappedStoreKeyRef>,
+        /// The keyring generation this removal rotates to: its causal generation plus one.
+        rotation_generation: u64,
+        /// The rotated keyring sealed to every remaining member, keyed by member public key.
+        sealed_keys: BTreeMap<String, SealedStoreKey>,
     },
     DeviceRegistrationActivation {
         registration: super::store_commit::ActivatedStoreDeviceRegistrationRef,
@@ -527,17 +537,17 @@ pub enum MembershipError {
     UnexpectedOwnerRecoveryState,
     #[error("membership entry {0} carries an invalid Owner membership stream anchor")]
     InvalidOwnerMembershipAnchor(usize),
-    #[error("membership entry {0} carries invalid wrapped Store-key authority")]
-    InvalidWrappedKeys(usize),
+    #[error("membership entry {0} carries invalid sealed Store-key authority")]
+    InvalidSealedKeys(usize),
     #[error("membership grant {grant} retirement at {authority:?} lacks its exact signed barrier")]
     MissingRetirementBarrier {
         grant: MembershipGrantId,
         authority: Box<MembershipCoord>,
     },
     #[error(
-        "current member {recipient_pubkey} lacks wrapped Store-key coverage for rotation {rotation:?}"
+        "current member {recipient_pubkey} lacks sealed Store-key coverage for rotation {rotation:?}"
     )]
-    MissingWrappedKeyCoverage {
+    MissingSealedKeyCoverage {
         recipient_pubkey: String,
         rotation: Box<MembershipCoord>,
     },

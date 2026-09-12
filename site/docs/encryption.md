@@ -39,20 +39,13 @@ permission to decrypt from proof of who authored a record.
 **Recipient encryption delivers keys.** To share the Store keyring, an owner
 seals it to the recipient's X25519 public key, derived from their Ed25519 public
 key. The recipient derives the matching secret key to open it. The sealed box
-alone does not authenticate a sender, so coven also signs the wrapping record:
-the signature binds the Store, recipient, owner, generation, and sealed bytes.
-The reader verifies the authorized owner and exact reference before adopting
-the keyring.
+alone does not authenticate a sender, so it travels inside the Owner-signed
+membership entry that grants or rotates that member's access: the entry's
+signature and hash authenticate the sealed bytes, and the entry's position in
+membership history fixes which keyring generation they must decode to.
 
-A wrapped key is stored at:
-
-```text
-keys/{owner_pubkey}/{recipient_pubkey}/{generation}/{wrap_hash}.json
-```
-
-Its key material is encrypted to the recipient; its owner and generation remain
-readable. The path also exposes the recipient. The invitation therefore does
-not hide who created or received the wrapping record.
+The membership entry names its recipient and is itself a readable signed
+record, so an invitation does not hide who granted access to whom.
 
 ## What the storage provider sees
 
@@ -62,7 +55,6 @@ Protection is selected by the object kind, not by its filename extension:
 | --- | --- |
 | Store row packages, Store snapshot images, reclamation evidence | Store-key encryption |
 | Store root, publications, commit records, acknowledgements, device registrations, snapshot metadata, membership entries and rollups | Signed, readable records |
-| Wrapped Store keyrings | Recipient-encrypted contents, without another Store-key encryption layer |
 | Circle packages, roster and metadata records, acknowledgements, snapshot images and metadata | Circle-key encryption |
 | Circle control records, including each recipient's sealed access entry | Store-key encryption |
 | Application blobs | Encryption under their audience key and declared scope |

@@ -111,11 +111,6 @@ fn every_protocol_domain_requires_its_exact_path_grammar() {
             cross_domain: "store-v1/membership/entries/owner/grant/stream/1/hash",
         },
         DomainPathCase {
-            domain: ProtectedObjectDomain::StoreWrappedKey,
-            valid: &["keys/owner/recipient/1/hash"],
-            cross_domain: "store-v1/membership/entries/owner/grant/stream/1/hash",
-        },
-        DomainPathCase {
             domain: ProtectedObjectDomain::StorePackage,
             valid: &["store-v1/candidates/family/packages/device/1/hash"],
             cross_domain: "store-v1/candidates/family/commits/device/1/hash",

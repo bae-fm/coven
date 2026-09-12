@@ -128,8 +128,7 @@ pub fn copy_payload_files(
     }
 }
 
-/// Hex-encoded ed25519 public key, as membership entries and the wrapped-key
-/// store identify a member.
+/// Hex-encoded ed25519 public key, as membership entries identify a member.
 pub fn pubkey_hex(kp: &UserKeypair) -> String {
     coven_keys::keys::public_key_hex(kp)
 }
@@ -2594,17 +2593,6 @@ mod test_device {
 
         pub fn protocol_root(&self) -> &coven_protocol::store_commit::StoreProtocolRoot {
             self.store.protocol_root_for_test()
-        }
-
-        #[cfg(test)]
-        pub async fn prepare_wrapped_key(
-            &self,
-            recipient: &str,
-            value: coven_protocol::wrapped_store_key::WrappedStoreKey,
-        ) -> Result<coven_protocol::wrapped_store_key::PreparedWrappedStoreKey, TestError> {
-            self.store
-                .prepare_wrapped_key_for_test(recipient, value)
-                .await
         }
 
         #[cfg(test)]

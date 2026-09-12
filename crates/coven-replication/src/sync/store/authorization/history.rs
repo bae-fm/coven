@@ -26,7 +26,6 @@ pub(crate) struct AuthorizedStoreHistory<'storage> {
     blob_cache: crate::sync::store::blob::StoreBlobCache,
     history_verifier: MergeHistoryVerifier<'storage>,
     blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
-    keyrings: Arc<super::keyring::StoreKeyrings<'storage>>,
 }
 
 use coven_protocol::circle_control::StoreMembershipStateRef;

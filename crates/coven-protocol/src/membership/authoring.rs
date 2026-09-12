@@ -38,7 +38,7 @@ impl MembershipChain {
         Ok(entry)
     }
 
-    pub fn signed_set_member_with_anchor_and_wrapped_key_in_stream(
+    pub fn signed_set_member_with_anchor_and_sealed_key_in_stream(
         &self,
         signer: &UserKeypair,
         stream_id: AuthorStreamId,
@@ -46,12 +46,12 @@ impl MembershipChain {
         provider_account_email: Option<String>,
         role: MemberRole,
         membership: Option<GrantStreamAnchor>,
-        wrapped_key: WrappedStoreKeyRef,
+        sealed_key: SealedStoreKey,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
         let role = StoreMembershipRoleGrant::from_direct_assignment(role)?;
         let grant_id = self.next_member_grant_id_in_stream(signer, stream_id, &user_pubkey)?;
-        self.signed_set_role_grant_with_anchor_and_wrapped_key_in_stream(
+        self.signed_set_role_grant_with_anchor_and_sealed_key_in_stream(
             signer,
             stream_id,
             user_pubkey,
@@ -59,13 +59,13 @@ impl MembershipChain {
             role,
             grant_id,
             membership,
-            wrapped_key,
+            sealed_key,
             created_at,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn signed_set_role_grant_with_anchor_and_wrapped_key_in_stream(
+    fn signed_set_role_grant_with_anchor_and_sealed_key_in_stream(
         &self,
         signer: &UserKeypair,
         stream_id: AuthorStreamId,
@@ -74,7 +74,7 @@ impl MembershipChain {
         role: StoreMembershipRoleGrant,
         grant_id: MembershipGrantId,
         membership: Option<GrantStreamAnchor>,
-        wrapped_key: WrappedStoreKeyRef,
+        sealed_key: SealedStoreKey,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
         let replaces = self.active_grant_ids(&user_pubkey);
@@ -96,7 +96,7 @@ impl MembershipChain {
                 replaces,
                 retirement_barriers,
                 retirement_device_state: None,
-                wrapped_key,
+                sealed_key,
             },
             created_at,
         )
@@ -110,7 +110,7 @@ impl MembershipChain {
         candidate: &StoreDeviceRegistration,
         acceptance: OwnerPromotionAcceptance,
         signer: &UserKeypair,
-        wrapped_key: WrappedStoreKeyRef,
+        sealed_key: SealedStoreKey,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
         acceptance
@@ -150,7 +150,7 @@ impl MembershipChain {
         {
             return Err(MembershipError::InvalidOwnerPromotion);
         }
-        self.signed_set_role_grant_with_anchor_and_wrapped_key_in_stream(
+        self.signed_set_role_grant_with_anchor_and_sealed_key_in_stream(
             signer,
             author_stream,
             request.member_pubkey.clone(),
@@ -162,24 +162,24 @@ impl MembershipChain {
             },
             request.intended_owner_grant.clone(),
             Some(membership.clone()),
-            wrapped_key,
+            sealed_key,
             created_at,
         )
     }
 
-    pub fn signed_remove_member_with_wrapped_keys_in_stream(
+    pub fn signed_remove_member_with_sealed_keys_in_stream(
         &self,
         signer: &UserKeypair,
         stream_id: AuthorStreamId,
         user_pubkey: String,
-        wrapped_keys: Vec<WrappedStoreKeyRef>,
+        sealed_keys: BTreeMap<String, SealedStoreKey>,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
         self.signed_remove_member_with_barrier_state(
             signer,
             stream_id,
             user_pubkey,
-            wrapped_keys,
+            sealed_keys,
             None,
             created_at,
         )
@@ -190,7 +190,7 @@ impl MembershipChain {
         signer: &UserKeypair,
         stream_id: AuthorStreamId,
         user_pubkey: String,
-        wrapped_keys: Vec<WrappedStoreKeyRef>,
+        sealed_keys: BTreeMap<String, SealedStoreKey>,
         device_state: StoreDeviceStateRef,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
@@ -198,7 +198,7 @@ impl MembershipChain {
             signer,
             stream_id,
             user_pubkey,
-            wrapped_keys,
+            sealed_keys,
             Some(device_state),
             created_at,
         )
@@ -209,7 +209,7 @@ impl MembershipChain {
         signer: &UserKeypair,
         stream_id: AuthorStreamId,
         user_pubkey: String,
-        wrapped_keys: Vec<WrappedStoreKeyRef>,
+        sealed_keys: BTreeMap<String, SealedStoreKey>,
         retirement_device_state: Option<StoreDeviceStateRef>,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
@@ -225,6 +225,10 @@ impl MembershipChain {
         }
         let retirement_barriers =
             self.membership_retirement_barriers(&removes, retirement_device_state.as_ref())?;
+        let dependencies = self.effective_frontier();
+        let rotation_generation = membership_causal_generation(&self.entries, &dependencies)
+            .checked_add(1)
+            .ok_or(MembershipError::InvalidSealedKeys(self.entries.len()))?;
         self.signed_change_in_stream(
             signer,
             stream_id,
@@ -233,7 +237,8 @@ impl MembershipChain {
                 removes,
                 retirement_barriers,
                 retirement_device_state,
-                wrapped_keys,
+                rotation_generation,
+                sealed_keys,
             },
             created_at,
         )
@@ -251,14 +256,8 @@ impl MembershipChain {
     ) -> Result<MembershipEntry, MembershipError> {
         let role = StoreMembershipRoleGrant::from_direct_assignment(role)?;
         let grant_id = self.next_member_grant_id_in_stream(signer, stream_id, &user_pubkey)?;
-        let dependencies = self.effective_frontier();
-        let wrapped_key = test_wrapped_key_ref(
-            &keys::public_key_hex(signer),
-            &user_pubkey,
-            membership_causal_generation(&self.entries, &dependencies),
-            b"Merge membership test wrap",
-        );
-        self.signed_set_role_grant_with_anchor_and_wrapped_key_in_stream(
+        let sealed_key = test_sealed_store_key(b"Merge membership test key");
+        self.signed_set_role_grant_with_anchor_and_sealed_key_in_stream(
             signer,
             stream_id,
             user_pubkey,
@@ -266,7 +265,7 @@ impl MembershipChain {
             role,
             grant_id,
             None,
-            wrapped_key,
+            sealed_key,
             created_at,
         )
     }
@@ -279,30 +278,22 @@ impl MembershipChain {
         user_pubkey: String,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
-        let author_pubkey = keys::public_key_hex(signer);
-        let dependencies = self.effective_frontier();
-        let wrapped_key = test_wrapped_key_ref(
-            &author_pubkey,
-            &user_pubkey,
-            membership_causal_generation(&self.entries, &dependencies),
-            b"Merge Owner-promotion test wrap",
-        );
-        self.signed_promote_member_in_stream_with_wrapped_key_for_test(
+        self.signed_promote_member_in_stream_with_sealed_key_for_test(
             signer,
             stream_id,
             user_pubkey,
-            wrapped_key,
+            test_sealed_store_key(b"Merge membership test key"),
             created_at,
         )
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn signed_promote_member_in_stream_with_wrapped_key_for_test(
+    pub(crate) fn signed_promote_member_in_stream_with_sealed_key_for_test(
         &self,
         signer: &UserKeypair,
         stream_id: AuthorStreamId,
         user_pubkey: String,
-        wrapped_key: WrappedStoreKeyRef,
+        sealed_key: SealedStoreKey,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
         let author_pubkey = keys::public_key_hex(signer);
@@ -434,7 +425,7 @@ impl MembershipChain {
                     },
                 },
             });
-        self.signed_set_role_grant_with_anchor_and_wrapped_key_in_stream(
+        self.signed_set_role_grant_with_anchor_and_sealed_key_in_stream(
             signer,
             stream_id,
             user_pubkey,
@@ -446,7 +437,7 @@ impl MembershipChain {
             },
             intended_owner_grant,
             Some(membership),
-            wrapped_key,
+            sealed_key,
             created_at,
         )
     }
@@ -485,18 +476,11 @@ impl MembershipChain {
         user_pubkey: String,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
-        let owner = keys::public_key_hex(signer);
-        let dependencies = self.effective_frontier();
-        let generation = membership_causal_generation(&self.entries, &dependencies)
-            .checked_add(1)
-            .ok_or(MembershipError::InvalidWrappedKeys(self.entries.len()))?;
-        let wrapped_keys = self
+        let sealed_keys = self
             .current_members()
             .into_iter()
             .filter(|(member, _)| member != &user_pubkey)
-            .map(|(member, _)| {
-                test_wrapped_key_ref(&owner, &member, generation, b"Merge removal test wrap")
-            })
+            .map(|(member, _)| (member, test_sealed_store_key(b"Merge removal test key")))
             .collect();
         let removes = self.active_grant_ids(&user_pubkey);
         let mut recovery = removes
@@ -546,7 +530,7 @@ impl MembershipChain {
             signer,
             stream_id,
             user_pubkey,
-            wrapped_keys,
+            sealed_keys,
             device_state,
             created_at,
         )

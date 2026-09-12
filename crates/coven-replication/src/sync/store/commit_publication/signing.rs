@@ -1,4 +1,3 @@
-use super::StoreKeyrings;
 use coven_keys::keys::UserKeypair;
 use std::sync::Arc;
 
@@ -263,30 +262,26 @@ impl coven_keys::keys::IdentityKeyAuthority for LocalStoreWriter {
     }
 }
 
-pub(crate) struct LocalWriterKeyrings<'storage> {
+pub(crate) struct LocalWriterKeyrings {
     writer: Arc<LocalStoreWriter>,
-    keyrings: Arc<StoreKeyrings<'storage>>,
 }
 
-impl<'storage> LocalWriterKeyrings<'storage> {
-    pub(crate) fn new(
-        writer: Arc<LocalStoreWriter>,
-        keyrings: Arc<StoreKeyrings<'storage>>,
-    ) -> Self {
-        Self { writer, keyrings }
+impl LocalWriterKeyrings {
+    pub(crate) fn new(writer: Arc<LocalStoreWriter>) -> Self {
+        Self { writer }
     }
 
-    pub(super) async fn open(
+    pub(super) fn open(
         &self,
         membership: &coven_protocol::membership::MembershipChain,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
         crate::sync::store::membership::MembershipMutationError,
     > {
-        self.keyrings.open(self.writer.as_ref(), membership).await
+        crate::sync::store::authorization::open_store_keyring(self.writer.as_ref(), membership)
     }
 
-    pub(super) async fn open_or(
+    pub(super) fn open_or(
         &self,
         membership: &coven_protocol::membership::MembershipChain,
         initial: &coven_keys::encryption::EncryptionService,
@@ -294,19 +289,10 @@ impl<'storage> LocalWriterKeyrings<'storage> {
         coven_keys::encryption::EncryptionService,
         crate::sync::store::membership::MembershipMutationError,
     > {
-        self.keyrings
-            .open_or(self.writer.as_ref(), membership, initial)
-            .await
-    }
-
-    pub(super) async fn prepare(
-        &self,
-        recipient: &str,
-        value: coven_protocol::wrapped_store_key::WrappedStoreKey,
-    ) -> Result<
-        coven_protocol::wrapped_store_key::PreparedWrappedStoreKey,
-        coven_protocol::objects::StorageError,
-    > {
-        self.keyrings.prepare(recipient, value).await
+        crate::sync::store::authorization::open_store_keyring_or(
+            self.writer.as_ref(),
+            membership,
+            initial,
+        )
     }
 }

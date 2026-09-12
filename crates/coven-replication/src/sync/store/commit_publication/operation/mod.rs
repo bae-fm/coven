@@ -1,15 +1,16 @@
 use super::*;
-use crate::sync::store::authorization::load_wrapped_store_key;
 use crate::sync::store::commit_verification::commit::StoreMembershipObjectVerifier;
 use crate::sync::store::membership::MembershipMutationError;
 use coven_database::VerifiedMergeMembershipObjects;
-use coven_protocol::membership::{self, MembershipChain, MembershipEntry, StoreAuthorityChange};
+use coven_protocol::membership::{
+    self, MembershipChain, MembershipEntry, SealedStoreKey, StoreAuthorityChange,
+};
 use coven_protocol::membership_mutation::{
     PreparedMembershipPublication, PreparedMembershipTransition,
 };
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{self, commit_semantic_prefix};
-use coven_protocol::wrapped_store_key::{PreparedWrappedStoreKey, WrappedStoreKeyRef};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod blob_lifecycle;
@@ -47,10 +48,10 @@ pub enum StoreWriterAuthorizationError {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AuthorizationRefreshError {
-    #[error("select this device's wrapped-key authority: {0}")]
+    #[error("select this device's sealed-key authority: {0}")]
     Membership(#[source] coven_protocol::membership::MembershipError),
-    #[error("read this device's wrapped key: {0}")]
-    WrappedKey(#[source] crate::sync::store::membership::MembershipMutationError),
+    #[error("open this device's sealed Store key: {0}")]
+    SealedKey(#[source] crate::sync::store::membership::MembershipMutationError),
     #[error("rotation gate database state: {0}")]
     Database(#[source] coven_database::DbError),
     #[error("merge this device's live and selected keyrings: {0}")]

@@ -24,7 +24,7 @@ async fn store_whose_key_rotated_after_an_upload() -> RotationFixture {
             coven_protocol::blob::CacheFill::CacheLazy,
         ),
     );
-    let (store, connection) = Box::pin(TestStore::create_encrypted_with_connection(
+    let (store, _connection) = Box::pin(TestStore::create_encrypted_with_connection(
         &db,
         db_store_dir.clone(),
         LIB_ID,
@@ -106,10 +106,8 @@ async fn store_whose_key_rotated_after_an_upload() -> RotationFixture {
         )
         .await
         .expect("remove the member and rotate the Store key");
-    let rotated = crate::sync::store::StoreKeyrings::new(&*connection, store.root().clone())
-        .open(&owner, &rotated_membership)
-        .await
-        .expect("open the accepted rotation wraps");
+    let rotated = crate::sync::store::open_store_keyring(&owner, &rotated_membership)
+        .expect("open the accepted rotation keys");
     // The running device adopts the rotation, so from here it seals under
     // the new generation while the blob it already published carries the old.
     device

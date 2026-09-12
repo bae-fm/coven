@@ -67,17 +67,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self.history.verified_root_object().value
     }
 
-    pub(crate) async fn prepare_wrapped_key(
-        &self,
-        recipient: &str,
-        value: coven_protocol::wrapped_store_key::WrappedStoreKey,
-    ) -> Result<
-        coven_protocol::wrapped_store_key::PreparedWrappedStoreKey,
-        coven_protocol::objects::StorageError,
-    > {
-        self.keyrings.prepare(recipient, value).await
-    }
-
     /// Select the exact author stream without overwriting its committed prefix.
     /// Streams are persisted per database, so independently restored devices use
     /// different streams; copied state that reuses one exposes an immutable fork.
@@ -383,18 +372,21 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             }
 
             let recipient = self.writer.author_pubkey();
-            let wrapped_keys = self
+            let activated = self
                 .membership
-                .wrapped_key_authority_for(&recipient)
+                .sealed_key_authority_for(&recipient)
                 .map_err(AuthorizationRefreshError::Membership)?;
-            if wrapped_keys.is_empty() {
+            if activated.is_empty() {
                 tracing::debug!(
-                    "refresh: no activated wrapped key for this device; keeping the live key"
+                    "refresh: no activated sealed key for this device; keeping the live key"
                 );
                 return Ok(());
             }
 
-            match self.keyrings.open(&self.membership).await {
+            match crate::sync::store::authorization::open_store_keyring(
+                self.writer.as_ref(),
+                &self.membership,
+            ) {
                 Ok(new_encryption) => {
                     let merged = cipher
                         .merged_keyring(&new_encryption)
@@ -409,7 +401,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                             pending_rotation.install_durable_gate(gate);
                         }
                         tracing::debug!(
-                            "refresh: wrapped store key is already held by the live keyring"
+                            "refresh: sealed store key is already held by the live keyring"
                         );
                     } else {
                         let gate = self
@@ -445,7 +437,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         }
                     }
                 }
-                Err(error) => return Err(AuthorizationRefreshError::WrappedKey(error)),
+                Err(error) => return Err(AuthorizationRefreshError::SealedKey(error)),
             }
 
             Ok(())

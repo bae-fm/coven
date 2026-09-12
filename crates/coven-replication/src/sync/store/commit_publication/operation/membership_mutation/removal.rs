@@ -3,10 +3,10 @@ use super::{
     MembershipMutationProgress, MembershipRevocation, RevokeMutationPlan,
 };
 use coven_keys::encryption::{self, EncryptionService};
-use coven_keys::keys;
-use coven_protocol::membership::{MemberRole, StoreAuthorityChange};
+use coven_protocol::membership::{MemberRole, SealedStoreKey, StoreAuthorityChange};
 use coven_storage as cloud_storage;
 use coven_storage::cloud::{CloudAccessOutcome, CloudAccessState, RevokeOutcome};
+use std::collections::BTreeMap;
 
 pub(crate) struct AuthorizedMembershipRevocation<'operation, 'storage, 'input> {
     operation:
@@ -84,8 +84,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         let current_keyring = self
             .operation
             .keyrings
-            .open_or(&chain, current_encryption)
-            .await?;
+            .open_or(&chain, current_encryption)?;
         let new_keyring = current_keyring
             .with_appended_generation(
                 current_keyring
@@ -102,28 +101,18 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             .filter(|(pubkey, _)| pubkey != revokee_pubkey)
             .cloned()
             .collect::<Vec<_>>();
-        let mut wraps = Vec::with_capacity(remaining_members.len());
+        let mut sealed_keys = BTreeMap::new();
         for (recipient, _) in remaining_members {
-            let recipient_key = keys::ed25519_hex_to_x25519_public_key(&recipient)?;
-            wraps.push(
-                self.operation
-                    .prepare_replacement_wrapped_key(
-                        store_id,
-                        &recipient,
-                        &recipient_key,
-                        &new_keyring,
-                    )
-                    .await?,
-            );
+            let sealed = SealedStoreKey::seal(&recipient, &new_keyring)
+                .map_err(MembershipMutationError::SealedKeySeal)?;
+            sealed_keys.insert(recipient, sealed);
         }
-        wraps.sort_by(|left, right| left.reference.cmp(&right.reference));
-        let wrapped_keys = wraps.iter().map(|wrap| wrap.reference.clone()).collect();
         let entry = if chain.is_owner_now(revokee_pubkey) {
             self.operation.sign_owner_barrier_removal(
                 &chain,
                 stream_id,
                 revokee_pubkey.to_string(),
-                wrapped_keys,
+                sealed_keys,
                 plan.device_state().clone(),
                 timestamp.to_string(),
             )?
@@ -132,7 +121,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 &chain,
                 stream_id,
                 revokee_pubkey.to_string(),
-                wrapped_keys,
+                sealed_keys,
                 timestamp.to_string(),
             )?
         };
@@ -160,7 +149,6 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         Ok(RevokeMutationPlan {
             candidate: Box::new(candidate),
             provider_account_email,
-            wraps,
             keyring_payload: new_keyring
                 .to_keyring_payload()
                 .map_err(MembershipMutationError::Encryption)?,
@@ -220,11 +208,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     {
                         return Err(MembershipMutationError::LastOwner);
                     }
-                    let keyring = self
-                        .operation
-                        .keyrings
-                        .open(&self.operation.membership)
-                        .await?;
+                    let keyring = self.operation.keyrings.open(&self.operation.membership)?;
                     match self
                         .operation
                         .set_membership_access(CloudAccessState::Absent {
@@ -304,11 +288,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 .iter()
                 .any(|(pubkey, _)| pubkey == self.revokee_pubkey)
             {
-                let keyring = self
-                    .operation
-                    .keyrings
-                    .open(operation_plan.membership())
-                    .await?;
+                let keyring = self.operation.keyrings.open(operation_plan.membership())?;
                 match self
                     .operation
                     .set_membership_access(plan.desired_access()?)
@@ -420,42 +400,15 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         }
         let keyring = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
             .map_err(MembershipMutationError::Encryption)?;
-        let remaining = validated_chain.current_members();
-        if remaining.len() != plan.wraps.len() {
+        // Chain validation bound the entry's sealed keys to every remaining
+        // member when `with_exact_entry` added it; what remains to check is
+        // that the keyring this plan rotates to is the one that entry names.
+        if validated_chain.keyring_generation_of(&publication.entry)
+            != Some(keyring.current_generation())
+        {
             return Err(MembershipMutationError::InvalidDurableMutation(
-                "planned replacement wraps do not cover every remaining member exactly once"
-                    .to_string(),
+                "planned removal keyring generation differs from its exact entry".to_string(),
             ));
-        }
-        let mut planned_recipients = std::collections::BTreeSet::new();
-        for wrapped in &plan.wraps {
-            let reference = &wrapped.reference;
-            if !planned_recipients.insert(reference.recipient_pubkey.clone())
-                || !remaining
-                    .iter()
-                    .any(|(member_pubkey, _)| member_pubkey == &reference.recipient_pubkey)
-            {
-                return Err(MembershipMutationError::InvalidDurableMutation(format!(
-                    "planned replacement wrap has duplicate or non-member recipient {}",
-                    reference.recipient_pubkey
-                )));
-            }
-            let envelope = wrapped.validate()?;
-            if envelope.generation != keyring.current_generation()
-                || envelope.author_pubkey != publication.entry.author_pubkey
-                || envelope
-                    .verify_and_unwrap(
-                        &publication.entry.store_id,
-                        &reference.recipient_pubkey,
-                        std::iter::once(publication.entry.author_pubkey.as_str()),
-                    )
-                    .is_err()
-            {
-                return Err(MembershipMutationError::InvalidDurableMutation(format!(
-                "planned replacement wrap for {} is not bound to the exact removal, generation, recipient, and author",
-                reference.recipient_pubkey
-            )));
-            }
         }
         operation
             .publish_membership_authority(&plan.candidate, &remote_objects)

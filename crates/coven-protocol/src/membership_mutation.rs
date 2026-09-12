@@ -137,19 +137,6 @@ impl PreparedMembershipPublication {
             .map(|remote| remote.object().clone())
             .collect::<Vec<_>>();
         objects.push(reference.object.clone());
-        match &self.entry.change {
-            membership::StoreAuthorityChange::SetMember { wrapped_key, .. } => {
-                objects.push(wrapped_key.object.clone());
-            }
-            membership::StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => {
-                objects.extend(wrapped_keys.iter().map(|key| key.object.clone()));
-            }
-            membership::StoreAuthorityChange::Founder { .. }
-            | membership::StoreAuthorityChange::DeviceRegistrationActivation { .. }
-            | membership::StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | membership::StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | membership::StoreAuthorityChange::ProviderAdmin => {}
-        }
         objects.sort();
         if objects.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(crate::prepared_commit::PreparedCommitError::Invariant(

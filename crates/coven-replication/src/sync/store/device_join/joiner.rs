@@ -850,7 +850,6 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             storage.as_ref(),
             root.reference().clone(),
         );
-        let keyrings = super::StoreKeyrings::new(storage.as_ref(), root.reference().clone());
         let blob_cache =
             crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
         let mut history = super::AuthorizedStoreHistory::from_pending_device_join(
@@ -862,7 +861,6 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             blob_cache,
             history_verifier,
             blob_source,
-            keyrings,
         );
         let founder_pubkey = root.protocol().descriptor.founder_pubkey.clone();
         let membership = history

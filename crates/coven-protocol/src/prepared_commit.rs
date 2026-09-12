@@ -212,68 +212,32 @@ impl PreparedStoreOperationCommit {
         authorities: Vec<crate::remote_object::ClosedRemoteObject>,
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         let publication = self.prepared_membership_publication()?;
-        self.close_merge_membership_remote_objects(&publication, &[], authorities)
+        self.close_merge_membership_remote_objects(&publication, authorities)
     }
 
     pub fn merge_membership_activation_remote_objects(
         &self,
-        wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         let publication = self.prepared_membership_publication()?;
-        let expected_wraps: &[super::wrapped_store_key::WrappedStoreKeyRef] =
-            match &publication.entry.change {
-                super::membership::StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => {
-                    wrapped_keys
-                }
-                super::membership::StoreAuthorityChange::SetMember { wrapped_key, .. } => {
-                    std::slice::from_ref(wrapped_key)
-                }
-                _ => {
-                    return Err(PreparedCommitError::Invariant(
-                        "Merge membership mutation graph contains another change".to_string(),
-                    ));
-                }
-            };
-        if expected_wraps.len() != wraps.len()
-            || expected_wraps
-                .iter()
-                .zip(wraps)
-                .any(|(reference, prepared)| reference != &prepared.reference)
-        {
-            return Err(PreparedCommitError::Invariant(
-                "Merge membership mutation wraps differ from its exact entry".to_string(),
-            ));
+        match &publication.entry.change {
+            super::membership::StoreAuthorityChange::RemoveMember { .. }
+            | super::membership::StoreAuthorityChange::SetMember { .. } => {}
+            _ => {
+                return Err(PreparedCommitError::Invariant(
+                    "Merge membership mutation graph contains another change".to_string(),
+                ));
+            }
         }
-        self.close_merge_membership_remote_objects(&publication, wraps, Vec::new())
+        self.close_merge_membership_remote_objects(&publication, Vec::new())
     }
 
     fn close_merge_membership_remote_objects(
         &self,
         publication: &PreparedMembershipPublication,
-        wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
         authorities: Vec<crate::remote_object::ClosedRemoteObject>,
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
-        let family = self.commit.candidate_family();
         let mut objects = vec![self.candidate_remote_object()?];
         objects.extend(publication.candidate_remote_objects(&self.commit, &self.reference)?);
-        for prepared in wraps {
-            let value = prepared.validate().map_err(PreparedCommitError::from)?;
-            let canonical =
-                serde_json::to_vec(&value).map_err(|source| PreparedCommitError::Json {
-                    operation: "serialize Merge membership candidate wrap",
-                    source,
-                })?;
-            objects.push(
-                crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_wrapped_store_key(
-                    family,
-                    prepared.reference.clone(),
-                    &canonical,
-                    prepared.object.stored_bytes(),
-                    self.reference.clone(),
-                )
-                .map_err(PreparedCommitError::from)?,
-            );
-        }
         objects.extend(authorities);
         let mut unique = std::collections::BTreeSet::new();
         if objects

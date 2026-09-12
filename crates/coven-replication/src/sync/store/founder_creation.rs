@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use super::authorization::history::AuthorizedStoreHistory;
 use super::authorization::InitializedStore;
-use super::{HistoryConstructionAuthority, StoreKeyrings};
+use super::HistoryConstructionAuthority;
 use crate::sync::store::commit_verification::commit::StoreCommitVerifier;
 use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use coven_protocol::store_commit::StoreRootRef;
@@ -938,7 +938,6 @@ impl<'operation> FounderStoreCreation<'operation> {
             storage_access,
             root.clone(),
         );
-        let keyrings = StoreKeyrings::new(storage_access, root);
         Ok(AuthorizedStoreHistory::new(
             database.clone(),
             self.routing_encryption.clone(),
@@ -947,7 +946,6 @@ impl<'operation> FounderStoreCreation<'operation> {
             self.blob_cache.clone(),
             history_verifier,
             blob_source,
-            keyrings,
         ))
     }
 

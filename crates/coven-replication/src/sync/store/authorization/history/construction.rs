@@ -13,7 +13,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
-        keyrings: crate::sync::store::authorization::keyring::StoreKeyrings<'storage>,
     ) -> Self {
         Self {
             database,
@@ -23,7 +22,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             blob_cache,
             history_verifier,
             blob_source,
-            keyrings: Arc::new(keyrings),
         }
     }
 
@@ -247,7 +245,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let database = self.database.clone();
         let storage = self.storage;
         let store_dir = self.store_dir;
-        let keyrings = Arc::clone(&self.keyrings);
         let writer = Arc::new(
             crate::sync::store::commit_publication::LocalStoreWriter::from_verified_parts(
                 identity.clone(),
@@ -255,10 +252,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 device_signer,
             ),
         );
-        let keyrings = crate::sync::store::commit_publication::LocalWriterKeyrings::new(
-            Arc::clone(&writer),
-            keyrings,
-        );
+        let keyrings =
+            crate::sync::store::commit_publication::LocalWriterKeyrings::new(Arc::clone(&writer));
         crate::sync::store::commit_publication::AuthorizedWriterOperation::from_parts(
             database, self, storage, store_dir, membership, writer, keyrings,
         )
@@ -273,7 +268,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
-        keyrings: crate::sync::store::authorization::keyring::StoreKeyrings<'storage>,
     ) -> Self {
         Self::new(
             database,
@@ -283,7 +277,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             blob_cache,
             history_verifier,
             blob_source,
-            keyrings,
         )
     }
 
@@ -296,7 +289,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
-        keyrings: crate::sync::store::authorization::keyring::StoreKeyrings<'storage>,
     ) -> Self {
         Self::new(
             database,
@@ -306,7 +298,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             blob_cache,
             history_verifier,
             blob_source,
-            keyrings,
         )
     }
 }

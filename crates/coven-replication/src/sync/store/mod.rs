@@ -104,7 +104,8 @@ pub(crate) use settled::{CycleInputs, SettledCycle};
 pub use authorization::StoreInitializationError;
 pub use authorization::StoreRegistrationError;
 pub use authorization::{
-    HistoryConstructionAuthority, Store, StoreKeyrings, StoreRestoreMembership,
+    open_granted_store_keyring, open_store_keyring, HistoryConstructionAuthority, Store,
+    StoreRestoreMembership,
 };
 pub use circles::CirclePackageReadError;
 pub use circles::StoreCircleCommands;

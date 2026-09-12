@@ -5,7 +5,6 @@ use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
 use coven_protocol::remote_object::ClosedRemoteObject;
 use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
-use coven_protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use coven_storage::cloud::{CloudAccessState, CloudHomeJoinInfo};
 
 use crate::sync::store::membership::MembershipMutationError;
@@ -32,7 +31,6 @@ impl MembershipMutationPlan {
 #[serde(deny_unknown_fields)]
 pub(super) struct AdmissionMutationPlan {
     pub(super) candidate: Box<PreparedStoreOperationCommit>,
-    pub(super) wrapped_key: PreparedWrappedStoreKey,
 }
 
 impl AdmissionMutationPlan {
@@ -66,7 +64,6 @@ impl AdmissionMutationPlan {
 pub(super) struct RevokeMutationPlan {
     pub(super) candidate: Box<PreparedStoreOperationCommit>,
     pub(super) provider_account_email: Option<String>,
-    pub(super) wraps: Vec<PreparedWrappedStoreKey>,
     pub(super) keyring_payload: Vec<u8>,
 }
 
@@ -132,7 +129,7 @@ impl RevokeMutationPlan {
         }
         Ok(self
             .candidate
-            .merge_membership_activation_remote_objects(&self.wraps)?)
+            .merge_membership_activation_remote_objects()?)
     }
 }
 

@@ -193,63 +193,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         remotes: &[coven_protocol::remote_object::ClosedRemoteObject],
     ) -> Result<(), MembershipMutationError> {
         use coven_protocol::objects::PreparedExactObject;
-        use coven_protocol::remote_object::ClosedRemoteObject;
 
         let publication = candidate.prepared_membership_publication()?;
-        let expected_wraps: &[WrappedStoreKeyRef] = match &publication.entry.change {
-            StoreAuthorityChange::SetMember { wrapped_key, .. } => {
-                std::slice::from_ref(wrapped_key)
-            }
-            StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => wrapped_keys,
-            StoreAuthorityChange::Founder { .. }
-            | StoreAuthorityChange::DeviceRegistrationActivation { .. }
-            | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin => &[],
-        };
-        let prepare_exact = |reference: &coven_protocol::objects::ExactObjectRef| -> Result<
-            (ClosedRemoteObject, PreparedExactObject),
-            MembershipMutationError,
-        > {
-            let remote = exact_owned_remote(remotes, reference)?;
-            let bytes = remote.stored_bytes().ok_or_else(|| {
-                MembershipMutationError::InvalidDurableMutation(format!(
-                    "membership candidate lacks stored bytes for exact object {}",
-                    reference.slot().logical_key(),
-                ))
-            })?;
-            let prepared = PreparedExactObject::new(reference.clone(), bytes.to_vec())?;
-            Ok((remote, prepared))
-        };
-        let (entry_remote, entry) = prepare_exact(&publication.entry_ref.object)?;
-        let wraps = expected_wraps
-            .iter()
-            .map(|reference| {
-                let (remote, object) = prepare_exact(&reference.object)?;
-                let prepared = PreparedWrappedStoreKey {
-                    reference: reference.clone(),
-                    object,
-                };
-                prepared.validate()?;
-                Ok((remote, prepared))
-            })
-            .collect::<Result<Vec<_>, MembershipMutationError>>()?;
-
-        for (remote, prepared) in wraps {
-            self.storage
-                .as_ref()
-                .create_protocol_object(&prepared.object)
-                .await?;
-            load_wrapped_store_key(
-                self.storage.as_ref(),
-                self.store_root().store_root_hash,
-                &prepared.reference,
-            )
-            .await?;
-            self.database
-                .mark_remote_object_uploaded(remote.into_record())
-                .await?;
-        }
+        let entry_remote = exact_owned_remote(remotes, &publication.entry_ref.object)?;
+        let bytes = entry_remote.stored_bytes().ok_or_else(|| {
+            MembershipMutationError::InvalidDurableMutation(format!(
+                "membership candidate lacks stored bytes for exact object {}",
+                publication.entry_ref.object.slot().logical_key(),
+            ))
+        })?;
+        let entry = PreparedExactObject::new(publication.entry_ref.object.clone(), bytes.to_vec())?;
         self.storage.as_ref().create_protocol_object(&entry).await?;
         self.membership_objects()
             .load_entry(&publication.entry_ref)

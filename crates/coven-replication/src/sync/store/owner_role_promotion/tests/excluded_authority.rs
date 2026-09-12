@@ -311,18 +311,17 @@ async fn accepted_member_retirement(continuation: RetirementContinuation) {
             assert!(!replacement.abandoned_candidates().is_empty());
             return;
         }
-        let coven_protocol::membership::StoreAuthorityChange::RemoveMember { wrapped_keys, .. } = &publication.entry.change else { panic!("retained removal"); };
-        let exposed = wrapped_keys.iter().find(|key| key.recipient_pubkey == third_pubkey)
-            .expect("old candidate offered its proposed key to the subsequently retired Member");
-        let active_keys = membership.wrapped_key_authority_for(&keys::public_key_hex(&fixture.owner)).unwrap();
+        let coven_protocol::membership::StoreAuthorityChange::RemoveMember { rotation_generation, sealed_keys, .. } = &publication.entry.change else { panic!("retained removal"); };
+        assert!(sealed_keys.contains_key(&third_pubkey),
+            "old candidate offered its proposed key to the subsequently retired Member");
+        let active_keys = membership.sealed_key_authority_for(&keys::public_key_hex(&fixture.owner)).unwrap();
         assert!(!active_keys.is_empty());
-        let latest = active_keys.iter().max_by_key(|key| key.generation).unwrap();
-        let accepted_keyring = crate::sync::store::authorization::StoreKeyrings::new(storage.as_ref(), root.clone())
-            .open_containing(&fixture.owner, &membership, latest).await.unwrap();
+        let accepted_keyring =
+            crate::sync::store::open_store_keyring(&fixture.owner, &membership).unwrap();
         let abandoned_keyring = EncryptionService::from_keyring_payload(
             serde_json::from_value(durable["plan"]["keyring_payload"].clone()).unwrap(),
         ).unwrap();
-        assert!(accepted_keyring.current_generation() > exposed.generation);
+        assert!(accepted_keyring.current_generation() > *rotation_generation);
         let ciphertext = accepted_keyring.encrypt(b"content after both removals", b"retirement authority");
         assert!(abandoned_keyring.decrypt(&ciphertext, b"retirement authority").is_err(),
             "the abandoned key offered to the retired Member cannot open later content");
@@ -793,10 +792,6 @@ async fn excluded_device_authority_tail(tail: AuthorityTail) {
     let mut publication = candidate
         .prepared_membership_publication()
         .expect("actual staged head");
-    let wrapped: coven_protocol::wrapped_store_key::PreparedWrappedStoreKey =
-        serde_json::from_value(durable["plan"]["wrapped_key"].clone())
-            .expect("actual staged key wrap");
-    wrapped.validate().expect("exact wrapped key");
     candidate.validate_closed_shape().expect("closed candidate");
     publication
         .validate()
@@ -1057,13 +1052,6 @@ async fn excluded_device_authority_tail(tail: AuthorityTail) {
         panic!("real admission is Store-bound");
     };
     for (context, prepared) in [
-        (
-            ProtocolObjectContext::recipient_sealed(
-                root.store_root_hash,
-                ProtocolObjectDomain::StoreWrappedKey,
-            ),
-            wrapped.object,
-        ),
         (
             ProtocolObjectContext::signed_plaintext(
                 root.store_root_hash,

@@ -21,7 +21,7 @@ pub struct AuthorizedWriterOperation<'storage> {
     store_dir: &'storage StoreDir,
     membership: coven_protocol::membership::MembershipChain,
     writer: Arc<LocalStoreWriter>,
-    keyrings: LocalWriterKeyrings<'storage>,
+    keyrings: LocalWriterKeyrings,
 }
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
@@ -40,7 +40,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         store_dir: &'storage StoreDir,
         membership: coven_protocol::membership::MembershipChain,
         writer: Arc<LocalStoreWriter>,
-        keyrings: LocalWriterKeyrings<'storage>,
+        keyrings: LocalWriterKeyrings,
     ) -> Self {
         Self {
             database,

@@ -42,7 +42,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 .await
                 .map_err(MembershipMutationError::from)?;
             if self.membership.is_member_now(public_key_hex) {
-                let wrapped_key = Self::accepted_admission_key(
+                let grant_id = Self::accepted_admission_grant(
                     &self.membership,
                     public_key_hex,
                     member_email,
@@ -68,7 +68,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     store_name: store_name.to_string(),
                     join_info,
                     owner_pubkey,
-                    wrapped_key,
+                    member_pubkey: public_key_hex.to_string(),
+                    grant_id,
                     store_root: root,
                     membership_floor: coven_protocol::membership::MembershipFloor(
                         self.membership.head_refs().to_vec(),
@@ -76,7 +77,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 });
             }
         }
-        let (join_info, wrapped_key) = self
+        let (join_info, grant_id) = self
             .continue_admission(pending, public_key_hex, member_email, role, encryption)
             .await?;
         let owner_pubkey = self
@@ -98,7 +99,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             store_name: store_name.to_string(),
             join_info,
             owner_pubkey,
-            wrapped_key,
+            member_pubkey: public_key_hex.to_string(),
+            grant_id,
             store_root: root,
             membership_floor: coven_protocol::membership::MembershipFloor(
                 self.membership.head_refs().to_vec(),
@@ -106,13 +108,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         })
     }
 
-    fn accepted_admission_key(
+    /// The single current grant an already-admitted member holds, once its role
+    /// and provider account match the request and the sealed keys that grant
+    /// activates are completely covered.
+    fn accepted_admission_grant(
         membership: &coven_protocol::membership::MembershipChain,
         public_key_hex: &str,
         member_email: Option<&str>,
         role: &coven_protocol::membership::MemberRole,
     ) -> Result<
-        coven_protocol::wrapped_store_key::WrappedStoreKeyRef,
+        coven_protocol::membership::MembershipGrantId,
         crate::sync::store::membership::MembershipOpsError,
     > {
         if !membership
@@ -123,15 +128,17 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         {
             return Err(crate::sync::store::membership::MembershipOpsError::ExistingMemberMismatch);
         }
-        let references = membership
-            .wrapped_key_authority_for(public_key_hex)
+        membership
+            .sealed_key_authority_for(public_key_hex)
             .map_err(MembershipMutationError::from)?;
-        let [reference] = references.as_slice() else {
-            return Err(
-                crate::sync::store::membership::MembershipOpsError::ExistingMemberKeyAuthority,
-            );
-        };
-        Ok(reference.clone())
+        let grants = membership.active_grant_ids(public_key_hex);
+        let mut grants = grants.into_iter();
+        match (grants.next(), grants.next()) {
+            (Some(grant), None) => Ok(grant),
+            _ => {
+                Err(crate::sync::store::membership::MembershipOpsError::ExistingMemberKeyAuthority)
+            }
+        }
     }
 
     async fn continue_admission(
@@ -144,7 +151,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     ) -> Result<
         (
             coven_storage::cloud::CloudHomeJoinInfo,
-            coven_protocol::wrapped_store_key::WrappedStoreKeyRef,
+            coven_protocol::membership::MembershipGrantId,
         ),
         crate::sync::store::membership::MembershipOpsError,
     > {
@@ -187,9 +194,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .await?;
                 let remotes = plan
                     .candidate
-                    .merge_membership_activation_remote_objects(std::slice::from_ref(
-                        &plan.wrapped_key,
-                    ))
+                    .merge_membership_activation_remote_objects()
                     .map_err(MembershipMutationError::from)?;
                 let progress = MembershipMutationProgress::Pending;
                 let intent_hash = self
@@ -286,7 +291,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         .record()
                         .clone();
                     let satisfaction = if self.membership.is_member_now(public_key_hex) {
-                        Some(Self::accepted_admission_key(
+                        Some(Self::accepted_admission_grant(
                             &self.membership,
                             public_key_hex,
                             member_email,
@@ -304,7 +309,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         )
                         .await?;
                     return match satisfaction {
-                        Some(Ok(reference)) => {
+                        Some(Ok(grant_id)) => {
                             let join_info = match progress {
                                 MembershipMutationProgress::AdmissionGranted { join_info }
                                 | MembershipMutationProgress::AdmissionActivated { join_info } => {
@@ -316,7 +321,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                                     )
                                 }
                             };
-                            Ok((join_info, reference))
+                            Ok((join_info, grant_id))
                         }
                         Some(Err(error)) => Err(error),
                         None => Err(MembershipMutationError::InitiatingAuthorityRetired.into()),
@@ -364,13 +369,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             progress = retained_progress;
             let operation_plan = self.prepare_plan().await?;
             if operation_plan.membership().is_member_now(public_key_hex) {
-                let reference = match Self::accepted_admission_key(
+                let grant_id = match Self::accepted_admission_grant(
                     operation_plan.membership(),
                     public_key_hex,
                     member_email,
                     &role,
                 ) {
-                    Ok(reference) => reference,
+                    Ok(grant_id) => grant_id,
                     Err(
                         crate::sync::store::membership::MembershipOpsError::ExistingMemberMismatch,
                     ) => {
@@ -414,7 +419,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         operation_plan.membership().clone(),
                     )
                     .await?;
-                return Ok((join_info, reference));
+                return Ok((join_info, grant_id));
             }
             let replacement = self
                 .prepare_admission_mutation(
@@ -428,9 +433,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 .await?;
             let remotes = replacement
                 .candidate
-                .merge_membership_activation_remote_objects(std::slice::from_ref(
-                    &replacement.wrapped_key,
-                ))
+                .merge_membership_activation_remote_objects()
                 .map_err(MembershipMutationError::from)?;
             intent_hash = self
                 .database
@@ -462,16 +465,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let admission_timestamp = self.database.stamp();
         let chain = operation_plan.membership().clone();
         let stream_id = self.select_membership_author_stream(&chain).await?;
-        let wrapped_key = self
-            .prepare_member_wrapped_key(&chain, encryption, public_key_hex)
-            .await?;
+        let sealed_key = self.seal_member_keyring(&chain, encryption, public_key_hex)?;
         let entry = self.writer.sign_set_member(
             &chain,
             stream_id,
             public_key_hex.to_string(),
             member_email.map(str::to_string),
             role.clone(),
-            wrapped_key.reference.clone(),
+            sealed_key,
             admission_timestamp.clone(),
         )?;
         let transition = self.prepare_membership_transition(&chain, entry).await?;
@@ -492,11 +493,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         candidate
             .attach_merge_membership_proof(&publication)
             .map_err(crate::sync::store::StoreError::from)?;
-        let plan = AdmissionMutationPlan {
+        Ok(AdmissionMutationPlan {
             candidate: Box::new(candidate),
-            wrapped_key,
-        };
-        Ok(plan)
+        })
     }
 
     async fn admission_access(
@@ -553,39 +552,17 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     ) -> Result<
         (
             coven_storage::cloud::CloudHomeJoinInfo,
-            coven_protocol::wrapped_store_key::WrappedStoreKeyRef,
+            coven_protocol::membership::MembershipGrantId,
         ),
         MembershipMutationError,
     > {
         let publication = plan.candidate.prepared_membership_publication()?;
-        let wrapped = plan.wrapped_key.validate()?;
-        let StoreAuthorityChange::SetMember {
-            user_pubkey,
-            wrapped_key,
-            ..
-        } = &publication.entry.change
-        else {
+        let StoreAuthorityChange::SetMember { grant_id, .. } = &publication.entry.change else {
             return Err(MembershipMutationError::InvalidDurableMutation(
                 "membership admission plan contains another change".into(),
             ));
         };
-        if wrapped_key != &plan.wrapped_key.reference
-            || wrapped.author_pubkey != publication.entry.author_pubkey
-            || wrapped
-                .verify_and_unwrap(
-                    &publication.entry.store_id,
-                    user_pubkey,
-                    std::iter::once(publication.entry.author_pubkey.as_str()),
-                )
-                .is_err()
-        {
-            return Err(
-                crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
-                    "planned admission wrap is not bound to its exact entry, recipient, and author"
-                        .to_string(),
-                ),
-            );
-        }
+        let grant_id = grant_id.clone();
         let persistence = self.membership_mutation_persistence(intent_hash);
         let activated = matches!(
             progress,
@@ -601,11 +578,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         }
         let join_info = self.admission_access(&plan, progress, intent_hash).await?;
         if !activated {
-            let remotes =
-                plan.candidate
-                    .merge_membership_activation_remote_objects(std::slice::from_ref(
-                        &plan.wrapped_key,
-                    ))?;
+            let remotes = plan
+                .candidate
+                .merge_membership_activation_remote_objects()?;
             self.publish_membership_authority(&plan.candidate, &remotes)
                 .await?;
             let accepted = self.publish_membership_activation(
@@ -623,7 +598,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             }
         }
         persistence.complete().await?;
-        let wrapped_key = plan.wrapped_key.reference;
-        Ok((join_info, wrapped_key))
+        Ok((join_info, grant_id))
     }
 }

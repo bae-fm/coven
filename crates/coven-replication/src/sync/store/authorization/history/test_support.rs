@@ -49,28 +49,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn membership_keyring_facts(
-        &self,
-        identity: &UserKeypair,
-        membership: &MembershipChain,
-    ) -> Result<([u8; 32], usize), crate::sync::store::membership::MembershipMutationError> {
-        let keyring = self.keyrings.open(identity, membership).await?;
-        Ok((keyring.key_bytes(), keyring.key_count()))
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn prepare_wrapped_key(
-        &self,
-        recipient: &str,
-        value: coven_protocol::wrapped_store_key::WrappedStoreKey,
-    ) -> Result<
-        coven_protocol::wrapped_store_key::PreparedWrappedStoreKey,
-        coven_protocol::objects::StorageError,
-    > {
-        self.keyrings.prepare(recipient, value).await
-    }
-
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn load_exact_membership_head_for_test(
         &mut self,

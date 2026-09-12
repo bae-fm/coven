@@ -69,9 +69,8 @@ async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively
         .expect("project deep membership path");
 }
 
-/// Signed entries, heads and commits are rebuilt from their canonical values.
-/// Only the sealed wrapped keys need their exact stored payload carried beside
-/// the reference; serializing them again would produce different ciphertext.
+/// Signed entries, heads and commits are rebuilt from their canonical values,
+/// so the durable plan names them rather than carrying their bytes.
 #[tokio::test]
 async fn the_membership_mutation_journal_carries_no_object_it_already_names() {
     let fixture = MergeFixture::new("mutation-journal-names-its-objects").await;
@@ -129,13 +128,10 @@ async fn the_membership_mutation_journal_carries_no_object_it_already_names() {
             "the journal carries {carried}, whose bytes its own reference already names"
         );
     }
-    // One replacement wrapped key, for the one member who remains, and its
-    // sealed keyring is the only value in the plan without a sibling field the
-    // upload could rebuild it from.
     assert_eq!(
         plan.matches("stored_bytes").count(),
-        1,
-        "the journal's only carried payload is the replacement wrapped key"
+        0,
+        "the journal carries no object payload its own references cannot rebuild"
     );
 }
 
@@ -418,7 +414,7 @@ async fn a_membership_stream_is_listed_once_and_fetched_together() {
 /// authority. The chain it produces is compared against one walked entirely off
 /// the provider over the same Store, and the Store is built so the comparison
 /// has something to say — a member admitted and then removed, which rotates the
-/// wrapped keys and retires that member's grant, plus a membership change
+/// Store keyring and retires that member's grant, plus a membership change
 /// published *after* the snapshot so the rollup is deliberately stale and the
 /// reader has a tail to walk.
 #[tokio::test]

@@ -91,12 +91,7 @@ async fn an_unaccepted_owner_promotion_cannot_authorize_its_own_snapshot() {
         .await
         .expect("read pending promotion")
         .expect("promotion journal exists");
-    let OwnerPromotionJournalState::MergeHeadPrepared {
-        candidate,
-        wrapped_key,
-        ..
-    } = &journal.state
-    else {
+    let OwnerPromotionJournalState::MergeHeadPrepared { candidate, .. } = &journal.state else {
         panic!("promotion must be fully prepared, got {:?}", journal.state);
     };
     let publication = candidate
@@ -121,7 +116,6 @@ async fn an_unaccepted_owner_promotion_cannot_authorize_its_own_snapshot() {
         .any(|entry| entry.value.payload
             == StorePublicationPayload::Commit(candidate.reference.clone())));
     for prepared in [
-        wrapped_key.object.clone(),
         publication.prepared_entry().expect("exact prepared entry"),
         publication.prepared_head().expect("exact prepared head"),
     ] {

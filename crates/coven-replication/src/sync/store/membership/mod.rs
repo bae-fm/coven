@@ -16,7 +16,8 @@ pub struct MemberAdmission {
     pub store_name: String,
     pub join_info: CloudHomeJoinInfo,
     pub owner_pubkey: String,
-    pub wrapped_key: coven_protocol::wrapped_store_key::WrappedStoreKeyRef,
+    pub member_pubkey: String,
+    pub grant_id: coven_protocol::membership::MembershipGrantId,
     pub store_root: coven_protocol::store_commit::StoreRootRef,
     pub membership_floor: coven_protocol::membership::MembershipFloor,
 }
@@ -57,7 +58,7 @@ pub enum MembershipOpsError {
     SelfAdmission,
     #[error("the identity is already a member with different role or provider account")]
     ExistingMemberMismatch,
-    #[error("the existing member does not have exactly one current wrapped Store key")]
+    #[error("the existing member does not have exactly one current membership grant")]
     ExistingMemberKeyAuthority,
     /// Admitting into a store whose founder entry is missing (a fresh store
     /// that never founded, or a wiped `membership/*`). Bootstrapping a founder on

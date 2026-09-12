@@ -69,51 +69,37 @@ pub(super) fn validate_membership_retirement_barriers(
     Ok(())
 }
 
-pub(super) fn validate_membership_wrapped_keys(
+pub(super) fn validate_membership_sealed_keys(
     entries: &[MembershipEntry],
 ) -> Result<(), MembershipError> {
     for (index, entry) in entries.iter().enumerate() {
-        let included = causal_grants::history_closure(entries, &entry.dependencies);
-        let causal_generation = membership_causal_generation(entries, &entry.dependencies);
-        let references = match &entry.change {
-            StoreAuthorityChange::SetMember {
-                user_pubkey,
-                wrapped_key,
-                ..
-            } => {
-                if wrapped_key.owner_pubkey != entry.author_pubkey
-                    || wrapped_key.recipient_pubkey != *user_pubkey
-                    || wrapped_key.generation != causal_generation
-                    || wrapped_key.validate_identity().is_err()
-                {
-                    return Err(MembershipError::InvalidWrappedKeys(index));
+        let (removed_pubkey, rotation_generation, sealed_keys) = match &entry.change {
+            StoreAuthorityChange::SetMember { sealed_key, .. } => {
+                if sealed_key.validate().is_err() {
+                    return Err(MembershipError::InvalidSealedKeys(index));
                 }
                 continue;
             }
             StoreAuthorityChange::RemoveMember {
                 user_pubkey,
-                wrapped_keys,
+                rotation_generation,
+                sealed_keys,
                 ..
-            } => (user_pubkey, wrapped_keys),
+            } => (user_pubkey, *rotation_generation, sealed_keys),
             StoreAuthorityChange::Founder { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
             | StoreAuthorityChange::DeviceExclusionOutcome { .. }
             | StoreAuthorityChange::ProviderAdmin => continue,
         };
-        let (removed_pubkey, wrapped_keys) = references;
-        let rotation_generation = wrapped_keys.first().map(|reference| reference.generation);
-        if causal_generation.checked_add(1) != rotation_generation
-            || !wrapped_keys.windows(2).all(|pair| pair[0] < pair[1])
-            || wrapped_keys.iter().any(|reference| {
-                reference.owner_pubkey != entry.author_pubkey
-                    || reference.recipient_pubkey == *removed_pubkey
-                    || Some(reference.generation) != rotation_generation
-                    || reference.validate_identity().is_err()
-            })
+        let causal_generation = membership_causal_generation(entries, &entry.dependencies);
+        if causal_generation.checked_add(1) != Some(rotation_generation)
+            || sealed_keys.contains_key(removed_pubkey)
+            || sealed_keys.values().any(|key| key.validate().is_err())
         {
-            return Err(MembershipError::InvalidWrappedKeys(index));
+            return Err(MembershipError::InvalidSealedKeys(index));
         }
+        let included = causal_grants::history_closure(entries, &entry.dependencies);
         let causal_past = entries
             .iter()
             .filter(|candidate| included.contains(&candidate.coord()))
@@ -127,13 +113,8 @@ pub(super) fn validate_membership_wrapped_keys(
             .filter(|record| record.member_pubkey != *removed_pubkey)
             .map(|record| record.member_pubkey.clone())
             .collect::<BTreeSet<_>>();
-        let actual_recipients = wrapped_keys
-            .iter()
-            .map(|reference| reference.recipient_pubkey.clone())
-            .collect::<BTreeSet<_>>();
-        if expected_recipients != actual_recipients || actual_recipients.len() != wrapped_keys.len()
-        {
-            return Err(MembershipError::InvalidWrappedKeys(index));
+        if expected_recipients != sealed_keys.keys().cloned().collect::<BTreeSet<_>>() {
+            return Err(MembershipError::InvalidSealedKeys(index));
         }
     }
     Ok(())
@@ -147,18 +128,18 @@ pub(super) fn membership_causal_generation(
     entries
         .iter()
         .filter(|candidate| included.contains(&candidate.coord()))
-        .flat_map(|candidate| match &candidate.change {
-            StoreAuthorityChange::SetMember { wrapped_key, .. } => {
-                std::slice::from_ref(wrapped_key)
-            }
-            StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.as_slice(),
+        .filter_map(|candidate| match &candidate.change {
+            StoreAuthorityChange::RemoveMember {
+                rotation_generation,
+                ..
+            } => Some(*rotation_generation),
             StoreAuthorityChange::Founder { .. }
+            | StoreAuthorityChange::SetMember { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
             | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin => &[],
+            | StoreAuthorityChange::ProviderAdmin => None,
         })
-        .map(|reference| reference.generation)
         .max()
         .unwrap_or(coven_keys::encryption::INITIAL_KEY_GENERATION)
 }

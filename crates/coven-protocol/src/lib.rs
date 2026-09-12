@@ -38,7 +38,6 @@ pub mod remote_object;
 pub mod store_commit;
 pub mod store_creation;
 pub mod synced_schema;
-pub mod wrapped_store_key;
 pub mod write;
 
 pub use objects::{

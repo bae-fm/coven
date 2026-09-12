@@ -7,7 +7,7 @@
 
 use super::authorization::history::AuthorizedStoreHistory;
 use super::authorization::registration_outbox::RegistrationOutbox;
-use super::{prepare_registration_object, AuthorizedWriterOperation, StoreKeyrings};
+use super::{prepare_registration_object, AuthorizedWriterOperation};
 use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use crate::sync::store::{Store, StoreDatabase};
 use coven_database::DeviceJoinBootstrapPlan;

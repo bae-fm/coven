@@ -28,7 +28,7 @@ competing accepted history before retrying.
 <svg class="flow" viewBox="0 0 660 210" role="img" aria-label="Sync concepts pass through the sealing layer to the raw byte trait and then to a provider">
 <rect class="lane" x="80" y="16" width="500" height="40" rx="9"/>
 <text class="lbl s11" x="330" y="34" text-anchor="middle">sync concepts</text>
-<text class="sub" x="330" y="48" text-anchor="middle">a device's changeset seq · a blob id · a member's wrapped key</text>
+<text class="sub" x="330" y="48" text-anchor="middle">a device's changeset seq · a blob id · a membership entry</text>
 <line class="arr" x1="330" y1="60" x2="330" y2="74" marker-end="url(#fa)"/>
 <rect class="chipo" x="80" y="78" width="500" height="40" rx="9"/>
 <text class="lbl s11" x="330" y="96" text-anchor="middle">CloudSyncConnection</text>

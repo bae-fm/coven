@@ -238,7 +238,7 @@ async fn issuer_retirement(stage: PromotionStage, interruption: Interruption) {
             Interruption::Upload(_) | Interruption::ConcurrentUpload | Interruption::ReplaceTerminal => {
                 fixture.home.fail_exact_create_before_call(match stage {
                     PromotionStage::Request => 2,
-                    PromotionStage::MergeHead => 5,
+                    PromotionStage::MergeHead => 4,
                 });
                 None
             }
@@ -266,16 +266,16 @@ async fn issuer_retirement(stage: PromotionStage, interruption: Interruption) {
                 PromotionStage::Request,
             ) => (candidate.as_ref(), vec![candidate.reference.object.clone()]),
             (
-                OwnerPromotionJournalState::MergeHeadPrepared {
-                    candidate,
-                    wrapped_key,
-                    ..
-                },
+                OwnerPromotionJournalState::MergeHeadPrepared { candidate, .. },
                 PromotionStage::MergeHead,
             ) => (
                 candidate.as_ref(),
-                candidate.merge_membership_activation_remote_objects(std::slice::from_ref(wrapped_key))
-                    .unwrap().iter().map(|remote| remote.record().object().clone()).collect::<Vec<_>>(),
+                candidate
+                    .merge_membership_activation_remote_objects()
+                    .unwrap()
+                    .iter()
+                    .map(|remote| remote.record().object().clone())
+                    .collect::<Vec<_>>(),
             ),
             _ => panic!(
                 "upload failure did not preserve the requested preparation: {:?}",

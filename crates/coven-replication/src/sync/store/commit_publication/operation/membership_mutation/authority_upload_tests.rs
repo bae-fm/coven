@@ -15,12 +15,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Copy, Debug)]
-enum AuthorityUploadTarget {
-    LaterWrap,
-    Entry,
-}
-
-#[derive(Clone, Copy, Debug)]
 enum AuthorityUploadFailure {
     Missing,
     Duplicate,
@@ -84,39 +78,26 @@ impl StorageInterceptor for FailAuthorityUpload {
 
 #[tokio::test]
 async fn authority_payload_refusal_preserves_the_unpublished_membership_request() {
-    for target in [
-        AuthorityUploadTarget::LaterWrap,
-        AuthorityUploadTarget::Entry,
+    for failure in [
+        AuthorityUploadFailure::Missing,
+        AuthorityUploadFailure::Duplicate,
+        AuthorityUploadFailure::Corrupt,
     ] {
-        for failure in [
-            AuthorityUploadFailure::Missing,
-            AuthorityUploadFailure::Duplicate,
-            AuthorityUploadFailure::Corrupt,
-        ] {
-            interrupted_authority_upload(target, failure).await;
-        }
+        interrupted_authority_upload(failure).await;
     }
 }
 
 #[tokio::test]
 async fn authority_upload_interruption_retains_verified_progress_across_reopen() {
-    for target in [
-        AuthorityUploadTarget::LaterWrap,
-        AuthorityUploadTarget::Entry,
+    for failure in [
+        AuthorityUploadFailure::Create,
+        AuthorityUploadFailure::Readback,
     ] {
-        for failure in [
-            AuthorityUploadFailure::Create,
-            AuthorityUploadFailure::Readback,
-        ] {
-            interrupted_authority_upload(target, failure).await;
-        }
+        interrupted_authority_upload(failure).await;
     }
 }
 
-async fn interrupted_authority_upload(
-    target: AuthorityUploadTarget,
-    failure: AuthorityUploadFailure,
-) {
+async fn interrupted_authority_upload(failure: AuthorityUploadFailure) {
     let directory = test_store_dir();
     let database = open_test_db(directory.clone());
     let owner = UserKeypair::generate();
@@ -196,24 +177,15 @@ async fn interrupted_authority_upload(
         panic!("the staged request must be a removal");
     };
     let publication = plan.candidate.prepared_membership_publication().unwrap();
-    let StoreAuthorityChange::RemoveMember { wrapped_keys, .. } = &publication.entry.change else {
+    let StoreAuthorityChange::RemoveMember { sealed_keys, .. } = &publication.entry.change else {
         panic!("the signed entry must remove the requested member");
     };
     assert_eq!(
-        wrapped_keys.len(),
+        sealed_keys.len(),
         2,
-        "the later-wrap case needs two surviving members"
+        "the removal seals the rotated keyring to both surviving members"
     );
-    let mut ordered = wrapped_keys
-        .iter()
-        .map(|wrap| wrap.object.clone())
-        .collect::<Vec<_>>();
-    ordered.push(publication.entry_ref.object.clone());
-    let target_index = match target {
-        AuthorityUploadTarget::LaterWrap => 1,
-        AuthorityUploadTarget::Entry => 2,
-    };
-    let selected = ordered[target_index].clone();
+    let selected = publication.entry_ref.object.clone();
     let mut remotes = plan.candidate_remote_objects().unwrap();
     let index = remotes
         .iter()
@@ -238,7 +210,7 @@ async fn interrupted_authority_upload(
     }
     interceptor
         .target
-        .set(selected)
+        .set(selected.clone())
         .expect("set the staged exact target once");
     let before = database.database_image_for_test().await.unwrap();
     let reservation = durable.active_store_publication().await.unwrap();
@@ -276,25 +248,19 @@ async fn interrupted_authority_upload(
         );
     }
     let objects = database.remote_objects_for_test().await.unwrap();
-    for (index, object) in ordered.iter().enumerate() {
-        let record = objects
-            .iter()
-            .find(|record| record.object() == object)
-            .expect("staged exact record");
-        let verified = network_failure && index < target_index;
-        assert_eq!(
-            record.records_verified_upload(),
-            verified,
-            "{failure:?} at {target:?}: record {index}"
-        );
-        let present = home.stored_exact_bytes(object.slot()).is_some();
-        let expected_present = verified
-            || (matches!(failure, AuthorityUploadFailure::Readback) && index == target_index);
-        assert_eq!(
-            present, expected_present,
-            "{failure:?} at {target:?}: physical object {index}"
-        );
-    }
+    let record = objects
+        .iter()
+        .find(|record| record.object() == &selected)
+        .expect("staged exact record");
+    assert!(
+        !record.records_verified_upload(),
+        "{failure:?}: the interrupted entry upload records no verified upload"
+    );
+    assert_eq!(
+        home.stored_exact_bytes(selected.slot()).is_some(),
+        matches!(failure, AuthorityUploadFailure::Readback),
+        "{failure:?}: physical entry object"
+    );
     let retained_row = durable
         .outbound_membership_mutation()
         .await

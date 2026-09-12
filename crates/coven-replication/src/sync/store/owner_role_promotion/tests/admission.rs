@@ -177,7 +177,7 @@ async fn staged_admission_with_guard(
             | AdmissionContinuation::AcceptedBeforeIssuerRemoval | AdmissionContinuation::IssuerRemovedDuringAbandonment
             | AdmissionContinuation::IssuerRemovedDuringAbandonmentCleanup
             | AdmissionContinuation::IssuerRemovedAfterAbandonmentAccepted);
-        fixture.home.fail_exact_create_before_call(if issuer_removed { 3 } else { 1 });
+        fixture.home.fail_exact_create_before_call(if issuer_removed { 2 } else { 1 });
         founder
             .admit_member(
                 &admitted_pubkey,
@@ -198,12 +198,12 @@ async fn staged_admission_with_guard(
         let envelope: serde_json::Value = serde_json::from_slice(&pending.plan_bytes).unwrap();
         let original: PreparedStoreOperationCommit =
             serde_json::from_value(envelope["plan"]["candidate"].clone()).unwrap();
-        let old_wrap: coven_protocol::wrapped_store_key::PreparedWrappedStoreKey =
-            serde_json::from_value(envelope["plan"]["wrapped_key"].clone()).unwrap();
+        let abandoned_publication = original
+            .prepared_membership_publication()
+            .expect("the retained plan grants the invited member");
+        let abandoned_entry = abandoned_publication.entry.clone();
+        let abandoned_entry_object = abandoned_publication.entry_ref.object.clone();
         if issuer_removed {
-            assert_eq!(storage.observe_exact_slot(old_wrap.reference.object.slot()).await.unwrap(),
-                Some(old_wrap.reference.object.clone()),
-                "the failed admission must leave an actual uploaded wrapped key to retire");
             let mut history = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
                 .open_pinned(storage.as_ref(), &root).await.unwrap();
             let candidate = history.authenticate_bytes(&original.reference, &original.commit.to_bytes()).await.unwrap();
@@ -239,13 +239,13 @@ async fn staged_admission_with_guard(
                         }
                     }
                 } else {
-                    // The original wrap, entry, head, and commit precede the
+                    // The original entry, head, and commit precede the
                     // abandonment commit; stop at its publication entry.
-                    fixture.home.fail_exact_create_before_call(6);
+                    fixture.home.fail_exact_create_before_call(5);
                     let error = founder.admit_member(&admitted_pubkey, requested_email, MemberRole::Member,
                         &fixture.encryption, &root.store_root_id.to_string(), "Pending admission").await
                         .expect_err("interrupt abandonment after its commit upload but before acceptance");
-                    assert!(error.to_string().contains("forced failure before exact create call 6"), "{error}");
+                    assert!(error.to_string().contains("forced failure before exact create call 5"), "{error}");
                 }
                 let active = database.active_store_publication().await.unwrap().unwrap();
                 let abandonment = active.membership_abandonment().expect("the retained request owns its exact abandonment").clone();
@@ -334,13 +334,13 @@ async fn staged_admission_with_guard(
                 "issuer retirement cannot invalidate an already covered candidate sequence");
             assert_eq!(database.store_current_publication().await.unwrap(), before);
             assert!(storage.observe_exact_slot(original.reference.object.slot()).await.unwrap().is_some());
-            assert!(storage.observe_exact_slot(old_wrap.reference.object.slot()).await.unwrap().is_some());
+            assert!(storage.observe_exact_slot(abandoned_entry_object.slot()).await.unwrap().is_some());
             assert!(peer.membership_for_test().await.unwrap().is_member_now(&admitted_pubkey));
             return;
         }
         if completion_guard.is_some() {
             fixture.home.fail_nth_exact_delete_of(
-                &[old_wrap.reference.object.slot()],
+                &[abandoned_entry_object.slot()],
                 1,
             );
         }
@@ -348,7 +348,7 @@ async fn staged_admission_with_guard(
             .store_current_publication().await.unwrap().record().clone();
         if matches!(continuation, AdmissionContinuation::IssuerRemovedDuringCleanup
             | AdmissionContinuation::IssuerRemovedDuringAbandonmentCleanup) {
-            fixture.home.fail_nth_exact_delete_of(&[old_wrap.reference.object.slot()], 1);
+            fixture.home.fail_nth_exact_delete_of(&[abandoned_entry_object.slot()], 1);
         }
         fixture.home.clear_exact_creates();
         let mut access_requests_before_retry = fixture.home.access_requests().len();
@@ -384,7 +384,7 @@ async fn staged_admission_with_guard(
             }
             assert_eq!(active.commit_reservation().unwrap().2, &expected_coord);
             assert_eq!(active.retired_candidates().len(), 1);
-            assert!(storage.observe_exact_slot(old_wrap.reference.object.slot()).await.unwrap().is_some());
+            assert!(storage.observe_exact_slot(abandoned_entry_object.slot()).await.unwrap().is_some());
             if interrupted_abandonment.is_none() {
                 assert!(fixture.home.exact_creates().is_empty());
             }
@@ -432,7 +432,7 @@ async fn staged_admission_with_guard(
             }
             assert_eq!(fixture.home.access_requests().len(), access_requests_before_retry,
                 "the removed issuer must not change provider access");
-            for object in [&original.reference.object, &old_wrap.reference.object] {
+            for object in [&original.reference.object, &abandoned_entry_object] {
                 assert!(storage.observe_exact_slot(object.slot()).await.unwrap().is_none(),
                     "retirement must finish the exact candidate cleanup");
             }
@@ -459,15 +459,16 @@ async fn staged_admission_with_guard(
             let active = database.active_store_publication().await.unwrap().unwrap();
             assert!(active.is_awaiting_preparation());
             assert_eq!(active.retired_candidates().len(), 1);
-            assert!(storage
-                .observe_exact_slot(old_wrap.reference.object.slot())
-                .await.unwrap().is_some());
             let membership = founder.membership_for_test().await.unwrap();
-            let accepted_wrap = peer_admission.as_ref().unwrap().wrapped_key.clone();
+            let accepted_grant = peer_admission.as_ref().unwrap().grant_id.clone();
             assert_eq!(
-                membership.wrapped_key_authority_for(&admitted_pubkey).unwrap(),
-                vec![accepted_wrap.clone()]
+                membership.active_grant_ids(&admitted_pubkey),
+                std::collections::BTreeSet::from([accepted_grant.clone()])
             );
+            assert!(!membership
+                .sealed_key_authority_for(&admitted_pubkey)
+                .unwrap()
+                .is_empty());
             let accepted = database.store_current_publication().await.unwrap().record().clone();
             if !matches!(guard, AdmissionCompletionGuard::IncompleteCleanup) {
                 crate::sync::store::authorization::retire_store_write_candidates(
@@ -501,11 +502,10 @@ async fn staged_admission_with_guard(
             assert_eq!(database.active_store_publication().await.unwrap().as_ref(), Some(&active));
             assert_eq!(
                 founder.membership_for_test().await.unwrap()
-                    .wrapped_key_authority_for(&admitted_pubkey).unwrap(),
-                vec![accepted_wrap]
+                    .active_grant_ids(&admitted_pubkey),
+                std::collections::BTreeSet::from([accepted_grant])
             );
             if matches!(guard, AdmissionCompletionGuard::IncompleteCleanup) {
-                assert!(storage.observe_exact_slot(old_wrap.reference.object.slot()).await.unwrap().is_some());
                 crate::sync::store::authorization::retire_store_write_candidates(
                     &database, storage.as_ref(), active,
                 ).await.unwrap();
@@ -567,23 +567,19 @@ async fn staged_admission_with_guard(
                 );
             }
             assert_eq!(
-                membership
-                    .wrapped_key_authority_for(&admitted_pubkey)
-                    .unwrap(),
-                vec![peer_admission.unwrap().wrapped_key]
+                membership.active_grant_ids(&admitted_pubkey),
+                std::collections::BTreeSet::from([peer_admission.unwrap().grant_id])
             );
-            for object in [&original.reference.object, &old_wrap.reference.object] {
-                assert!(storage
-                    .observe_exact_slot(object.slot())
-                    .await
-                    .unwrap()
-                    .is_none());
-            }
+            assert!(storage
+                .observe_exact_slot(original.reference.object.slot())
+                .await
+                .unwrap()
+                .is_none());
             return;
         }
         let admission = result.expect("resume the retained admission against accepted authority");
         if matches!(continuation, AdmissionContinuation::SameMember) {
-            assert_eq!(admission.wrapped_key, peer_admission.unwrap().wrapped_key);
+            assert_eq!(admission.grant_id, peer_admission.unwrap().grant_id);
             assert!(database
                 .outbound_membership_mutation()
                 .await
@@ -597,7 +593,6 @@ async fn staged_admission_with_guard(
                 .is_none());
             return;
         }
-        assert!(admission.wrapped_key.generation > old_wrap.reference.generation);
         assert_eq!(
             &fixture.home.access_requests()[access_requests_before_retry..],
             &[coven_storage::cloud::CloudAccessState::Present {
@@ -606,7 +601,6 @@ async fn staged_admission_with_guard(
             }],
             "replacement establishes its own provider step exactly once"
         );
-        assert_ne!(admission.wrapped_key, old_wrap.reference);
         assert!(database
             .outbound_membership_mutation()
             .await
@@ -659,26 +653,20 @@ async fn staged_admission_with_guard(
         if matches!(continuation, AdmissionContinuation::Rotation) {
             assert!(!membership.is_member_now(&keys::public_key_hex(&retired)));
         }
-        let keys =
-            crate::sync::store::authorization::StoreKeyrings::new(storage.as_ref(), root.clone());
-        let received = keys
-            .open_containing(&admitted, &membership, &admission.wrapped_key)
-            .await
-            .unwrap();
-        let owner_wraps = membership
-            .wrapped_key_authority_for(&keys::public_key_hex(&fixture.owner))
-            .unwrap();
-        let current = keys
-            .open_containing(
-                &fixture.owner,
-                &membership,
-                owner_wraps
-                    .iter()
-                    .max_by_key(|reference| reference.generation)
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let received = crate::sync::store::open_granted_store_keyring(
+            &admitted,
+            &membership,
+            &admission.grant_id,
+        )
+        .unwrap();
+        assert!(
+            received.current_generation()
+                > membership
+                    .keyring_generation_of(&abandoned_entry)
+                    .expect("the abandoned plan establishes a keyring generation"),
+            "the replacement grant carries the keyring the accepted rotation established",
+        );
+        let current = crate::sync::store::open_store_keyring(&fixture.owner, &membership).unwrap();
         let ciphertext =
             current.encrypt(b"content after the accepted rotation", b"admission keyring");
         assert_eq!(

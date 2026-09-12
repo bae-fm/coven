@@ -154,20 +154,18 @@ nothing if the key travels carelessly. A store's data is encrypted under a
 symmetric key that can
 [rotate](#revocation-is-key-rotation); the keyring is the full set of those key
 generations. Each member's copy of the keyring is sealed to their X25519
-public key with libsodium's sealed box. The wrapping Owner also signs the
-Store, recipient, generation and sealed bytes: a path under that Owner's name
-does not authenticate its sender.
+public key with libsodium's sealed box, and that sealed box travels inside the
+Owner-signed membership entry that grants or rotates their access. The sealed
+box authenticates no sender; the entry's signature and hash do, and the entry's
+place in membership history fixes the generation the box must decode to.
 
-Wrapped keyrings are immutable exact objects at
-`keys/{owner_pubkey}/{recipient_pubkey}/{generation}/{wrap_hash}.json`.
-The membership control names the exact wrapped-key reference. A joiner verifies
-the accepted activation, object reference and Owner signature before opening
-its copy with the matching private key.
+A joiner verifies the accepted membership activation, then opens the sealed key
+its own active grant carries with the matching private key.
 
 Admission retains its prepared objects and progress in a durable journal.
 A failure before acceptance does not grant membership; a failure after
 acceptance must resume finalization of that accepted change. It cannot undo
-acceptance by deleting an entry or replacing an earlier key wrap.
+acceptance by deleting or replacing an entry.
 
 ## Pull verification
 
@@ -215,17 +213,18 @@ receive. So removal is key rotation, not a temporal replay of the chain ("was
 this author allowed when they claim they wrote this?").
 `handle.remove_member(...)`:
 
-1. Prepares the removal and a new key generation, with exact wrapped keyrings
-   for the remaining members, and retains them in its durable operation.
-2. Uploads those immutable wraps and the removal entry, then requests removal
-   of the member's cloud access. Providers with no per-member credential
-   revocation report that limitation; key rotation protects new encrypted data.
+1. Prepares the removal and a new key generation, sealing the rotated keyring
+   to every remaining member inside the removal entry, and retains it in its
+   durable operation.
+2. Uploads that entry, then requests removal of the member's cloud access.
+   Providers with no per-member credential revocation report that limitation;
+   key rotation protects new encrypted data.
 3. Publishes the matching Store commit and membership head, accepts the control
    through the shared Store publication, and finalizes its acceptance result.
 
-The removed member receives no wrap for the new generation. Earlier wraps
-remain earlier-generation objects; deleting them cannot take back a key the
-member already learned.
+The removal seals nothing to the removed member, so they receive no key for the
+new generation. Earlier entries keep the keys they always carried; deleting them
+cannot take back a key the member already learned.
 
 <svg class="flow" viewBox="0 0 660 158" role="img" aria-label="Removing a member appends key generation 2; remaining members receive it, the removed member stops at generation 1">
 <line class="arrd" x1="30" y1="62" x2="640" y2="62" marker-end="url(#fam)"/>
@@ -236,7 +235,7 @@ member already learned.
 <rect class="chipa" x="400" y="48" width="120" height="28" rx="7"/>
 <text class="lbl s11" x="460" y="66" text-anchor="middle">generation 2</text>
 <text class="sub" x="130" y="102" text-anchor="middle">everyone could read</text>
-<text class="sub" x="460" y="102" text-anchor="middle">re-wrapped to remaining members only</text>
+<text class="sub" x="460" y="102" text-anchor="middle">sealed to remaining members only</text>
 <text class="sub" x="330" y="134" text-anchor="middle">the removed member's keyring stops at generation 1: new data is unreadable to them</text>
 </svg>
 
@@ -256,8 +255,8 @@ an earlier candidate does not give that candidate an earlier acceptance time.
 An existing device displays one pairing code. The joining device scans it,
 establishes an encrypted LAN session, and sends its signed identity and provider
 account through that session. After the owner approves the exact identity, cloud
-access and the wrapped keyring return through the same session, encrypted to the
-joining device. No second code is displayed, scanned, or pasted.
+access and the membership grant that carries the sealed keyring return through
+the same session, encrypted to the joining device. No second code is displayed, scanned, or pasted.
 
 <svg class="flow" viewBox="0 0 660 216" role="img" aria-label="The owner displays one pairing code; the joining device scans it and the devices complete approval over an encrypted LAN session">
 <text class="hdr" x="120" y="22" text-anchor="middle">JOINER</text>
@@ -303,7 +302,7 @@ public-key fingerprint and provider account, and passes it with a role to
 `handle.approve_device_pairing(...)`. coven:
 
 1. grants the joiner cloud access,
-2. wraps the store keyring to their X25519 key,
+2. seals the store keyring to their X25519 key inside the membership entry,
 3. signs and validates the membership control against accepted authority,
 4. accepts its Store publication and finalizes the exact head acceptance result,
 5. serializes those exact admission facts and encrypts them to the request's
@@ -312,7 +311,7 @@ public-key fingerprint and provider account, and passes it with a role to
 
 The sealed admission returns through the same LAN session. Only the pending
 identity retained for that request can decrypt its cloud connection, Store id,
-owner key, wrapped key, Store root, and membership floor. The two sides then
+owner key, membership grant, Store root, and membership floor. The two sides then
 exchange four exact values through the Store's cloud transport:
 
 1. The offer becomes a provider access request; the selected provider

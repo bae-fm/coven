@@ -600,17 +600,10 @@ pub(super) fn membership_rotation_generation(
     entry: &coven_protocol::membership::MembershipEntry,
 ) -> Result<Option<u64>, DbError> {
     match &entry.change {
-        coven_protocol::membership::StoreAuthorityChange::RemoveMember { wrapped_keys, .. } => {
-            let generation = wrapped_keys
-                .first()
-                .ok_or_else(|| {
-                    DbError::Message(
-                        "retained member removal has no replacement key generation".into(),
-                    )
-                })?
-                .generation;
-            Ok(Some(generation))
-        }
+        coven_protocol::membership::StoreAuthorityChange::RemoveMember {
+            rotation_generation,
+            ..
+        } => Ok(Some(*rotation_generation)),
         _ => Ok(None),
     }
 }

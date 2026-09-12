@@ -810,10 +810,6 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 storage.as_ref(),
                 root_ref.clone(),
             );
-            let keyrings = crate::sync::store::authorization::keyring::StoreKeyrings::new(
-                storage.as_ref(),
-                root_ref,
-            );
             let blob_cache =
                 crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
             Ok(
@@ -826,7 +822,6 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                     blob_cache,
                     history_verifier,
                     blob_source,
-                    keyrings,
                 )
                 .bind_restore(membership, restorer_identity),
             )

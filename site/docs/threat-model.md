@@ -23,8 +23,9 @@ them:
   object copied to a different key fails to open there.
 - **Signed membership.** Causal, per-author membership streams beginning at the
   founder bound into the signed Store protocol root (see
-  [Sharing](/docs/sharing)). Heads, snapshot metadata, and wrapped keys are
-  signed, so the provider holding them cannot forge membership.
+  [Sharing](/docs/sharing)). Entries, heads, and snapshot metadata are signed,
+  so the provider holding them cannot forge membership or the sealed Store keys
+  those entries carry.
 
 ## Non-member with read access to the bucket
 
@@ -34,8 +35,8 @@ provider employee, a misconfigured public bucket.
 **Defended.** Confidentiality comes from the store keyring: every object is
 sealed before it leaves the device, and the reader holds no generation of that
 key, so the bucket is ciphertext and a flat set of key paths. Integrity of the
-control plane comes from the signatures on membership entries, heads, snapshot
-metadata, and wrapped keys — a reader who cannot write changes nothing, and a
+control plane comes from the signatures on membership entries, heads, and
+snapshot metadata — a reader who cannot write changes nothing, and a
 reader learns nothing beyond object sizes and access timing.
 
 ## Non-member with write access to the bucket
@@ -201,7 +202,7 @@ Four positions are worth stating on their own, as deliberate scope decisions
 rather than gaps to close later.
 
 **Removal either activates its complete state or restores the prior state.**
-Removing a member records the prior provider access and wrapped-key objects,
+Removing a member records the prior provider access and membership objects,
 then publishes the membership removal with its replacement key generation. If
 activation loses its expected head or another step fails, coven restores those
 exact prior objects and access grants and reports the failure.

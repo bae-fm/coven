@@ -1,37 +1,5 @@
 use super::*;
 
-#[cfg(any(test, feature = "test-utils"))]
-pub fn test_wrapped_key_ref(
-    owner_pubkey: &str,
-    recipient_pubkey: &str,
-    generation: u64,
-    label: &[u8],
-) -> WrappedStoreKeyRef {
-    let wrap_hash = ObjectHash::digest(
-        &[
-            label,
-            owner_pubkey.as_bytes(),
-            recipient_pubkey.as_bytes(),
-            &generation.to_le_bytes(),
-        ]
-        .concat(),
-    );
-    let logical_key =
-        format!("keys/{owner_pubkey}/{recipient_pubkey}/{generation}/{wrap_hash}.json");
-    WrappedStoreKeyRef {
-        owner_pubkey: owner_pubkey.to_string(),
-        recipient_pubkey: recipient_pubkey.to_string(),
-        generation,
-        wrap_hash,
-        object: ExactObjectRef::new(
-            crate::objects::ObjectSlot::logical(logical_key)
-                .expect("test wrapped-key slot is valid"),
-            label.len() as u64,
-            ObjectHash::digest(label),
-        ),
-    }
-}
-
 pub fn derive_founder_stream_id(store_id: &str, owner_pubkey: &str) -> AuthorStreamId {
     AuthorStreamId::from_digest(ObjectHash::digest(
         format!("coven.membership-founder-stream.v1\0{store_id}\0{owner_pubkey}").as_bytes(),

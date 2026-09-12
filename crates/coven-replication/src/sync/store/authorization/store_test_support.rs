@@ -50,29 +50,12 @@ impl Store {
     }
 
     #[cfg(test)]
-    pub(crate) async fn prepare_wrapped_key_for_test(
-        &self,
-        recipient: &str,
-        value: coven_protocol::wrapped_store_key::WrappedStoreKey,
-    ) -> Result<
-        coven_protocol::wrapped_store_key::PreparedWrappedStoreKey,
-        crate::sync::test_helpers::TestError,
-    > {
-        let authorization = self.authorize().await?;
-        authorization
-            .prepare_wrapped_key_for_test(recipient, value)
-            .await
-            .map_err(Into::into)
-    }
-
-    #[cfg(test)]
     pub(crate) async fn membership_keyring_facts_for_test(
         &self,
     ) -> Result<([u8; 32], usize), crate::sync::test_helpers::TestError> {
         let authorization = self.authorize().await?;
         authorization
             .membership_keyring_facts_for_test()
-            .await
             .map_err(Into::into)
     }
 

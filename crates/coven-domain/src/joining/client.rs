@@ -521,7 +521,7 @@ impl DeviceJoinClient {
         cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
         clock: coven_foundation::clock::ClockRef,
     ) -> Result<Self, BootstrapError> {
-        if admission.wrapped_key.recipient_pubkey != member_pubkey {
+        if admission.member_pubkey != member_pubkey {
             return Err(crate::joining::DeviceInviteError::RecipientMismatch.into());
         }
         coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
@@ -1140,7 +1140,7 @@ impl DeviceJoinClient {
     /// Both the pre-key bootstrap reads and the device-join transport go
     /// through this: the transport's objects carry their own per-attempt seal,
     /// so they need no store key — which is what lets a joiner publish its
-    /// access request before it has unwrapped the store keyring at all.
+    /// access request before it has opened the store keyring at all.
     pub(super) async fn transport_storage(&self) -> Result<CloudSyncConnection, BootstrapError> {
         let signer = coven_keys::keys::peek_pending_identity(&self.member_pubkey)?;
         let cloud = self.build_cloud_home().await?;
@@ -1161,13 +1161,13 @@ impl DeviceJoinClient {
         ))
     }
 
-    /// Unwrap the store keyring over the home this join already opened.
+    /// Open the store keyring over the home this join already opened.
     ///
     /// Timed as one step by its callers, where it has been the second-largest
     /// on a live join. Constructing the home is local — no bucket check, no
     /// auth probe — and its caller does it, so all of this time is the two
     /// reads that pin the Store root and its founder, the membership rollup,
-    /// the membership chain walk, and the wrapped-key reads.
+    /// and the membership chain walk.
     ///
     /// The walk used to grow with the Store's whole membership history: a
     /// listing and a read per head, then a read per entry, back to the founding
@@ -1195,10 +1195,10 @@ impl DeviceJoinClient {
     ) -> Result<DeviceJoinStorage, BootstrapError> {
         let bootstrap_storage = self.plaintext_storage(cloud.clone(), signer)?;
         let recipient = hex::encode(signer.public_key());
-        if self.admission.wrapped_key.recipient_pubkey != recipient {
+        if self.admission.member_pubkey != recipient {
             return Err(
                 coven_replication::sync::store::MembershipMutationError::Crypto(
-                    "admission wrapped-key ref names another recipient".to_string(),
+                    "admission names another member".to_string(),
                 )
                 .into(),
             );
@@ -1235,18 +1235,13 @@ impl DeviceJoinClient {
             .await
             .map_err(coven_replication::sync::store::MembershipMutationError::from)?;
         let encryption = timings
-            .stage(
-                "open the keyring",
-                coven_replication::sync::store::StoreKeyrings::new(
-                    &bootstrap_storage,
-                    self.admission.store_root.clone(),
-                )
-                .open_containing(
+            .stage("open the keyring", async {
+                coven_replication::sync::store::open_granted_store_keyring(
                     signer,
                     chain.chain(),
-                    &self.admission.wrapped_key,
-                ),
-            )
+                    &self.admission.grant_id,
+                )
+            })
             .await?;
         let keyring = MasterKeyring::from(encryption.clone());
         let storage = CloudSyncConnection::new(

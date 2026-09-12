@@ -37,10 +37,6 @@ pub enum CandidateExclusiveObjectDomain {
         family: CandidateFamilyId,
         reference: crate::membership::MembershipHeadRef,
     },
-    MergeMembershipWrappedStoreKey {
-        family: CandidateFamilyId,
-        reference: crate::wrapped_store_key::WrappedStoreKeyRef,
-    },
     StorePackage {
         reference: crate::store_commit::StorePackageRef,
     },
@@ -73,8 +69,7 @@ impl CandidateExclusiveObjectDomain {
     pub(super) fn family(&self) -> CandidateFamilyId {
         match self {
             Self::MergeMembershipEntry { family, .. }
-            | Self::MergeMembershipHead { family, .. }
-            | Self::MergeMembershipWrappedStoreKey { family, .. } => *family,
+            | Self::MergeMembershipHead { family, .. } => *family,
             Self::StorePackage { reference } => reference.candidate_family,
             Self::CirclePackage { reference } => reference.package.candidate_family,
             Self::CircleEpochCloseIntent { family, .. }
@@ -88,7 +83,6 @@ impl CandidateExclusiveObjectDomain {
         match self {
             Self::MergeMembershipEntry { reference, .. } => &reference.object,
             Self::MergeMembershipHead { reference, .. } => &reference.object,
-            Self::MergeMembershipWrappedStoreKey { reference, .. } => &reference.object,
             Self::StorePackage { reference } => &reference.object,
             Self::CirclePackage { reference } => &reference.package.object,
             Self::CircleEpochCloseIntent { reference, .. } => &reference.object,
@@ -113,7 +107,6 @@ impl CandidateExclusiveObjectDomain {
             }
             Self::MergeMembershipEntry { .. }
             | Self::MergeMembershipHead { .. }
-            | Self::MergeMembershipWrappedStoreKey { .. }
             | Self::CircleEpochCloseIntent { .. }
             | Self::CircleEpochCloseOutcome { .. }
             | Self::CircleEpochCloseCancellation { .. } => None,
@@ -132,11 +125,6 @@ impl CandidateExclusiveObjectDomain {
                     reference: reference.clone(),
                 })
             }
-            Self::MergeMembershipWrappedStoreKey { reference, .. } => Some(
-                RetainedAuthorityObjectDomain::MergeMembershipWrappedStoreKey {
-                    reference: reference.clone(),
-                },
-            ),
             Self::CircleEpochCloseIntent {
                 family,
                 circle_id,
@@ -313,10 +301,6 @@ pub enum RetainedAuthorityObjectDomain {
     CircleAcknowledgement {
         reference: CircleAckRef,
     },
-    MergeMembershipWrappedStoreKey {
-        reference: crate::wrapped_store_key::WrappedStoreKeyRef,
-    },
-
     ProviderAccessGrant {
         reference: crate::provider::StoreMemberProviderAccessGrantRef,
     },

@@ -495,19 +495,14 @@ fn direct_owner_assignment_is_rejected() {
     let candidate_pubkey = keys::public_key_hex(&candidate);
 
     assert!(matches!(
-        chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
+        chain.signed_set_member_with_anchor_and_sealed_key_in_stream(
             &founder,
             stream(1),
-            candidate_pubkey.clone(),
+            candidate_pubkey,
             None,
             MemberRole::Owner,
             Some(membership_anchor("direct-owner-assignment")),
-            test_wrapped_key_ref(
-                &keys::public_key_hex(&founder),
-                &candidate_pubkey,
-                coven_keys::encryption::INITIAL_KEY_GENERATION,
-                b"direct Owner assignment",
-            ),
+            test_sealed_store_key(b"direct Owner assignment"),
             "direct Owner assignment".to_string(),
         ),
         Err(MembershipError::OwnerPromotionRequired)
@@ -515,32 +510,12 @@ fn direct_owner_assignment_is_rejected() {
 }
 
 #[test]
-fn membership_candidates_require_exact_wrapped_key_recipient_coverage() {
+fn membership_removals_require_exact_sealed_key_recipient_coverage() {
     let owner = key();
     let member = key();
     let owner_pubkey = keys::public_key_hex(&owner);
     let member_pubkey = keys::public_key_hex(&member);
     let mut chain = founded("store", &owner);
-    let wrong_recipient = test_wrapped_key_ref(
-        &owner_pubkey,
-        &owner_pubkey,
-        coven_keys::encryption::INITIAL_KEY_GENERATION,
-        b"wrong invitation recipient",
-    );
-    assert!(matches!(
-        chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
-            &owner,
-            stream(1),
-            member_pubkey.clone(),
-            None,
-            MemberRole::Member,
-            None,
-            wrong_recipient,
-            "invalid invitation".to_string(),
-        ),
-        Err(MembershipError::InvalidWrappedKeys(_))
-    ));
-
     let add = chain
         .signed_set_member_in_stream(
             &owner,
@@ -552,29 +527,44 @@ fn membership_candidates_require_exact_wrapped_key_recipient_coverage() {
         )
         .unwrap();
     chain.add_entry(add).unwrap();
+
     assert!(matches!(
-        chain.signed_remove_member_with_wrapped_keys_in_stream(
+        chain.signed_remove_member_with_sealed_keys_in_stream(
             &owner,
             stream(1),
-            member_pubkey,
-            Vec::new(),
-            "missing owner wrap".to_string(),
+            member_pubkey.clone(),
+            BTreeMap::new(),
+            "missing owner key".to_string(),
         ),
-        Err(MembershipError::InvalidWrappedKeys(_))
+        Err(MembershipError::InvalidSealedKeys(_))
+    ));
+    assert!(matches!(
+        chain.signed_remove_member_with_sealed_keys_in_stream(
+            &owner,
+            stream(1),
+            member_pubkey.clone(),
+            BTreeMap::from([
+                (owner_pubkey, test_sealed_store_key(b"owner rotation")),
+                (
+                    member_pubkey.clone(),
+                    test_sealed_store_key(b"removed member rotation")
+                ),
+            ]),
+            "sealing to the removed member".to_string(),
+        ),
+        Err(MembershipError::InvalidSealedKeys(_))
     ));
 }
 
 #[test]
-fn wrapped_key_generations_follow_the_causal_membership_history() {
+fn rotation_generations_follow_the_causal_membership_history() {
     let owner = key();
     let first_member = key();
     let second_member = key();
-    let later_member = key();
     let owner_pubkey = keys::public_key_hex(&owner);
     let first_pubkey = keys::public_key_hex(&first_member);
     let second_pubkey = keys::public_key_hex(&second_member);
-    let later_pubkey = keys::public_key_hex(&later_member);
-    let mut chain = founded("wrapped-generation-history", &owner);
+    let mut chain = founded("rotation-generation-history", &owner);
     for member in [&first_pubkey, &second_pubkey] {
         let add = chain
             .signed_set_member_in_stream(
@@ -588,54 +578,63 @@ fn wrapped_key_generations_follow_the_causal_membership_history() {
             .unwrap();
         chain.add_entry(add).unwrap();
     }
-    let mut first_rotation_wraps = vec![
-        test_wrapped_key_ref(&owner_pubkey, &owner_pubkey, 2, b"first owner rotation"),
-        test_wrapped_key_ref(&owner_pubkey, &second_pubkey, 2, b"first member rotation"),
-    ];
-    first_rotation_wraps.sort();
     let first_rotation = chain
-        .signed_remove_member_with_wrapped_keys_in_stream(
+        .signed_remove_member_with_sealed_keys_in_stream(
             &owner,
             stream(1),
             first_pubkey,
-            first_rotation_wraps,
+            BTreeMap::from([
+                (
+                    owner_pubkey.clone(),
+                    test_sealed_store_key(b"first owner rotation"),
+                ),
+                (
+                    second_pubkey.clone(),
+                    test_sealed_store_key(b"first member rotation"),
+                ),
+            ]),
             "first rotation".to_string(),
         )
         .unwrap();
+    let StoreAuthorityChange::RemoveMember {
+        rotation_generation,
+        ..
+    } = &first_rotation.change
+    else {
+        panic!("the authored change removes a member");
+    };
+    assert_eq!(*rotation_generation, 2);
     chain.add_entry(first_rotation).unwrap();
 
+    // A removal asserts which rotation it performs, so a second removal that
+    // reuses the generation the first one established is refused.
+    let removes = chain.active_grant_ids(&second_pubkey);
+    let retirement_barriers = chain
+        .membership_retirement_barriers(&removes, None)
+        .unwrap();
     assert!(matches!(
-        chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
+        chain.signed_change_in_stream(
             &owner,
             stream(1),
-            later_pubkey.clone(),
-            None,
-            MemberRole::Member,
-            None,
-            test_wrapped_key_ref(&owner_pubkey, &later_pubkey, 1, b"stale later invitation",),
-            "stale later invitation".to_string(),
-        ),
-        Err(MembershipError::InvalidWrappedKeys(_))
-    ));
-    assert!(matches!(
-        chain.signed_remove_member_with_wrapped_keys_in_stream(
-            &owner,
-            stream(1),
-            second_pubkey,
-            vec![test_wrapped_key_ref(
-                &owner_pubkey,
-                &owner_pubkey,
-                2,
-                b"reused rotation generation",
-            )],
+            StoreAuthorityChange::RemoveMember {
+                user_pubkey: second_pubkey,
+                removes,
+                retirement_barriers,
+                retirement_device_state: None,
+                rotation_generation: 2,
+                sealed_keys: BTreeMap::from([(
+                    owner_pubkey,
+                    test_sealed_store_key(b"reused rotation generation"),
+                )]),
+            },
             "reused rotation generation".to_string(),
         ),
-        Err(MembershipError::InvalidWrappedKeys(_))
+        Err(MembershipError::InvalidSealedKeys(_))
     ));
 }
 
 #[test]
-fn concurrent_add_and_rotation_has_incomplete_wrapped_key_authority() {
+fn concurrent_add_and_rotation_has_incomplete_sealed_key_authority() {
     let owner = key();
     let removed = key();
     let concurrent_member = key();
@@ -665,18 +664,15 @@ fn concurrent_add_and_rotation_has_incomplete_wrapped_key_authority() {
             "concurrent add".to_string(),
         )
         .unwrap();
-    let owner_rotation = test_wrapped_key_ref(
-        &owner_pubkey,
-        &owner_pubkey,
-        2,
-        b"rotation missing concurrent member",
-    );
     let remove = chain
-        .signed_remove_member_with_wrapped_keys_in_stream(
+        .signed_remove_member_with_sealed_keys_in_stream(
             &owner,
             stream(3),
             removed_pubkey,
-            vec![owner_rotation],
+            BTreeMap::from([(
+                owner_pubkey,
+                test_sealed_store_key(b"rotation missing concurrent member"),
+            )]),
             "concurrent removal".to_string(),
         )
         .unwrap();
@@ -684,32 +680,32 @@ fn concurrent_add_and_rotation_has_incomplete_wrapped_key_authority() {
     chain.add_entry(remove).unwrap();
 
     assert!(matches!(
-        chain.wrapped_key_authority_for(&concurrent_pubkey),
-        Err(MembershipError::MissingWrappedKeyCoverage { .. })
+        chain.sealed_key_authority_for(&concurrent_pubkey),
+        Err(MembershipError::MissingSealedKeyCoverage { .. })
     ));
 
-    let replacement_wrap = test_wrapped_key_ref(
-        &owner_pubkey,
-        &concurrent_pubkey,
-        2,
-        b"post-rotation replacement invitation",
-    );
+    let replacement_key = test_sealed_store_key(b"post-rotation replacement invitation");
     let replacement = chain
-        .signed_set_member_with_anchor_and_wrapped_key_in_stream(
+        .signed_set_member_with_anchor_and_sealed_key_in_stream(
             &owner,
             stream(4),
             concurrent_pubkey.clone(),
             None,
             MemberRole::Member,
             None,
-            replacement_wrap.clone(),
+            replacement_key.clone(),
             "replace concurrent invitation after rotation".to_string(),
         )
         .unwrap();
+    let replacement_coord = replacement.coord();
     chain.add_entry(replacement).unwrap();
     assert_eq!(
-        chain.wrapped_key_authority_for(&concurrent_pubkey).unwrap(),
-        vec![replacement_wrap],
+        chain.sealed_key_authority_for(&concurrent_pubkey).unwrap(),
+        vec![ActivatedSealedKey {
+            coord: replacement_coord,
+            generation: 2,
+            key: replacement_key,
+        }],
     );
 }
 

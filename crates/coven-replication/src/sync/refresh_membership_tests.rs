@@ -10,7 +10,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let encryption = EncryptionService::from_key(old_key);
     let ExactStoreFixture {
         store: storage,
-        cloud_storage,
+        cloud_storage: _,
         db: owner_db,
         db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
@@ -81,10 +81,8 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         )
         .await
         .expect("revoke rotates the key");
-    let new_key = crate::sync::store::StoreKeyrings::new(&*cloud_storage, storage.root().clone())
-        .open(&owner, &rotated_membership)
-        .await
-        .expect("open the exact accepted rotation wraps");
+    let new_key = crate::sync::store::open_store_keyring(&owner, &rotated_membership)
+        .expect("open the exact accepted rotation keys");
     assert_ne!(
         new_key.key_bytes(),
         old_key,
@@ -114,15 +112,15 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         "B persisted the rotated key to its keyring, so its restart reads the current key",
     );
 
-    // The chain supplies the exact refs; no path search chooses the key.
-    let (reunwrapped, _) = storage
+    // The chain carries the sealed keys; no path search chooses the key.
+    let (reopened, _) = storage
         .bind_device_in(&db_b, db_b_store_dir.clone(), &device_b)
         .await
         .expect("bind refreshed member Store")
         .membership_keyring_facts()
         .await
-        .expect("B can unwrap its re-wrapped key");
-    assert_eq!(reunwrapped, new_key.key_bytes());
+        .expect("B opens the key the rotation sealed to it");
+    assert_eq!(reopened, new_key.key_bytes());
 }
 
 #[tokio::test]
@@ -163,10 +161,8 @@ async fn admission_after_rotation_uses_the_membership_selected_keyring() {
         )
         .await
         .expect("remove member and rotate the Store key");
-    let rotated = crate::sync::store::StoreKeyrings::new(&*cloud_storage, storage.root().clone())
-        .open(&owner, &rotated_membership)
-        .await
-        .expect("open the exact accepted rotation wraps");
+    let rotated = crate::sync::store::open_store_keyring(&owner, &rotated_membership)
+        .expect("open the exact accepted rotation keys");
     cipher
         .adopt_key_rotation(&rotated, &custody)
         .expect("owner adopts the activated rotation");
@@ -202,11 +198,12 @@ async fn admission_after_rotation_uses_the_membership_selected_keyring() {
         )
         .await
         .expect("load admission membership");
-    let admitted_keyring =
-        crate::sync::store::StoreKeyrings::new(&*cloud_storage, admission.store_root.clone())
-            .open_containing(&admitted_member, &chain, &admission.wrapped_key)
-            .await
-            .expect("admitted member opens the activated exact wrap");
+    let admitted_keyring = crate::sync::store::open_granted_store_keyring(
+        &admitted_member,
+        &chain,
+        &admission.grant_id,
+    )
+    .expect("admitted member opens the key its accepted grant activates");
     let sealed = rotated.seal_app_data(b"current Store data", b"post-rotation admission");
     assert_eq!(
         admitted_keyring

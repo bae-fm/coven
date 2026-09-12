@@ -256,10 +256,8 @@ pub enum AdmissionPayloadError {
     StoreId(#[from] coven_foundation::store_dir::PathTokenError),
     #[error("owner public key: {0}")]
     OwnerPublicKey(#[source] coven_foundation::code_envelope::FixedHexError),
-    #[error("wrapped-key material: {0}")]
-    WrappedKeyMaterial(#[source] coven_foundation::code_envelope::FixedHexError),
-    #[error("wrapped-key identity: {0}")]
-    WrappedKeyIdentity(#[source] coven_protocol::objects::StorageError),
+    #[error("member public key: {0}")]
+    MemberPublicKey(#[source] coven_foundation::code_envelope::FixedHexError),
     #[error("membership floor is empty")]
     EmptyMembershipFloor,
     #[error("membership floor: {0}")]
@@ -274,23 +272,12 @@ fn validate_admission(admission: &MemberAdmission) -> Result<(), AdmissionPayloa
         32,
     )
     .map_err(AdmissionPayloadError::OwnerPublicKey)?;
-    for (subject, value) in [
-        (
-            "wrapped-key author public key",
-            &admission.wrapped_key.owner_pubkey,
-        ),
-        (
-            "wrapped-key recipient public key",
-            &admission.wrapped_key.recipient_pubkey,
-        ),
-    ] {
-        coven_foundation::code_envelope::decode_fixed_hex(subject, value, 32)
-            .map_err(AdmissionPayloadError::WrappedKeyMaterial)?;
-    }
-    admission
-        .wrapped_key
-        .validate_identity()
-        .map_err(AdmissionPayloadError::WrappedKeyIdentity)?;
+    coven_foundation::code_envelope::decode_fixed_hex(
+        "member public key",
+        &admission.member_pubkey,
+        32,
+    )
+    .map_err(AdmissionPayloadError::MemberPublicKey)?;
     if admission.membership_floor.0.is_empty() {
         return Err(AdmissionPayloadError::EmptyMembershipFloor);
     }
@@ -304,7 +291,7 @@ fn require_admission_matches_bundle(
     admission: &MemberAdmission,
     bundle: &DeviceJoinOfferBundle,
 ) -> Result<(), DeviceInviteError> {
-    if admission.wrapped_key.recipient_pubkey != bundle.offer.member_pubkey
+    if admission.member_pubkey != bundle.offer.member_pubkey
         || admission.store_root != bundle.offer.store_root
     {
         return Err(DeviceInviteError::OfferMismatch);
