@@ -49,7 +49,6 @@ impl CircleTransitionDraft {
         };
         let roster_state = MergeCircleRosterStateRef {
             heads: Vec::new(),
-            resolutions: Vec::new(),
             state_hash: roster_objects.resolved.state_hash,
         };
         let metadata = CircleMetadata::founder(
@@ -108,7 +107,7 @@ impl CircleTransitionDraft {
                 covered_control_heads: Vec::new(),
             }),
             access: access.map.clone(),
-            author_authority: MergeCircleOwnerAuthorityRef::Roster {
+            author_authority: MergeCircleOwnerAuthorityRef {
                 roster: roster_state,
                 grant_id: owner_grant.clone(),
                 created_at: roster_objects.entry.coord(),
@@ -202,7 +201,6 @@ impl CircleTransitionDraft {
         let roster = current_roster_chain.resolved_with_successor(entry.clone())?;
         let roster_state = MergeCircleRosterStateRef {
             heads: active_epoch.roster.heads.clone(),
-            resolutions: active_epoch.roster.resolutions.clone(),
             state_hash: roster.state_hash,
         };
         let store_root_hash = current_control.value.store_root_hash;

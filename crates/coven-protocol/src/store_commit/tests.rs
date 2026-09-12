@@ -1375,7 +1375,6 @@ fn candidate_manifest_rejects_duplicate_circle_bootstraps_with_distinct_provider
             close_cancellation: None,
             roster_entries: BTreeMap::new(),
             roster_heads: Vec::new(),
-            roster_resolutions: BTreeMap::new(),
             metadata_entries: BTreeMap::new(),
             metadata_heads: Vec::new(),
             bootstraps: vec![bootstrap("drive-file-a"), bootstrap("drive-file-b")],

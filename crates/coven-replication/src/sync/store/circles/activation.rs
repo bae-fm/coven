@@ -200,31 +200,7 @@ fn verify_merge_circle_owner_authority(
     authority: &MergeCircleOwnerAuthorityRef,
     roster: &ResolvedCircleRoster,
 ) -> bool {
-    match authority {
-        MergeCircleOwnerAuthorityRef::Roster {
-            grant_id,
-            created_at,
-            ..
-        } => roster.authorizes_owner_grant(author_pubkey, grant_id, created_at),
-        MergeCircleOwnerAuthorityRef::ConflictResolution {
-            conflict_hash,
-            resolution_hash,
-        } => {
-            let grant_id = coven_protocol::circle_roster::derive_circle_resolution_grant(
-                conflict_hash,
-                author_pubkey,
-            );
-            roster.authorizes_resolution_grant(
-                author_pubkey,
-                &grant_id,
-                &coven_protocol::circle_roster::CircleRosterConflictResolutionRef {
-                    conflict_hash: *conflict_hash,
-                    resolver_pubkey: author_pubkey.to_string(),
-                    resolution_hash: *resolution_hash,
-                },
-            )
-        }
-    }
+    roster.authorizes_owner_grant(author_pubkey, &authority.grant_id, &authority.created_at)
 }
 
 #[cfg(test)]

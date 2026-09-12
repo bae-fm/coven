@@ -29,7 +29,6 @@ pub enum ProtectedObjectDomain {
     StorePackage,
     CircleControl,
     CircleRoster,
-    CircleRosterResolution,
     CircleMetadata,
     CirclePackage,
     CircleBootstrapImage,
@@ -392,14 +391,6 @@ impl ProtectedObjectDomain {
                 ]),
                 extension: ".json",
             },
-            Self::CircleRosterResolution => ProtocolObjectMetadata {
-                aad_label: b"circle-roster-resolution",
-                path: ProtocolPathRule::Exact(&[ExactPathShape {
-                    component_count: 7,
-                    fixed_components: &[(0, "circles"), (2, "roster"), (3, "resolutions")],
-                }]),
-                extension: ".json",
-            },
             Self::CircleMetadata => ProtocolObjectMetadata {
                 aad_label: b"circle-metadata",
                 path: ProtocolPathRule::Exact(&[
@@ -569,8 +560,6 @@ impl ProtocolObjectDomain {
         StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::CircleControl);
     pub const CircleRoster: CircleProtocolObjectDomain =
         CircleProtocolObjectDomain(ProtectedObjectDomain::CircleRoster);
-    pub const CircleRosterResolution: CircleProtocolObjectDomain =
-        CircleProtocolObjectDomain(ProtectedObjectDomain::CircleRosterResolution);
     pub const CircleMetadata: CircleProtocolObjectDomain =
         CircleProtocolObjectDomain(ProtectedObjectDomain::CircleMetadata);
     pub const CirclePackage: CircleProtocolObjectDomain =

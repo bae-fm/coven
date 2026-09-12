@@ -335,27 +335,19 @@ pub(super) fn map_store_grant_state(
         member_pubkey: causal_record.member_pubkey.clone(),
         role: causal_record.assignment.role.clone(),
         provider_account_email: causal_record.assignment.provider_account_email.clone(),
-        creation_authority: membership_creation_authority(grant, causal_record.creation.clone())?,
+        creation_authority: causal_record.creation.clone(),
     };
-    causal_grants::try_map_grant_state(
-        state,
-        record,
-        None,
-        || MembershipError::MissingCheckpointRetirementEvidence {
-            grant: grant.clone(),
-        },
-        |coord, _owner_barrier| {
-            Ok(MembershipGrantRetirement {
-                authority: coord.clone(),
-                barrier: membership_retirement_barrier(entries, coord, grant).ok_or_else(|| {
-                    MembershipError::MissingRetirementBarrier {
-                        grant: grant.clone(),
-                        authority: Box::new(coord.clone()),
-                    }
-                })?,
-            })
-        },
-    )
+    causal_grants::try_map_grant_state(state, record, |coord, _owner_barrier| {
+        Ok(MembershipGrantRetirement {
+            authority: coord.clone(),
+            barrier: membership_retirement_barrier(entries, coord, grant).ok_or_else(|| {
+                MembershipError::MissingRetirementBarrier {
+                    grant: grant.clone(),
+                    authority: Box::new(coord.clone()),
+                }
+            })?,
+        })
+    })
 }
 
 pub(super) fn membership_retirement_barrier(
@@ -380,20 +372,6 @@ pub(super) fn membership_retirement_barrier(
         | StoreAuthorityChange::ProviderAdmin => return None,
     };
     barriers.get(grant).cloned()
-}
-
-pub(super) fn membership_creation_authority(
-    grant: &MembershipGrantId,
-    creation: causal_grants::CausalGrantCreation<MembershipCoord>,
-) -> Result<MembershipCoord, MembershipError> {
-    match creation {
-        causal_grants::CausalGrantCreation::Entry(coord) => Ok(coord),
-        causal_grants::CausalGrantCreation::Checkpoint => {
-            Err(MembershipError::MissingCheckpointGrant {
-                grant: grant.clone(),
-            })
-        }
-    }
 }
 
 pub(super) fn store_membership_state_hash(
@@ -496,8 +474,5 @@ pub(super) fn map_store_causal_error(error: CausalGrantError<MembershipCoord>) -
             MembershipError::InvalidOwnerRevocationBarrier { index, grant }
         }
         CausalGrantError::NoActiveOwner => MembershipError::NoActiveOwner,
-        CausalGrantError::RevocationCycleTooWide { sources, maximum } => {
-            MembershipError::RevocationCycleTooWide { sources, maximum }
-        }
     }
 }

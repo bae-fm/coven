@@ -195,7 +195,6 @@ impl MergeDeviceAuthority {
             close_cancellation: None,
             roster_entries: BTreeMap::new(),
             roster_heads: Vec::new(),
-            roster_resolutions: BTreeMap::new(),
             metadata_entries: BTreeMap::new(),
             metadata_heads: Vec::new(),
             bootstraps: Vec::new(),

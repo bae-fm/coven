@@ -302,7 +302,6 @@ pub fn test_circle_activation(label: &str, active: bool) -> TestCircleActivation
         close_cancellation: None,
         roster_entries,
         roster_heads,
-        roster_resolutions: BTreeMap::new(),
         metadata_entries,
         metadata_heads,
         bootstraps: Vec::new(),

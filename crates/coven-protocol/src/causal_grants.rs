@@ -8,48 +8,18 @@ use serde::{Deserialize, Serialize};
 
 use super::store_commit::ObjectHash;
 
-const MAX_CYCLIC_REVOCATION_SOURCES: usize = 12;
-
-mod fixed_sets;
 mod reduction;
 
-pub(crate) use reduction::{reduce, reduce_from_checkpoint};
+pub(crate) use reduction::reduce;
 
-pub fn canonical_ready_checkpoint<'a, K: Clone + Ord + 'a>(
+/// The first key whose dependencies are all applied, in canonical key order.
+pub fn canonical_ready_node<'a, K: Clone + Ord + 'a>(
     mut dependencies: impl Iterator<Item = (&'a K, &'a BTreeSet<K>)>,
     applied: &BTreeSet<K>,
 ) -> Option<K> {
     dependencies
         .find(|(_, required)| required.is_subset(applied))
-        .map(|(checkpoint, _)| checkpoint.clone())
-}
-
-pub(crate) fn merge_checkpoint_evidence<K, V, T, C>(
-    merged_grants: &mut BTreeMap<K, GrantState<V, T>>,
-    merged_included: &mut BTreeSet<C>,
-    grants: &BTreeMap<K, GrantState<V, T>>,
-    included: &BTreeSet<C>,
-) -> bool
-where
-    K: Clone + Ord,
-    V: Clone + Eq,
-    T: Clone + Ord,
-    C: Clone + Ord,
-{
-    for (grant, state) in grants {
-        match merged_grants.entry(grant.clone()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(state.clone());
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                if !entry.get_mut().merge(state) {
-                    return false;
-                }
-            }
-        }
-    }
-    merged_included.extend(included.iter().cloned());
-    true
+        .map(|(node, _)| node.clone())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -71,10 +41,6 @@ impl<T: Ord> GrantRetirements<T> {
 
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.0.iter()
-    }
-
-    pub fn contains(&self, retirement: &T) -> bool {
-        self.0.contains(retirement)
     }
 
     pub fn as_set(&self) -> &BTreeSet<T> {
@@ -194,131 +160,9 @@ pub(crate) fn has_concurrent_assignments<R, T: Ord>(
     active_grants(grants).any(|(_, record)| !members.insert(member_pubkey(record).to_string()))
 }
 
-/// Merge one branch's grant state into a conflict result. A grant's record is
-/// immutable; divergent records are an invalid conflict, while retirement
-/// evidence accumulates across every selected branch.
-pub(crate) fn merge_conflict_grant_state<R: Clone + Eq, T: Clone + Ord>(
-    grants: &mut CausalGrants<R, T>,
-    grant: MembershipGrantId,
-    state: &GrantState<R, T>,
-) -> Result<(), ()> {
-    match grants.entry(grant) {
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(state.clone());
-            Ok(())
-        }
-        std::collections::btree_map::Entry::Occupied(mut entry) => {
-            if entry.get().record() != state.record() {
-                return Err(());
-            }
-            if !entry.get_mut().merge(state) {
-                return Err(());
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Retire `grant`, adding `retirements` to whatever evidence it already
-/// carries. A grant's record is immutable, so a divergent record is an invalid
-/// conflict.
-pub(crate) fn tombstone_conflict_grant<R: Clone + Eq, T: Clone + Ord>(
-    grants: &mut CausalGrants<R, T>,
-    grant: &MembershipGrantId,
-    record: &R,
-    retirements: &GrantRetirements<T>,
-) -> Result<(), ()> {
-    match grants.entry(grant.clone()) {
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(GrantState::Tombstoned {
-                record: record.clone(),
-                retirements: retirements.clone(),
-            });
-        }
-        std::collections::btree_map::Entry::Occupied(mut entry) => {
-            if entry.get().record() != record {
-                return Err(());
-            }
-            let mut merged = entry
-                .get()
-                .retirements()
-                .cloned()
-                .unwrap_or_else(|| retirements.clone());
-            merged.extend(retirements.iter().cloned());
-            *entry.get_mut() = GrantState::Tombstoned {
-                record: record.clone(),
-                retirements: merged,
-            };
-        }
-    }
-    Ok(())
-}
-
-/// The grant state the branches selected by a revocation-cycle resolution agree
-/// on.
-///
-/// A grant stays active only when the first selected branch holds it active,
-/// every other selected branch holds the identical record active, and no
-/// resolver retired it. Every other grant across `branches` is retired:
-/// evidence accumulates from each branch that already retired it, and
-/// `resolution_retirements` supplies the evidence for a grant that survived its
-/// own branch but lost to the resolution.
-pub(crate) fn resolve_conflict_grants<'branch, R, T, E>(
-    branches: impl Iterator<Item = &'branch CausalGrants<R, T>> + Clone,
-    selected: impl Iterator<Item = &'branch CausalGrants<R, T>> + Clone,
-    retired_owner_grants: &BTreeSet<MembershipGrantId>,
-    resolution_retirements: impl Fn(&MembershipGrantId) -> Result<GrantRetirements<T>, E>,
-    invalid: impl Fn() -> E,
-) -> Result<CausalGrants<R, T>, E>
-where
-    R: Clone + Eq + 'branch,
-    T: Clone + Ord + 'branch,
-{
-    let mut selected = selected;
-    let first = selected.next().ok_or_else(&invalid)?;
-    let others = selected;
-    let mut resolved = active_grants(first)
-        .filter(|(grant, _)| !retired_owner_grants.contains(*grant))
-        .filter(|(grant, record)| {
-            others
-                .clone()
-                .all(|branch| branch.get(*grant).and_then(GrantState::active) == Some(*record))
-        })
-        .map(|(grant, record)| {
-            (
-                grant.clone(),
-                GrantState::Active {
-                    record: record.clone(),
-                },
-            )
-        })
-        .collect::<CausalGrants<R, T>>();
-    for branch in branches.clone() {
-        for (grant, state) in branch {
-            if state.retirements().is_some() {
-                merge_conflict_grant_state(&mut resolved, grant.clone(), state)
-                    .map_err(|()| invalid())?;
-            }
-        }
-    }
-    for branch in branches {
-        for (grant, record) in active_grants(branch) {
-            if resolved.get(grant).and_then(GrantState::active).is_some() {
-                continue;
-            }
-            let retirements = resolution_retirements(grant)?;
-            tombstone_conflict_grant(&mut resolved, grant, record, &retirements)
-                .map_err(|()| invalid())?;
-        }
-    }
-    Ok(resolved)
-}
-
 pub(crate) fn try_map_grant_state<C, A, R, T, E>(
     state: &GrantState<GrantRecord<C, A>, CausalGrantRetirement<C>>,
     record: R,
-    checkpoint_retirements: Option<&GrantRetirements<T>>,
-    missing_checkpoint_retirements: impl Fn() -> E,
     map_entry: impl Fn(&C, Option<&OwnerGrantBarrier<C>>) -> Result<T, E>,
 ) -> Result<GrantState<R, T>, E>
 where
@@ -330,48 +174,19 @@ where
         return Ok(GrantState::Active { record });
     };
     let mut mapped: Option<GrantRetirements<T>> = None;
-    let mut add = |retirement| match &mut mapped {
-        Some(mapped) => {
-            mapped.insert(retirement);
-        }
-        None => mapped = Some(GrantRetirements::new(retirement)),
-    };
     for retirement in retirements.iter() {
-        match retirement {
-            CausalGrantRetirement::Entry {
-                coord,
-                owner_barrier,
-            } => add(map_entry(coord, owner_barrier.as_ref())?),
-            CausalGrantRetirement::Checkpoint => {
-                let checkpoint_retirements =
-                    checkpoint_retirements.ok_or_else(&missing_checkpoint_retirements)?;
-                for retirement in checkpoint_retirements.iter().cloned() {
-                    add(retirement);
-                }
+        let mapped_retirement = map_entry(&retirement.coord, retirement.owner_barrier.as_ref())?;
+        match &mut mapped {
+            Some(mapped) => {
+                mapped.insert(mapped_retirement);
             }
+            None => mapped = Some(GrantRetirements::new(mapped_retirement)),
         }
     }
     Ok(GrantState::Tombstoned {
         record,
         retirements: mapped.expect("causal tombstone has retirement evidence"),
     })
-}
-
-pub(crate) fn merge_checkpoint_frontier<C: CausalCoordinate>(
-    merged: &mut BTreeMap<C::StreamKey, C>,
-    frontier: &[C],
-) -> bool {
-    for coord in frontier {
-        let stream = coord.stream_key();
-        match merged.get(&stream) {
-            Some(existing) if existing.seq() == coord.seq() && existing != coord => return false,
-            Some(existing) if existing.seq() >= coord.seq() => {}
-            _ => {
-                merged.insert(stream, coord.clone());
-            }
-        }
-    }
-    true
 }
 
 /// Derived identity of one causal author stream.
@@ -509,71 +324,9 @@ pub(crate) fn stream_frontier<C: CausalCoordinate>(coords: impl IntoIterator<Ite
     heads.into_values().collect()
 }
 
-pub(crate) fn common_frontier<C: CausalCoordinate>(frontiers: &[&[C]]) -> Vec<C> {
-    let Some(first) = frontiers.first() else {
-        return Vec::new();
-    };
-    let others = frontiers[1..]
-        .iter()
-        .map(|frontier| {
-            frontier
-                .iter()
-                .map(|coord| (coord.stream_key(), coord))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .collect::<Vec<_>>();
-    first
-        .iter()
-        .filter_map(|coord| {
-            let stream = coord.stream_key();
-            let mut common = coord.clone();
-            for frontier in &others {
-                let candidate = frontier.get(&stream)?;
-                if candidate.seq() < common.seq() {
-                    common = (*candidate).clone();
-                }
-            }
-            Some(common)
-        })
-        .collect()
-}
-
-/// The frontier a resolved revocation cycle advances to: the coordinates every
-/// branch its resolvers selected has reached.
-///
-/// `branch_frontier` states how one domain's resolution names the branch it
-/// selected.
-pub(crate) fn selected_branch_frontier<'branch, C, R, E>(
-    resolutions: &[R],
-    branch_frontier: impl Fn(&R) -> Result<&'branch [C], E>,
-) -> Result<Vec<C>, E>
-where
-    C: CausalCoordinate + 'branch,
-{
-    let selected = resolutions
-        .iter()
-        .map(branch_frontier)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(common_frontier(&selected))
-}
-
-/// An entry that begins its author stream: sequence one, no predecessor, and no
-/// dependency on the very stream it opens.
-pub(crate) fn starts_author_stream<K: Eq>(
-    seq: u64,
-    previous_hash: Option<ObjectHash>,
-    own_stream: &K,
-    dependency_streams: impl IntoIterator<Item = K>,
-) -> bool {
-    seq == 1
-        && previous_hash.is_none()
-        && dependency_streams
-            .into_iter()
-            .all(|stream| stream != *own_stream)
-}
-
 /// An entry sits where its sequence says it does: sequence one begins the
-/// author stream, every later sequence continues it from a predecessor.
+/// author stream — no predecessor, and no dependency on the very stream it
+/// opens — and every later sequence continues it from a predecessor.
 pub(crate) fn author_stream_position_is_valid<K: Eq>(
     seq: u64,
     previous_hash: Option<ObjectHash>,
@@ -581,8 +334,10 @@ pub(crate) fn author_stream_position_is_valid<K: Eq>(
     dependency_streams: impl IntoIterator<Item = K>,
 ) -> bool {
     match (seq, previous_hash) {
-        (1, _) => starts_author_stream(seq, previous_hash, own_stream, dependency_streams),
-        (0, _) | (_, None) => false,
+        (1, None) => dependency_streams
+            .into_iter()
+            .all(|stream| stream != *own_stream),
+        (1, Some(_)) | (0, _) | (_, None) => false,
         (_, Some(_)) => true,
     }
 }
@@ -600,74 +355,9 @@ pub(crate) trait CausalHistoryEntry {
     fn dependencies(&self) -> &[Self::Coord];
 }
 
-/// The entries a checkpoint has not already absorbed: those standing beyond
-/// their stream's checkpointed head, plus any stream the checkpoint never saw.
-///
-/// A resumed chain replays only this suffix, because the checkpoint already
-/// carries the reduced state of everything at or below its heads.
-pub(crate) fn entries_beyond_checkpoint<'a, E: CausalHistoryEntry>(
-    entries: &'a [E],
-    raw_heads: &[E::Coord],
-) -> impl Iterator<Item = &'a E> {
-    let heads = raw_heads
-        .iter()
-        .map(|coord| (coord.stream_key(), coord.seq()))
-        .collect::<BTreeMap<_, _>>();
-    entries.iter().filter(move |entry| {
-        let coord = entry.coord();
-        heads
-            .get(&coord.stream_key())
-            .is_none_or(|head| coord.seq() > *head)
-    })
-}
-
-/// Re-state a checkpoint's own grants under new record and retirement types.
-///
-/// `record` states how one domain's record maps across; the rest is the rule
-/// every caller must agree on — a grant the checkpoint had already retired
-/// stays retired, carrying the checkpoint itself as its evidence, so replaying
-/// a suffix can never resurrect it.
-pub(crate) fn map_checkpoint_grants<R, T: Ord, MappedRecord, MappedRetirement: Ord>(
-    grants: &CausalGrants<R, T>,
-    record: impl Fn(&R) -> MappedRecord,
-    retirement: impl Fn() -> MappedRetirement,
-) -> CausalGrants<MappedRecord, MappedRetirement> {
-    grants
-        .iter()
-        .map(|(grant, state)| {
-            let record = record(state.record());
-            (
-                grant.clone(),
-                match state {
-                    GrantState::Active { .. } => GrantState::Active { record },
-                    GrantState::Tombstoned { .. } => GrantState::Tombstoned {
-                        record,
-                        retirements: GrantRetirements::new(retirement()),
-                    },
-                },
-            )
-        })
-        .collect()
-}
-
-/// The resolution references a new checkpoint carries: everything the previous
-/// checkpoint recorded plus the resolutions just applied, canonically ordered
-/// and each named once.
-pub(crate) fn checkpoint_resolution_refs<R: Clone + Ord>(
-    previous: Option<&[R]>,
-    applied: impl IntoIterator<Item = R>,
-) -> Vec<R> {
-    let mut references = previous.map_or_else(Vec::new, <[R]>::to_vec);
-    references.extend(applied);
-    references.sort();
-    references.dedup();
-    references
-}
-
 /// Every coordinate reachable from `frontier` by walking dependencies.
 ///
-/// A coordinate with no entry in `entries` is included but not walked through —
-/// a frontier may name coordinates a checkpoint has already absorbed.
+/// A coordinate with no entry in `entries` is included but not walked through.
 pub(crate) fn history_closure<E: CausalHistoryEntry>(
     entries: &[E],
     frontier: &[E::Coord],
@@ -732,7 +422,6 @@ pub(crate) enum CausalChange<C: CausalCoordinate, A: CausalAssignment> {
         owner_barriers: BTreeMap<MembershipGrantId, OwnerGrantBarrier<C>>,
     },
     Control,
-    ResolutionActivation,
 }
 
 type RemovedGrants<'a, C> = (
@@ -753,7 +442,7 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalChange<C, A> {
                 owner_barriers,
                 ..
             } => Some((removes, owner_barriers)),
-            Self::Founder { .. } | Self::Control | Self::ResolutionActivation => None,
+            Self::Founder { .. } | Self::Control => None,
         }
     }
 
@@ -775,28 +464,13 @@ pub(crate) struct CausalEntry<C: CausalCoordinate, A: CausalAssignment> {
 pub(crate) struct GrantRecord<C: CausalCoordinate, A: CausalAssignment> {
     pub member_pubkey: String,
     pub assignment: A,
-    pub creation: CausalGrantCreation<C>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CausalGrantCreation<C: CausalCoordinate> {
-    Entry(C),
-    Checkpoint,
+    pub creation: C,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum CausalGrantRetirement<C: CausalCoordinate> {
-    Entry {
-        coord: C,
-        owner_barrier: Option<OwnerGrantBarrier<C>>,
-    },
-    Checkpoint,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CausalSeedGrant<A: CausalAssignment> {
-    pub member_pubkey: String,
-    pub assignment: A,
+pub(crate) struct CausalGrantRetirement<C: CausalCoordinate> {
+    pub coord: C,
+    pub owner_barrier: Option<OwnerGrantBarrier<C>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -804,13 +478,6 @@ pub(crate) struct ReducedGrants<C: CausalCoordinate, A: CausalAssignment> {
     pub grants:
         BTreeMap<MembershipGrantId, GrantState<GrantRecord<C, A>, CausalGrantRetirement<C>>>,
     pub included: BTreeSet<C>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CausalGrantBranch<C: CausalCoordinate, A: CausalAssignment> {
-    pub raw_heads: Vec<C>,
-    pub effective_frontier: Vec<C>,
-    pub reduced: ReducedGrants<C, A>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -827,7 +494,6 @@ pub(crate) enum CausalGrantConflict<C: CausalCoordinate, A: CausalAssignment> {
         raw_heads: Vec<C>,
         cyclic_sources: Vec<C>,
         involved_owner_grants: BTreeSet<MembershipGrantId>,
-        maximal_valid_branches: Vec<CausalGrantBranch<C, A>>,
     },
 }
 
@@ -902,10 +568,6 @@ pub(crate) enum CausalGrantError<C: CausalCoordinate> {
     },
     #[error("causal assignment history leaves no active Owner")]
     NoActiveOwner,
-    #[error(
-        "causal assignment revocation cycle has {sources} sources, exceeding the protocol limit of {maximum}"
-    )]
-    RevocationCycleTooWide { sources: usize, maximum: usize },
 }
 
 #[cfg(test)]

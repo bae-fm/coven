@@ -52,8 +52,6 @@ pub struct CircleActivationObjects {
     pub roster_entries: BTreeMap<CircleRosterCoord, ExactObjectRef>,
     pub roster_heads: Vec<CircleRosterHeadRef>,
     #[serde(with = "ordered_map_entries")]
-    pub roster_resolutions: BTreeMap<CircleRosterConflictResolutionRef, ExactObjectRef>,
-    #[serde(with = "ordered_map_entries")]
     pub metadata_entries: BTreeMap<CircleMetadataCoord, CircleMetadataObjectRef>,
     pub metadata_heads: Vec<CircleMetadataHeadRef>,
     pub bootstraps: Vec<CircleBootstrapObjectRef>,

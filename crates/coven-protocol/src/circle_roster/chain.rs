@@ -21,16 +21,6 @@ pub struct CircleRosterChain {
     pub(super) reduced: Option<causal_grants::ReducedGrants<CircleRosterCoord, CircleRole>>,
     pub(super) status: CircleRosterStatus,
     pub(super) head_refs: Vec<CircleRosterHeadRef>,
-    pub(super) resolution_checkpoint: Option<CircleRosterResolutionCheckpoint>,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct CircleRosterResolutionCheckpoint {
-    raw_heads: Vec<CircleRosterCoord>,
-    effective_frontier: Vec<CircleRosterCoord>,
-    grants: BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
-    included: BTreeSet<CircleRosterCoord>,
-    resolutions: Vec<CircleRosterConflictResolutionRef>,
 }
 
 impl CircleRosterChain {
@@ -52,7 +42,7 @@ impl CircleRosterChain {
         head: ExactCircleRosterHead,
     ) -> Result<Self, CircleRosterError> {
         if head.head().entry_coord() != entry.coord() {
-            return Err(CircleRosterError::MissingConflictHeads);
+            return Err(CircleRosterError::HeadEntryMismatch);
         }
         let stream = entry.coord().stream_key();
         let mut entries = self.entries.clone();
@@ -61,11 +51,7 @@ impl CircleRosterChain {
         head_refs.retain(|reference| reference.coord.stream_key() != stream);
         head_refs.push(head.reference().clone());
         head_refs.sort_by_key(|reference| reference.coord.stream_key());
-        Self::from_entries_head_refs_and_checkpoint(
-            entries,
-            head_refs,
-            self.resolution_checkpoint.clone(),
-        )
+        Self::from_entries_and_head_refs(entries, head_refs)
     }
 
     pub fn resolved_with_successor(
@@ -74,15 +60,10 @@ impl CircleRosterChain {
     ) -> Result<ResolvedCircleRoster, CircleRosterError> {
         let mut entries = self.entries.clone();
         entries.push(entry);
-        Self::from_entries_head_refs_and_checkpoint(
-            entries,
-            self.head_refs.clone(),
-            self.resolution_checkpoint.clone(),
-        )?
-        .try_resolved()
+        Self::from_entries_and_head_refs(entries, self.head_refs.clone())?.try_resolved()
     }
 
-    pub fn validate_exact_heads(
+    fn validate_exact_heads(
         entries: &[CircleRosterEntry],
         heads: &[ExactCircleRosterHead],
     ) -> Result<Vec<CircleRosterHeadRef>, CircleRosterError> {
@@ -93,12 +74,9 @@ impl CircleRosterChain {
             head.store_root_hash != founder.store_root_hash
                 || head.circle_id != founder.circle_id
                 || head.entry_coord() != reference.coord
-                || entries
-                    .iter()
-                    .find(|entry| entry.coord() == reference.coord)
-                    .is_none_or(|entry| head.resolutions != entry.resolution_dependencies)
+                || !entries.iter().any(|entry| entry.coord() == reference.coord)
         }) {
-            return Err(CircleRosterError::MissingConflictHeads);
+            return Err(CircleRosterError::HeadEntryMismatch);
         }
         Ok(heads.iter().map(|head| head.reference().clone()).collect())
     }
@@ -106,14 +84,6 @@ impl CircleRosterChain {
     fn from_entries_and_head_refs(
         entries: Vec<CircleRosterEntry>,
         head_refs: Vec<CircleRosterHeadRef>,
-    ) -> Result<Self, CircleRosterError> {
-        Self::from_entries_head_refs_and_checkpoint(entries, head_refs, None)
-    }
-
-    fn from_entries_head_refs_and_checkpoint(
-        entries: Vec<CircleRosterEntry>,
-        head_refs: Vec<CircleRosterHeadRef>,
-        resolution_checkpoint: Option<CircleRosterResolutionCheckpoint>,
     ) -> Result<Self, CircleRosterError> {
         let founder = entries.first().ok_or(CircleRosterError::Empty)?;
         let expected_store = founder.store_root_hash;
@@ -125,23 +95,9 @@ impl CircleRosterChain {
             if entry.store_root_hash != expected_store || entry.circle_id != expected_circle {
                 return Err(CircleRosterError::ContextMismatch { index });
             }
-            if matches!(
-                entry.change,
-                CircleRosterChange::ResolutionActivation { .. }
-            ) && resolution_checkpoint.as_ref().is_none_or(|checkpoint| {
-                let already_checkpointed = checkpoint.included.contains(&entry.coord())
-                    || checkpoint.raw_heads.contains(&entry.coord());
-                !already_checkpointed
-                    && (entry.dependencies != checkpoint.effective_frontier
-                        || entry.resolution_dependencies != checkpoint.resolutions)
-            }) {
-                return Err(CircleRosterError::InvalidEntry(index));
-            }
         }
-        let checkpoint_heads = resolution_checkpoint
-            .as_ref()
-            .map_or_else(Vec::new, |checkpoint| checkpoint.raw_heads.clone());
-        let normalized = causal_grants::entries_beyond_checkpoint(&entries, &checkpoint_heads)
+        let normalized = entries
+            .iter()
             .map(|entry| CausalEntry {
                 coord: entry.coord(),
                 previous_hash: entry.previous_hash,
@@ -182,32 +138,10 @@ impl CircleRosterChain {
                         removes: removes.clone(),
                         owner_barriers: causal_owner_barriers(owner_barriers),
                     },
-                    CircleRosterChange::ResolutionActivation { .. } => {
-                        CausalChange::ResolutionActivation
-                    }
                 },
             })
             .collect::<Vec<_>>();
-        let reduction = match &resolution_checkpoint {
-            Some(checkpoint) => {
-                let seeds = causal_grants::map_checkpoint_grants(
-                    &checkpoint.grants,
-                    |record| causal_grants::CausalSeedGrant {
-                        member_pubkey: record.member_pubkey.clone(),
-                        assignment: record.role,
-                    },
-                    || (),
-                );
-                causal_grants::reduce_from_checkpoint(
-                    &normalized,
-                    &checkpoint.raw_heads,
-                    &checkpoint.effective_frontier,
-                    &seeds,
-                    &checkpoint.included,
-                )?
-            }
-            None => causal_grants::reduce(&normalized)?,
-        };
+        let reduction = causal_grants::reduce(&normalized)?;
         let founder_entry = entries
             .iter()
             .find(|entry| matches!(entry.change, CircleRosterChange::Founder { .. }))
@@ -223,12 +157,7 @@ impl CircleRosterChain {
         }
         let (reduced, status) = match reduction {
             CausalGrantStatus::Resolved(reduced) => {
-                let resolved = resolved_circle_roster(
-                    &reduced,
-                    resolution_checkpoint
-                        .as_ref()
-                        .map(|checkpoint| &checkpoint.grants),
-                )?;
+                let resolved = resolved_circle_roster(&reduced);
                 (Some(reduced), CircleRosterStatus::Resolved(resolved))
             }
             CausalGrantStatus::Conflict(CausalGrantConflict::ConcurrentMemberAssignments {
@@ -238,88 +167,34 @@ impl CircleRosterChain {
                 conflicting_grants,
                 uncontested_grants,
                 reduced,
-            }) => {
-                let heads = exact_circle_head_refs(&head_refs, &raw_heads)?;
-                let conflict_hash = circle_assignment_conflict_hash(
-                    expected_store,
-                    expected_circle,
-                    &heads,
-                    &member_pubkey,
-                    &conflicting_grants,
-                );
-                (
-                    Some(reduced),
-                    CircleRosterStatus::Conflict(
-                        CircleRosterConflict::ConcurrentMemberAssignments {
-                            conflict_hash,
-                            heads,
-                            effective_frontier,
-                            member_pubkey,
-                            conflicting_grants: map_circle_grants(
-                                conflicting_grants,
-                                resolution_checkpoint
-                                    .as_ref()
-                                    .map(|checkpoint| &checkpoint.grants),
-                            )?,
-                            uncontested_grants: map_circle_grants(
-                                uncontested_grants,
-                                resolution_checkpoint
-                                    .as_ref()
-                                    .map(|checkpoint| &checkpoint.grants),
-                            )?,
-                        },
-                    ),
-                )
-            }
+            }) => (
+                Some(reduced),
+                CircleRosterStatus::Conflict(CircleRosterConflict::ConcurrentMemberAssignments {
+                    heads: exact_circle_head_refs(&head_refs, &raw_heads)?,
+                    effective_frontier,
+                    member_pubkey,
+                    conflicting_grants: map_circle_grants(conflicting_grants),
+                    uncontested_grants: map_circle_grants(uncontested_grants),
+                }),
+            ),
             CausalGrantStatus::Conflict(CausalGrantConflict::RevocationCycle {
                 raw_heads,
                 cyclic_sources,
                 involved_owner_grants,
-                maximal_valid_branches,
-            }) => {
-                let heads = exact_circle_head_refs(&head_refs, &raw_heads)?;
-                let branches = maximal_valid_branches
-                    .into_iter()
-                    .map(|branch| -> Result<CircleRosterBranch, CircleRosterError> {
-                        let resolved = resolved_circle_roster(
-                            &branch.reduced,
-                            resolution_checkpoint
-                                .as_ref()
-                                .map(|checkpoint| &checkpoint.grants),
-                        )?;
-                        Ok(CircleRosterBranch {
-                            heads: exact_circle_head_refs(&head_refs, &branch.raw_heads)?,
-                            effective_frontier: branch.effective_frontier,
-                            grants: resolved.grants,
-                            state_hash: resolved.state_hash,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let conflict_hash = circle_revocation_conflict_hash(
-                    expected_store,
-                    expected_circle,
-                    &heads,
-                    &cyclic_sources,
-                    &involved_owner_grants,
-                );
-                (
-                    None,
-                    CircleRosterStatus::Conflict(CircleRosterConflict::RevocationCycle {
-                        conflict_hash,
-                        heads,
-                        cyclic_sources,
-                        involved_owner_grants,
-                        maximal_valid_branches: branches,
-                    }),
-                )
-            }
+            }) => (
+                None,
+                CircleRosterStatus::Conflict(CircleRosterConflict::RevocationCycle {
+                    heads: exact_circle_head_refs(&head_refs, &raw_heads)?,
+                    cyclic_sources,
+                    involved_owner_grants,
+                }),
+            ),
         };
         Ok(Self {
             entries,
             reduced,
             status,
             head_refs,
-            resolution_checkpoint,
         })
     }
 
@@ -329,120 +204,6 @@ impl CircleRosterChain {
 
     pub fn status(&self) -> &CircleRosterStatus {
         &self.status
-    }
-
-    pub fn resolution_refs(&self) -> &[CircleRosterConflictResolutionRef] {
-        self.resolution_checkpoint
-            .as_ref()
-            .map_or(&[], |checkpoint| checkpoint.resolutions.as_slice())
-    }
-
-    pub fn resolution_checkpoint_covers(&self, coord: &CircleRosterCoord) -> bool {
-        self.resolution_checkpoint
-            .as_ref()
-            .is_some_and(|checkpoint| {
-                checkpoint.included.contains(coord) || checkpoint.raw_heads.contains(coord)
-            })
-    }
-
-    pub fn replay_resolved_history_to_heads(
-        &self,
-        entries: Vec<CircleRosterEntry>,
-        heads: Vec<CircleRosterHeadRef>,
-    ) -> Result<Self, CircleRosterError> {
-        let checkpoint = self
-            .resolution_checkpoint
-            .clone()
-            .ok_or(CircleRosterError::InvalidConflictResolution)?;
-        if heads.iter().any(|head| {
-            entries
-                .iter()
-                .find(|entry| entry.coord() == head.coord)
-                .is_none()
-        }) {
-            return Err(CircleRosterError::MissingConflictHeads);
-        }
-        Self::from_entries_head_refs_and_checkpoint(entries, heads, Some(checkpoint))
-    }
-
-    pub fn replay_merged_resolved_histories_to_heads(
-        chains: &[&CircleRosterChain],
-        entries: Vec<CircleRosterEntry>,
-        heads: Vec<CircleRosterHeadRef>,
-    ) -> Result<Self, CircleRosterError> {
-        let mut raw_by_stream = BTreeMap::new();
-        let mut effective_by_stream = BTreeMap::new();
-        let mut grants = BTreeMap::new();
-        let mut included = BTreeSet::new();
-        let mut resolutions = BTreeSet::new();
-        for chain in chains {
-            let checkpoint = chain
-                .resolution_checkpoint
-                .as_ref()
-                .ok_or(CircleRosterError::InvalidConflictResolution)?;
-            if !causal_grants::merge_checkpoint_frontier(&mut raw_by_stream, &checkpoint.raw_heads)
-                || !causal_grants::merge_checkpoint_frontier(
-                    &mut effective_by_stream,
-                    &checkpoint.effective_frontier,
-                )
-                || !causal_grants::merge_checkpoint_evidence(
-                    &mut grants,
-                    &mut included,
-                    &checkpoint.grants,
-                    &checkpoint.included,
-                )
-            {
-                return Err(CircleRosterError::InvalidConflictResolution);
-            }
-            resolutions.extend(checkpoint.resolutions.iter().cloned());
-        }
-        let checkpoint = CircleRosterResolutionCheckpoint {
-            raw_heads: raw_by_stream.into_values().collect(),
-            effective_frontier: effective_by_stream.into_values().collect(),
-            grants,
-            included,
-            resolutions: resolutions.into_iter().collect(),
-        };
-        let base = chains
-            .first()
-            .ok_or(CircleRosterError::InvalidConflictResolution)?;
-        let mut merged = (*base).clone();
-        merged.resolution_checkpoint = Some(checkpoint);
-        merged.replay_resolved_history_to_heads(entries, heads)
-    }
-
-    pub fn checkpoint_current_resolved_state(&mut self) -> Result<(), CircleRosterError> {
-        self.try_resolved()?;
-        let resolutions = self
-            .resolution_checkpoint
-            .as_ref()
-            .map_or_else(Vec::new, |checkpoint| checkpoint.resolutions.clone());
-        let checkpoint_grants = self
-            .resolution_checkpoint
-            .as_ref()
-            .map(|checkpoint| &checkpoint.grants);
-        let reduced = self
-            .reduced
-            .as_ref()
-            .ok_or(CircleRosterError::InvalidConflictResolution)?;
-        let grants = reduced
-            .grants
-            .iter()
-            .map(|(grant, state)| -> Result<_, CircleRosterError> {
-                Ok((
-                    grant.clone(),
-                    map_circle_grant_state(grant, state, checkpoint_grants)?,
-                ))
-            })
-            .collect::<Result<_, _>>()?;
-        self.resolution_checkpoint = Some(CircleRosterResolutionCheckpoint {
-            raw_heads: self.author_heads(),
-            effective_frontier: self.effective_frontier(),
-            grants,
-            included: reduced.included.clone(),
-            resolutions,
-        });
-        Ok(())
     }
 
     pub fn resolved(&self) -> ResolvedCircleRoster {
@@ -455,82 +216,6 @@ impl CircleRosterChain {
             CircleRosterStatus::Resolved(resolved) => Ok(resolved.clone()),
             CircleRosterStatus::Conflict(_) => Err(CircleRosterError::Conflict),
         }
-    }
-
-    pub(crate) fn resolved_with(
-        &self,
-        resolutions: &[CircleRosterConflictResolution],
-    ) -> Result<ResolvedCircleRoster, CircleRosterError> {
-        match &self.status {
-            CircleRosterStatus::Resolved(resolved) if resolutions.is_empty() => {
-                Ok(resolved.clone())
-            }
-            CircleRosterStatus::Conflict(conflict) => resolve_circle_roster_conflict(
-                self.entries[0].store_root_hash,
-                self.entries[0].circle_id,
-                conflict,
-                resolutions,
-            ),
-            CircleRosterStatus::Resolved(_) => Err(CircleRosterError::InvalidConflictResolution),
-        }
-    }
-
-    pub fn apply_resolutions(
-        &mut self,
-        resolutions: &[CircleRosterConflictResolution],
-    ) -> Result<(), CircleRosterError> {
-        let (raw_heads, effective_frontier) = match self.status() {
-            CircleRosterStatus::Conflict(CircleRosterConflict::RevocationCycle {
-                heads,
-                maximal_valid_branches,
-                ..
-            }) => (
-                heads
-                    .iter()
-                    .map(|reference| reference.coord.clone())
-                    .collect(),
-                causal_grants::selected_branch_frontier(resolutions, |resolution| {
-                    maximal_valid_branches
-                        .iter()
-                        .find(|branch| branch.heads == resolution.resolver_branch_heads)
-                        .map(|branch| branch.effective_frontier.as_slice())
-                        .ok_or(CircleRosterError::InvalidConflictResolution)
-                })?,
-            ),
-            _ => return Err(CircleRosterError::InvalidConflictResolution),
-        };
-        let resolved = self.resolved_with(resolutions)?;
-        let grants = resolved.grants.clone();
-        let included = causal_grants::history_closure(&self.entries, &effective_frontier);
-        let checkpoint = CircleRosterResolutionCheckpoint {
-            raw_heads,
-            effective_frontier: effective_frontier.clone(),
-            grants: grants.clone(),
-            included: included.clone(),
-            resolutions: causal_grants::checkpoint_resolution_refs(
-                self.resolution_checkpoint
-                    .as_ref()
-                    .map(|checkpoint| checkpoint.resolutions.as_slice()),
-                resolutions
-                    .iter()
-                    .map(CircleRosterConflictResolution::resolution_ref),
-            ),
-        };
-        self.reduced = Some(causal_grants::ReducedGrants {
-            grants: causal_grants::map_checkpoint_grants(
-                &grants,
-                |record| causal_grants::GrantRecord {
-                    member_pubkey: record.member_pubkey.clone(),
-                    assignment: record.role,
-                    creation: causal_grants::CausalGrantCreation::Checkpoint,
-                },
-                || causal_grants::CausalGrantRetirement::Checkpoint,
-            ),
-            included: included.clone(),
-        });
-        self.status = CircleRosterStatus::Resolved(resolved);
-        self.resolution_checkpoint = Some(checkpoint);
-        Ok(())
     }
 
     pub fn author_heads(&self) -> Vec<CircleRosterCoord> {
@@ -748,67 +433,13 @@ impl CircleRosterChain {
                 seq,
                 previous_hash,
                 dependencies,
-                resolution_dependencies: self.resolution_refs().to_vec(),
                 change,
             },
             signer,
         );
         let mut candidate_history = self.entries.clone();
         candidate_history.push(entry.clone());
-        Self::from_entries_head_refs_and_checkpoint(
-            candidate_history,
-            self.head_refs.clone(),
-            self.resolution_checkpoint.clone(),
-        )?;
+        Self::from_entries_and_head_refs(candidate_history, self.head_refs.clone())?;
         Ok(entry)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn signed_cycle_resolution(
-        &self,
-        resolver_branch_heads: Vec<CircleRosterHeadRef>,
-        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
-    ) -> Result<CircleRosterConflictResolution, CircleRosterError> {
-        let CircleRosterStatus::Conflict(CircleRosterConflict::RevocationCycle {
-            conflict_hash,
-            heads,
-            involved_owner_grants,
-            maximal_valid_branches,
-            ..
-        }) = self.status()
-        else {
-            return Err(CircleRosterError::Conflict);
-        };
-        let resolver_pubkey = keys::public_key_hex(signer);
-        let branch = maximal_valid_branches
-            .iter()
-            .find(|branch| branch.heads == resolver_branch_heads)
-            .ok_or(CircleRosterError::InvalidConflictResolution)?;
-        if !causal_grants::active_grants(&branch.grants).any(|(_, record)| {
-            record.member_pubkey == resolver_pubkey && record.role == CircleRole::Owner
-        }) {
-            return Err(CircleRosterError::SignerIsNotOwner(resolver_pubkey));
-        }
-        let replacement_grant = derive_circle_resolution_grant(conflict_hash, &resolver_pubkey);
-        let mut retired_owner_grants = involved_owner_grants.clone();
-        retired_owner_grants.extend(causal_grants::active_grants(&branch.grants).filter_map(
-            |(grant, record)| {
-                (record.member_pubkey == resolver_pubkey && record.role == CircleRole::Owner)
-                    .then_some(grant.clone())
-            },
-        ));
-        Ok(Signed::sign(
-            super::CircleRosterConflictResolutionBody {
-                store_root_hash: self.entries[0].store_root_hash,
-                circle_id: self.entries[0].circle_id,
-                conflict_hash: *conflict_hash,
-                conflicting_heads: heads.clone(),
-                retired_owner_grants,
-                resolver_pubkey,
-                resolver_branch_heads,
-                replacement_grant,
-            },
-            signer,
-        ))
     }
 }

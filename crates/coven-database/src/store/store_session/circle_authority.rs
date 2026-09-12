@@ -320,7 +320,7 @@ impl StoreSession<'_> {
         let mut applied = std::collections::BTreeSet::new();
         let mut state = super::circle_operations::circle_current_state_on(self.conn, circle_id)?;
         while !pending.is_empty() {
-            let coordinate = coven_protocol::causal_grants::canonical_ready_checkpoint(
+            let coordinate = coven_protocol::causal_grants::canonical_ready_node(
                 pending
                     .keys()
                     .map(|coordinate| (coordinate, &dependencies[coordinate])),

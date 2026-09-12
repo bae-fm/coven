@@ -89,8 +89,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         } else {
             draft.control.value.access_epoch().roster.heads.clone()
         };
-        let mut roster_resolutions = previous_objects
-            .map_or_else(BTreeMap::new, |objects| objects.roster_resolutions.clone());
         let mut metadata_entries =
             previous_objects.map_or_else(BTreeMap::new, |objects| objects.metadata_entries.clone());
         let mut metadata_heads =
@@ -105,7 +103,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         // frontiers that the resolution shaped.
         for branch in merged_branch_objects {
             roster_entries.extend(branch.roster_entries.clone());
-            roster_resolutions.extend(branch.roster_resolutions.clone());
             metadata_entries.extend(branch.metadata_entries.clone());
             roster_heads.extend(branch.roster_heads.iter().cloned());
             for head in &branch.metadata_heads {
@@ -336,7 +333,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
 
             let roster_state = coven_protocol::circle::MergeCircleRosterStateRef {
                 heads: roster_frontier,
-                resolutions: roster_resolutions.keys().cloned().collect(),
                 state_hash: draft.roster.state_hash,
             };
             let (metadata_state, metadata_head) = if draft.policy.metadata_successor {
@@ -656,17 +652,9 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             access_epoch.metadata = metadata_state;
             *access = access_map;
             access_epoch.covered_control_heads = control_frontier;
-            if let (
-                Some((true, _, entry, _, _)),
-                coven_protocol::circle::MergeCircleOwnerAuthorityRef::Roster {
-                    roster,
-                    created_at,
-                    ..
-                },
-            ) = (&prepared_roster, author_authority)
-            {
-                *roster = roster_state;
-                *created_at = entry.coord();
+            if let Some((true, _, entry, _, _)) = &prepared_roster {
+                author_authority.roster = roster_state;
+                author_authority.created_at = entry.coord();
             }
             if let Some(finalization) = draft.close_finalization.take() {
                 let active_epoch = state.active_epoch_mut().ok_or_else(|| {
@@ -902,7 +890,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 close_cancellation: close_cancellation.map(|(_, reference)| reference),
                 roster_entries,
                 roster_heads,
-                roster_resolutions,
                 metadata_entries,
                 metadata_heads,
                 bootstraps,

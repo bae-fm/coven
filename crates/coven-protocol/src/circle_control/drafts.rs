@@ -352,18 +352,10 @@ pub(super) fn circle_authored_successor_context<'a>(
             record.member_pubkey == author_pubkey && record.role == crate::circle::CircleRole::Owner
         })
         .ok_or(CircleTransitionError::AuthorNotCircleOwner)?;
-    let author_authority = match &record.creation_authority {
-        CircleGrantCreationAuthority::Entry(created_at) => MergeCircleOwnerAuthorityRef::Roster {
-            roster: epoch.roster.clone(),
-            grant_id: grant_id.clone(),
-            created_at: created_at.clone(),
-        },
-        CircleGrantCreationAuthority::ConflictResolution(resolution) => {
-            MergeCircleOwnerAuthorityRef::ConflictResolution {
-                conflict_hash: resolution.conflict_hash,
-                resolution_hash: resolution.resolution_hash,
-            }
-        }
+    let author_authority = MergeCircleOwnerAuthorityRef {
+        roster: epoch.roster.clone(),
+        grant_id: grant_id.clone(),
+        created_at: record.creation_authority.clone(),
     };
     Ok(CircleSuccessorContext {
         store_members,

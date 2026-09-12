@@ -10,9 +10,9 @@ use super::causal_grants::AuthorStreamId;
 use super::circle::CircleEpochCloseId;
 use super::circle::{generated_id_digest, CircleEpochId, CircleId};
 use super::circle_roster::{
-    CircleAuthorStreamKey, CircleGrantCreationAuthority, CircleMaterializedRoster,
-    CircleRosterChain, CircleRosterEntry, CircleRosterError, CircleRosterHead, CircleRosterHeadRef,
-    CircleRosterStateRef, MergeCircleRosterStateRef, ResolvedCircleRoster,
+    CircleAuthorStreamKey, CircleMaterializedRoster, CircleRosterChain, CircleRosterEntry,
+    CircleRosterError, CircleRosterHead, CircleRosterHeadRef, CircleRosterStateRef,
+    MergeCircleRosterStateRef, ResolvedCircleRoster,
 };
 use super::membership::MembershipHeadRef;
 use super::membership::{MemberRole, MembershipCoord, MembershipGrantId};

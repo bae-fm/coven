@@ -111,28 +111,11 @@ pub fn merge_frontier_head<H>(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MergeCircleOwnerAuthorityRef {
-    Roster {
-        roster: MergeCircleRosterStateRef,
-        grant_id: MembershipGrantId,
-        created_at: crate::circle_roster::CircleRosterCoord,
-    },
-    ConflictResolution {
-        conflict_hash: ObjectHash,
-        resolution_hash: ObjectHash,
-    },
-}
-
-impl MergeCircleOwnerAuthorityRef {
-    pub(crate) fn grant_id(&self, author_pubkey: &str) -> MembershipGrantId {
-        match self {
-            Self::Roster { grant_id, .. } => grant_id.clone(),
-            Self::ConflictResolution { conflict_hash, .. } => {
-                crate::circle_roster::derive_circle_resolution_grant(conflict_hash, author_pubkey)
-            }
-        }
-    }
+#[serde(deny_unknown_fields)]
+pub struct MergeCircleOwnerAuthorityRef {
+    pub roster: MergeCircleRosterStateRef,
+    pub grant_id: MembershipGrantId,
+    pub created_at: crate::circle_roster::CircleRosterCoord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,7 +202,7 @@ impl CircleControlBody {
     }
 
     pub fn author_grant_id(&self) -> MembershipGrantId {
-        self.value.author_authority.grant_id(&self.author_pubkey)
+        self.value.author_authority.grant_id.clone()
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -250,7 +233,7 @@ impl CircleControl {
         let order = &self.value.order;
         let access_epoch = self.access_epoch();
         let author_authority = &self.value.author_authority;
-        let grant_id = author_authority.grant_id(&self.author_pubkey);
+        let grant_id = author_authority.grant_id.clone();
         let stream_key = CircleAuthorStreamKey {
             author_pubkey: self.author_pubkey.clone(),
             device_id: order.device_id.clone(),
@@ -276,11 +259,7 @@ impl CircleControl {
             && order.author_owner_grant == grant_id
             && covered_are_canonical
             && order.dependencies == expected_dependencies;
-        let authority_is_founder_roster = matches!(
-            author_authority,
-            MergeCircleOwnerAuthorityRef::Roster { roster, .. }
-                if roster == &access_epoch.roster
-        );
+        let authority_is_founder_roster = author_authority.roster == access_epoch.roster;
         let founder = order.seq == 1 && access_epoch.covered_control_heads.is_empty();
         let continuity_is_valid = match (order.seq, own_predecessor) {
             (1, None) => order.previous_control_hash.is_none(),

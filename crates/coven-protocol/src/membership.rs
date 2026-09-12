@@ -529,10 +529,6 @@ pub enum MembershipError {
     InvalidOwnerMembershipAnchor(usize),
     #[error("membership entry {0} carries invalid wrapped Store-key authority")]
     InvalidWrappedKeys(usize),
-    #[error("checkpoint lacks the exact record for membership grant {grant}")]
-    MissingCheckpointGrant { grant: MembershipGrantId },
-    #[error("checkpoint lacks retirement evidence for membership grant {grant}")]
-    MissingCheckpointRetirementEvidence { grant: MembershipGrantId },
     #[error("membership grant {grant} retirement at {authority:?} lacks its exact signed barrier")]
     MissingRetirementBarrier {
         grant: MembershipGrantId,
@@ -547,10 +543,6 @@ pub enum MembershipError {
     },
     #[error("membership history leaves no active Owner")]
     NoActiveOwner,
-    #[error(
-        "membership revocation cycle has {sources} sources, exceeding the protocol limit of {maximum}"
-    )]
-    RevocationCycleTooWide { sources: usize, maximum: usize },
     #[error("signer {0} has no active Owner grant")]
     SignerIsNotOwner(String),
     #[error("member {0} has no active grants")]

@@ -601,7 +601,6 @@ fn verify_prepared_objects_are_signed(
     signed.insert(reference.head_object().clone());
     signed.extend(objects.roster_entries.values().cloned());
     signed.extend(objects.roster_heads.iter().map(|head| head.object.clone()));
-    signed.extend(objects.roster_resolutions.values().cloned());
     signed.extend(
         objects
             .metadata_entries

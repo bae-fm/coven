@@ -351,9 +351,9 @@ fn grant_mapping_returns_an_error_when_signed_retirement_evidence_is_absent() {
                 role: StoreMembershipRoleGrant::Member,
                 provider_account_email: None,
             },
-            creation: causal_grants::CausalGrantCreation::Entry(founder.coord()),
+            creation: founder.coord(),
         },
-        retirements: GrantRetirements::new(causal_grants::CausalGrantRetirement::Entry {
+        retirements: GrantRetirements::new(causal_grants::CausalGrantRetirement {
             coord: authority.clone(),
             owner_barrier: None,
         }),
@@ -440,56 +440,6 @@ fn concurrent_effective_removals_union_exact_retirement_entries() {
         &resolved.grants[&member_grant],
         GrantState::Tombstoned { retirements, .. }
             if retirements.as_set() == expected.as_set()
-    ));
-}
-
-#[test]
-fn store_revocation_cycle_over_protocol_bound_is_typed() {
-    let owners = (0..13).map(|_| key()).collect::<Vec<_>>();
-    let pubkeys = owners.iter().map(keys::public_key_hex).collect::<Vec<_>>();
-    let mut base = founded("bounded-store-cycle", &owners[0]);
-    for pubkey in pubkeys.iter().skip(1) {
-        base.add_owner_for_test(
-            &owners[0],
-            stream(1),
-            pubkey.clone(),
-            format!("add {pubkey}"),
-        )
-        .expect("add ring Owner");
-    }
-    let removals = owners
-        .iter()
-        .enumerate()
-        .map(|(index, owner)| {
-            base.signed_remove_member_in_stream(
-                owner,
-                stream(index as u8 + 101),
-                pubkeys[(index + 1) % pubkeys.len()].clone(),
-                format!("remove ring successor {index}"),
-            )
-            .expect("sign ring removal")
-        })
-        .collect::<Vec<_>>();
-    let mut entries = base.entries().to_vec();
-    entries.extend(removals.iter().cloned());
-    let heads = removals
-        .iter()
-        .zip(&owners)
-        .map(|(entry, owner)| exact_head(entry, owner))
-        .collect();
-
-    assert!(matches!(
-        MembershipChain::from_entries_with_coords_and_heads(
-            entries
-                .into_iter()
-                .map(|entry| (entry.coord(), entry))
-                .collect(),
-            heads,
-        ),
-        Err(MembershipError::RevocationCycleTooWide {
-            sources: 13,
-            maximum: 12,
-        })
     ));
 }
 

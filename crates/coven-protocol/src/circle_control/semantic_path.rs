@@ -18,10 +18,6 @@ pub enum CircleSemanticSlot<'a> {
         circle_id: CircleId,
         head: &'a CircleRosterHeadRef,
     },
-    RosterResolution {
-        circle_id: CircleId,
-        resolution: &'a crate::circle_roster::CircleRosterConflictResolutionRef,
-    },
     MetadataEntry {
         circle_id: CircleId,
         coord: &'a CircleMetadataCoord,
@@ -68,15 +64,6 @@ pub fn circle_semantic_prefix(slot: CircleSemanticSlot<'_>) -> String {
         CircleSemanticSlot::RosterHead { circle_id, head } => {
             circle_roster_head_prefix(circle_id, &head.coord.stream_key(), head.coord.seq)
         }
-        CircleSemanticSlot::RosterResolution {
-            circle_id,
-            resolution,
-        } => format!(
-            "circles/{circle_id}/roster/resolutions/{}/{}/{}",
-            resolution.conflict_hash,
-            resolution.resolver_pubkey,
-            resolution.resolution_hash
-        ),
         CircleSemanticSlot::MetadataEntry { circle_id, coord } => format!(
             "circles/{circle_id}/metadata/entries/{}/{}/{}/{}/{}/{}",
             coord.author_pubkey,

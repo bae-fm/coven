@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::causal_grants::{
     self, AuthorStreamId, CausalAssignment, CausalChange, CausalCoordinate, CausalEntry,
-    CausalGrantConflict, CausalGrantError, CausalGrantStatus, GrantRetirements, GrantState,
-    OwnerGrantBarrier,
+    CausalGrantConflict, CausalGrantError, CausalGrantStatus, GrantState, OwnerGrantBarrier,
 };
 use super::circle::{CircleId, CircleRole};
 use super::membership::MembershipGrantId;
@@ -20,18 +19,12 @@ mod conflict;
 mod reduction;
 
 pub use chain::CircleRosterChain;
-#[cfg(any(test, feature = "test-utils"))]
-pub use conflict::CircleRosterConflictResolutionBody;
-pub use conflict::CircleRosterConflictResolutionRef;
 pub use conflict::{
-    derive_circle_resolution_grant, resolve_circle_roster_conflict, CircleMaterializedRoster,
-    CircleRosterBranch, CircleRosterConflict, CircleRosterConflictResolution, CircleRosterStatus,
-    ResolvedCircleRoster,
+    CircleMaterializedRoster, CircleRosterConflict, CircleRosterStatus, ResolvedCircleRoster,
 };
 
 const ROSTER_DOMAIN: &[u8] = b"coven.circle-roster.v1\0";
 const ROSTER_HEAD_DOMAIN: &[u8] = b"coven.circle-roster-head.v1\0";
-const ROSTER_RESOLUTION_DOMAIN: &[u8] = b"coven.circle-roster-conflict-resolution.v1\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,9 +124,6 @@ pub enum CircleRosterChange {
         removes: BTreeSet<MembershipGrantId>,
         owner_barriers: BTreeMap<MembershipGrantId, CircleOwnerGrantBarrier>,
     },
-    ResolutionActivation {
-        resolution: CircleRosterConflictResolutionRef,
-    },
 }
 
 /// The wire body of one Circle roster entry. Every field here is signed.
@@ -149,7 +139,6 @@ pub struct CircleRosterEntryBody {
     pub seq: u64,
     pub previous_hash: Option<ObjectHash>,
     pub dependencies: Vec<CircleRosterCoord>,
-    pub resolution_dependencies: Vec<CircleRosterConflictResolutionRef>,
     pub change: CircleRosterChange,
 }
 
@@ -180,7 +169,6 @@ impl CircleRosterEntry {
                 seq: 1,
                 previous_hash: None,
                 dependencies: Vec::new(),
-                resolution_dependencies: Vec::new(),
                 change: CircleRosterChange::Founder {
                     member_pubkey: author_pubkey,
                     grant_id: owner_grant,
@@ -217,16 +205,9 @@ impl CircleRosterEntry {
                 self.seq == 1
                     && self.previous_hash.is_none()
                     && self.dependencies.is_empty()
-                    && self.resolution_dependencies.is_empty()
                     && member_pubkey == &self.author_pubkey
                     && grant_id == &self.author_owner_grant
             }
-            CircleRosterChange::ResolutionActivation { .. } => causal_grants::starts_author_stream(
-                self.seq,
-                self.previous_hash,
-                &own_stream,
-                dependency_streams(),
-            ),
             CircleRosterChange::SetMember { .. } | CircleRosterChange::RemoveMember { .. } => {
                 causal_grants::author_stream_position_is_valid(
                     self.seq,
@@ -243,10 +224,6 @@ impl CircleRosterEntry {
                 .dependencies
                 .windows(2)
                 .all(|pair| pair[0].stream_key() < pair[1].stream_key())
-            && self
-                .resolution_dependencies
-                .windows(2)
-                .all(|pair| pair[0] < pair[1])
             && match &self.change {
                 CircleRosterChange::SetMember { owner_barriers, .. }
                 | CircleRosterChange::RemoveMember { owner_barriers, .. } => {
@@ -258,18 +235,6 @@ impl CircleRosterEntry {
                     })
                 }
                 CircleRosterChange::Founder { .. } => true,
-                CircleRosterChange::ResolutionActivation { resolution } => {
-                    resolution.resolver_pubkey == self.author_pubkey
-                        && self.author_owner_grant
-                            == derive_circle_resolution_grant(
-                                &resolution.conflict_hash,
-                                &resolution.resolver_pubkey,
-                            )
-                        && self
-                            .resolution_dependencies
-                            .binary_search(resolution)
-                            .is_ok()
-                }
             }
             && self.verify_by(&self.author_pubkey).is_ok()
     }
@@ -289,7 +254,6 @@ pub struct CircleRosterHeadBody {
     pub tip_hash: ObjectHash,
     pub tip: ExactObjectRef,
     pub successor: SuccessorLink,
-    pub resolutions: Vec<CircleRosterConflictResolutionRef>,
 }
 
 impl SignedBody for CircleRosterHeadBody {
@@ -305,22 +269,6 @@ impl CircleRosterHead {
         successor: SuccessorLink,
         signer: &UserKeypair,
     ) -> Self {
-        Self::signed_with_resolutions(
-            entry,
-            tip,
-            successor,
-            entry.resolution_dependencies.clone(),
-            signer,
-        )
-    }
-
-    pub(crate) fn signed_with_resolutions(
-        entry: &CircleRosterEntry,
-        tip: ExactObjectRef,
-        successor: SuccessorLink,
-        resolutions: Vec<CircleRosterConflictResolutionRef>,
-        signer: &UserKeypair,
-    ) -> Self {
         Signed::sign(
             CircleRosterHeadBody {
                 store_root_hash: entry.store_root_hash,
@@ -333,7 +281,6 @@ impl CircleRosterHead {
                 tip_hash: entry.entry_hash(),
                 tip,
                 successor,
-                resolutions,
             },
             signer,
         )
@@ -347,7 +294,6 @@ impl CircleRosterHead {
         self.seq > 0
             && !self.device_id.is_empty()
             && self.device_id == registration.device_id.to_string()
-            && self.resolutions.windows(2).all(|pair| pair[0] < pair[1])
             && self.verify_by(&registration.device_signing_pubkey).is_ok()
     }
     pub fn entry_coord(&self) -> CircleRosterCoord {
@@ -392,7 +338,7 @@ impl ExactCircleRosterHead {
         reference: CircleRosterHeadRef,
     ) -> Result<Self, CircleRosterError> {
         if CircleRosterHeadRef::from_stored_head(&head, reference.object.clone()) != reference {
-            return Err(CircleRosterError::MissingConflictHeads);
+            return Err(CircleRosterError::HeadEntryMismatch);
         }
         Ok(Self { head, reference })
     }
@@ -410,7 +356,6 @@ impl ExactCircleRosterHead {
 #[serde(deny_unknown_fields)]
 pub struct MergeCircleRosterStateRef {
     pub heads: Vec<CircleRosterHeadRef>,
-    pub resolutions: Vec<CircleRosterConflictResolutionRef>,
     pub state_hash: ObjectHash,
 }
 
@@ -421,24 +366,14 @@ pub(crate) type CircleRosterStateRef = MergeCircleRosterStateRef;
 pub struct CircleGrantRecord {
     pub member_pubkey: String,
     pub role: CircleRole,
-    pub creation_authority: CircleGrantCreationAuthority,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum CircleGrantCreationAuthority {
-    Entry(CircleRosterCoord),
-    ConflictResolution(CircleRosterConflictResolutionRef),
+    pub creation_authority: CircleRosterCoord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum CircleGrantRetirement {
-    Entry {
-        authority: CircleRosterCoord,
-        owner_barrier: Option<CircleOwnerGrantBarrier>,
-    },
-    ConflictResolution(CircleRosterConflictResolutionRef),
+#[serde(deny_unknown_fields)]
+pub struct CircleGrantRetirement {
+    pub authority: CircleRosterCoord,
+    pub owner_barrier: Option<CircleOwnerGrantBarrier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -461,14 +396,8 @@ pub enum CircleRosterError {
     SequenceExhausted { current: u64 },
     #[error("Circle roster has an unresolved semantic conflict")]
     Conflict,
-    #[error("Circle roster conflict is missing its exact signed raw heads")]
-    MissingConflictHeads,
-    #[error("Circle roster conflict resolution does not name exact validated conflict evidence")]
-    InvalidConflictResolution,
-    #[error("checkpoint lacks the exact record for Circle grant {grant}")]
-    MissingCheckpointGrant { grant: MembershipGrantId },
-    #[error("checkpoint lacks retirement evidence for Circle grant {grant}")]
-    MissingCheckpointRetirementEvidence { grant: MembershipGrantId },
+    #[error("Circle roster head does not match its exact entry")]
+    HeadEntryMismatch,
     #[error("Circle roster causal history is empty")]
     CausalEmpty,
     #[error("Circle roster stream {stream:?} has conflicting entries at sequence {seq}")]
@@ -533,10 +462,6 @@ pub enum CircleRosterError {
     },
     #[error("Circle roster causal history leaves no active Owner")]
     CausalNoActiveOwner,
-    #[error(
-        "Circle roster revocation cycle has {sources} sources, exceeding the protocol limit of {maximum}"
-    )]
-    RevocationCycleTooWide { sources: usize, maximum: usize },
 }
 
 impl From<CausalGrantError<CircleRosterCoord>> for CircleRosterError {
@@ -593,9 +518,6 @@ impl From<CausalGrantError<CircleRosterCoord>> for CircleRosterError {
                 Self::CausalInvalidOwnerRevocationBarrier { index, grant }
             }
             CausalGrantError::NoActiveOwner => Self::CausalNoActiveOwner,
-            CausalGrantError::RevocationCycleTooWide { sources, maximum } => {
-                Self::RevocationCycleTooWide { sources, maximum }
-            }
         }
     }
 }

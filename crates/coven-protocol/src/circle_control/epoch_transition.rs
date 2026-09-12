@@ -192,20 +192,10 @@ impl CircleTransitionDraft {
                     && record.role == crate::circle::CircleRole::Owner
             })
             .ok_or(CircleTransitionError::AuthorNotCircleOwner)?;
-        let author_authority = match &owner_record.creation_authority {
-            CircleGrantCreationAuthority::Entry(created_at) => {
-                MergeCircleOwnerAuthorityRef::Roster {
-                    roster: close.frozen_epoch.roster.clone(),
-                    grant_id: grant_id.clone(),
-                    created_at: created_at.clone(),
-                }
-            }
-            CircleGrantCreationAuthority::ConflictResolution(resolution) => {
-                MergeCircleOwnerAuthorityRef::ConflictResolution {
-                    conflict_hash: resolution.conflict_hash,
-                    resolution_hash: resolution.resolution_hash,
-                }
-            }
+        let author_authority = MergeCircleOwnerAuthorityRef {
+            roster: close.frozen_epoch.roster.clone(),
+            grant_id: grant_id.clone(),
+            created_at: owner_record.creation_authority.clone(),
         };
         let old_encryption = EncryptionService::from(
             MasterKeyring::from_serialized(keyring)
@@ -245,7 +235,6 @@ impl CircleTransitionDraft {
         }
         let roster_state = MergeCircleRosterStateRef {
             heads: close.frozen_epoch.roster.heads.clone(),
-            resolutions: close.frozen_epoch.roster.resolutions.clone(),
             state_hash: roster.state_hash(),
         };
         let metadata_stream = crate::store_commit::StreamActivation::grant_authorized_stream_id(
@@ -418,20 +407,10 @@ impl CircleTransitionDraft {
                     && record.role == crate::circle::CircleRole::Owner
             })
             .ok_or(CircleTransitionError::AuthorNotCircleOwner)?;
-        let author_authority = match &owner_record.creation_authority {
-            CircleGrantCreationAuthority::Entry(created_at) => {
-                MergeCircleOwnerAuthorityRef::Roster {
-                    roster: frozen.roster.clone(),
-                    grant_id: grant_id.clone(),
-                    created_at: created_at.clone(),
-                }
-            }
-            CircleGrantCreationAuthority::ConflictResolution(resolution) => {
-                MergeCircleOwnerAuthorityRef::ConflictResolution {
-                    conflict_hash: resolution.conflict_hash,
-                    resolution_hash: resolution.resolution_hash,
-                }
-            }
+        let author_authority = MergeCircleOwnerAuthorityRef {
+            roster: frozen.roster.clone(),
+            grant_id: grant_id.clone(),
+            created_at: owner_record.creation_authority.clone(),
         };
         let encryption = EncryptionService::from(
             MasterKeyring::from_serialized(keyring)

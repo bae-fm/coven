@@ -134,7 +134,7 @@ fn every_protocol_domain_requires_its_exact_path_grammar() {
                 "circles/circle/roster/entries/owner/device/grant/stream/1/hash",
                 "circles/circle/roster/heads/owner/device/grant/stream/1",
             ],
-            cross_domain: "circles/circle/roster/resolutions/conflict/resolver/hash",
+            cross_domain: "circles/circle/metadata/entries/owner/device/grant/stream/1/hash",
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::CircleMetadata,
