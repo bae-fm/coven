@@ -139,10 +139,6 @@ mod tests {
                 "__coven_probe__/conditional/journal".to_string(),
             )
             .unwrap(),
-            lost_response_slot: ObjectSlot::logical(
-                "__coven_probe__/lost-response/journal".to_string(),
-            )
-            .unwrap(),
             progress: ExactProbeProgress::Prepared,
         });
         assert_eq!(journal.begin(prepared.clone()).await.unwrap(), prepared);

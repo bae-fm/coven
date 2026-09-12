@@ -34,14 +34,6 @@ pub fn test_exact_receipt() -> ExactSlotProbeReceipt {
         first.len() as u64,
         ObjectHash::digest(&first),
     );
-    let lost_slot =
-        crate::objects::ObjectSlot::logical("store-v1/probes/lost".to_string()).unwrap();
-    let lost_payload = probe_payload(&probe_id, ProbePayloadLabel::LostResponse);
-    let lost_ref = crate::objects::ExactObjectRef::new(
-        lost_slot.clone(),
-        lost_payload.len() as u64,
-        ObjectHash::digest(&lost_payload),
-    );
     let conditional_slot =
         crate::objects::ObjectSlot::logical("store-v1/probes/conditional".to_string()).unwrap();
     let transcript = ExactSlotProbeTranscript {
@@ -68,13 +60,6 @@ pub fn test_exact_receipt() -> ExactSlotProbeReceipt {
             ),
         },
         conditional: test_conditional_receipt(probe_id, conditional_slot),
-        lost_response: LostResponseProbeReceipt {
-            logical_key: "store-v1/probes/lost".to_string(),
-            slot: lost_slot,
-            payload_hash: ObjectHash::digest(&lost_payload),
-            settled: lost_ref,
-            readback_hash: ObjectHash::digest(&lost_payload),
-        },
     };
     ExactSlotProbeReceipt::from_transcript(
         transcript,

@@ -193,7 +193,7 @@ impl CloudHome for ProbeHome {
 }
 
 #[derive(Default)]
-struct ProbeJournal(Mutex<Option<ProviderProbeJournalRecord>>);
+pub(super) struct ProbeJournal(Mutex<Option<ProviderProbeJournalRecord>>);
 
 #[async_trait]
 impl ProviderProbeJournal for ProbeJournal {

@@ -27,16 +27,6 @@ impl FounderProviderAdminGrant {
         let second = probe_payload(&probe_id, ProbePayloadLabel::ExactCreateSecond);
         let accepted =
             ExactObjectRef::new(slot.clone(), first.len() as u64, ObjectHash::digest(&first));
-        let lost_slot = ObjectSlot::logical(format!(
-            "store-v1/test/{label}/provider-probe/lost-response"
-        ))
-        .expect("valid lost-response test slot");
-        let lost_payload = probe_payload(&probe_id, ProbePayloadLabel::LostResponse);
-        let lost_ref = ExactObjectRef::new(
-            lost_slot.clone(),
-            lost_payload.len() as u64,
-            ObjectHash::digest(&lost_payload),
-        );
         let conditional_slot =
             ObjectSlot::logical(format!("store-v1/test/{label}/provider-probe/conditional"))
                 .expect("valid conditional-update test slot");
@@ -80,13 +70,6 @@ impl FounderProviderAdminGrant {
                 probe_id,
                 conditional_slot,
             ),
-            lost_response: LostResponseProbeReceipt {
-                logical_key: lost_slot.logical_key().to_string(),
-                slot: lost_slot,
-                payload_hash: ObjectHash::digest(&lost_payload),
-                settled: lost_ref,
-                readback_hash: ObjectHash::digest(&lost_payload),
-            },
         };
         Self {
             grant_id: ProviderAdminGrantId(ObjectHash::digest(

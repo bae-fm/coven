@@ -21,16 +21,11 @@ impl ProviderProbeStorage {
         let id = hex::encode(probe_id.as_bytes());
         let logical_key = format!("__coven_probe__/exact/{id}");
         let conditional_logical_key = format!("__coven_probe__/conditional/{id}");
-        let lost_logical_key = format!("__coven_probe__/lost-response/{id}");
         let mut durable = match journal.load(probe_id).await? {
             Some(existing) => existing,
             None => {
                 let allocated_slot = first
                     .allocate_slot(&logical_key)
-                    .await
-                    .map_err(StorageError::from)?;
-                let allocated_lost_slot = first
-                    .allocate_slot(&lost_logical_key)
                     .await
                     .map_err(StorageError::from)?;
                 let allocated_conditional_slot = first
@@ -43,7 +38,6 @@ impl ProviderProbeStorage {
                         binding: binding.clone(),
                         slot: allocated_slot,
                         conditional_slot: allocated_conditional_slot,
-                        lost_response_slot: allocated_lost_slot,
                         progress: ExactProbeProgress::Prepared,
                     }))
                     .await?
@@ -57,10 +51,8 @@ impl ProviderProbeStorage {
         }
         let slot = record.slot.clone();
         let conditional_slot = record.conditional_slot.clone();
-        let lost_slot = record.lost_response_slot.clone();
         if slot.logical_key() != logical_key
             || conditional_slot.logical_key() != conditional_logical_key
-            || lost_slot.logical_key() != lost_logical_key
         {
             return invalid("exact-slot allocator changed the probe logical key");
         }
@@ -230,85 +222,6 @@ impl ProviderProbeStorage {
                 journal,
                 &mut durable,
                 &mut record,
-                ExactProbeProgress::PrimaryAbsent {
-                    outcomes,
-                    conditional: conditional.clone(),
-                },
-            )
-            .await?;
-        }
-        let lost_payload = probe_payload(&probe_id, ProbePayloadLabel::LostResponse);
-        if matches!(record.progress, ExactProbeProgress::PrimaryAbsent { .. }) {
-            match first.read_at(&lost_slot).await {
-                Ok(bytes) if bytes == lost_payload => {}
-                Ok(_) => return invalid("lost-response slot contains unknown bytes"),
-                Err(CloudHomeError::NotFound(_)) => {
-                    create_exact_bytes(first, &lost_slot, &lost_payload)
-                        .await
-                        .map_err(StorageError::from)?;
-                }
-                Err(error) => return Err(ProviderProbeError::Storage(StorageError::from(error))),
-            }
-            advance_exact(
-                journal,
-                &mut durable,
-                &mut record,
-                ExactProbeProgress::LostResponseCreated {
-                    outcomes,
-                    conditional: conditional.clone(),
-                },
-            )
-            .await?;
-        }
-        let lost_readback = if matches!(
-            record.progress,
-            ExactProbeProgress::LostResponseCreated { .. }
-        ) {
-            let readback = first
-                .read_at(&lost_slot)
-                .await
-                .map_err(StorageError::from)?;
-            if readback != lost_payload {
-                return invalid(
-                    "lost-response authoritative readback differs from committed bytes",
-                );
-            }
-            readback
-        } else {
-            lost_payload.clone()
-        };
-        let settled = ExactObjectRef::new(
-            lost_slot.clone(),
-            lost_readback.len() as u64,
-            ObjectHash::digest(&lost_readback),
-        );
-        if matches!(
-            record.progress,
-            ExactProbeProgress::LostResponseCreated { .. }
-        ) {
-            advance_exact(
-                journal,
-                &mut durable,
-                &mut record,
-                ExactProbeProgress::LostResponseReadVerified {
-                    outcomes,
-                    conditional: conditional.clone(),
-                },
-            )
-            .await?;
-        }
-        if matches!(
-            record.progress,
-            ExactProbeProgress::LostResponseReadVerified { .. }
-        ) {
-            first
-                .delete_and_verify_absent(&lost_slot)
-                .await
-                .map_err(StorageError::from)?;
-            advance_exact(
-                journal,
-                &mut durable,
-                &mut record,
                 ExactProbeProgress::Absent {
                     outcomes,
                     conditional: conditional.clone(),
@@ -316,7 +229,6 @@ impl ProviderProbeStorage {
             )
             .await?;
         }
-
         if let ExactProbeProgress::ReceiptReady { receipt } = &record.progress {
             receipt.verify(&binding.store, &binding.device)?;
             return Ok(receipt.clone());
@@ -343,13 +255,6 @@ impl ProviderProbeStorage {
                 bytes_hash: ObjectHash::digest(&range),
             },
             conditional,
-            lost_response: LostResponseProbeReceipt {
-                logical_key: lost_logical_key,
-                slot: lost_slot,
-                payload_hash: ObjectHash::digest(&lost_payload),
-                settled,
-                readback_hash: ObjectHash::digest(&lost_readback),
-            },
         };
         let receipt =
             ExactSlotProbeReceipt::from_transcript(transcript, &binding.store, &binding.device);
@@ -375,9 +280,6 @@ fn exact_race_state(
         ExactProbeProgress::Created { outcomes }
         | ExactProbeProgress::ReadsVerified { outcomes }
         | ExactProbeProgress::ConditionalVerified { outcomes, .. }
-        | ExactProbeProgress::PrimaryAbsent { outcomes, .. }
-        | ExactProbeProgress::LostResponseCreated { outcomes, .. }
-        | ExactProbeProgress::LostResponseReadVerified { outcomes, .. }
         | ExactProbeProgress::Absent { outcomes, .. } => {
             let winner = outcomes
                 .iter()
@@ -420,9 +322,6 @@ fn exact_conditional_evidence(
 ) -> Result<&ConditionalUpdateProbeReceipt, ProviderProbeError> {
     match progress {
         ExactProbeProgress::ConditionalVerified { conditional, .. }
-        | ExactProbeProgress::PrimaryAbsent { conditional, .. }
-        | ExactProbeProgress::LostResponseCreated { conditional, .. }
-        | ExactProbeProgress::LostResponseReadVerified { conditional, .. }
         | ExactProbeProgress::Absent { conditional, .. } => Ok(conditional),
         ExactProbeProgress::ReceiptReady { receipt } => Ok(&receipt.transcript.conditional),
         ExactProbeProgress::Prepared
@@ -508,3 +407,7 @@ fn require_occupied_rejection(
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "exact_slots_tests.rs"]
+mod tests;
