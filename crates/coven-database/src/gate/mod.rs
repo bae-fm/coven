@@ -177,7 +177,7 @@ pub enum GateError {
         table: String,
         parent: String,
     },
-    MissingAudienceParentDeclaration {
+    MissingGateParentDeclaration {
         table: String,
     },
     InvalidAudienceParentDeclaration {
@@ -282,9 +282,10 @@ impl std::fmt::Display for GateError {
                 f,
                 "table {table} inherits its gate through a composite foreign key to {parent}, but gate inheritance requires one child column"
             ),
-            GateError::MissingAudienceParentDeclaration { table } => write!(
+            GateError::MissingGateParentDeclaration { table } => write!(
                 f,
-                "scoped descendant table {table} must declare its audience-parent foreign key"
+                "table {table} references a gated table and must declare the foreign key it \
+                 inherits its gate through"
             ),
             GateError::InvalidAudienceParentDeclaration {
                 table,
@@ -461,6 +462,8 @@ impl From<crate::CreateTableSchemaError> for GateError {
     }
 }
 
+#[cfg(test)]
+mod inheritance_tests;
 #[cfg(test)]
 mod retraction_tests;
 #[cfg(test)]

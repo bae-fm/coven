@@ -81,11 +81,13 @@ impl RowIdentityError {
 /// and passed to `CovenBuilder::synced_tables`.
 ///
 /// A plain [`SyncedTable::new`] table syncs unconditionally — every row goes to
-/// peers. [`SyncedTable::remote_root`] keeps that whole-table row sync and also
-/// makes the row a blob-locality root whose blobs are always Remote.
-/// [`SyncedTable::gated_by`] makes it a *gated root*: a boolean column whose
-/// truth decides, per row, whether that row (and its declared FK-descendants) is
-/// shared. A gated-false root and its subtree stay local; flipping the gate true
+/// peers — unless it names the foreign key it inherits a gate through with
+/// [`SyncedTable::inherits_audience_through`]. [`SyncedTable::remote_root`]
+/// keeps that whole-table row sync and also makes the row a blob-locality root
+/// whose blobs are always Remote. [`SyncedTable::gated_by`] makes it a *gated
+/// root*: a boolean column whose truth decides, per row, whether that row (and
+/// the descendants that declare their inheritance from it) is shared. A
+/// gated-false root and its subtree stay local; flipping the gate true
 /// re-emits the whole now-visible subtree to peers, and flipping it false again
 /// retracts that subtree from peers (emitting deletes for the rows leaving the
 /// shared set) while the rows stay local.
@@ -189,10 +191,12 @@ impl SyncedTable {
         self
     }
 
-    /// Make this plain table inherit its audience through the foreign key whose
-    /// child column is `column`. Every descendant of an audience root must
-    /// select this relationship explicitly; coven never guesses among the
-    /// table's foreign keys.
+    /// Make this plain table inherit its gate through the foreign key whose child
+    /// column is `column` — whatever kind of root that chain ends at: a boolean
+    /// gated root, an audience root, a remote root, or a kept ancestor. Every
+    /// plain table with a foreign key into a gated table must select this
+    /// relationship explicitly; coven never guesses among the table's foreign
+    /// keys.
     pub fn inherits_audience_through(mut self, column: impl Into<String>) -> Self {
         self.audience_parent_column = Some(column.into());
         self

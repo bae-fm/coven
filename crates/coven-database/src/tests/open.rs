@@ -452,7 +452,8 @@ fn first_open_rolls_back_host_migration_when_gate_model_is_invalid() {
         SyncedTable::new(
             "children",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("parent_id"),
     ];
 
     let error = match Database::open(

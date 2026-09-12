@@ -42,8 +42,9 @@ keys, its rows, or its package history.
 ## Declaring audience routing
 
 A row's audience is a column on a *synced graph root*, the same way a
-[gate](/docs/local-data) is. Only a root declares an audience; its foreign-key
-descendants inherit it. Two builder forms exist, and a table uses at most one:
+[gate](/docs/local-data) is. Only a root declares an audience; each descendant
+names the foreign key it inherits that audience through. Two builder forms exist,
+and a table uses at most one:
 
 ```rust
 SyncedTable::new("lists", RowIdentity::IndependentUuid).scoped_by("audience")
@@ -58,9 +59,10 @@ SyncedTable::new("todos", RowIdentity::IndependentUuid)
   SQL update to that column (see [Moving a row](#moving-a-row)).
 - [`inherits_audience_through(column)`](rustdoc:method:coven::SyncedTable::inherits_audience_through)
   makes a descendant table take its audience from the parent row named by the
-  foreign key in `column`. Every descendant of an audience root must select its
-  inheritance foreign key explicitly; coven never guesses among a table's
-  foreign keys.
+  foreign key in `column`. It is the same declaration a table under a
+  [gated root](/docs/local-data#gated-roots) uses: every plain table with a
+  foreign key into a gated table must select its inheritance foreign key
+  explicitly, and coven never guesses among a table's foreign keys.
 
 `scoped_by` is the general form of the two-audience [`gated_by`](/docs/local-data#gated-roots)
 (Store or Local only). A table declares one or the other, never both.

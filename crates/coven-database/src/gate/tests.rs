@@ -11,13 +11,13 @@ use coven_protocol::synced_schema::SyncedTable;
 
 /// A throwaway in-memory connection with `foreign_keys=ON`, for the gate
 /// tests' bespoke schemas. The gate's public API takes `&Connection`.
-fn conn() -> Connection {
+pub(super) fn conn() -> Connection {
     let c = Connection::open_in_memory().expect("open in-memory");
     c.execute_batch("PRAGMA foreign_keys = ON").expect("fk on");
     c
 }
 
-trait ConnectionTestSql {
+pub(super) trait ConnectionTestSql {
     fn execute_test_sql(&self, sql: &str);
     fn apply_test_changeset(&self, bytes: &[u8], tables: &[SyncedTable]);
     fn query_test_text(&self, sql: &str) -> String;
@@ -62,65 +62,6 @@ fn query_int(c: &Connection, sql: &str) -> i64 {
 }
 
 #[test]
-fn scoped_descendant_requires_a_declared_audience_parent() {
-    let c = conn();
-    c.execute_test_sql(
-        "CREATE TABLE notes (
-                id TEXT PRIMARY KEY,
-                audience TEXT,
-                _updated_at TEXT NOT NULL
-             ) STRICT;
-             CREATE TABLE note_tags (
-                id TEXT PRIMARY KEY,
-                note_id TEXT NOT NULL REFERENCES notes(id),
-                _updated_at TEXT NOT NULL
-             ) STRICT;",
-    );
-    let tables = vec![
-        SyncedTable::new(
-            "notes",
-            coven_protocol::synced_schema::RowIdentity::SharedKey,
-        )
-        .scoped_by("audience"),
-        SyncedTable::new(
-            "note_tags",
-            coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
-    ];
-
-    let error = match Gates::from_tables(&c, &tables) {
-        Ok(_) => panic!("a scoped descendant must select its audience-parent foreign key"),
-        Err(error) => error,
-    };
-
-    assert!(
-        error
-            .to_string()
-            .contains("must declare its audience-parent foreign key"),
-        "{error}"
-    );
-
-    let gates = Gates::from_tables(
-        &c,
-        &[
-            SyncedTable::new(
-                "notes",
-                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
-            )
-            .scoped_by("audience"),
-            SyncedTable::new(
-                "note_tags",
-                coven_protocol::synced_schema::RowIdentity::SharedKey,
-            )
-            .inherits_audience_through("note_id"),
-        ],
-    )
-    .expect("build explicitly declared audience inheritance");
-    assert!(gates.tables.contains_key("notes"));
-    assert!(gates.tables.contains_key("note_tags"));
-}
-
-#[test]
 fn child_gate_follows_the_foreign_keys_named_parent_column() {
     let c = conn();
     c.execute_test_sql(
@@ -150,7 +91,8 @@ fn child_gate_follows_the_foreign_keys_named_parent_column() {
         SyncedTable::new(
             "children",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("parent_code"),
     ];
 
     let gates = Gates::from_tables(&c, &tables).expect("build gate model");
@@ -179,7 +121,7 @@ fn capture(c: &Connection, tables: &[SyncedTable], stmts: &[&str]) -> Vec<u8> {
 }
 
 /// Capture, then gate against `tables`' gate model. Returns gated bytes.
-fn capture_and_gate(c: &Connection, tables: &[SyncedTable], stmts: &[&str]) -> Vec<u8> {
+pub(super) fn capture_and_gate(c: &Connection, tables: &[SyncedTable], stmts: &[&str]) -> Vec<u8> {
     let bytes = capture(c, tables, stmts);
     let gates = Gates::from_tables(c, tables).expect("build gates");
     gate_outbound(c, &bytes, &gates).expect("gate outbound")
@@ -195,11 +137,13 @@ fn test_synced_tables() -> Vec<SyncedTable> {
         SyncedTable::new(
             "note_tags",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("note_id"),
         SyncedTable::new(
             "note_photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("note_id"),
     ]
 }
 
@@ -423,7 +367,8 @@ fn remote_root_child_resolves_as_remote_and_belongs_to_root_subtree() {
         SyncedTable::new(
             "note_photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("note_id"),
     ];
     let gates = Gates::from_tables(&c, &tables).expect("gates");
 
@@ -754,11 +699,13 @@ fn multi_hop_fk_inheritance() {
         SyncedTable::new(
             "photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("album_id"),
         SyncedTable::new(
             "comments",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("photo_id"),
     ];
 
     // Private album with a 2-level subtree: all cut.
@@ -823,11 +770,13 @@ fn delete_gated_false_strips_private_subtrees_in_place() {
         SyncedTable::new(
             "photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("album_id"),
         SyncedTable::new(
             "comments",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("photo_id"),
         SyncedTable::new(
             "settings",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
@@ -880,11 +829,13 @@ fn album_tables() -> Vec<SyncedTable> {
         SyncedTable::new(
             "album_artists",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("album_id"),
         SyncedTable::new(
             "tracks",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("release_id"),
     ]
 }
 
@@ -916,7 +867,7 @@ fn create_album_schema(c: &Connection) {
 }
 
 /// The inferred keep-children of `tbl`, as `(child, fk column name)`, sorted.
-fn inferred_children(gates: &Gates, tbl: &str) -> Vec<(String, String)> {
+pub(super) fn inferred_children(gates: &Gates, tbl: &str) -> Vec<(String, String)> {
     match gates.tables.get(tbl) {
         Some(TableGate::Parent { children }) => {
             let mut out: Vec<(String, String)> = children
@@ -931,9 +882,9 @@ fn inferred_children(gates: &Gates, tbl: &str) -> Vec<(String, String)> {
     }
 }
 
-/// The downward gate-parent `from_tables` chose for `tbl`, as `(parent, fk
+/// The declared gate-parent `from_tables` resolved for `tbl`, as `(parent, fk
 /// column name)`. Panics if `tbl` is not modeled as an inheriting `Child`.
-fn downward_parent(gates: &Gates, tbl: &str) -> (String, String) {
+pub(super) fn downward_parent(gates: &Gates, tbl: &str) -> (String, String) {
     match gates.tables.get(tbl) {
         Some(TableGate::Child { fk_col, parent, .. }) => (parent.clone(), fk_col.name.clone()),
         other => panic!(
@@ -965,105 +916,7 @@ fn inference_resolves_children_and_join_parent() {
     assert_eq!(
         downward_parent(&gates, "album_artists"),
         ("albums".to_string(), "album_id".to_string()),
-    );
-}
-
-#[test]
-fn downward_parent_tie_uses_complete_foreign_key_shape() {
-    fn selected_child_column(foreign_keys: &str) -> String {
-        let c = conn();
-        c.execute_test_sql(
-            "CREATE TABLE roots (
-                    id TEXT PRIMARY KEY,
-                    shared INTEGER NOT NULL,
-                    _updated_at TEXT NOT NULL
-                ) STRICT;",
-        );
-        c.execute_test_sql(&format!(
-            "CREATE TABLE children (
-                        id TEXT PRIMARY KEY,
-                        a_root_id TEXT NOT NULL,
-                        z_root_id TEXT NOT NULL,
-                        _updated_at TEXT NOT NULL,
-                        {foreign_keys}
-                    ) STRICT;"
-        ));
-        let tables = vec![
-            SyncedTable::new(
-                "roots",
-                coven_protocol::synced_schema::RowIdentity::SharedKey,
-            )
-            .gated_by("shared"),
-            SyncedTable::new(
-                "children",
-                coven_protocol::synced_schema::RowIdentity::SharedKey,
-            ),
-        ];
-        downward_parent(&Gates::from_tables(&c, &tables).expect("gates"), "children").1
-    }
-
-    let a_then_z = selected_child_column(
-        "FOREIGN KEY (a_root_id) REFERENCES roots (id),
-             FOREIGN KEY (z_root_id) REFERENCES roots (id)",
-    );
-    let z_then_a = selected_child_column(
-        "FOREIGN KEY (z_root_id) REFERENCES roots (id),
-             FOREIGN KEY (a_root_id) REFERENCES roots (id)",
-    );
-
-    assert_eq!(a_then_z, "a_root_id");
-    assert_eq!(z_then_a, a_then_z);
-}
-
-#[test]
-fn downward_parent_is_most_specific_not_lexicographic() {
-    let c = conn();
-    c.execute_test_sql(
-        "CREATE TABLE aouter (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT",
-    );
-    c.execute_test_sql(
-        "CREATE TABLE zinner (id TEXT PRIMARY KEY, aouter_id TEXT, \
-             _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (aouter_id) REFERENCES aouter (id)) STRICT",
-    );
-    c.execute_test_sql(
-        "CREATE TABLE zgated (id TEXT PRIMARY KEY, zinner_id TEXT NOT NULL, \
-             shared INTEGER NOT NULL DEFAULT 0, _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (zinner_id) REFERENCES zinner (id)) STRICT",
-    );
-    c.execute_test_sql(
-        "CREATE TABLE joiner (id TEXT PRIMARY KEY, aouter_id TEXT NOT NULL, \
-             zinner_id TEXT NOT NULL, _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (aouter_id) REFERENCES aouter (id), \
-             FOREIGN KEY (zinner_id) REFERENCES zinner (id)) STRICT",
-    );
-    let tables = vec![
-        SyncedTable::new(
-            "aouter",
-            coven_protocol::synced_schema::RowIdentity::SharedKey,
-        )
-        .gated_by_descendants(),
-        SyncedTable::new(
-            "zinner",
-            coven_protocol::synced_schema::RowIdentity::SharedKey,
-        )
-        .gated_by_descendants(),
-        SyncedTable::new(
-            "zgated",
-            coven_protocol::synced_schema::RowIdentity::SharedKey,
-        )
-        .gated_by("shared"),
-        SyncedTable::new(
-            "joiner",
-            coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
-    ];
-    let gates = Gates::from_tables(&c, &tables).expect("gates");
-    assert_eq!(
-        downward_parent(&gates, "joiner"),
-        ("zinner".to_string(), "zinner_id".to_string()),
-        "the most-specific (deeper) ancestor wins even though it sorts \
-             lexicographically later than `aouter`"
+        "the join row inherits through the foreign key it declares",
     );
 }
 
@@ -2125,20 +1978,24 @@ fn album_asset_tables() -> Vec<SyncedTable> {
         SyncedTable::new(
             "album_artists",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("album_id"),
         SyncedTable::new(
             "tracks",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("release_id"),
         SyncedTable::new(
             "covers",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
+        .inherits_audience_through("release_id")
         .asset(),
         SyncedTable::new(
             "artist_images",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
+        .inherits_audience_through("artist_id")
         .asset(),
     ]
 }
@@ -2408,7 +2265,8 @@ fn asset_marker_excludes_a_child_the_back_edge_would_keep() {
         let image = SyncedTable::new(
             "artist_images",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        );
+        )
+        .inherits_audience_through("album_id");
         let image = if asset { image.asset() } else { image };
         vec![
             SyncedTable::new(
@@ -2467,7 +2325,8 @@ fn work_part_tables() -> Vec<SyncedTable> {
         SyncedTable::new(
             "tracks",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("release_id"),
         SyncedTable::new(
             "works",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
@@ -2476,11 +2335,13 @@ fn work_part_tables() -> Vec<SyncedTable> {
         SyncedTable::new(
             "track_works",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("track_id"),
         SyncedTable::new(
             "work_parts",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("child_work_id"),
     ]
 }
 
@@ -2544,7 +2405,8 @@ fn a_work_part_inherits_from_its_child_work_and_keeps_no_work_alive() {
     assert_eq!(
         downward_parent(&gates, "work_parts"),
         ("works".to_string(), "child_work_id".to_string()),
-        "the join row inherits its gate through exactly one of its two works FKs",
+        "the join row inherits through the one of its two works foreign keys it \
+         declares",
     );
     assert_eq!(
         inferred_children(&gates, "works"),
@@ -2766,13 +2628,14 @@ fn a_shared_row_naming_a_gate_false_root_is_refused_at_the_write() {
         SyncedTable::new(
             "playlist_items",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
-        ),
+        )
+        .inherits_audience_through("playlist_id"),
     ];
     let gates = Gates::from_tables(&c, &tables).expect("gates");
     assert_eq!(
         downward_parent(&gates, "playlist_items").0,
         "playlists",
-        "the join row inherits from the playlist, so the release FK is unguarded",
+        "the join row declares the playlist, so the release FK is unguarded",
     );
 
     c.execute_test_sql(

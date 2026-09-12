@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 
 use super::outbound::{query_column_text, resolve_root};
 use super::{execute_batch, query_mapped_rows, query_row_optional, row_value_to_string, GateError};
-use crate::{foreign_key_edges, quote_ident, ForeignKeyEdge};
+use crate::{foreign_key_edges, quote_ident};
 use coven_protocol::synced_schema::{RowIdentity, SyncedTable};
 
 /// How a synced table relates to the gate.
@@ -20,7 +20,7 @@ pub enum TableGate {
     Root { gate_col: GateColumn },
     /// A scoped root: this column names Store (`NULL`), one circle, or the
     /// local device (`local`). Descendants inherit the same audience through
-    /// their selected foreign-key parent.
+    /// the foreign key each of them declares.
     ScopedRoot { audience_col: GateColumn },
     /// A root whose rows sync unconditionally and whose blob subtree is always
     /// Remote.
@@ -90,14 +90,12 @@ impl<'schema> GateModelConstruction<'schema> {
         let mut gate_map = HashMap::new();
 
         // Classify each table's downward gate-parent. Roots and ancestors are
-        // termini; a plain table inherits from the FK parent picked by
-        // `select_parent_fk` (which considers ALL its synced-parent FKs, prefers
-        // a parent that reaches a gated root, then the most-specific ancestor,
-        // then lexicographic). Ancestors are deferred: their upward keep-children
-        // are built below, once every plain table's downward parent is known, so
-        // an ancestor is inserted already complete — never empty-then-filled.
+        // termini; a plain table inherits through the foreign key it declares
+        // with `inherits_audience_through` — coven never elects one for it.
+        // Ancestors are deferred: their upward keep-children are built below,
+        // once every declared downward parent is known, so an ancestor is
+        // inserted already complete — never empty-then-filled.
         for t in self.tables {
-            let has_scoped_ancestor = self.reaches_scoped_root(t.name(), &mut HashSet::new())?;
             if let Some(column) = t.audience_parent_column().filter(|_| {
                 t.is_gated_by_descendants()
                     || t.is_remote_root()
@@ -109,14 +107,6 @@ impl<'schema> GateModelConstruction<'schema> {
                     column: column.to_string(),
                     reason: "only a plain descendant table may select an audience parent"
                         .to_string(),
-                });
-            }
-            if has_scoped_ancestor
-                && t.audience_column().is_none()
-                && t.audience_parent_column().is_none()
-            {
-                return Err(GateError::MissingAudienceParentDeclaration {
-                    table: t.name().to_string(),
                 });
             }
             if t.is_gated_by_descendants() {
@@ -142,51 +132,32 @@ impl<'schema> GateModelConstruction<'schema> {
                 continue;
             }
 
-            // A plain table inherits the gate downward from its selected FK
-            // parent. Inheritance flows ONLY through declared FKs, toward synced
-            // parents, and (for a multi-FK join row) toward the gated side, never
-            // up an ancestor back-edge.
-            let selected_parent = if let Some(column) = t.audience_parent_column() {
-                Some(self.select_audience_parent_fk(t.name(), column)?)
-            } else {
-                self.select_parent_fk(t.name(), &mut HashSet::new())?
+            // A plain table inherits the gate downward from the foreign key it
+            // declares. Without a declaration it is ungated — or, if it does
+            // reference a gated table, a host error resolved below.
+            let Some(column) = t.audience_parent_column() else {
+                continue;
             };
-            if let Some((fk_name, parent, parent_name)) = selected_parent {
-                let fk_col = fk_column(&cols, t.name(), &fk_name)?;
-                let parent_cols = super::gate_table_columns(self.conn, &parent)?;
-                let parent_col = fk_column(&parent_cols, &parent, &parent_name)?;
-                gate_map.insert(
-                    t.name().to_string(),
-                    TableGate::Child {
-                        fk_col,
-                        parent,
-                        parent_col,
-                    },
-                );
-            }
-            // else: ungated, unconditionally shared — not in the map.
-        }
-
-        for (table, column) in self
-            .tables
-            .iter()
-            .filter_map(|table| table.audience_parent_column().map(|column| (table, column)))
-        {
-            if !gate_reaches_scoped_root(&gate_map, table.name()) {
-                return Err(GateError::InvalidAudienceParentDeclaration {
-                    table: table.name().to_string(),
-                    column: column.to_string(),
-                    reason: "the selected foreign-key chain does not end at an audience root"
-                        .to_string(),
-                });
-            }
+            let (fk_name, parent, parent_name) =
+                self.select_declared_parent_fk(t.name(), column)?;
+            let fk_col = fk_column(&cols, t.name(), &fk_name)?;
+            let parent_cols = super::gate_table_columns(self.conn, &parent)?;
+            let parent_col = fk_column(&parent_cols, &parent, &parent_name)?;
+            gate_map.insert(
+                t.name().to_string(),
+                TableGate::Child {
+                    fk_col,
+                    parent,
+                    parent_col,
+                },
+            );
         }
 
         // Children are filled once all downward parents are known. A keep-child
         // of ancestor P is any synced table with an FK referencing P, MINUS two
         // kinds: an *asset* (a host-declared decoration that rides P's gate but
         // never keeps it alive — e.g. an artist image keeping its artist), and a
-        // table whose chosen downward gate-parent IS P (the join-table back-edge:
+        // table whose declared downward gate-parent IS P (the join-table back-edge:
         // a child cannot keep its own parent alive — that is the circular fixpoint
         // that would keep an empty album alive forever). An ancestor that infers
         // no children is a host error (the keep would be vacuously false). The
@@ -227,21 +198,51 @@ impl<'schema> GateModelConstruction<'schema> {
             gate_map.insert(ancestor.to_string(), TableGate::Parent { children });
         }
 
-        // Prune children whose FK chain never reaches a gate terminus (a
-        // gated root or an ancestor): they are effectively ungated. Roots and
-        // ancestors are themselves termini and are always retained.
-        let reaches_gate: HashSet<String> = gate_map
-            .keys()
-            .filter(|name| reaches_gate_terminus(&gate_map, name))
-            .cloned()
-            .collect();
-        gate_map.retain(|name, tg| match tg {
-            TableGate::Root { .. }
-            | TableGate::ScopedRoot { .. }
-            | TableGate::RemoteRoot
-            | TableGate::Parent { .. } => true,
-            TableGate::Child { .. } => reaches_gate.contains(name),
-        });
+        // Every gate a plain table could inherit is now in the map — a root, a
+        // remote root, an ancestor, or another plain table's own declaration —
+        // and a plain table that declares nothing is never in it. So a single
+        // pass over the undeclared plain tables reads the settled classification:
+        // one that references a gated table is a host guess coven refuses to
+        // make for it, and one that references only ungated tables stays ungated
+        // and unconditionally shared.
+        for t in self.tables {
+            if gate_map.contains_key(t.name()) || t.audience_parent_column().is_some() {
+                continue;
+            }
+            // Read the edges rather than `foreign_keys`, which refuses a
+            // composite relationship: a composite foreign key into a gated table
+            // is still an undeclared gate, and the host hears about its shape
+            // once it declares it.
+            for edge in
+                foreign_key_edges(self.conn, t.name()).map_err(GateError::ForeignKeySchema)?
+            {
+                if gate_map.contains_key(&edge.parent_table) {
+                    return Err(GateError::MissingGateParentDeclaration {
+                        table: t.name().to_string(),
+                    });
+                }
+            }
+        }
+
+        // Every declared chain must end at a gate terminus — a root, a remote
+        // root, or a kept ancestor. A chain that loops, or that ends at an
+        // ungated table, inherits nothing, and a declaration that resolves to
+        // nothing is a host error rather than a silently ungated table.
+        for (table, column) in self
+            .tables
+            .iter()
+            .filter_map(|table| table.audience_parent_column().map(|column| (table, column)))
+        {
+            if !reaches_gate_terminus(&gate_map, table.name()) {
+                return Err(GateError::InvalidAudienceParentDeclaration {
+                    table: table.name().to_string(),
+                    column: column.to_string(),
+                    reason: "the selected foreign-key chain does not end at a gate root or kept \
+                             ancestor"
+                        .to_string(),
+                });
+            }
+        }
 
         Ok(Gates {
             tables: gate_map,
@@ -273,108 +274,11 @@ impl<'schema> GateModelConstruction<'schema> {
             .map(|(from, _, to)| (from, to)))
     }
 
-    /// Pick `table`'s single DOWNWARD gate-parent among ALL its synced-parent FKs —
-    /// not just the first PRAGMA row, whose order is non-deterministic w.r.t.
-    /// declaration (SQLite numbers FKs in reverse). Returns `(child FK column name,
-    /// parent table)`, or `None` if no synced-parent FK exists.
-    ///
-    /// A join row (e.g. `album_artists` → albums, artists) must inherit downward from
-    /// the right parent, so the choice follows a deterministic preference:
-    ///
-    /// 1. **Prefer a parent that reaches a gated root downward** — a Root, or a plain
-    ///    table whose own chosen FK chain reaches a Root. So `release_files` →
-    ///    releases (a Root), not `release_files` → audio_formats (a lookup ancestor).
-    /// 2. **Else, among ancestor parents, pick the most-specific** — the candidate
-    ///    that is itself an FK-descendant of the other candidates (deepest in the
-    ///    containment DAG). So `album_artists` → albums, since albums is a descendant
-    ///    of artists (albums.artist_id → artists).
-    /// 3. **Else break ties lexicographically** by parent name.
-    fn select_parent_fk(
-        &self,
-        table: &str,
-        visiting: &mut HashSet<String>,
-    ) -> Result<Option<(String, String, String)>, GateError> {
-        let synced: HashSet<&str> = self.tables.iter().map(|t| t.name()).collect();
-        let candidates: Vec<ForeignKeyEdge> = foreign_key_edges(self.conn, table)
-            .map_err(GateError::ForeignKeySchema)?
-            .into_iter()
-            .filter(|edge| synced.contains(edge.parent_table.as_str()))
-            .collect();
-        if candidates.is_empty() {
-            return Ok(None);
-        }
-
-        // Rank each candidate `(fk, parent)` by the preference and pick the smallest:
-        //   tier 0  parent reaches a gated root downward (a Root, or a plain chain to
-        //           one) — the gated side of a join row;
-        //   tier 1  parent is an ancestor, ranked most-specific first (a deeper
-        //           ancestor sorts before a shallower one, so albums beats artists);
-        //   tier 2  some other synced parent (neither).
-        // The lexicographic parent name is the final tie-break. A stable key makes
-        // the choice deterministic regardless of PRAGMA row order. The ranking probes
-        // the FK graph (fallible), so build each key before sorting rather than inside
-        // the sort comparator.
-        //
-        // `ParentRank`'s field order is its comparison order (derived `Ord`): tier,
-        // then specificity, then name.
-        #[derive(PartialEq, Eq, PartialOrd, Ord)]
-        struct ParentRank {
-            tier: u8,
-            specificity: isize,
-            name: String,
-            columns: Vec<(String, String)>,
-            on_update: String,
-            on_delete: String,
-            match_clause: String,
-        }
-        let mut keyed = Vec::with_capacity(candidates.len());
-        for edge in candidates {
-            let parent = &edge.parent_table;
-            let tier = if self.parent_reaches_root(parent, visiting)? {
-                0u8
-            } else if self.ancestors.contains(parent.as_str()) {
-                1
-            } else {
-                2
-            };
-            let specificity = if tier == 1 {
-                -(self.ancestor_depth(parent, &mut HashSet::new())? as isize)
-            } else {
-                0
-            };
-            let rank = ParentRank {
-                tier,
-                specificity,
-                name: parent.clone(),
-                columns: edge
-                    .columns
-                    .iter()
-                    .map(|column| (column.child.clone(), column.parent.clone()))
-                    .collect(),
-                on_update: edge.on_update.clone(),
-                on_delete: edge.on_delete.clone(),
-                match_clause: edge.match_clause.clone(),
-            };
-            keyed.push((rank, edge));
-        }
-        keyed.sort_by(|a, b| a.0.cmp(&b.0));
-        let Some((_, edge)) = keyed.into_iter().next() else {
-            return Ok(None);
-        };
-        let [column] = edge.columns.as_slice() else {
-            return Err(GateError::CompositeGateForeignKey {
-                table: table.to_string(),
-                parent: edge.parent_table,
-            });
-        };
-        Ok(Some((
-            column.child.clone(),
-            edge.parent_table,
-            column.parent.clone(),
-        )))
-    }
-
-    fn select_audience_parent_fk(
+    /// Resolve the foreign key `table` declared as the one it inherits its gate
+    /// through, as `(child FK column, parent table, parent column)`. Exactly one
+    /// foreign key must use that child column, its target must be a declared
+    /// synced table, and the relationship must be single-column.
+    fn select_declared_parent_fk(
         &self,
         table: &str,
         column: &str,
@@ -422,92 +326,6 @@ impl<'schema> GateModelConstruction<'schema> {
             foreign_key_column.parent.clone(),
         ))
     }
-
-    fn reaches_scoped_root(
-        &self,
-        table: &str,
-        visiting: &mut HashSet<String>,
-    ) -> Result<bool, GateError> {
-        if !visiting.insert(table.to_string()) {
-            return Ok(false);
-        }
-        let synced = self
-            .tables
-            .iter()
-            .map(|declaration| (declaration.name(), declaration))
-            .collect::<HashMap<_, _>>();
-        let mut reaches = false;
-        for edge in foreign_key_edges(self.conn, table).map_err(GateError::ForeignKeySchema)? {
-            let Some(parent) = synced.get(edge.parent_table.as_str()) else {
-                continue;
-            };
-            if parent.audience_column().is_some()
-                || self.reaches_scoped_root(parent.name(), visiting)?
-            {
-                reaches = true;
-                break;
-            }
-        }
-        visiting.remove(table);
-        Ok(reaches)
-    }
-
-    /// Whether `parent`'s own gate eventually reaches a locality root downward, so a
-    /// child inheriting from it lands on a real root rather than on an ancestor or
-    /// nothing. A gated root or remote root is the terminus; a plain table reaches one
-    /// iff its own selected parent FK does; an ancestor is NOT a downward root path (its
-    /// keep is the separate upward relation). Cycle-guarded by `visiting`.
-    fn parent_reaches_root(
-        &self,
-        parent: &str,
-        visiting: &mut HashSet<String>,
-    ) -> Result<bool, GateError> {
-        if !visiting.insert(parent.to_string()) {
-            return Ok(false); // a cycle is not a path to a real root.
-        }
-        let decl = self.tables.iter().find(|t| t.name() == parent);
-        let reaches = match decl {
-            Some(t)
-                if t.gate_column().is_some()
-                    || t.audience_column().is_some()
-                    || t.is_remote_root() =>
-            {
-                true
-            }
-            // An ancestor is not a downward root path.
-            Some(t) if t.is_gated_by_descendants() => false,
-            // A plain (or unknown) parent reaches a root iff its own chain does.
-            _ => match self.select_parent_fk(parent, visiting)? {
-                Some((_, grandparent, _)) => self.parent_reaches_root(&grandparent, visiting)?,
-                // No synced-parent FK: the chain ends here without a root.
-                None => false,
-            },
-        };
-        visiting.remove(parent);
-        Ok(reaches)
-    }
-
-    /// How deep `ancestor` sits in the containment DAG of ancestor tables: 0 if it
-    /// references no other ancestor, else 1 + the max depth of the ancestors it has
-    /// an FK to. A deeper ancestor is more specific (e.g. albums references artists,
-    /// so albums is depth 1 and artists depth 0). Cycle-guarded by `visiting`.
-    fn ancestor_depth(
-        &self,
-        ancestor: &str,
-        visiting: &mut HashSet<String>,
-    ) -> Result<usize, GateError> {
-        if !visiting.insert(ancestor.to_string()) {
-            return Ok(0); // defensive against a malformed ancestor cycle.
-        }
-        let mut depth = 0;
-        for (_, parent, _) in foreign_keys(self.conn, ancestor)? {
-            if parent != ancestor && self.ancestors.contains(parent.as_str()) {
-                depth = depth.max(1 + self.ancestor_depth(&parent, visiting)?);
-            }
-        }
-        visiting.remove(ancestor);
-        Ok(depth)
-    }
 }
 
 /// Whether a table's gate is *derived* from other rows rather than declared on
@@ -526,7 +344,7 @@ pub(super) fn gate_is_derived(gate: Option<&TableGate>) -> bool {
 /// Two relations decide membership, and they answer different questions.
 ///
 /// **Keep** ([`Gates::row_kept`]) decides what the gate *elects* to share: a root
-/// row iff its gate column is true, a descendant iff its selected gate-parent is
+/// row iff its gate column is true, a descendant iff its declared gate-parent is
 /// kept, an ancestor iff some inferred keep-child still references it.
 ///
 /// **Closure** decides what those elections *oblige*. A shared row lands on a
@@ -646,8 +464,12 @@ impl Gates {
             .any(|gate| matches!(gate, TableGate::ScopedRoot { .. }))
     }
 
+    /// Whether `table`'s chain ends at an audience root, so its rows inherit an
+    /// audience rather than the boolean gate.
     pub fn table_is_scoped(&self, table: &str) -> bool {
-        gate_reaches_scoped_root(&self.tables, table)
+        chain_reaches(&self.tables, table, |gate| {
+            matches!(gate, TableGate::ScopedRoot { .. })
+        })
     }
 
     /// Every scoped table, sorted, so a pass over the scoped graph visits them
@@ -1297,15 +1119,3 @@ pub(crate) fn foreign_keys(
         })
         .collect()
 }
-
-/// Whether `table`'s chain ends at an audience root, so its rows inherit an
-/// audience rather than the boolean gate.
-fn gate_reaches_scoped_root(gates: &HashMap<String, TableGate>, table: &str) -> bool {
-    chain_reaches(gates, table, |gate| {
-        matches!(gate, TableGate::ScopedRoot { .. })
-    })
-}
-
-#[cfg(test)]
-#[path = "model_tests.rs"]
-mod tests;

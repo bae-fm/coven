@@ -53,7 +53,8 @@ let handle = Coven::builder(store_dir, config)
     .synced_tables(vec![
         SyncedTable::new("workspaces", RowIdentity::IndependentUuid),
         SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared"),
-        SyncedTable::new("todos", RowIdentity::IndependentUuid),
+        SyncedTable::new("todos", RowIdentity::IndependentUuid)
+            .inherits_audience_through("list_id"),
     ])
     .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
@@ -75,10 +76,12 @@ syncs every row and makes blobs on those rows and descendants always Remote,
 [`gated_by`](rustdoc:method:coven::SyncedTable::gated_by) makes a
 row sync only while its boolean column is true, and
 [`gated_by_descendants`](rustdoc:method:coven::SyncedTable::gated_by_descendants)
-keeps an ancestor row alive only while a gated descendant survives. Here `lists`
-is a gated root, and `todos` inherit that gate down the foreign key. Tables you
-don't pass are local-only and never leave the device. The gating rules are in
-[Local data](/docs/local-data).
+keeps an ancestor row alive only while a gated descendant survives, and
+[`inherits_audience_through`](rustdoc:method:coven::SyncedTable::inherits_audience_through)
+names the foreign key a plain table takes its gate from. Here `lists` is a gated
+root, and `todos` name `list_id` as the foreign key they inherit that gate
+through. Tables you don't pass are local-only and never leave the device. The
+gating rules are in [Local data](/docs/local-data).
 
 The handle's SQL context mints `_updated_at` stamps from a clock already seeded
 past every value on disk, so a write made right after a restart can't mint a
@@ -276,9 +279,11 @@ use coven::{BlobDecl, CacheFill, Provenance};
 // In the set you pass to `Coven::builder(...).synced_tables(...)`, declare the blob on `todos`:
 //   blob id = the row's primary key; opaque home, so no cloud_path column;
 //   master-scoped; the user's own file, fetched into every device's cache on pull.
-SyncedTable::new("todos", RowIdentity::IndependentUuid).carries_blob(
-    BlobDecl::new("todo-files", Provenance::UserProvided, CacheFill::CacheEager),
-)
+SyncedTable::new("todos", RowIdentity::IndependentUuid)
+    .inherits_audience_through("list_id")
+    .carries_blob(
+        BlobDecl::new("todo-files", Provenance::UserProvided, CacheFill::CacheEager),
+    )
 ```
 
 coven resolves the declaration against the live schema each cycle and derives every

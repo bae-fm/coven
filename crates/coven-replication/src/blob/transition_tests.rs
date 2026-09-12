@@ -83,9 +83,14 @@ fn scoped_blob_transition_db(store_dir: StoreDir) -> Database {
         store_dir,
         vec![
             SyncedTable::new("notes", RowIdentity::SharedKey).gated_by("shared"),
-            SyncedTable::new("note_tags", RowIdentity::SharedKey),
-            SyncedTable::new("note_photos", RowIdentity::SharedKey).carries_blob(photo_decl()),
-            SyncedTable::new("note_covers", RowIdentity::SharedKey).carries_blob(cover_decl()),
+            SyncedTable::new("note_tags", RowIdentity::SharedKey)
+                .inherits_audience_through("note_id"),
+            SyncedTable::new("note_photos", RowIdentity::SharedKey)
+                .inherits_audience_through("note_id")
+                .carries_blob(photo_decl()),
+            SyncedTable::new("note_covers", RowIdentity::SharedKey)
+                .inherits_audience_through("note_id")
+                .carries_blob(cover_decl()),
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
         ],
         vec![Migration::run(1, "scoped-blob-transition", |conn| {

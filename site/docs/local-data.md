@@ -85,16 +85,21 @@ on the device that made it.
 gate forms:
 
 ```rust
-SyncedTable::new("todos", RowIdentity::IndependentUuid) // no gate of its own
+SyncedTable::new("todos", RowIdentity::IndependentUuid) // inherits the list's gate
+    .inherits_audience_through("list_id")
 SyncedTable::new("attachments", RowIdentity::IndependentUuid).remote_root()
 SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared")
 SyncedTable::new("workspaces", RowIdentity::IndependentUuid).gated_by_descendants()
 SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience")
 ```
 
-- `new(name, row_identity)` declares the table synced with no gate of its own. With a foreign
-  key into a gated root it inherits that gate; without one it syncs
-  unconditionally.
+- `new(name, row_identity)` declares the table synced with no gate of its own. It
+  syncs unconditionally unless it names a foreign key to inherit a gate through.
+- `inherits_audience_through(column)` names the one foreign key this table takes
+  its gate from, whatever the chain ends at: a gated root, an audience root, a
+  remote root, or a kept ancestor. A table with a foreign key into a gated table
+  must name it — coven refuses to choose among a table's foreign keys, because
+  which one carries the gate is the host's answer, not a fact in the schema.
 - `remote_root()` keeps whole-table row sync and makes blobs on those rows and
   their descendants Remote by construction.
 - `gated_by(column)` makes the table a *gated root*: a row syncs only while its
@@ -107,10 +112,12 @@ SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience")
   the store and this device). Audience roots require an opaque cloud home and are
   covered on the [Circles](/docs/circles#declaring-audience-routing) page.
 
-A table is one of these, never two at once. Two further properties are
-orthogonal to the gate and covered in [Blobs](/docs/blobs): a table may *carry
-a blob* (`carries_blob`), and it may be an *asset*, a decoration like a cover
-image that rides its subject's gate but never keeps that subject alive.
+A table is one root kind or plain, never two at once; `inherits_audience_through`
+is the plain table's own declaration and never combines with a root kind. Two
+further properties are orthogonal to the gate and covered in
+[Blobs](/docs/blobs): a table may *carry a blob* (`carries_blob`), and it may be
+an *asset*, a decoration like a cover image that rides its subject's gate but
+never keeps that subject alive.
 
 ## One tree, both directions
 
@@ -145,11 +152,11 @@ A gated root carries a boolean column. A row whose column is false stays on the
 device that wrote it, and its foreign-key descendants stay with it. With
 `lists.gated_by("shared")`, a private list and its todos never leave the device.
 
-The gate flows down foreign keys: a child row syncs iff the row at the top of
-its foreign-key chain, the gated root, syncs. `todos` reference `lists`, so a
-todo is shared exactly while its list is. The host declares the gate once, on
-the root; coven follows the schema's foreign keys to every descendant, so the
-children need no declaration of their own.
+The gate flows down the declared foreign keys: a child row syncs iff the row at
+the top of its chain, the gated root, syncs. `todos` name `list_id`, so a todo is
+shared exactly while its list is. The host declares the gate once, on the root,
+and each descendant names the one foreign key it inherits through; a chain of
+those declarations reaches every descendant.
 
 ## Remote roots
 
@@ -175,16 +182,18 @@ pointing at nothing.
 `gated_by_descendants()` removes that orphan. The ancestor syncs only while a
 surviving descendant references it. coven infers which descendants count from
 the foreign-key graph: every synced table with a foreign key into the ancestor,
-except a child that already inherits the ancestor's own gate (a many-to-many
-join row, which would otherwise keep its parent alive in a circle). The rule
+except a child that named its foreign key into this ancestor as the one it
+inherits through (a many-to-many join row, which would otherwise keep its parent
+alive in a circle). The rule
 composes up the chain, so a workspace nested in a parent of its own would sync
 only while a surviving workspace, and through it a shared list, kept it alive.
 
 A many-to-many is the case the exception covers. Say todos carry `labels`
 through a `todo_labels` join. Mark `labels` with `gated_by_descendants()`: a
-label syncs while a shared todo wears it. The `todo_labels` join row inherits the
-list's gate downward (it is a descendant of `todos`), so it does not count as a
-keep-child of `todos`; it does count for `labels`.
+label syncs while a shared todo wears it. The join row names `todo_id` as the
+foreign key it inherits through, so it does not count as a keep-child of `todos`;
+it does count for `labels`. Naming `label_id` instead would flip both: the join
+row would take its gate from the label and keep a todo alive.
 
 ## The keep rule
 
