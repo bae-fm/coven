@@ -311,23 +311,6 @@ impl RemoteObjectRecord {
         )
     }
 
-    pub fn candidate_activated_reclaim_receipt(
-        reference: crate::reclaim::ReclaimReceiptRef,
-        canonical_signed_bytes: &[u8],
-        stored_bytes: &[u8],
-        owner: StoreBatchCommitRef,
-    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
-        let object = reference.object.clone();
-        Self::candidate_activated_retained_authority(
-            RetainedAuthorityObjectDomain::ReclaimReceipt { reference },
-            ObjectHash::digest(canonical_signed_bytes),
-            object,
-            canonical_signed_bytes,
-            stored_bytes,
-            owner,
-        )
-    }
-
     pub fn snapshot_activated_blob(
         stored: &crate::blob::locator::StoredBlobRef,
         owner: SnapshotObjectOwner,

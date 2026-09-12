@@ -537,7 +537,7 @@ impl StoreSession<'_> {
         crate::clear_store_reclaim_operation_stuck_on(self.conn, operation_id)
     }
 
-    fn begin_store_reclaim_receipt(
+    fn begin_store_reclaim_completion(
         &mut self,
         expected: DurableStoreReclaimOperation,
         next: DurableStoreReclaimOperation,
@@ -548,11 +548,11 @@ impl StoreSession<'_> {
             .ok_or_else(|| DbError::Message("Store reclaim operation disappeared".to_string()))?;
         if current != expected {
             return Err(DbError::Message(
-                "Store reclaim operation changed before receipt preparation".to_string(),
+                "Store reclaim operation changed before completion preparation".to_string(),
             ));
         }
         let candidate = next.candidate().ok_or_else(|| {
-            DbError::Message("Store reclaim receipt has no publication candidate".to_string())
+            DbError::Message("Store reclaim completion has no publication candidate".to_string())
         })?;
         let active_publication = ActiveStorePublication::for_commit(
             ActiveStorePublicationOwner::Reclaim(next.operation_id()),
@@ -565,7 +565,7 @@ impl StoreSession<'_> {
             super::active_store_publication::ActiveStorePublicationClaim::Acquired => {}
             super::active_store_publication::ActiveStorePublicationClaim::AlreadyOwned => {
                 return Err(DbError::Message(
-                    "Store reclaim receipt owns publication before its journal".to_string(),
+                    "Store reclaim completion owns publication before its journal".to_string(),
                 ));
             }
             super::active_store_publication::ActiveStorePublicationClaim::Occupied(owner) => {
@@ -579,7 +579,7 @@ impl StoreSession<'_> {
                 &tx,
                 self.store_dir,
                 remote,
-                "Store reclaim receipt candidate",
+                "Store reclaim completion candidate",
             )?;
         }
         update_store_reclaim_operation_on(&tx, &expected, &next)?;
@@ -847,10 +847,9 @@ impl StoreDatabase {
             .await
     }
 
-    pub async fn begin_store_reclaim_receipt(
+    pub async fn begin_store_reclaim_completion(
         &self,
         expected: DurableStoreReclaimOperation,
-        object: DurableStoreReclaimObject,
         candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
         let DurableStoreReclaimOperation::AbsentVerified {
@@ -860,26 +859,22 @@ impl StoreDatabase {
         } = &expected
         else {
             return Err(DbError::Message(
-                "only an authorized reclaim can prepare a receipt".to_string(),
+                "only an authorized reclaim can prepare a completion".to_string(),
             ));
         };
-        let next = DurableStoreReclaimOperation::ReceiptCandidate {
+        let remotes = vec![candidate
+            .candidate_remote_object()
+            .map_err(|error| store_reclaim_journal_error(error.into()))?];
+        let next = DurableStoreReclaimOperation::CompletionCandidate {
             authorization: authorization.clone(),
             authorization_activation: authorization_activation.clone(),
-            object: Box::new(object),
             candidate: Box::new(candidate),
         };
         next.validate().map_err(store_reclaim_journal_error)?;
-        let remotes = match &next {
-            DurableStoreReclaimOperation::ReceiptCandidate {
-                object, candidate, ..
-            } => object
-                .remote_objects(candidate)
-                .map_err(store_reclaim_journal_error)?,
-            _ => unreachable!("constructed receipt candidate"),
-        };
-        self.call_store(move |session| session.begin_store_reclaim_receipt(expected, next, remotes))
-            .await
+        self.call_store(move |session| {
+            session.begin_store_reclaim_completion(expected, next, remotes)
+        })
+        .await
     }
 
     pub async fn mark_store_reclaim_target_absent(

@@ -470,27 +470,6 @@ mod test_device {
                 &self.device_signer,
             )
         }
-
-        pub fn sign_reclaim_receipt_for_test(
-            &self,
-            store_root_hash: coven_protocol::store_commit::ObjectHash,
-            authorization: coven_protocol::reclaim::ReclaimAuthorizationRef,
-            provider_admin_state: coven_protocol::circle_control::StoreMembershipStateRef,
-            provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId,
-        ) -> Result<
-            coven_protocol::reclaim::ReclaimReceipt,
-            coven_protocol::store_commit::StoreProtocolError,
-        > {
-            coven_protocol::reclaim::ReclaimReceipt::signed(
-                store_root_hash,
-                authorization,
-                provider_admin_state,
-                provider_admin_grant,
-                self.registration.reference().clone(),
-                self.registration.value(),
-                &self.device_signer,
-            )
-        }
     }
 
     #[derive(Clone)]

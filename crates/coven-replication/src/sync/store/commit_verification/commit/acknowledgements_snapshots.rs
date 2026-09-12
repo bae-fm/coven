@@ -374,51 +374,6 @@ impl<'a> StoreCommitVerifier<'a> {
         .await
     }
 
-    pub(crate) async fn load_reclaim_receipt(
-        &self,
-        reference: &ReclaimReceiptRef,
-    ) -> Result<VerifiedReclaimReceipt, StoreObjectError> {
-        let context = ProtocolObjectContext::signed_plaintext(
-            self.root.reference().store_root_hash,
-            ProtocolObjectDomain::StoreReclaimReceipt,
-        );
-        let prefix = reclaim_receipt_semantic_prefix(reference.receipt_hash);
-        let bytes = self
-            .storage
-            .read_protocol_object(&context, &reference.object, &prefix)
-            .await?;
-        let unverified: ReclaimReceipt =
-            serde_json::from_slice(&bytes).map_err(|error| StoreObjectError::InvalidObject {
-                semantic_prefix: prefix.clone(),
-                key: reference.object.slot().logical_key().to_string(),
-                source: Box::new(StoreProtocolError::from(error)),
-            })?;
-        let executor = self.load_registration(&unverified.executor).await?.value;
-        let receipt = reference
-            .verify(&unverified, &executor)
-            .and_then(|()| {
-                verify_store_root(
-                    self.root.reference().store_root_hash,
-                    unverified.store_root_hash,
-                )?;
-                Ok(unverified)
-            })
-            .map_err(|source| StoreObjectError::InvalidObject {
-                semantic_prefix: prefix,
-                key: reference.object.slot().logical_key().to_string(),
-                source: Box::new(source),
-            })?;
-        Ok(VerifiedReclaimReceipt {
-            receipt: VerifiedObject {
-                value: receipt,
-                bytes,
-                semantic_hash: reference.receipt_hash,
-                object: reference.object.clone(),
-            },
-            executor,
-        })
-    }
-
     /// The acknowledgement one sequence below `successor`, from the cache when
     /// this verifier already holds it and from the provider otherwise.
     ///

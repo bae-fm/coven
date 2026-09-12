@@ -44,7 +44,7 @@ impl StoreBatchCommit {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn signed_reclaim_receipt(
+    pub fn signed_reclaim_completion(
         store_root_hash: ObjectHash,
         write_id: WriteId,
         coord: StoreCommitCoord,
@@ -54,7 +54,7 @@ impl StoreBatchCommit {
         publication_base: StorePublicationBase,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        receipt: crate::reclaim::ReclaimReceiptRef,
+        completion: crate::reclaim::ReclaimCompletion,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         validate_commit_envelope(
@@ -77,8 +77,8 @@ impl StoreBatchCommit {
             membership_state,
             device_state,
             None,
-            StoreCommitBody::ReclaimReceipt {
-                receipt: Box::new(receipt),
+            StoreCommitBody::ReclaimCompletion {
+                completion: Box::new(completion),
             },
             signer,
         )

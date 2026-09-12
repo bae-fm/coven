@@ -376,14 +376,6 @@ pub(super) fn validate_retained_authority_identity(
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
-        RetainedAuthorityObjectDomain::ReclaimReceipt { reference } => {
-            let value: crate::reclaim::ReclaimReceipt =
-                serde_json::from_slice(canonical_semantic_bytes)?;
-            reference.verify_identity(&value)?;
-            if reference.object != identity.object {
-                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-            }
-        }
         RetainedAuthorityObjectDomain::CircleEpochCloseIntent {
             circle_id,
             reference,

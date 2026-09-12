@@ -12,9 +12,8 @@ use coven_protocol::objects::{
     ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
 };
 use coven_protocol::reclaim::{
-    reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
-    reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
-    ReclaimEvidence, ReclaimReceipt, ReclaimReceiptRef,
+    reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix, ReclaimAuthorization,
+    ReclaimAuthorizationRef, ReclaimEvidence,
 };
 use coven_protocol::remote_object;
 use coven_protocol::store_commit::*;
@@ -192,12 +191,6 @@ impl VerifiedMergeMembershipClosure {
 pub(crate) struct VerifiedReclaimAuthorization {
     pub(crate) authorization: VerifiedObject<ReclaimAuthorization>,
     pub(crate) evidence: VerifiedObject<ReclaimEvidence>,
-}
-
-#[derive(Debug)]
-pub(crate) struct VerifiedReclaimReceipt {
-    pub(crate) receipt: VerifiedObject<ReclaimReceipt>,
-    pub(crate) executor: StoreDeviceRegistration,
 }
 
 impl<'a> StoreCommitVerifier<'a> {

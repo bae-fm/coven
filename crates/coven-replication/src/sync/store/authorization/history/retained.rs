@@ -154,11 +154,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let predecessors = self
             .retained_history_checkpoints(frontier.values().cloned().collect())
             .await?;
-        let receipts = predecessors
+        let completions = predecessors
             .iter()
             .filter_map(|checkpoint| match checkpoint {
                 coven_database::RetainedMergeHistoryCheckpoint::Commit(input) => {
-                    input.commit().reclaim_receipt().cloned()
+                    input.commit().reclaim_completion().cloned()
                 }
                 coven_database::RetainedMergeHistoryCheckpoint::Snapshot(_) => None,
             })
@@ -233,7 +233,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 .map_err(pull::StorePullError::Protocol)?;
             summary
                 .reclaim
-                .retire_receipts(&receipts)
+                .retire_completions(&completions)
                 .map_err(pull::StorePullError::Protocol)?;
         }
         self.history_verifier

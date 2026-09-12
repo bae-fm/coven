@@ -112,7 +112,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     let (target, package_remote) =
         reclaim_target_package("closed-reclaimed-package", &target_activation);
     let authorization_activation = reclaim_commit("closed-reclaimed-package/authority", 2);
-    let receipt_activation = reclaim_commit("closed-reclaimed-package/receipt", 3);
+    let completion_activation = reclaim_commit("closed-reclaimed-package/completion", 3);
     let authorization = coven_protocol::reclaim::ReclaimAuthorizationRef {
         authorization_hash: ObjectHash::digest(b"closed reclaim authorization"),
         evidence: coven_protocol::reclaim::ReclaimEvidenceRef {
@@ -172,28 +172,22 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         .await
         .is_err());
 
-    let receipt = coven_protocol::reclaim::ReclaimReceiptRef {
-        receipt_hash: ObjectHash::digest(b"closed reclaim receipt"),
-        authorization: authorization.clone(),
-        object: reclaim_test_object("store-v1/reclaim/receipts/closed.json"),
-    };
-    let receipted = ReclaimedStorePackage::receipted(
+    let completed = ReclaimedStorePackage::completed(
         authorization,
         authorization_activation,
-        receipt,
-        receipt_activation,
+        completion_activation,
     )
-    .expect("valid receipt closure");
+    .expect("valid completion closure");
     closure_db
-        .record_reclaimed_store_package_for_test(receipted.clone())
+        .record_reclaimed_store_package_for_test(completed.clone())
         .await
-        .expect("attach receipt to reclaimed package");
+        .expect("attach completion to reclaimed package");
     assert_eq!(
         closure_db
             .reclaimed_store_package_for_test(object_id)
             .await
-            .expect("load receipted closure"),
-        Some(receipted)
+            .expect("load completed closure"),
+        Some(completed)
     );
 }
 

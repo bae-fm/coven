@@ -483,7 +483,7 @@ async fn exercise_sequence(seed: u64) {
                 before_rows,
                 "{context}: compaction changed the publisher's private/shared projection"
             );
-            // Reclaim publishes its authorization and receipt commits. Both
+            // Reclaim publishes its authorization and completion commits. Both
             // receivers must observe that suffix before their state is compared.
             online
                 .pull(&format!("{context}, online after reclaim suffix"))

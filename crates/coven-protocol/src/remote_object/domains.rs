@@ -336,9 +336,6 @@ pub enum RetainedAuthorityObjectDomain {
     ReclaimAuthorization {
         reference: crate::reclaim::ReclaimAuthorizationRef,
     },
-    ReclaimReceipt {
-        reference: crate::reclaim::ReclaimReceiptRef,
-    },
     CircleEpochCloseIntent {
         family: CandidateFamilyId,
         circle_id: CircleId,

@@ -33,7 +33,7 @@ pub(crate) enum StoreOperationBatch {
         transition: super::membership::MergeMembershipHeadTransition,
     },
     ReclaimAuthorization(Box<coven_protocol::reclaim::ReclaimAuthorizationRef>),
-    ReclaimReceipt(Box<coven_protocol::reclaim::ReclaimReceiptRef>),
+    ReclaimCompletion(coven_protocol::reclaim::ReclaimCompletion),
     OwnerPromotionRequest(super::store_commit::OwnerPromotionRequest),
     MergeMembershipActivation {
         transition: super::membership::MergeMembershipHeadTransition,
@@ -327,19 +327,6 @@ impl StoreOperationCommitPlan {
             target,
             target_registration,
             owner_grant,
-        )
-    }
-
-    pub(crate) fn sign_reclaim_receipt(
-        &self,
-        authorization: coven_protocol::reclaim::ReclaimAuthorizationRef,
-        provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId,
-    ) -> Result<coven_protocol::reclaim::ReclaimReceipt, StoreError> {
-        self.writer.sign_reclaim_receipt(
-            self.root.store_root_hash,
-            authorization,
-            self.membership_state.clone(),
-            provider_admin_grant,
         )
     }
 

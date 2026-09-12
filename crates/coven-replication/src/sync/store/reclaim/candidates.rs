@@ -61,53 +61,55 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         operation: DurableStoreReclaimOperation,
     ) -> Result<(), StoreReclaimError> {
         let database = self.database.clone();
-        let (object, candidate) = match &operation {
-            DurableStoreReclaimOperation::AuthorizationCandidate { object, candidate }
-            | DurableStoreReclaimOperation::ReceiptCandidate {
-                object, candidate, ..
-            } => (object.clone(), candidate.clone()),
+        let candidate = match &operation {
+            DurableStoreReclaimOperation::AuthorizationCandidate { object, candidate } => {
+                let object = object.clone();
+                let candidate = candidate.clone();
+                Box::pin(create_reclaim_exact_objects(
+                    object.as_ref(),
+                    self.storage.as_ref(),
+                ))
+                .await
+                .map_err(StoreReclaimError::from)?;
+                for remote in object
+                    .remote_objects(&candidate)
+                    .map_err(StoreReclaimError::from)?
+                {
+                    if matches!(
+                        remote.record(),
+                        coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+                            if matches!(
+                                record.identity.domain,
+                                coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
+                                    | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
+                            )
+                    ) {
+                        database
+                            .mark_reusable_retained_authority_uploaded(remote.into_record())
+                            .await?;
+                    }
+                }
+                candidate
+            }
+            DurableStoreReclaimOperation::CompletionCandidate { candidate, .. } => {
+                candidate.clone()
+            }
             _ => {
                 return Err(StoreReclaimError::Authorization(
                     "Store reclaim journal has no publication candidate".to_string(),
                 ));
             }
         };
-        Box::pin(create_reclaim_exact_objects(
-            object.as_ref(),
-            self.storage.as_ref(),
-        ))
-        .await
-        .map_err(StoreReclaimError::from)?;
-        for remote in object
-            .remote_objects(&candidate)
-            .map_err(StoreReclaimError::from)?
-        {
-            if matches!(
-                remote.record(),
-                coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
-                    if matches!(
-                        record.identity.domain,
-                        coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
-                            | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
-                            | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
-                    )
-            ) {
-                database
-                    .mark_reusable_retained_authority_uploaded(remote.into_record())
-                    .await?;
-            }
-        }
         let _authorship = database.author_own_stream().await;
         Box::pin(self.writer.publish_prepared(candidate, None, None)).await?;
         Ok(())
     }
 
-    pub(super) async fn prepare_receipt(
+    pub(super) async fn prepare_completion(
         &mut self,
         operation: DurableStoreReclaimOperation,
     ) -> Result<(), StoreReclaimError> {
         let database = self.database.clone();
-        let root = self.root.clone();
         let membership = self.membership.clone();
         let DurableStoreReclaimOperation::AbsentVerified {
             authorization,
@@ -139,41 +141,19 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                     "local Store device is not an effective provider administrator".to_string(),
                 )
             })?;
-        let receipt = plan
-            .sign_reclaim_receipt(authorization.clone(), provider_admin_grant)
-            .map_err(StoreReclaimError::from)?;
-        let context = ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::StoreReclaimReceipt,
-        );
-        let prefix = reclaim_receipt_semantic_prefix(receipt.receipt_hash());
-        let slot = self
-            .storage
-            .allocate_protocol_slot(&context, &prefix, ".json")
-            .await?;
-        let prepared =
-            self.storage
-                .prepare_protocol_object(&context, slot, &prefix, receipt.to_bytes())?;
-        let receipt_ref = ReclaimReceiptRef::from_receipt(&receipt, prepared.reference().clone());
         let candidate = self
             .writer
             .prepare_candidate(
                 &plan,
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ReclaimReceipt(Box::new(
-                    receipt_ref.clone(),
-                )),
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ReclaimCompletion(
+                    ReclaimCompletion {
+                        authorization: authorization.clone(),
+                        provider_admin_grant,
+                    },
+                ),
             )
             .await?;
-        Box::pin(database.begin_store_reclaim_receipt(
-            operation,
-            DurableStoreReclaimObject::Receipt {
-                receipt_ref,
-                receipt,
-                receipt_prepared: prepared,
-            },
-            candidate,
-        ))
-        .await?;
+        Box::pin(database.begin_store_reclaim_completion(operation, candidate)).await?;
         Ok(())
     }
 

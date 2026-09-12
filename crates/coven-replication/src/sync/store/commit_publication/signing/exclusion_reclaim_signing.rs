@@ -131,23 +131,4 @@ impl LocalStoreWriter {
         )
         .map_err(crate::sync::store::StoreError::from)
     }
-
-    pub(crate) fn sign_reclaim_receipt(
-        &self,
-        root_hash: coven_protocol::store_commit::ObjectHash,
-        authorization: coven_protocol::reclaim::ReclaimAuthorizationRef,
-        membership_state: coven_protocol::circle_control::StoreMembershipStateRef,
-        provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId,
-    ) -> Result<coven_protocol::reclaim::ReclaimReceipt, crate::sync::store::StoreError> {
-        coven_protocol::reclaim::ReclaimReceipt::signed(
-            root_hash,
-            authorization,
-            membership_state,
-            provider_admin_grant,
-            self.registration.reference().clone(),
-            self.registration.value(),
-            &self.device_signer,
-        )
-        .map_err(crate::sync::store::StoreError::from)
-    }
 }

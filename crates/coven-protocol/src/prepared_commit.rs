@@ -170,7 +170,7 @@ impl std::ops::DerefMut for PreparedStoreOperationCommit {
 }
 
 impl PreparedStoreOperationCommit {
-    pub(crate) fn candidate_remote_object(
+    pub fn candidate_remote_object(
         &self,
     ) -> Result<crate::remote_object::ClosedRemoteObject, PreparedCommitError> {
         let commit_bytes = self.commit.to_bytes();

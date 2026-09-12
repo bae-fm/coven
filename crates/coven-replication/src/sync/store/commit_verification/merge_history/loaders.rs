@@ -227,16 +227,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
     }
 
-    pub(crate) async fn load_reclaim_receipt(
-        &self,
-        reference: &coven_protocol::reclaim::ReclaimReceiptRef,
-    ) -> Result<
-        crate::sync::store::commit_verification::commit::VerifiedReclaimReceipt,
-        StoreObjectError,
-    > {
-        self.commit_verifier.load_reclaim_receipt(reference).await
-    }
-
     pub(crate) async fn load_owner_recovery_node(
         &self,
         reference: &OwnerRecoveryNodeRef,
@@ -366,32 +356,24 @@ impl<'a> MergeHistoryVerifier<'a> {
                 }
             }?;
         }
-        if let Some(reference) = commit.reclaim_receipt() {
-            let opened = self
-                .load_reclaim_receipt(reference)
-                .await
-                .map_err(RegistrationLoadError::Object)?;
-            let receipt = &opened.receipt.value;
-            if receipt.executor != commit.author_registration
-                || opened.executor != *activating_author
-                || receipt.provider_admin_state != commit.membership_state
-                || !predecessor_verifies_provider_administrator_grant(
-                    predecessor,
-                    &receipt.provider_admin_grant,
-                    &receipt.executor,
-                )
-            {
+        if let Some(completion) = commit.reclaim_completion() {
+            if !predecessor_verifies_provider_administrator_grant(
+                predecessor,
+                &completion.provider_admin_grant,
+                &commit.author_registration,
+            ) {
                 return Err(RegistrationLoadError::Invalid(
-                    "reclaim receipt signer is not the effective provider administrator at its exact predecessor"
+                    "reclaim completion author is not the effective provider administrator at its exact predecessor"
                         .to_string(),
                 ));
             }
             if !accepted
-                .contains_reclaim_authorization(&receipt.authorization)
+                .contains_reclaim_authorization(&completion.authorization)
                 .map_err(registration_attempt_error)?
             {
                 return Err(RegistrationLoadError::Invalid(
-                    "reclaim receipt authorization is absent from predecessor history".to_string(),
+                    "reclaim completion authorization is absent from predecessor history"
+                        .to_string(),
                 ));
             }
         }

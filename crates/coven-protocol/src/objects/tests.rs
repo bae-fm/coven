@@ -73,11 +73,6 @@ fn every_protocol_domain_requires_its_exact_path_grammar() {
             cross_domain: "store-v1/reclaim/evidence/hash",
         },
         DomainPathCase {
-            domain: ProtectedObjectDomain::StoreReclaimReceipt,
-            valid: &["store-v1/reclaim/receipts/hash"],
-            cross_domain: "store-v1/reclaim/authorizations/hash",
-        },
-        DomainPathCase {
             domain: ProtectedObjectDomain::ProviderAccessGrant,
             valid: &["store-v1/provider-access/grants/grant"],
             cross_domain: "store-v1/provider-access/withdrawals/grant",

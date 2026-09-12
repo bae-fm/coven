@@ -565,8 +565,8 @@ pub enum StoreCommitBody {
     ReclaimAuthorization {
         authorization: Box<crate::reclaim::ReclaimAuthorizationRef>,
     },
-    ReclaimReceipt {
-        receipt: Box<crate::reclaim::ReclaimReceiptRef>,
+    ReclaimCompletion {
+        completion: Box<crate::reclaim::ReclaimCompletion>,
     },
     OwnerPromotionRequest {
         request: Box<OwnerPromotionRequest>,

@@ -6,94 +6,49 @@ use coven_protocol::objects::PreparedExactObject;
 use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
 use coven_protocol::reclaim::{
     ReclaimAuthorization, ReclaimAuthorizationRef, ReclaimEvidence, ReclaimEvidenceRef,
-    ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
+    ReclaimTarget,
 };
 use coven_protocol::remote_object::{RemoteObjectRecord, RemoteObjectRecordError};
 use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
 
+/// The exact objects one reclaim authorization publishes: the Owner's sealed
+/// evidence and the public authorization it signs, each with the prepared
+/// object its candidate commit activates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum DurableStoreReclaimObject {
-    Authorization {
-        evidence_ref: ReclaimEvidenceRef,
-        evidence: ReclaimEvidence,
-        evidence_prepared: PreparedExactObject,
-        authorization_ref: ReclaimAuthorizationRef,
-        authorization: ReclaimAuthorization,
-        authorization_prepared: PreparedExactObject,
-    },
-    Receipt {
-        receipt_ref: ReclaimReceiptRef,
-        receipt: ReclaimReceipt,
-        receipt_prepared: PreparedExactObject,
-    },
+#[serde(deny_unknown_fields)]
+pub struct DurableStoreReclaimAuthorization {
+    pub evidence_ref: ReclaimEvidenceRef,
+    pub evidence: ReclaimEvidence,
+    pub evidence_prepared: PreparedExactObject,
+    pub authorization_ref: ReclaimAuthorizationRef,
+    pub authorization: ReclaimAuthorization,
+    pub authorization_prepared: PreparedExactObject,
 }
 
-impl DurableStoreReclaimObject {
-    pub fn authorization_ref(&self) -> &ReclaimAuthorizationRef {
-        match self {
-            Self::Authorization {
-                authorization_ref, ..
-            } => authorization_ref,
-            Self::Receipt { receipt_ref, .. } => &receipt_ref.authorization,
-        }
-    }
-
+impl DurableStoreReclaimAuthorization {
     pub fn validate(&self) -> Result<(), StoreReclaimJournalError> {
-        match self {
-            Self::Authorization {
-                evidence_ref,
-                evidence,
-                evidence_prepared,
-                authorization_ref,
-                authorization,
-                authorization_prepared,
-            } => {
-                evidence_ref
-                    .verify(evidence)
-                    .map_err(StoreReclaimJournalError::from)?;
-                authorization_ref
-                    .verify_identity(authorization)
-                    .map_err(StoreReclaimJournalError::from)?;
-                if evidence_prepared.reference() != &evidence_ref.object
-                    || authorization_prepared.reference() != &authorization_ref.object
-                    || authorization_ref.evidence != *evidence_ref
-                    || authorization.evidence != *evidence_ref
-                    || authorization.target != evidence.claim.target()
-                    || authorization.store_root_hash != evidence.store_root_hash
-                {
-                    return Err(StoreReclaimJournalError::Invalid(
-                        "reclaim authorization graph has inconsistent exact identities".to_string(),
-                    ));
-                }
-            }
-            Self::Receipt {
-                receipt_ref,
-                receipt,
-                receipt_prepared,
-            } => {
-                receipt_ref
-                    .verify_identity(receipt)
-                    .map_err(StoreReclaimJournalError::from)?;
-                if receipt_prepared.reference() != &receipt_ref.object {
-                    return Err(StoreReclaimJournalError::Invalid(
-                        "reclaim receipt differs from its prepared exact object".to_string(),
-                    ));
-                }
-            }
+        self.evidence_ref
+            .verify(&self.evidence)
+            .map_err(StoreReclaimJournalError::from)?;
+        self.authorization_ref
+            .verify_identity(&self.authorization)
+            .map_err(StoreReclaimJournalError::from)?;
+        if self.evidence_prepared.reference() != &self.evidence_ref.object
+            || self.authorization_prepared.reference() != &self.authorization_ref.object
+            || self.authorization_ref.evidence != self.evidence_ref
+            || self.authorization.evidence != self.evidence_ref
+            || self.authorization.target != self.evidence.claim.target()
+            || self.authorization.store_root_hash != self.evidence.store_root_hash
+        {
+            return Err(StoreReclaimJournalError::Invalid(
+                "reclaim authorization graph has inconsistent exact identities".to_string(),
+            ));
         }
         Ok(())
     }
 
     pub fn commit_names_object(&self, candidate: &PreparedStoreOperationCommit) -> bool {
-        match self {
-            Self::Authorization {
-                authorization_ref, ..
-            } => candidate.commit.reclaim_authorization() == Some(authorization_ref),
-            Self::Receipt { receipt_ref, .. } => {
-                candidate.commit.reclaim_receipt() == Some(receipt_ref)
-            }
-        }
+        candidate.commit.reclaim_authorization() == Some(&self.authorization_ref)
     }
 
     pub fn remote_objects(
@@ -108,39 +63,20 @@ impl DurableStoreReclaimObject {
             ));
         }
         let owner = candidate.reference.clone();
-        let authorities = match self {
-            Self::Authorization {
-                evidence_ref,
-                evidence,
-                evidence_prepared,
-                authorization_ref,
-                authorization,
-                authorization_prepared,
-            } => vec![
-                RemoteObjectRecord::candidate_activated_reclaim_evidence(
-                    evidence_ref.clone(),
-                    &evidence.to_bytes(),
-                    evidence_prepared.stored_bytes(),
-                    owner.clone(),
-                )?,
-                RemoteObjectRecord::candidate_activated_reclaim_authorization(
-                    authorization_ref.clone(),
-                    &authorization.to_bytes(),
-                    authorization_prepared.stored_bytes(),
-                    owner,
-                )?,
-            ],
-            Self::Receipt {
-                receipt_ref,
-                receipt,
-                receipt_prepared,
-            } => vec![RemoteObjectRecord::candidate_activated_reclaim_receipt(
-                receipt_ref.clone(),
-                &receipt.to_bytes(),
-                receipt_prepared.stored_bytes(),
+        let authorities = vec![
+            RemoteObjectRecord::candidate_activated_reclaim_evidence(
+                self.evidence_ref.clone(),
+                &self.evidence.to_bytes(),
+                self.evidence_prepared.stored_bytes(),
+                owner.clone(),
+            )?,
+            RemoteObjectRecord::candidate_activated_reclaim_authorization(
+                self.authorization_ref.clone(),
+                &self.authorization.to_bytes(),
+                self.authorization_prepared.stored_bytes(),
                 owner,
-            )?],
-        };
+            )?,
+        ];
         candidate
             .retained_authority_remote_objects(authorities)
             .map_err(StoreReclaimJournalError::Outbound)
@@ -154,11 +90,10 @@ pub enum ReclaimedStorePackage {
         authorization: ReclaimAuthorizationRef,
         authorization_activation: StoreBatchCommitRef,
     },
-    Receipted {
+    Completed {
         authorization: ReclaimAuthorizationRef,
         authorization_activation: StoreBatchCommitRef,
-        receipt: ReclaimReceiptRef,
-        receipt_activation: StoreBatchCommitRef,
+        completion_activation: StoreBatchCommitRef,
     },
 }
 
@@ -175,17 +110,15 @@ impl ReclaimedStorePackage {
         Ok(value)
     }
 
-    pub fn receipted(
+    pub fn completed(
         authorization: ReclaimAuthorizationRef,
         authorization_activation: StoreBatchCommitRef,
-        receipt: ReclaimReceiptRef,
-        receipt_activation: StoreBatchCommitRef,
+        completion_activation: StoreBatchCommitRef,
     ) -> Result<Self, StoreReclaimJournalError> {
-        let value = Self::Receipted {
+        let value = Self::Completed {
             authorization,
             authorization_activation,
-            receipt,
-            receipt_activation,
+            completion_activation,
         };
         value.validate()?;
         Ok(value)
@@ -193,7 +126,7 @@ impl ReclaimedStorePackage {
 
     pub fn authorization(&self) -> &ReclaimAuthorizationRef {
         match self {
-            Self::AbsentVerified { authorization, .. } | Self::Receipted { authorization, .. } => {
+            Self::AbsentVerified { authorization, .. } | Self::Completed { authorization, .. } => {
                 authorization
             }
         }
@@ -205,7 +138,7 @@ impl ReclaimedStorePackage {
                 authorization_activation,
                 ..
             }
-            | Self::Receipted {
+            | Self::Completed {
                 authorization_activation,
                 ..
             } => authorization_activation,
@@ -230,18 +163,14 @@ impl ReclaimedStorePackage {
                 "reclaimed package aliases authority or crosses Store histories".to_string(),
             ));
         }
-        if let Self::Receipted {
-            receipt,
-            receipt_activation,
+        if let Self::Completed {
+            completion_activation,
             ..
         } = self
         {
-            if &receipt.authorization != authorization
-                || receipt.object == *authorization.target().object()
-                || receipt_activation == authorization_activation
-            {
+            if completion_activation == authorization_activation {
                 return Err(StoreReclaimJournalError::Invalid(
-                    "reclaim receipt does not close its exact authorization history".to_string(),
+                    "reclaim completion does not close its exact authorization history".to_string(),
                 ));
             }
         }
@@ -271,7 +200,7 @@ fn validate_reclaim_identity(
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DurableStoreReclaimOperation {
     AuthorizationCandidate {
-        object: Box<DurableStoreReclaimObject>,
+        object: Box<DurableStoreReclaimAuthorization>,
         candidate: Box<PreparedStoreOperationCommit>,
     },
     Authorized {
@@ -283,17 +212,15 @@ pub enum DurableStoreReclaimOperation {
         authorization_activation: StoreBatchCommitRef,
         target: ReclaimTarget,
     },
-    ReceiptCandidate {
+    CompletionCandidate {
         authorization: ReclaimAuthorizationRef,
         authorization_activation: StoreBatchCommitRef,
-        object: Box<DurableStoreReclaimObject>,
         candidate: Box<PreparedStoreOperationCommit>,
     },
     Completed {
         authorization: ReclaimAuthorizationRef,
         authorization_activation: StoreBatchCommitRef,
-        receipt: ReclaimReceiptRef,
-        receipt_activation: StoreBatchCommitRef,
+        completion_activation: StoreBatchCommitRef,
     },
 }
 
@@ -317,10 +244,10 @@ impl DurableStoreReclaimOperation {
 
     pub fn authorization(&self) -> &ReclaimAuthorizationRef {
         match self {
-            Self::AuthorizationCandidate { object, .. } => object.authorization_ref(),
+            Self::AuthorizationCandidate { object, .. } => &object.authorization_ref,
             Self::Authorized { authorization, .. }
             | Self::AbsentVerified { authorization, .. }
-            | Self::ReceiptCandidate { authorization, .. }
+            | Self::CompletionCandidate { authorization, .. }
             | Self::Completed { authorization, .. } => authorization,
         }
     }
@@ -328,17 +255,18 @@ impl DurableStoreReclaimOperation {
     pub fn candidate(&self) -> Option<&PreparedStoreOperationCommit> {
         match self {
             Self::AuthorizationCandidate { candidate, .. }
-            | Self::ReceiptCandidate { candidate, .. } => Some(candidate),
+            | Self::CompletionCandidate { candidate, .. } => Some(candidate),
             Self::Authorized { .. } | Self::AbsentVerified { .. } | Self::Completed { .. } => None,
         }
     }
 
-    pub fn object(&self) -> Option<&DurableStoreReclaimObject> {
+    pub fn object(&self) -> Option<&DurableStoreReclaimAuthorization> {
         match self {
-            Self::AuthorizationCandidate { object, .. } | Self::ReceiptCandidate { object, .. } => {
-                Some(object)
-            }
-            Self::Authorized { .. } | Self::AbsentVerified { .. } | Self::Completed { .. } => None,
+            Self::AuthorizationCandidate { object, .. } => Some(object),
+            Self::Authorized { .. }
+            | Self::AbsentVerified { .. }
+            | Self::CompletionCandidate { .. }
+            | Self::Completed { .. } => None,
         }
     }
 
@@ -375,39 +303,36 @@ impl DurableStoreReclaimOperation {
                     authorization_activation.clone(),
                 )?;
             }
-            Self::ReceiptCandidate {
+            Self::CompletionCandidate {
                 authorization,
                 authorization_activation,
-                object,
                 candidate,
-                ..
             } => {
                 validate_reclaim_identity(authorization, authorization_activation)?;
-                object.validate()?;
                 candidate
                     .reference
                     .verify_commit(&candidate.commit)
                     .map_err(StoreReclaimJournalError::from)?;
-                if object.authorization_ref() != authorization
-                    || !matches!(&**object, DurableStoreReclaimObject::Receipt { .. })
-                    || !object.commit_names_object(candidate)
+                if candidate
+                    .commit
+                    .reclaim_completion()
+                    .map(|completion| &completion.authorization)
+                    != Some(authorization)
                 {
                     return Err(StoreReclaimJournalError::Invalid(
-                        "reclaim receipt candidate changes its authorization".to_string(),
+                        "reclaim completion candidate changes its authorization".to_string(),
                     ));
                 }
             }
             Self::Completed {
                 authorization,
                 authorization_activation,
-                receipt,
-                receipt_activation,
+                completion_activation,
             } => {
-                ReclaimedStorePackage::receipted(
+                ReclaimedStorePackage::completed(
                     authorization.clone(),
                     authorization_activation.clone(),
-                    receipt.clone(),
-                    receipt_activation.clone(),
+                    completion_activation.clone(),
                 )?;
             }
         }

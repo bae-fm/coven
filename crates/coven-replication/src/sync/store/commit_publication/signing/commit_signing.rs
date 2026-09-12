@@ -515,8 +515,8 @@ impl LocalStoreWriter {
                     signer,
                 )
             }
-            StoreOperationBatch::ReclaimReceipt(receipt) => {
-                StoreBatchCommit::signed_reclaim_receipt(
+            StoreOperationBatch::ReclaimCompletion(completion) => {
+                StoreBatchCommit::signed_reclaim_completion(
                     root_hash,
                     write_id,
                     context.coord,
@@ -526,7 +526,7 @@ impl LocalStoreWriter {
                     context.publication_base,
                     context.membership_state,
                     context.device_state,
-                    *receipt,
+                    completion,
                     signer,
                 )
             }

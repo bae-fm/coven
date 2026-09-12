@@ -24,7 +24,7 @@ pub(crate) fn membership_authorizes(
                     })
         }
         store_commit::StoreCommitBody::ReclaimAuthorization { .. }
-        | store_commit::StoreCommitBody::ReclaimReceipt { .. }
+        | store_commit::StoreCommitBody::ReclaimCompletion { .. }
         | store_commit::StoreCommitBody::AbandonCandidates { .. } => true,
     }
 }

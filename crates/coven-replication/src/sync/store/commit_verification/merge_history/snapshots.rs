@@ -211,11 +211,11 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .map_err(StorePullError::Protocol)?;
             canonical
                 .reclaim
-                .retire_receipts(state.commit_refs.iter().filter_map(|reference| {
+                .retire_completions(state.commit_refs.iter().filter_map(|reference| {
                     self.history
                         .commits
                         .get(reference)
-                        .and_then(|commit| commit.verified.value().reclaim_receipt())
+                        .and_then(|commit| commit.verified.value().reclaim_completion())
                 }))
                 .map_err(StorePullError::Protocol)?;
         }

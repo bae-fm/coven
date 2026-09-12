@@ -61,7 +61,7 @@ pub(super) fn validate_commit_body(
             )?;
         }
         StoreCommitBody::ReclaimAuthorization { .. } => {}
-        StoreCommitBody::ReclaimReceipt { .. } => {}
+        StoreCommitBody::ReclaimCompletion { .. } => {}
         StoreCommitBody::OwnerPromotionRequest { request } => {
             if request.store_root_hash != store_root_hash
                 || request.promoter_registration != *author
@@ -257,7 +257,7 @@ pub(crate) fn candidate_manifest(
             }
         }
         StoreCommitBody::ReclaimAuthorization { .. } => {}
-        StoreCommitBody::ReclaimReceipt { .. } => {}
+        StoreCommitBody::ReclaimCompletion { .. } => {}
         StoreCommitBody::OwnerPromotionRequest { .. }
         | StoreCommitBody::AbandonCandidates { .. } => {}
     }

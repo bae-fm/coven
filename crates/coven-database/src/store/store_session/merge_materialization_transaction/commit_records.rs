@@ -161,7 +161,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     if matches!(
                         &expected,
                         DurableStoreReclaimOperation::AuthorizationCandidate { object, .. }
-                            if object.authorization_ref() == authorization
+                            if object.authorization_ref == *authorization
                     ) =>
                 {
                     update_store_reclaim_operation_on(self.store.transaction, &expected, &next)?;
@@ -180,17 +180,17 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 None => insert_store_reclaim_operation_on(self.store.transaction, &next)?,
             }
         }
-        if let Some(receipt) = commit.reclaim_receipt() {
-            let operation_id = receipt.authorization.authorization_hash;
+        if let Some(completion) = commit.reclaim_completion() {
+            let operation_id = completion.authorization.authorization_hash;
             let expected = load_store_reclaim_operation_on(self.store.transaction, operation_id)?
                 .ok_or_else(|| {
-                DbError::Message("reclaim receipt has no durable authorization".to_string())
+                DbError::Message("reclaim completion has no durable authorization".to_string())
             })?;
             let (authorization, authorization_activation, completes_local_candidate) =
                 match &expected {
                     DurableStoreReclaimOperation::AuthorizationCandidate { .. } => {
                         return Err(DbError::Message(
-                            "reclaim receipt precedes authorization activation".to_string(),
+                            "reclaim completion precedes authorization activation".to_string(),
                         ));
                     }
                     DurableStoreReclaimOperation::Authorized {
@@ -206,46 +206,34 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                         authorization_activation.clone(),
                         false,
                     ),
-                    DurableStoreReclaimOperation::ReceiptCandidate {
+                    DurableStoreReclaimOperation::CompletionCandidate {
                         authorization,
                         authorization_activation,
-                        object,
-                        ..
-                    } if matches!(
-                        &**object,
-                        crate::DurableStoreReclaimObject::Receipt {
-                            receipt_ref,
-                            ..
-                        } if receipt_ref == receipt
-                    ) =>
-                    {
-                        (
-                            authorization.clone(),
-                            authorization_activation.clone(),
-                            true,
-                        )
-                    }
-                    DurableStoreReclaimOperation::ReceiptCandidate { .. } => {
+                        candidate,
+                    } if candidate.reference == *commit_ref => (
+                        authorization.clone(),
+                        authorization_activation.clone(),
+                        true,
+                    ),
+                    DurableStoreReclaimOperation::CompletionCandidate { .. } => {
                         return Err(DbError::Message(
-                            "reclaim receipt differs from its durable candidate".to_string(),
+                            "reclaim completion differs from its durable candidate".to_string(),
                         ));
                     }
                     DurableStoreReclaimOperation::Completed { .. } => {
                         return Err(DbError::Message(
-                            "reclaim authorization already has a receipt".to_string(),
+                            "reclaim authorization is already completed".to_string(),
                         ));
                     }
                 };
             let next = DurableStoreReclaimOperation::Completed {
                 authorization: authorization.clone(),
                 authorization_activation: authorization_activation.clone(),
-                receipt: receipt.clone(),
-                receipt_activation: commit_ref.clone(),
+                completion_activation: commit_ref.clone(),
             };
-            let reclaimed = ReclaimedStorePackage::receipted(
+            let reclaimed = ReclaimedStorePackage::completed(
                 authorization,
                 authorization_activation,
-                receipt.clone(),
                 commit_ref.clone(),
             )
             .map_err(store_reclaim_journal_error)?;

@@ -15,7 +15,6 @@ pub enum ProtectedObjectDomain {
     StoreDeviceExclusionOutcome,
     StoreReclaimEvidence,
     StoreReclaimAuthorization,
-    StoreReclaimReceipt,
     ProviderAccessGrant,
     OwnerRecoveryNode,
     OwnerPromotionRequestPublication,
@@ -268,14 +267,6 @@ impl ProtectedObjectDomain {
                 }]),
                 extension: ".json",
             },
-            Self::StoreReclaimReceipt => ProtocolObjectMetadata {
-                aad_label: b"store-reclaim-receipt",
-                path: ProtocolPathRule::Exact(&[ExactPathShape {
-                    component_count: 4,
-                    fixed_components: &[(0, "store-v1"), (1, "reclaim"), (2, "receipts")],
-                }]),
-                extension: ".json",
-            },
             Self::ProviderAccessGrant => ProtocolObjectMetadata {
                 aad_label: b"provider-access-grant",
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
@@ -523,8 +514,6 @@ impl ProtocolObjectDomain {
         StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::StoreReclaimEvidence);
     pub const StoreReclaimAuthorization: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreReclaimAuthorization);
-    pub const StoreReclaimReceipt: SignedStoreProtocolObjectDomain =
-        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreReclaimReceipt);
     pub const ProviderAccessGrant: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessGrant);
     pub const OwnerRecoveryNode: SignedStoreProtocolObjectDomain =

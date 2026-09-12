@@ -186,7 +186,7 @@ async fn check_retired_reclaim_authority(forge: ForgeTarget) {
         .expect("prepare the signed authorization candidate");
     let candidate_ref = candidate.reference.clone();
     let operation = DurableStoreReclaimOperation::AuthorizationCandidate {
-        object: Box::new(DurableStoreReclaimObject::Authorization {
+        object: Box::new(DurableStoreReclaimAuthorization {
             evidence_ref,
             evidence,
             evidence_prepared,

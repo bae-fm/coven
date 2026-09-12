@@ -70,7 +70,7 @@ impl StoreBatchCommit {
         match &self.body {
             StoreCommitBody::Operations(operations) => Some(operations),
             StoreCommitBody::ReclaimAuthorization { .. }
-            | StoreCommitBody::ReclaimReceipt { .. }
+            | StoreCommitBody::ReclaimCompletion { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -137,10 +137,6 @@ impl StoreBatchCommit {
                         [reference.evidence.object.clone(), reference.object.clone()]
                     }),
             )
-            .chain(
-                self.reclaim_receipt()
-                    .map(|reference| reference.object.clone()),
-            )
             .collect::<Vec<_>>();
         if objects
             .iter()
@@ -160,7 +156,7 @@ impl StoreBatchCommit {
             StoreCommitBody::AbandonCandidates { manifests } => manifests,
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
-            | StoreCommitBody::ReclaimReceipt { .. }
+            | StoreCommitBody::ReclaimCompletion { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. } => &[],
         }
     }
@@ -169,15 +165,15 @@ impl StoreBatchCommit {
         match &self.body {
             StoreCommitBody::ReclaimAuthorization { authorization } => Some(authorization.as_ref()),
             StoreCommitBody::Operations(_)
-            | StoreCommitBody::ReclaimReceipt { .. }
+            | StoreCommitBody::ReclaimCompletion { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
 
-    pub fn reclaim_receipt(&self) -> Option<&crate::reclaim::ReclaimReceiptRef> {
+    pub fn reclaim_completion(&self) -> Option<&crate::reclaim::ReclaimCompletion> {
         match &self.body {
-            StoreCommitBody::ReclaimReceipt { receipt } => Some(receipt.as_ref()),
+            StoreCommitBody::ReclaimCompletion { completion } => Some(completion.as_ref()),
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. }
@@ -201,7 +197,7 @@ impl StoreBatchCommit {
         match &self.body {
             StoreCommitBody::Operations(operations) => operations.device_registrations.as_slice(),
             StoreCommitBody::ReclaimAuthorization { .. }
-            | StoreCommitBody::ReclaimReceipt { .. }
+            | StoreCommitBody::ReclaimCompletion { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. } => &[],
             StoreCommitBody::AbandonCandidates { .. } => &[],
         }
@@ -229,7 +225,7 @@ impl StoreBatchCommit {
             StoreCommitBody::OwnerPromotionRequest { request } => Some(request),
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
-            | StoreCommitBody::ReclaimReceipt { .. }
+            | StoreCommitBody::ReclaimCompletion { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }

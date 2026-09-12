@@ -12,7 +12,7 @@ mod snapshot_retirement;
 
 use crate::sync::store::AuthorizedWriterOperation;
 use coven_database::{
-    DurableStoreReclaimObject, DurableStoreReclaimOperation, StoreDatabase,
+    DurableStoreReclaimAuthorization, DurableStoreReclaimOperation, StoreDatabase,
     StoreReclaimJournalError,
 };
 use coven_protocol::circle::{CircleControlCoord, CircleControlState, CircleEpochOrigin, CircleId};
@@ -895,7 +895,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             )
             .await?;
         let operation = DurableStoreReclaimOperation::AuthorizationCandidate {
-            object: Box::new(DurableStoreReclaimObject::Authorization {
+            object: Box::new(DurableStoreReclaimAuthorization {
                 evidence_ref,
                 evidence,
                 evidence_prepared,
@@ -981,7 +981,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
     ) -> Result<ReclaimStep, StoreReclaimError> {
         match &operation {
             DurableStoreReclaimOperation::AuthorizationCandidate { .. }
-            | DurableStoreReclaimOperation::ReceiptCandidate { .. } => {
+            | DurableStoreReclaimOperation::CompletionCandidate { .. } => {
                 Box::pin(self.drive_candidate(operation)).await?;
                 Ok(ReclaimStep::Advanced)
             }
@@ -1001,7 +1001,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 Ok(ReclaimStep::Deleted)
             }
             DurableStoreReclaimOperation::AbsentVerified { .. } => {
-                Box::pin(self.prepare_receipt(operation)).await?;
+                Box::pin(self.prepare_completion(operation)).await?;
                 Ok(ReclaimStep::Advanced)
             }
             DurableStoreReclaimOperation::Completed { .. } => Ok(ReclaimStep::Idle),
@@ -1079,56 +1079,37 @@ mod snapshot_retirement_tests;
 mod tests;
 
 pub(crate) async fn create_reclaim_exact_objects(
-    object: &coven_database::DurableStoreReclaimObject,
+    object: &DurableStoreReclaimAuthorization,
     storage: &dyn CloudSyncObjectStorage,
 ) -> Result<(), StoreReclaimJournalError> {
-    match object {
-        coven_database::DurableStoreReclaimObject::Authorization {
-            evidence,
+    let DurableStoreReclaimAuthorization {
+        evidence,
+        evidence_prepared,
+        authorization,
+        authorization_prepared,
+        ..
+    } = object;
+    storage
+        .create_verified_protocol_object(
+            &ProtocolObjectContext::store_encrypted(
+                evidence.store_root_hash,
+                ProtocolObjectDomain::StoreReclaimEvidence,
+            ),
             evidence_prepared,
-            authorization,
+            &reclaim_evidence_semantic_prefix(evidence.evidence_hash()),
+            &evidence.to_bytes(),
+        )
+        .await?;
+    storage
+        .create_verified_protocol_object(
+            &ProtocolObjectContext::signed_plaintext(
+                authorization.store_root_hash,
+                ProtocolObjectDomain::StoreReclaimAuthorization,
+            ),
             authorization_prepared,
-            ..
-        } => {
-            storage
-                .create_verified_protocol_object(
-                    &ProtocolObjectContext::store_encrypted(
-                        evidence.store_root_hash,
-                        ProtocolObjectDomain::StoreReclaimEvidence,
-                    ),
-                    evidence_prepared,
-                    &reclaim_evidence_semantic_prefix(evidence.evidence_hash()),
-                    &evidence.to_bytes(),
-                )
-                .await?;
-            storage
-                .create_verified_protocol_object(
-                    &ProtocolObjectContext::signed_plaintext(
-                        authorization.store_root_hash,
-                        ProtocolObjectDomain::StoreReclaimAuthorization,
-                    ),
-                    authorization_prepared,
-                    &reclaim_authorization_semantic_prefix(authorization.authorization_hash()),
-                    &authorization.to_bytes(),
-                )
-                .await
-                .map_err(StoreReclaimJournalError::Storage)
-        }
-        coven_database::DurableStoreReclaimObject::Receipt {
-            receipt,
-            receipt_prepared,
-            ..
-        } => storage
-            .create_verified_protocol_object(
-                &ProtocolObjectContext::signed_plaintext(
-                    receipt.store_root_hash,
-                    ProtocolObjectDomain::StoreReclaimReceipt,
-                ),
-                receipt_prepared,
-                &reclaim_receipt_semantic_prefix(receipt.receipt_hash()),
-                &receipt.to_bytes(),
-            )
-            .await
-            .map_err(StoreReclaimJournalError::Storage),
-    }
+            &reclaim_authorization_semantic_prefix(authorization.authorization_hash()),
+            &authorization.to_bytes(),
+        )
+        .await
+        .map_err(StoreReclaimJournalError::Storage)
 }

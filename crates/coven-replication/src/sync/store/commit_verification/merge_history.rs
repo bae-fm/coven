@@ -648,7 +648,7 @@ impl VerifiedMergeHistory {
     /// The registrations a retained row already proved active at its commit.
     ///
     /// Re-deriving them reads whatever the commit's body names from the
-    /// provider — a reclaim authorization, its evidence, its receipt — on every
+    /// provider — a reclaim authorization and its evidence — on every
     /// pull, for a commit this device verified once and wrote a row for. The
     /// row was written by the transaction that verified and applied the commit,
     /// and opening it re-parses and re-checks the commit against its activated

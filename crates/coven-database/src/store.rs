@@ -113,7 +113,7 @@ pub(crate) use pull_replay::{
     install_circle_bootstrap_remote_objects_on,
 };
 pub use reclaim::journal::{
-    DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimedStorePackage,
+    DurableStoreReclaimAuthorization, DurableStoreReclaimOperation, ReclaimedStorePackage,
     StoreReclaimJournalError, StuckReclaimOperation,
 };
 pub(crate) use retained_replay::copy_table_with_conflicts;

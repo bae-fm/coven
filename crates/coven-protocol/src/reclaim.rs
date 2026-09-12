@@ -1,4 +1,5 @@
-//! Signed reclaim targets, claims, evidence, authorizations, and receipts.
+//! Signed reclaim targets, claims, evidence, authorizations, and the
+//! completion an executor asserts in its own Store commit.
 
 use std::collections::BTreeSet;
 
@@ -10,18 +11,17 @@ use crate::membership::MembershipGrantId;
 use crate::objects::ExactObjectRef;
 use crate::store_commit::{
     CircleAckRef, CirclePackageRef, CircleSnapshotRef, ObjectHash, Signed, SignedBody,
-    SnapshotImageRef, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StorePackageRef, StoreProtocolError,
+    SnapshotImageRef, StoreBatchCommitRef, StoreDeviceRegistrationRef, StorePackageRef,
+    StoreProtocolError,
 };
 use coven_keys::keys::{self, UserKeypair};
 
 const RECLAIM_EVIDENCE_DOMAIN: &[u8] = b"coven.store-reclaim-evidence.v1\0";
 const RECLAIM_AUTHORIZATION_DOMAIN: &[u8] = b"coven.store-reclaim-authorization.v1\0";
-const RECLAIM_RECEIPT_DOMAIN: &[u8] = b"coven.store-reclaim-receipt.v1\0";
 
 /// The exact object a reclaim authorizes the deletion of, together with the
 /// kind-specific locator needed to physically delete it and confirm its absence.
-/// Every kind shares one signed evidence → authorization → receipt chain; the
+/// Every kind shares one signed evidence → authorization → completion chain; the
 /// kind selects only the eligibility proof and the readback prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -739,110 +739,15 @@ impl ReclaimAuthorization {
     }
 }
 
+/// A reclaim's completion, asserted by the executor inside its own Store
+/// commit: the authorization it closes and the provider-administrator grant
+/// the executor deleted under. The executor registration, Store root and
+/// membership state are the signed commit envelope's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReclaimReceiptRef {
-    pub receipt_hash: ObjectHash,
+pub struct ReclaimCompletion {
     pub authorization: ReclaimAuthorizationRef,
-    pub object: ExactObjectRef,
-}
-
-impl ReclaimReceiptRef {
-    pub fn from_receipt(receipt: &ReclaimReceipt, object: ExactObjectRef) -> Self {
-        Self {
-            receipt_hash: receipt.receipt_hash(),
-            authorization: receipt.authorization.clone(),
-            object,
-        }
-    }
-
-    pub fn verify_identity(&self, receipt: &ReclaimReceipt) -> Result<(), StoreProtocolError> {
-        let actual = receipt.receipt_hash();
-        if actual != self.receipt_hash {
-            return Err(StoreProtocolError::ObjectHashMismatch {
-                expected: self.receipt_hash,
-                actual,
-            });
-        }
-        if receipt.authorization != self.authorization {
-            return Err(StoreProtocolError::Malformed(
-                "reclaim receipt authorization differs from its exact reference".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn verify(
-        &self,
-        receipt: &ReclaimReceipt,
-        executor: &StoreDeviceRegistration,
-    ) -> Result<(), StoreProtocolError> {
-        self.verify_identity(receipt)?;
-        receipt.verify(executor)
-    }
-}
-
-/// The wire body of a reclaim receipt: what was reclaimed, and under whose
-/// authority. Every field here is signed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReclaimReceiptBody {
-    pub store_root_hash: ObjectHash,
-    pub authorization: ReclaimAuthorizationRef,
-    pub provider_admin_state: StoreMembershipStateRef,
     pub provider_admin_grant: crate::provider::ProviderAdminGrantId,
-    pub executor: StoreDeviceRegistrationRef,
-}
-
-impl SignedBody for ReclaimReceiptBody {
-    const DOMAIN: &'static [u8] = RECLAIM_RECEIPT_DOMAIN;
-}
-
-pub type ReclaimReceipt = Signed<ReclaimReceiptBody>;
-
-impl ReclaimReceipt {
-    #[allow(clippy::too_many_arguments)]
-    pub fn signed(
-        store_root_hash: ObjectHash,
-        authorization: ReclaimAuthorizationRef,
-        provider_admin_state: StoreMembershipStateRef,
-        provider_admin_grant: crate::provider::ProviderAdminGrantId,
-        executor: StoreDeviceRegistrationRef,
-        executor_registration: &StoreDeviceRegistration,
-        signer: &UserKeypair,
-    ) -> Result<Self, StoreProtocolError> {
-        executor.verify_registration(executor_registration)?;
-        crate::objects::verify_store_root(
-            store_root_hash,
-            executor_registration.store_root.store_root_hash,
-        )?;
-        if keys::public_key_hex(signer) != executor_registration.device_signing_pubkey {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        Ok(Signed::sign(
-            ReclaimReceiptBody {
-                store_root_hash,
-                authorization,
-                provider_admin_state,
-                provider_admin_grant,
-                executor,
-            },
-            signer,
-        ))
-    }
-
-    pub fn receipt_hash(&self) -> ObjectHash {
-        self.hash()
-    }
-
-    pub fn verify(&self, executor: &StoreDeviceRegistration) -> Result<(), StoreProtocolError> {
-        self.executor.verify_registration(executor)?;
-        crate::objects::verify_store_root(
-            self.store_root_hash,
-            executor.store_root.store_root_hash,
-        )?;
-        self.verify_by(&executor.device_signing_pubkey)
-    }
 }
 
 pub fn reclaim_evidence_semantic_prefix(evidence_hash: ObjectHash) -> String {
@@ -851,10 +756,6 @@ pub fn reclaim_evidence_semantic_prefix(evidence_hash: ObjectHash) -> String {
 
 pub fn reclaim_authorization_semantic_prefix(authorization_hash: ObjectHash) -> String {
     format!("store-v1/reclaim/authorizations/{authorization_hash}")
-}
-
-pub fn reclaim_receipt_semantic_prefix(receipt_hash: ObjectHash) -> String {
-    format!("store-v1/reclaim/receipts/{receipt_hash}")
 }
 
 #[cfg(test)]

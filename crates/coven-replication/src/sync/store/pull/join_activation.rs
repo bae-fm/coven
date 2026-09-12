@@ -24,7 +24,7 @@ pub(crate) fn verify_device_join_activation_commit(
         || !commit.circle_packages().is_empty()
         || commit.store_package().is_some()
         || commit.reclaim_authorization().is_some()
-        || commit.reclaim_receipt().is_some()
+        || commit.reclaim_completion().is_some()
         || commit.control().is_none()
     {
         return Err(StorePullError::InvalidState(

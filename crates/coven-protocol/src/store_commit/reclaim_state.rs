@@ -67,7 +67,8 @@ impl RetainedStoreSnapshotOwnership {
 }
 
 /// Reclamation's live objects and unfinished accepted authorizations.
-/// Receipts release their exact facts; ordinary covered commits are not retained.
+/// Completions release their exact facts; ordinary covered commits are not
+/// retained.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedReclaimState {
@@ -190,8 +191,9 @@ impl RetainedReclaimState {
         Ok(())
     }
 
-    /// Fold the accepted interval as a set of additions and corresponding receipts.
-    /// Traversal order does not change which exact objects the interval retires.
+    /// Fold the accepted interval as a set of additions and corresponding
+    /// completions. Traversal order does not change which exact objects the
+    /// interval retires.
     pub fn extend<'a>(
         &mut self,
         commits: impl IntoIterator<Item = (&'a StoreBatchCommitRef, &'a StoreBatchCommit)>,
@@ -247,19 +249,19 @@ impl RetainedReclaimState {
                     .insert(authorization.authorization_hash, value);
             }
         }
-        self.retire_receipts(
+        self.retire_completions(
             commits
                 .into_iter()
-                .filter_map(|(_, commit)| commit.reclaim_receipt()),
+                .filter_map(|(_, commit)| commit.reclaim_completion()),
         )
     }
 
-    pub fn retire_receipts<'a>(
+    pub fn retire_completions<'a>(
         &mut self,
-        receipts: impl IntoIterator<Item = &'a crate::reclaim::ReclaimReceiptRef>,
+        completions: impl IntoIterator<Item = &'a crate::reclaim::ReclaimCompletion>,
     ) -> Result<(), StoreProtocolError> {
-        for receipt in receipts {
-            let target = receipt.authorization.target();
+        for completion in completions {
+            let target = completion.authorization.target();
             if matches!(
                 target,
                 ReclaimTarget::StorePackage(_) | ReclaimTarget::CirclePackage(_)
@@ -281,7 +283,7 @@ impl RetainedReclaimState {
                     };
                     if !matches {
                         return Err(StoreProtocolError::Malformed(
-                            "reclaim receipt names another package activation".to_string(),
+                            "reclaim completion names another package activation".to_string(),
                         ));
                     }
                 }
@@ -289,16 +291,16 @@ impl RetainedReclaimState {
             }
             if let Some(authorization) = self
                 .authorizations
-                .get(&receipt.authorization.authorization_hash)
+                .get(&completion.authorization.authorization_hash)
             {
-                if authorization.authorization != receipt.authorization {
+                if authorization.authorization != completion.authorization {
                     return Err(StoreProtocolError::Malformed(
-                        "reclaim receipt names another exact authorization".to_string(),
+                        "reclaim completion names another exact authorization".to_string(),
                     ));
                 }
             }
             self.authorizations
-                .remove(&receipt.authorization.authorization_hash);
+                .remove(&completion.authorization.authorization_hash);
         }
         self.validate()
     }

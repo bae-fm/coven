@@ -298,7 +298,7 @@ pub(crate) fn record_reclaimed_store_package_on(
                     authorization: existing_authorization,
                     authorization_activation: existing_activation,
                 },
-                ReclaimedStorePackage::Receipted {
+                ReclaimedStorePackage::Completed {
                     authorization,
                     authorization_activation,
                     ..
@@ -320,7 +320,7 @@ pub(crate) fn record_reclaimed_store_package_on(
             .map_err(DbError::from)?;
         if updated != 1 {
             return Err(DbError::Message(format!(
-                "reclaimed Store package {object_id} disappeared during receipt closure"
+                "reclaimed Store package {object_id} disappeared during completion closure"
             )));
         }
         return Ok(());

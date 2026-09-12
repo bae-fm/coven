@@ -1,5 +1,7 @@
 #[path = "baseline_tests.rs"]
 mod baseline_tests;
+#[path = "completion_tests.rs"]
+mod completion_tests;
 #[path = "offline_peer_tests.rs"]
 mod offline_peer_tests;
 
@@ -419,27 +421,6 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         Err(StoreProtocolError::InvalidSignature)
     ));
 
-    let receipt = founder_authority
-        .sign_reclaim_receipt_for_test(
-            store.root().store_root_hash,
-            authorization_ref,
-            authorization.authority.membership.clone(),
-            loaded
-                .protocol_root_for_test()
-                .descriptor
-                .founder_provider_admin
-                .grant_id
-                .clone(),
-        )
-        .expect("sign reclaim receipt");
-    let mut reassigned = receipt.clone();
-    reassigned.body_mut().provider_admin_grant =
-        coven_protocol::provider::ProviderAdminGrantId(ObjectHash::digest(b"another admin"));
-    assert!(matches!(
-        reassigned.verify(founder_authority.registration()),
-        Err(StoreProtocolError::InvalidSignature)
-    ));
-
     db.release_retained_replay_ownership_for_test()
         .await
         .expect("release retained replay package ownership");
@@ -455,7 +436,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
     authorization_activation.commit_hash = ObjectHash::digest(b"reclaim authorization commit");
     authorization_activation.object = proof_object("store-v1/commits/reclaim-authorization.json");
     let operation = DurableStoreReclaimOperation::Authorized {
-        authorization: receipt.authorization.clone(),
+        authorization: authorization_ref.clone(),
         activation: authorization_activation,
     };
     let mut writer = loaded
@@ -817,7 +798,7 @@ async fn a_refused_reclaim_delete_leaves_one_operation_stuck_and_finishes_the_re
 }
 
 /// The whole reclaim journal runs end to end: both acknowledged, snapshot-covered
-/// packages are proof-gated, deleted, and receipted in one uninterrupted pass.
+/// packages are proof-gated, deleted, and completed in one uninterrupted pass.
 #[tokio::test]
 async fn reclaim_journal_deletes_every_covered_package_in_one_pass() {
     let fixture = ReclaimJourneyFixture::build("reclaim-journal-full-pass").await;
