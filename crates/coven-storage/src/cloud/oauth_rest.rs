@@ -10,11 +10,10 @@
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use std::collections::HashSet;
-use std::path::Path;
 
 use super::http::{body_text, ensure_ok, ok_bytes, NotFound};
 use super::s3_common::is_range_success;
-use super::{CloudFileReadError, CloudHomeError};
+use super::CloudHomeError;
 use coven_protocol::objects::ObjectSlot;
 
 /// One page of a listing: the slots it yielded (already decoded and
@@ -105,18 +104,17 @@ pub(crate) async fn rest_read<T: OAuthRestHome + ?Sized>(
     ok_bytes(resp, &format!("read body for {key}")).await
 }
 
-pub(crate) async fn response_to_file(
+/// The response body as the stream an exact read serves. A transport failure
+/// part-way through the body ends the stream with that error, so a truncated
+/// body is never mistaken for a complete one.
+pub(crate) fn response_stream(
     response: reqwest::Response,
-    destination: &Path,
     context: &str,
-    progress: super::DownloadProgress,
-) -> Result<(), CloudFileReadError> {
+) -> super::CloudObjectStream {
     let context = context.to_string();
-    let stream = response.bytes_stream().map_err(move |error| {
+    Box::pin(response.bytes_stream().map_err(move |error| {
         CloudHomeError::transport(format!("{context}: stream response"), error)
-    });
-    super::write_cloud_object_stream(destination, Box::pin(stream), progress).await?;
-    Ok(())
+    }))
 }
 
 /// Read the `[start, end)` byte range of `key`.

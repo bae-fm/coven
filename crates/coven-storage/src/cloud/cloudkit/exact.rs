@@ -613,19 +613,57 @@ impl ExactSlotStorage for CloudKitCloudHome {
         blocking(move || read_exact_cloudkit_range(&*ops, &scope, &logical_key, start, end)).await
     }
 
-    async fn read_at_to_file(
+    /// One manifest read, then one part record per stream item. No
+    /// whole-object buffer is assembled: the reader consuming the stream sees
+    /// each part as it is fetched.
+    async fn open_stream_at(
         &self,
         slot: &ObjectSlot,
-        destination: &std::path::Path,
-        progress: crate::cloud::DownloadProgress,
-    ) -> Result<(), crate::cloud::CloudFileReadError> {
-        let bytes = self.read_at(slot).await?;
-        let stream: crate::cloud::CloudObjectStream = Box::pin(futures_util::stream::once(
-            async move { Ok(Bytes::from(bytes)) },
-        ));
-        crate::cloud::write_cloud_object_stream(destination, stream, progress)
-            .await
-            .map(drop)
+    ) -> Result<crate::cloud::CloudObjectStream, CloudHomeError> {
+        slot.require_logical_key_for("CloudKit")?;
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let logical_key = slot.logical_key().to_string();
+        let manifest = {
+            let ops = ops.clone();
+            let scope = scope.clone();
+            let logical_key = logical_key.clone();
+            blocking(move || {
+                decode_exact_manifest(&ops.read_versioned_record(&scope, &logical_key)?.bytes)
+            })
+            .await?
+        };
+        Ok(Box::pin(futures_util::stream::unfold(
+            Some(0usize),
+            move |index| {
+                let ops = ops.clone();
+                let scope = scope.clone();
+                let logical_key = logical_key.clone();
+                async move {
+                    let index = index.filter(|index| *index < manifest.part_count)?;
+                    let part = blocking(move || {
+                        let key = exact_part_key(&logical_key, index);
+                        read_exact_part(
+                            &*ops,
+                            &scope,
+                            &logical_key,
+                            manifest.part_count,
+                            manifest.total_len,
+                            index,
+                            &key,
+                        )
+                    })
+                    .await;
+                    match part {
+                        // A failed part ends the stream with its error rather
+                        // than skipping to the next one: the bytes after a gap
+                        // are not the object's bytes.
+                        Err(error) => Some((Err(error), None)),
+                        Ok(part) => Some((Ok(Bytes::from(part.bytes)), Some(index + 1))),
+                    }
+                }
+            },
+        )))
     }
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {

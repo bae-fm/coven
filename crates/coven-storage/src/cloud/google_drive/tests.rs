@@ -136,6 +136,116 @@ async fn immutable_copy_test_home() -> (
     )
 }
 
+#[derive(Clone)]
+struct ExactReadEndpointState {
+    body: Vec<u8>,
+    /// How many bytes the response declares. A cut body declares the whole
+    /// object and delivers less.
+    declared: usize,
+}
+
+async fn exact_read_endpoint(
+    State(state): State<ExactReadEndpointState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let query = request.uri().query().map(str::to_string);
+
+    if method == "GET"
+        && path == "/files/generated-id"
+        && query
+            .as_deref()
+            .is_some_and(|query| query.contains("fields="))
+    {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"id":"generated-id","name":"{}","parents":["folder123"],"trashed":false,"size":"{}","md5Checksum":"2f4c3c1992f3016909827d43b8267ae4","appProperties":{{"covenLogicalKey":"protocol/copy"}}}}"#,
+                encode_key("protocol/copy"),
+                state.declared,
+            )))
+            .expect("build metadata response");
+    }
+    if method == "GET" && path == "/files/generated-id" {
+        let body = if state.body.len() == state.declared {
+            Body::from(state.body.clone())
+        } else {
+            crate::cloud::test_server::cut_body(state.body.clone())
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-length", state.declared.to_string())
+            .body(body)
+            .expect("build read response");
+    }
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Body::from(format!(
+            "unexpected request: {method} {path} {query:?}"
+        )))
+        .expect("build unexpected response")
+}
+
+async fn exact_read_test_home(
+    body: Vec<u8>,
+    declared: usize,
+) -> (GoogleDriveCloudHome, tokio::sync::oneshot::Sender<()>) {
+    let (endpoint, shutdown) = crate::cloud::test_server::spawn_test_server(
+        Router::new()
+            .fallback(exact_read_endpoint)
+            .with_state(ExactReadEndpointState { body, declared }),
+    )
+    .await;
+    (home().with_endpoints(endpoint.clone(), endpoint), shutdown)
+}
+
+fn drive_slot() -> ObjectSlot {
+    ObjectSlot::opaque("protocol/copy".to_string(), "generated-id".to_string())
+        .expect("valid Drive slot")
+}
+
+#[tokio::test]
+async fn exact_stream_serves_the_whole_drive_body() {
+    let body = b"drive object bytes".to_vec();
+    let (home, shutdown) = exact_read_test_home(body.clone(), body.len()).await;
+
+    let mut stream = ExactSlotStorage::open_stream_at(&home, &drive_slot())
+        .await
+        .expect("open the Drive exact stream");
+    let mut received = Vec::new();
+    while let Some(part) = futures_util::StreamExt::next(&mut stream).await {
+        received.extend_from_slice(&part.expect("Drive body part"));
+    }
+
+    assert_eq!(received, body);
+    shutdown.send(()).expect("shut down Drive endpoint");
+}
+
+/// A body that stops mid-stream ends the stream with an error. It must not
+/// look like an object that simply finished early.
+#[tokio::test]
+async fn a_cut_drive_body_ends_its_stream_with_an_error() {
+    let (home, shutdown) = exact_read_test_home(b"drive ".to_vec(), 18).await;
+
+    let mut stream = ExactSlotStorage::open_stream_at(&home, &drive_slot())
+        .await
+        .expect("open the Drive exact stream");
+    let mut received = Vec::new();
+    let error = loop {
+        match futures_util::StreamExt::next(&mut stream).await {
+            Some(Ok(part)) => received.extend_from_slice(&part),
+            Some(Err(error)) => break error,
+            None => panic!("a cut body must not end the stream cleanly"),
+        }
+    };
+
+    assert_eq!(received, b"drive ");
+    assert!(matches!(error, CloudHomeError::Backend { .. }), "{error}");
+    shutdown.send(()).expect("shut down Drive endpoint");
+}
+
 #[tokio::test]
 async fn immutable_copy_uses_preallocated_id_for_create_read_and_delete() {
     let (home, requests, shutdown) = immutable_copy_test_home().await;

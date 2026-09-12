@@ -137,6 +137,86 @@ async fn immutable_copy_endpoint(
     }
 }
 
+/// Serves the shared-folder handshake and one download that stops part-way
+/// through the body it declared.
+async fn cut_download_endpoint(request: Request<Body>) -> Response<Body> {
+    let path = request.uri().path().to_string();
+    match path.as_str() {
+        "/sharing/share_folder" => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{".tag":"complete","shared_folder_id":"namespace:copy"}"#,
+            ))
+            .expect("build share response"),
+        "/files/download" => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-length", "10")
+            .header(
+                "Dropbox-API-Result",
+                serde_json::json!({
+                    ".tag": "file",
+                    "id": "id:copy",
+                    "path_display": "/protocol/copy",
+                    "rev": "015f9a7d",
+                    "size": 10,
+                    "content_hash": "8e59e665d837edb9abe693bc6c919a14fc6745c9df04a06aa573a5ab9f295d59",
+                })
+                .to_string(),
+            )
+            .body(crate::cloud::test_server::cut_body(b"copy".to_vec()))
+            .expect("build cut download response"),
+        _ => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from(format!("unexpected path: {path}")))
+            .expect("build unexpected response"),
+    }
+}
+
+#[tokio::test]
+async fn exact_stream_serves_the_whole_dropbox_body() {
+    let (home, _requests, shutdown) = immutable_copy_test_home().await;
+    let slot = ObjectSlot::logical("protocol/copy".to_string()).expect("valid slot");
+
+    let mut stream = ExactSlotStorage::open_stream_at(&home, &slot)
+        .await
+        .expect("open the Dropbox exact stream");
+    let mut received = Vec::new();
+    while let Some(part) = futures_util::StreamExt::next(&mut stream).await {
+        received.extend_from_slice(&part.expect("Dropbox body part"));
+    }
+
+    assert_eq!(received, b"copy-bytes");
+    shutdown.send(()).expect("shut down Dropbox endpoint");
+}
+
+/// A body that stops mid-stream ends the stream with an error. It must not
+/// look like an object that simply finished early.
+#[tokio::test]
+async fn a_cut_dropbox_body_ends_its_stream_with_an_error() {
+    let (endpoint, shutdown) =
+        crate::cloud::test_server::spawn_test_server(Router::new().fallback(cut_download_endpoint))
+            .await;
+    let home = home().with_endpoints(endpoint.clone(), endpoint);
+    let slot = ObjectSlot::logical("protocol/copy".to_string()).expect("valid slot");
+
+    let mut stream = ExactSlotStorage::open_stream_at(&home, &slot)
+        .await
+        .expect("open the Dropbox exact stream");
+    let mut received = Vec::new();
+    let error = loop {
+        match futures_util::StreamExt::next(&mut stream).await {
+            Some(Ok(part)) => received.extend_from_slice(&part),
+            Some(Err(error)) => break error,
+            None => panic!("a cut body must not end the stream cleanly"),
+        }
+    };
+
+    assert_eq!(received, b"copy");
+    assert!(matches!(error, CloudHomeError::Backend { .. }), "{error}");
+    shutdown.send(()).expect("shut down Dropbox endpoint");
+}
+
 async fn immutable_copy_test_home() -> (
     DropboxCloudHome,
     Arc<Mutex<Vec<RecordedRequest>>>,

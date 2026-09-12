@@ -291,13 +291,11 @@ impl ExactSlotStorage for S3CloudHome {
         slot.require_logical_key_for("S3")?;
         S3CloudHome::read_range(self, slot.logical_key(), start, end).await
     }
-    async fn read_at_to_file(
+    async fn open_stream_at(
         &self,
         slot: &ObjectSlot,
-        destination: &std::path::Path,
-        progress: crate::cloud::DownloadProgress,
-    ) -> Result<(), crate::cloud::CloudFileReadError> {
-        S3CloudHome::read_exact_to_file(self, slot, destination, progress).await
+    ) -> Result<crate::cloud::CloudObjectStream, CloudHomeError> {
+        S3CloudHome::open_exact_stream(self, slot).await
     }
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         slot.require_logical_key_for("S3")?;

@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::{
-    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError, CloudHome,
-    CloudHomeError, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
+    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudObjectStream, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
     ExactSlotStorage, PartSink,
 };
 use coven_protocol::objects::ObjectSlot;
@@ -115,6 +115,7 @@ pub struct InMemoryCloudHome {
     fail_writes: Arc<AtomicBool>,
     fail_next_range_reads: Arc<AtomicUsize>,
     fail_next_exact_stream_reads: Arc<AtomicUsize>,
+    fail_exact_stream_read_after_bytes: Arc<Mutex<Option<u64>>>,
     sort_listings: Arc<AtomicBool>,
     exact_create_count: Arc<AtomicUsize>,
     exact_creates: Arc<Mutex<Vec<ObjectSlot>>>,
@@ -194,6 +195,7 @@ impl InMemoryCloudHome {
             fail_writes: Arc::new(AtomicBool::new(false)),
             fail_next_range_reads: Arc::new(AtomicUsize::new(0)),
             fail_next_exact_stream_reads: Arc::new(AtomicUsize::new(0)),
+            fail_exact_stream_read_after_bytes: Arc::new(Mutex::new(None)),
             sort_listings: Arc::new(AtomicBool::new(false)),
             exact_create_count: Arc::new(AtomicUsize::new(0)),
             exact_creates: Arc::new(Mutex::new(Vec::new())),
@@ -271,6 +273,40 @@ impl InMemoryCloudHome {
     /// without changing the durable object stored in the shared test home.
     pub fn fail_next_exact_stream_reads(&self, n: usize) {
         self.fail_next_exact_stream_reads.store(n, Ordering::SeqCst);
+    }
+
+    /// Arm the next exact streaming read to serve `n` bytes of the object and
+    /// then end with a transport error. What drives a provider that fails
+    /// part-way through a body — including after its last byte, where nothing
+    /// is missing from the framing and only the source's own end says the
+    /// download completed.
+    pub fn fail_exact_stream_read_after_bytes(&self, n: u64) {
+        *self.fail_exact_stream_read_after_bytes.lock().unwrap() = Some(n);
+    }
+
+    /// Append bytes to a stored exact object, out of band. Drives a provider
+    /// that serves more than the object its reference names.
+    pub fn append_exact_object_bytes(&self, slot: &ObjectSlot, extra: &[u8]) {
+        let key = Self::exact_storage_key(slot).expect("test exact slot is valid");
+        let mut writes = self.writes.lock().unwrap();
+        let mut bytes = writes.bytes(&key).expect("exact slot exists");
+        bytes.extend_from_slice(extra);
+        writes.insert(key, bytes);
+    }
+
+    /// Cut a stored exact object down to `len` bytes, out of band. Drives a
+    /// provider that stops short of the object its reference names.
+    pub fn truncate_exact_object(&self, slot: &ObjectSlot, len: usize) {
+        let key = Self::exact_storage_key(slot).expect("test exact slot is valid");
+        let mut writes = self.writes.lock().unwrap();
+        let mut bytes = writes.bytes(&key).expect("exact slot exists");
+        assert!(
+            len <= bytes.len(),
+            "truncation length {len} exceeds the {} stored bytes",
+            bytes.len()
+        );
+        bytes.truncate(len);
+        writes.insert(key, bytes);
     }
 
     /// Serve exact streaming reads in chunks separated by `delay`. This lets a
@@ -753,12 +789,13 @@ impl InMemoryCloudHome {
             .ok_or_else(|| CloudHomeError::NotFound(slot.logical_key().to_string()))
     }
 
-    async fn read_exact_to_file(
+    /// The object's stored bytes, in whatever chunking and delay the home is
+    /// armed for. The in-flight guard rides in the stream, so concurrency is
+    /// measured over the life of the body rather than the call that opened it.
+    async fn open_exact_stream(
         &self,
         slot: &ObjectSlot,
-        destination: &std::path::Path,
-        progress: super::DownloadProgress,
-    ) -> Result<(), CloudFileReadError> {
+    ) -> Result<CloudObjectStream, CloudHomeError> {
         if self
             .fail_next_exact_stream_reads
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
@@ -766,8 +803,7 @@ impl InMemoryCloudHome {
         {
             return Err(CloudHomeError::Transport(
                 "InMemoryCloudHome: armed exact stream-read failure".into(),
-            )
-            .into());
+            ));
         }
         self.exact_stream_read_count.fetch_add(1, Ordering::SeqCst);
         self.exact_reads.lock().unwrap().push(slot.clone());
@@ -777,7 +813,7 @@ impl InMemoryCloudHome {
             + 1;
         self.exact_stream_read_max_inflight
             .fetch_max(inflight, Ordering::SeqCst);
-        let _guard = ExactStreamReadGuard {
+        let guard = ExactStreamReadGuard {
             inflight: self.exact_stream_read_inflight.clone(),
         };
         let barrier = self.exact_stream_read_barrier.lock().unwrap().clone();
@@ -804,17 +840,22 @@ impl InMemoryCloudHome {
                 .map(bytes::Bytes::copy_from_slice)
                 .collect::<Vec<_>>()
         };
-        let stream = futures_util::StreamExt::then(
-            futures_util::stream::iter(chunks),
-            move |chunk| async move {
+        let fail_after = self
+            .fail_exact_stream_read_after_bytes
+            .lock()
+            .unwrap()
+            .take();
+        let items = armed_stream_items(chunks, fail_after);
+        Ok(Box::pin(futures_util::stream::unfold(
+            (items.into_iter(), guard),
+            move |(mut items, guard)| async move {
+                let item = items.next()?;
                 if !chunk_delay.is_zero() {
                     tokio::time::sleep(chunk_delay).await;
                 }
-                Ok(chunk)
+                Some((item, (items, guard)))
             },
-        );
-        super::write_cloud_object_stream(destination, Box::pin(stream), progress).await?;
-        Ok(())
+        )))
     }
 
     async fn delete_exact(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
@@ -1197,18 +1238,43 @@ impl ExactSlotStorage for InMemoryCloudHome {
         Ok(window)
     }
 
-    async fn read_at_to_file(
-        &self,
-        slot: &ObjectSlot,
-        destination: &std::path::Path,
-        progress: super::DownloadProgress,
-    ) -> Result<(), CloudFileReadError> {
-        InMemoryCloudHome::read_exact_to_file(self, slot, destination, progress).await
+    async fn open_stream_at(&self, slot: &ObjectSlot) -> Result<CloudObjectStream, CloudHomeError> {
+        InMemoryCloudHome::open_exact_stream(self, slot).await
     }
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         InMemoryCloudHome::delete_exact(self, slot).await
     }
+}
+
+/// The stream items an armed cut produces: whole chunks while the byte budget
+/// lasts, the part of the chunk that reaches it, then the transport error. An
+/// unarmed read is every chunk and no error; a budget at or past the object's
+/// length serves the whole body and *then* fails, which is the case only the
+/// source's own end can tell from success.
+fn armed_stream_items(
+    chunks: Vec<bytes::Bytes>,
+    fail_after: Option<u64>,
+) -> Vec<Result<bytes::Bytes, CloudHomeError>> {
+    let Some(limit) = fail_after else {
+        return chunks.into_iter().map(Ok).collect();
+    };
+    let mut items = Vec::with_capacity(chunks.len() + 1);
+    let mut served = 0_u64;
+    for chunk in chunks {
+        let take = (limit - served).min(chunk.len() as u64) as usize;
+        if take > 0 {
+            items.push(Ok(chunk.slice(0..take)));
+        }
+        served += take as u64;
+        if served == limit {
+            break;
+        }
+    }
+    items.push(Err(CloudHomeError::Transport(format!(
+        "InMemoryCloudHome: armed exact stream-read failure after {limit} bytes"
+    ))));
+    items
 }
 
 #[cfg(test)]

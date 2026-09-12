@@ -588,13 +588,11 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
         let response = self.send_exact_read(slot, Some(&range)).await?;
         validated_range_bytes(response, "read exact Drive range", start, end).await
     }
-    async fn read_at_to_file(
+    async fn open_stream_at(
         &self,
         slot: &ObjectSlot,
-        destination: &std::path::Path,
-        progress: crate::cloud::DownloadProgress,
-    ) -> Result<(), crate::cloud::CloudFileReadError> {
-        GoogleDriveCloudHome::read_at_slot_to_file(self, slot, destination, progress).await
+    ) -> Result<crate::cloud::CloudObjectStream, CloudHomeError> {
+        GoogleDriveCloudHome::open_exact_slot_stream(self, slot).await
     }
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         GoogleDriveCloudHome::delete_at_slot(self, slot).await

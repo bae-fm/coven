@@ -512,15 +512,16 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         progress: crate::cloud::DownloadProgress,
     ) -> Result<Vec<u8>, StorageError> {
         context.validate_reference(object, semantic_prefix)?;
-        let temporary = tempfile::tempdir().map_err(StorageError::Io)?;
-        let stored_path = temporary.path().join("protocol-object");
-        self.home
-            .read_at_to_file(object.slot(), &stored_path, progress)
+        let mut stream = self.home.open_stream_at(object.slot()).await?;
+        let mut stored = Vec::with_capacity(object.stored_size() as usize);
+        while let Some(bytes) = futures_util::StreamExt::next(&mut stream)
             .await
-            .map_err(map_cloud_file_read_error)?;
-        let stored = tokio::fs::read(&stored_path)
-            .await
-            .map_err(StorageError::Io)?;
+            .transpose()
+            .map_err(StorageError::from)?
+        {
+            stored.extend_from_slice(&bytes);
+            progress(stored.len() as u64);
+        }
         let aad = protocol_object_aad_context(context, semantic_prefix);
         self.verify_and_open_protocol_data(
             "verify and open streamed protocol object",
@@ -699,9 +700,17 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                 );
                 let blob =
                     coven_protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)?;
-                let mut reader =
-                    ExactBlobPlaintextReader::new(&spool_file, &self.store_id, &blob, protection)
-                        .await?;
+                let mut reader = ExactBlobPlaintextReader::new(
+                    StoredBlobSource::File(
+                        crate::local_file::open_reader(&spool_file)
+                            .await
+                            .map_err(StorageError::LocalFilesystem)?,
+                    ),
+                    &self.store_id,
+                    &blob,
+                    protection,
+                )
+                .await?;
                 loop {
                     let chunk = coven_foundation::local_file::PlaintextChunkReader::next_chunk(
                         &mut reader,
@@ -830,7 +839,11 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                 let blob =
                     coven_protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)?;
                 let mut reader = ExactBlobPlaintextReader::new(
-                    &spool_file,
+                    StoredBlobSource::File(
+                        crate::local_file::open_reader(&spool_file)
+                            .await
+                            .map_err(StorageError::LocalFilesystem)?,
+                    ),
                     &self.store_id,
                     &blob,
                     retry_protection,
@@ -950,18 +963,24 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         mut plaintext: coven_foundation::local_file::AtomicStagedFile,
         progress: crate::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
-        let stored_destination = plaintext
-            .destination()
-            .with_extension("coven-stored-download");
-        let stored_stage = plaintext
-            .stage_peer(&stored_destination)
-            .await
-            .map_err(StorageError::LocalFilesystem)?;
-        let stored = self
-            .stage_exact_blob_download(blob, stored_stage, progress)
-            .await?;
-        let mut reader =
-            ExactBlobPlaintextReader::new(stored.path(), &self.store_id, blob, protection).await?;
+        let locator = blob.locator();
+        let object = blob.object();
+        self.validate_blob_locator_home(locator)?;
+        let expected = locator.semantic_key();
+        if object.slot().logical_key() != expected {
+            return Err(StorageError::Parse(format!(
+                "blob object {:?} does not match locator key {expected:?}",
+                object.slot().logical_key()
+            )));
+        }
+        let stream = reporting_download(self.home.open_stream_at(object.slot()).await?, progress);
+        let mut reader = ExactBlobPlaintextReader::new(
+            StoredBlobSource::stream(stream),
+            &self.store_id,
+            blob,
+            protection,
+        )
+        .await?;
         let written =
             plaintext
                 .write_plaintext(&mut reader)
@@ -1076,44 +1095,20 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
     }
 }
 
-/// Reading a stored blob body into an unpublished sibling is a step of this
-/// adapter's own verified download, not a capability the storage surface
-/// offers: every caller reaches it through `stage_verified_blob_plaintext`.
-impl CloudSyncConnection {
-    async fn stage_exact_blob_download(
-        &self,
-        blob: &coven_protocol::blob::locator::StoredBlobRef,
-        mut staged: coven_foundation::local_file::AtomicStagedFile,
-        progress: crate::cloud::DownloadProgress,
-    ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
-        let locator = blob.locator();
-        let object = blob.object();
-        self.validate_blob_locator_home(locator)?;
-        let expected = locator.semantic_key();
-        if object.slot().logical_key() != expected {
-            return Err(StorageError::Parse(format!(
-                "blob object {:?} does not match locator key {expected:?}",
-                object.slot().logical_key()
-            )));
+/// Report each received buffer as a cumulative byte count, so a download's
+/// progress is what the provider has actually delivered rather than what it
+/// promised.
+fn reporting_download(
+    stream: crate::cloud::CloudObjectStream,
+    progress: crate::cloud::DownloadProgress,
+) -> crate::cloud::CloudObjectStream {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let received = std::sync::Arc::new(AtomicU64::new(0));
+    Box::pin(futures_util::StreamExt::map(stream, move |item| {
+        if let Ok(bytes) = &item {
+            progress(received.fetch_add(bytes.len() as u64, Ordering::SeqCst) + bytes.len() as u64);
         }
-        self.home
-            .read_at_to_file(
-                object.slot(),
-                staged.path_for_atomic_replacement(),
-                progress,
-            )
-            .await
-            .map_err(map_cloud_file_read_error)?;
-        {
-            let (size, digest) = coven_foundation::local_file::file_facts(staged.path())
-                .await
-                .map_err(StorageError::LocalFilesystem)?;
-            object.verify_stored_facts(
-                staged.path(),
-                size,
-                coven_protocol::store_commit::ObjectHash::from_digest(digest),
-            )?;
-        }
-        Ok(staged)
-    }
+        item
+    }))
 }

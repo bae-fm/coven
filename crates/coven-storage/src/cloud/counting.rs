@@ -159,15 +159,8 @@ impl ExactSlotStorage for CountingCloudHome {
         self.counted().read_range_at(slot, start, end).await
     }
 
-    async fn read_at_to_file(
-        &self,
-        slot: &ObjectSlot,
-        destination: &std::path::Path,
-        progress: DownloadProgress,
-    ) -> Result<(), CloudFileReadError> {
-        self.counted()
-            .read_at_to_file(slot, destination, progress)
-            .await
+    async fn open_stream_at(&self, slot: &ObjectSlot) -> Result<CloudObjectStream, CloudHomeError> {
+        self.counted().open_stream_at(slot).await
     }
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {

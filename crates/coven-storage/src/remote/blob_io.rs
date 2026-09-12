@@ -169,6 +169,49 @@ impl BlobRangeReader {
     }
 }
 
+/// Where a stored blob's bytes come from: a provider body being received, or a
+/// local spool this device wrote and is re-verifying. Either way the reader
+/// sees one sequence of stored bytes and ends when the source does.
+pub(crate) enum StoredBlobSource {
+    Stream {
+        stream: crate::cloud::CloudObjectStream,
+        /// What a provider buffer carried past the length the reader asked
+        /// for. The framing reads exact lengths, so an overlong buffer is held
+        /// here rather than spilling into the next chunk.
+        pending: bytes::Bytes,
+    },
+    File(crate::local_file::PlaintextReader),
+}
+
+impl StoredBlobSource {
+    pub(crate) fn stream(stream: crate::cloud::CloudObjectStream) -> Self {
+        Self::Stream {
+            stream,
+            pending: bytes::Bytes::new(),
+        }
+    }
+
+    /// Up to `max` more stored bytes. An empty result means the source ended.
+    async fn next_bytes(&mut self, max: usize) -> Result<Vec<u8>, StorageError> {
+        match self {
+            Self::File(reader) => reader.next_chunk(max).await.map_err(StorageError::from),
+            Self::Stream { stream, pending } => {
+                use futures_util::StreamExt as _;
+
+                while pending.is_empty() {
+                    match stream.next().await {
+                        None => return Ok(Vec::new()),
+                        Some(Err(error)) => return Err(StorageError::from(error)),
+                        Some(Ok(bytes)) => *pending = bytes,
+                    }
+                }
+                let taken = pending.split_to(max.min(pending.len()));
+                Ok(taken.to_vec())
+            }
+        }
+    }
+}
+
 pub(crate) enum ExactBlobOpening {
     Browsable,
     Opaque {
@@ -177,10 +220,15 @@ pub(crate) enum ExactBlobOpening {
     },
 }
 
-/// Opens one already exact-verified stored blob and withholds EOF until the
-/// complete plaintext size and hash match the signed locator.
+/// Opens one stored blob as it arrives and withholds EOF until the source has
+/// ended, every chunk of the framing has opened, and the bytes that passed
+/// through are the ones the signed reference names.
+///
+/// Nothing here trusts a length declared inside the body: the header's
+/// plaintext length frames the chunks, and completion is the source ending
+/// after the last authenticated chunk with nothing trailing it.
 pub(crate) struct ExactBlobPlaintextReader {
-    source: crate::local_file::PlaintextReader,
+    source: StoredBlobSource,
     opening: ExactBlobOpening,
     remaining: u64,
     hasher: Option<coven_protocol::blob::ContentHasher>,
@@ -188,19 +236,28 @@ pub(crate) struct ExactBlobPlaintextReader {
     locator_hash: ObjectHash,
     pending: Vec<u8>,
     pending_offset: usize,
+    /// Every byte taken from the source, counted and hashed, so the stored
+    /// object's identity is checked against the reference without a second
+    /// pass over a file.
+    stored_size: u64,
+    stored_hasher: sha2::Sha256,
+    expected_stored_size: u64,
+    expected_stored_hash: ObjectHash,
+    ended: bool,
 }
 
 impl ExactBlobPlaintextReader {
     pub(crate) async fn new(
-        stored_file: &Path,
+        mut source: StoredBlobSource,
         store_id: &str,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         protection: coven_protocol::objects::BlobSpoolProtection,
     ) -> Result<Self, StorageError> {
+        use sha2::Digest as _;
+
         let locator = blob.locator();
-        let mut source = crate::local_file::open_reader(stored_file)
-            .await
-            .map_err(StorageError::LocalFilesystem)?;
+        let mut stored_size = 0_u64;
+        let mut stored_hasher = sha2::Sha256::new();
 
         let opening = match (locator, protection) {
             (
@@ -211,8 +268,10 @@ impl ExactBlobPlaintextReader {
                 },
                 coven_protocol::objects::BlobSpoolProtection::Opaque(master),
             ) => {
-                let prefix = read_source_exact(
+                let prefix = take_stored_exact(
                     &mut source,
+                    &mut stored_size,
+                    &mut stored_hasher,
                     KeyTag::LEN + SEALED_BLOB_HEADER_LEN,
                     locator.locator_hash(),
                 )
@@ -268,6 +327,11 @@ impl ExactBlobPlaintextReader {
             locator_hash: locator.locator_hash(),
             pending: Vec::new(),
             pending_offset: 0,
+            stored_size,
+            stored_hasher,
+            expected_stored_size: blob.object().stored_size(),
+            expected_stored_hash: blob.object().stored_hash(),
+            ended: false,
         })
     }
 
@@ -280,6 +344,54 @@ impl ExactBlobPlaintextReader {
             self.pending_offset = 0;
         }
         result
+    }
+
+    /// Take the next stored bytes through the reader's own size and hash
+    /// accounting, so nothing reaches the framing uncounted.
+    async fn take_stored(&mut self, max: usize) -> Result<Vec<u8>, StorageError> {
+        take_stored(
+            &mut self.source,
+            &mut self.stored_size,
+            &mut self.stored_hasher,
+            max,
+        )
+        .await
+    }
+
+    /// The source has delivered the last byte the framing needed. Nothing may
+    /// follow it, and what did pass through must be the object the reference
+    /// names — only then does the reader report EOF.
+    async fn finish(&mut self) -> Result<(), crate::local_file::PlaintextChunkError> {
+        use sha2::Digest as _;
+
+        // One more byte is one too many: what the source has after the framing
+        // is not part of this object.
+        if !self
+            .take_stored(1)
+            .await
+            .map_err(crate::local_file::PlaintextChunkError::Remote)?
+            .is_empty()
+        {
+            return Err(crate::local_file::PlaintextChunkError::InvalidContent(
+                format!("blob {} stored body has trailing bytes", self.locator_hash),
+            ));
+        }
+        let stored_hash = ObjectHash::from_digest(self.stored_hasher.clone().finalize().into());
+        if self.stored_size != self.expected_stored_size || stored_hash != self.expected_stored_hash
+        {
+            return Err(crate::local_file::PlaintextChunkError::InvalidContent(
+                format!(
+                    "blob {} stored body is {} bytes with hash {stored_hash}, its reference names {} bytes with hash {}",
+                    self.locator_hash,
+                    self.stored_size,
+                    self.expected_stored_size,
+                    self.expected_stored_hash
+                ),
+            ));
+        }
+        self.verify_complete()?;
+        self.ended = true;
+        Ok(())
     }
 
     fn verify_complete(&mut self) -> Result<(), crate::local_file::PlaintextChunkError> {
@@ -297,6 +409,46 @@ impl ExactBlobPlaintextReader {
         }
         Ok(())
     }
+}
+
+/// Up to `max` stored bytes, counted and hashed into the running stored-object
+/// identity. Every byte the reader takes from a source goes through here.
+async fn take_stored(
+    source: &mut StoredBlobSource,
+    stored_size: &mut u64,
+    stored_hasher: &mut sha2::Sha256,
+    max: usize,
+) -> Result<Vec<u8>, StorageError> {
+    use sha2::Digest as _;
+
+    let bytes = source.next_bytes(max).await?;
+    *stored_size += bytes.len() as u64;
+    stored_hasher.update(&bytes);
+    Ok(bytes)
+}
+
+/// Exactly `len` stored bytes. A source that ends first has not served the
+/// object the framing requires, which is content the caller must refuse rather
+/// than a short read it can work with.
+async fn take_stored_exact(
+    source: &mut StoredBlobSource,
+    stored_size: &mut u64,
+    stored_hasher: &mut sha2::Sha256,
+    len: usize,
+    locator_hash: ObjectHash,
+) -> Result<Vec<u8>, StorageError> {
+    let mut bytes = Vec::with_capacity(len);
+    while bytes.len() < len {
+        let chunk = take_stored(source, stored_size, stored_hasher, len - bytes.len()).await?;
+        if chunk.is_empty() {
+            return Err(StorageError::InvalidContent(format!(
+                "blob {locator_hash} stored body ended after {} of {len} required bytes",
+                bytes.len()
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// Split a stored sealed blob into the three things its bytes declare: the key
@@ -428,62 +580,82 @@ impl coven_foundation::local_file::PlaintextChunkReader for ExactBlobPlaintextRe
         if max == 0 {
             return Ok(Vec::new());
         }
-        if !self.pending.is_empty() {
-            return Ok(self.take_pending(max));
-        }
-        if self.remaining == 0 {
-            self.verify_complete()?;
-            return Ok(Vec::new());
-        }
-
-        let plaintext = match &mut self.opening {
-            ExactBlobOpening::Browsable => {
-                let wanted = usize::try_from(self.remaining.min(max as u64)).map_err(|_| {
-                    crate::local_file::PlaintextChunkError::InvalidContent(
-                        "blob plaintext read length does not fit this platform".to_string(),
-                    )
-                })?;
-                let chunk = self.source.next_chunk(wanted).await?;
-                if chunk.is_empty() {
-                    return Err(crate::local_file::PlaintextChunkError::InvalidContent(
-                        format!("blob {} plaintext ended early", self.locator_hash),
-                    ));
-                }
-                chunk
+        // The empty result that ends a `write_plaintext` is handed out only by
+        // `finish`, so a caller never mistakes a chunk that opened to zero
+        // bytes — the single chunk of an empty blob — for the end of the blob.
+        loop {
+            if !self.pending.is_empty() {
+                return Ok(self.take_pending(max));
             }
-            ExactBlobOpening::Opaque { opener, next_chunk } => {
-                let index = *next_chunk;
-                let sealed_len =
-                    usize::try_from(opener.header().sealed_chunk_len(index)).map_err(|_| {
+            if self.ended {
+                return Ok(Vec::new());
+            }
+
+            let plaintext = match &mut self.opening {
+                ExactBlobOpening::Browsable => {
+                    if self.remaining == 0 {
+                        self.finish().await?;
+                        continue;
+                    }
+                    let wanted = usize::try_from(self.remaining.min(max as u64)).map_err(|_| {
                         crate::local_file::PlaintextChunkError::InvalidContent(
-                            "one sealed blob chunk does not fit this platform".to_string(),
+                            "blob plaintext read length does not fit this platform".to_string(),
                         )
                     })?;
-                let sealed = read_source_exact(&mut self.source, sealed_len, self.locator_hash)
+                    let chunk = self
+                        .take_stored(wanted)
+                        .await
+                        .map_err(crate::local_file::PlaintextChunkError::Remote)?;
+                    if chunk.is_empty() {
+                        return Err(crate::local_file::PlaintextChunkError::InvalidContent(
+                            format!("blob {} plaintext ended early", self.locator_hash),
+                        ));
+                    }
+                    chunk
+                }
+                ExactBlobOpening::Opaque { opener, next_chunk } => {
+                    if *next_chunk >= opener.header().chunk_count() {
+                        self.finish().await?;
+                        continue;
+                    }
+                    let index = *next_chunk;
+                    let sealed_len = usize::try_from(opener.header().sealed_chunk_len(index))
+                        .map_err(|_| {
+                            crate::local_file::PlaintextChunkError::InvalidContent(
+                                "one sealed blob chunk does not fit this platform".to_string(),
+                            )
+                        })?;
+                    let sealed = take_stored_exact(
+                        &mut self.source,
+                        &mut self.stored_size,
+                        &mut self.stored_hasher,
+                        sealed_len,
+                        self.locator_hash,
+                    )
                     .await
                     .map_err(crate::local_file::PlaintextChunkError::Remote)?;
-                let plaintext = opener.open_chunk(index, &sealed).map_err(|source| {
-                    crate::local_file::PlaintextChunkError::Decryption {
-                        context: format!("blob {}", self.locator_hash),
-                        source: source.into(),
-                    }
-                })?;
-                *next_chunk += 1;
-                plaintext
+                    let plaintext = opener.open_chunk(index, &sealed).map_err(|source| {
+                        crate::local_file::PlaintextChunkError::Decryption {
+                            context: format!("blob {}", self.locator_hash),
+                            source: source.into(),
+                        }
+                    })?;
+                    *next_chunk += 1;
+                    plaintext
+                }
+            };
+            if plaintext.len() as u64 > self.remaining {
+                return Err(crate::local_file::PlaintextChunkError::InvalidContent(
+                    format!("blob {} produced excess plaintext", self.locator_hash),
+                ));
             }
-        };
-        if plaintext.len() as u64 > self.remaining {
-            return Err(crate::local_file::PlaintextChunkError::InvalidContent(
-                format!("blob {} produced excess plaintext", self.locator_hash),
-            ));
+            // Present only for a browsable home, where the content hash is what
+            // refuses the provider's bytes; a sealed blob is refused by its tags.
+            if let Some(hasher) = self.hasher.as_mut() {
+                hasher.update(&plaintext);
+            }
+            self.remaining -= plaintext.len() as u64;
+            self.pending = plaintext;
         }
-        // Present only for a browsable home, where the content hash is what
-        // refuses the provider's bytes; a sealed blob is refused by its tags.
-        if let Some(hasher) = self.hasher.as_mut() {
-            hasher.update(&plaintext);
-        }
-        self.remaining -= plaintext.len() as u64;
-        self.pending = plaintext;
-        Ok(self.take_pending(max))
     }
 }

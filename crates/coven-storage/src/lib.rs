@@ -29,11 +29,10 @@ pub use cloud::s3::S3CloudHome;
 #[cfg(any(test, feature = "test-utils"))]
 pub use cloud::test_utils::InMemoryCloudHome;
 pub use cloud::{
-    no_progress, write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome,
-    CloudAccessState, CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    CloudObjectStream, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
-    DownloadProgress, ExactCloudHome, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
-    ExactUploadSource, PartSink, UploadControl, UploadProgress,
+    no_progress, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome,
+    CloudHomeError, CloudHomeJoinInfo, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
+    ConditionalWriteOutcome, DownloadProgress, ExactCloudHome, ExactCreateOutcome,
+    ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink, UploadControl, UploadProgress,
 };
 
 #[cfg(feature = "oauth-providers")]

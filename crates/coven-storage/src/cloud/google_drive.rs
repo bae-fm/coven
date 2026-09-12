@@ -14,7 +14,7 @@ use super::exact_upload::settle_exact_create;
 use super::http::{self, ensure_ok, ok_bytes, ok_json, NotFound};
 use super::key_encoding::{decode_listed_key, encode_key};
 use super::oauth_rest::{
-    response_to_file, rest_delete, rest_list, rest_read, rest_read_range, validated_range_bytes,
+    response_stream, rest_delete, rest_list, rest_read, rest_read_range, validated_range_bytes,
     ListPage, OAuthRestHome, PageTokenTracker,
 };
 use super::oauth_session::OAuthSession;
@@ -892,20 +892,15 @@ impl GoogleDriveCloudHome {
         .await
     }
 
-    async fn read_at_slot_to_file(
+    async fn open_exact_slot_stream(
         &self,
         slot: &ObjectSlot,
-        destination: &std::path::Path,
-        progress: super::DownloadProgress,
-    ) -> Result<(), super::CloudFileReadError> {
+    ) -> Result<super::CloudObjectStream, CloudHomeError> {
         let response = self.send_exact_read(slot, None).await?;
-        response_to_file(
+        Ok(response_stream(
             response,
-            destination,
             &format!("read exact body for {}", slot.logical_key()),
-            progress,
-        )
-        .await
+        ))
     }
 
     async fn delete_at_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {

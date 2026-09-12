@@ -1,14 +1,13 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use coven::{
-    write_cloud_object_stream, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudFileReadError, CloudHome, CloudHomeError, CloudKitAcceptedShareRecord,
-    CloudKitAtomicCreateBatch, CloudKitEnvironment, CloudKitOps, CloudKitProviderIdentity,
-    CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudObjectStream,
-    CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome, CovenHandle,
-    ExactCreateOutcome, ExactSlotStorage, ExactUpload, ObjectSlot, PhysicalObjectLocator,
-    ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
-    UploadControl,
+    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitEnvironment, CloudKitOps,
+    CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope,
+    CloudKitShare, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
+    ConditionalWriteOutcome, CovenHandle, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
+    ObjectSlot, PhysicalObjectLocator, ProviderDeviceBinding, ProviderPrincipalId,
+    ResolvedProviderBinding, StoreProviderBinding, UploadControl,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -359,22 +358,15 @@ impl ExactSlotStorage for ExternalProvider {
         Ok(bytes[start as usize..end as usize].to_vec())
     }
 
-    async fn read_at_to_file(
-        &self,
-        slot: &ObjectSlot,
-        destination: &std::path::Path,
-        progress: coven::DownloadProgress,
-    ) -> Result<(), CloudFileReadError> {
+    async fn open_stream_at(&self, slot: &ObjectSlot) -> Result<CloudObjectStream, CloudHomeError> {
         assert_eq!(
             slot.physical(),
             &PhysicalObjectLocator::Opaque("provider:copy".to_string())
         );
-        let stream: CloudObjectStream = Box::pin(futures_util::stream::iter([
+        Ok(Box::pin(futures_util::stream::iter([
             Ok(Bytes::from_static(b"external")),
             Ok(Bytes::from_static(b" provider bytes")),
-        ]));
-        write_cloud_object_stream(destination, stream, progress).await?;
-        Ok(())
+        ])))
     }
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         assert_eq!(
@@ -416,27 +408,17 @@ async fn external_provider_can_name_and_implement_the_full_cloud_home_surface() 
     assert!(exact_create_called.load(Ordering::SeqCst));
     let object = ObjectSlot::opaque("objects/copy".to_string(), "provider:copy".to_string())
         .expect("valid external provider slot");
-    let temp = tempfile::tempdir().expect("temp dir");
-    let destination = temp.path().join("object.bin");
 
-    let read_progress = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let observed = Arc::clone(&read_progress);
-    provider
-        .read_at_to_file(
-            &object,
-            &destination,
-            Arc::new(move |bytes| observed.lock().expect("progress lock").push(bytes)),
-        )
+    let mut stream = provider
+        .open_stream_at(&object)
         .await
         .expect("external provider stream");
-    assert_eq!(*read_progress.lock().expect("progress lock"), vec![8, 23]);
+    let mut streamed = Vec::new();
+    while let Some(part) = futures_util::StreamExt::next(&mut stream).await {
+        streamed.extend_from_slice(&part.expect("external provider body part"));
+    }
+    assert_eq!(streamed, b"external provider bytes");
 
-    assert_eq!(
-        tokio::fs::read(destination)
-            .await
-            .expect("read destination"),
-        b"external provider bytes"
-    );
     assert_eq!(
         provider.read_at(&object).await.unwrap(),
         b"external provider bytes"

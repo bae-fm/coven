@@ -9,7 +9,7 @@ use coven_protocol::objects::{LocalRotation, RotationPendingState};
 use coven_protocol::store_commit::ObjectHash;
 use std::num::NonZeroU64;
 
-async fn ephemeral_stage(
+pub(super) async fn ephemeral_stage(
     destination: &std::path::Path,
 ) -> coven_foundation::local_file::AtomicStagedFile {
     let parent = destination
@@ -146,7 +146,7 @@ fn local_adoption_clears_the_same_peer_fact_but_preserves_a_newer_one() {
 /// Publish one sealed blob into `home` and hand back the reference a reader
 /// opens it through. `chunking` is the installation setting the blob is
 /// sealed under; the reader honors whatever the stored header records.
-async fn publish_sealed_blob(
+pub(super) async fn publish_sealed_blob(
     home: &InMemoryCloudHome,
     store_id: &str,
     blob_id: &str,
@@ -217,11 +217,11 @@ async fn publish_sealed_blob(
     (storage, blob, audience_key, temp)
 }
 
-fn ramp(len: usize) -> Vec<u8> {
+pub(super) fn ramp(len: usize) -> Vec<u8> {
     (0..len).map(|value| (value % 251) as u8).collect()
 }
 
-fn small_chunking(chunk: u32) -> BlobChunking {
+pub(super) fn small_chunking(chunk: u32) -> BlobChunking {
     BlobChunking::new(
         std::num::NonZeroU32::new(chunk).expect("nonzero chunk"),
         std::num::NonZeroU64::new(1 << 20).expect("nonzero window"),
@@ -957,166 +957,6 @@ async fn blob_spool_rejects_a_key_that_differs_from_the_locator() {
         Err(StorageError::InvalidContent(_))
     ));
     assert!(!spool.exists());
-}
-
-#[tokio::test]
-async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
-    let home = InMemoryCloudHome::new();
-    let identity = UserKeypair::generate();
-    let storage = CloudSyncConnection::new(
-        Arc::new(home),
-        CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
-        BlobPathScheme::Hashed,
-        "verified-blob-download",
-        identity,
-    );
-    let registration = storage
-        .blob_write_registration("verified-blob-download")
-        .await;
-    let authority = BlobWriteAuthority::new(&registration);
-    let audience_key = EncryptionService::from_key([9u8; 32]);
-    let plaintext: Vec<u8> = (0..150_000u32).map(|value| (value % 251) as u8).collect();
-    let locator = BlobLocator::opaque(
-        "audio",
-        "verified-track",
-        registration.reference().clone(),
-        RemoteAudience::Store,
-        BlobScope::Derived("album-a".to_string()),
-        audience_key.seal_key_fingerprint(),
-        plaintext.len() as u64,
-        ObjectHash::digest(&plaintext),
-    )
-    .expect("build locator");
-    let temp = tempfile::tempdir().expect("temporary blob directory");
-    let source = temp.path().join("plaintext");
-    let spool = temp.path().join("spool");
-    let destination = temp.path().join("materialized");
-    tokio::fs::write(&source, &plaintext)
-        .await
-        .expect("write plaintext source");
-    storage
-        .seal_blob_to_spool(
-            &locator,
-            &authority,
-            coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
-            &source,
-            ephemeral_stage(&spool).await,
-            crate::cloud::no_preparation_progress(),
-        )
-        .await
-        .expect("seal exact spool");
-    let slot = storage
-        .allocate_blob_slot(&locator, &authority)
-        .await
-        .expect("allocate exact blob slot");
-    let blob = storage
-        .prepare_blob_object(&locator, &authority, slot, &spool)
-        .await
-        .expect("prepare exact blob");
-    storage
-        .create_blob_object_from_file(
-            &blob,
-            &authority,
-            &spool,
-            &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
-        )
-        .await
-        .expect("create exact blob");
-
-    let stage = ephemeral_stage(&destination).await;
-    let staged = storage
-        .stage_verified_blob_plaintext(
-            &blob,
-            coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key),
-            stage,
-            crate::cloud::no_download_progress(),
-        )
-        .await
-        .expect("stage verified plaintext");
-    assert!(!destination.exists());
-    assert_eq!(tokio::fs::read(staged.path()).await.unwrap(), plaintext);
-    staged.commit().await.expect("publish verified plaintext");
-    assert_eq!(tokio::fs::read(destination).await.unwrap(), plaintext);
-}
-
-#[tokio::test]
-async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
-    let home = InMemoryCloudHome::new();
-    let identity = UserKeypair::generate();
-    let storage = CloudSyncConnection::new(
-        Arc::new(home.clone()),
-        CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
-        BlobPathScheme::Hashed,
-        "corrupt-blob-download",
-        identity,
-    );
-    let registration = storage
-        .blob_write_registration("corrupt-blob-download")
-        .await;
-    let authority = BlobWriteAuthority::new(&registration);
-    let audience_key = EncryptionService::from_key([9u8; 32]);
-    let plaintext = b"signed blob plaintext";
-    let locator = BlobLocator::opaque(
-        "covers",
-        "corrupt-cover",
-        registration.reference().clone(),
-        RemoteAudience::Store,
-        BlobScope::Master,
-        audience_key.seal_key_fingerprint(),
-        plaintext.len() as u64,
-        ObjectHash::digest(plaintext),
-    )
-    .expect("build locator");
-    let temp = tempfile::tempdir().expect("temporary blob directory");
-    let source = temp.path().join("plaintext");
-    let spool = temp.path().join("spool");
-    let destination = temp.path().join("materialized");
-    tokio::fs::write(&source, plaintext)
-        .await
-        .expect("write plaintext source");
-    storage
-        .seal_blob_to_spool(
-            &locator,
-            &authority,
-            coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
-            &source,
-            ephemeral_stage(&spool).await,
-            crate::cloud::no_preparation_progress(),
-        )
-        .await
-        .expect("seal exact spool");
-    let slot = storage
-        .allocate_blob_slot(&locator, &authority)
-        .await
-        .unwrap();
-    let blob = storage
-        .prepare_blob_object(&locator, &authority, slot, &spool)
-        .await
-        .unwrap();
-    storage
-        .create_blob_object_from_file(
-            &blob,
-            &authority,
-            &spool,
-            &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
-        )
-        .await
-        .unwrap();
-    home.replace_exact_object(blob.object().slot(), b"corrupt".to_vec());
-
-    let stage = ephemeral_stage(&destination).await;
-    assert!(matches!(
-        storage
-            .stage_verified_blob_plaintext(
-                &blob,
-                coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key),
-                stage,
-                crate::cloud::no_download_progress(),
-            )
-            .await,
-        Err(StorageError::InvalidContent(_))
-    ));
-    assert!(!destination.exists());
 }
 
 #[tokio::test]

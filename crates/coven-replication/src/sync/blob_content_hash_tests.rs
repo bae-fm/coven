@@ -1,7 +1,7 @@
 //! Exact blob references bind a row-visible locator to one immutable provider
 //! object. Same-id objects with different plaintext have different locator hashes
-//! and slots, and provider rollback at the correct slot fails the stored hash
-//! check before any plaintext is published locally.
+//! and slots, and provider rollback at the correct slot is refused before any
+//! plaintext is published locally.
 
 use crate::sync::test_helpers::TestStore;
 use coven_keys::encryption::EncryptionService;
@@ -125,6 +125,10 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
     let directory = tempfile::tempdir().expect("create materialization directory");
     let destination = directory.path().join("current");
     let stage = ephemeral_stage(&destination).await;
+    // The rolled-back body is another blob's, sealed under another blob's
+    // context, so its first chunk's tag refuses it. A sealed blob is refused
+    // by its tags; the stored size and hash catch what tags cannot, which is a
+    // body whose framing never opens at all.
     assert!(matches!(
         cloud_storage
             .stage_verified_blob_plaintext(
@@ -134,7 +138,7 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
                 coven_storage::cloud::no_download_progress(),
             )
             .await,
-        Err(StorageError::InvalidContent(_))
+        Err(StorageError::Decryption { .. })
     ));
     assert!(!destination.exists());
 

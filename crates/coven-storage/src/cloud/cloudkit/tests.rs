@@ -1358,6 +1358,77 @@ async fn test_read_range_empty_when_end_leq_start() {
 /// the object — the sabotage this test exists to catch, since a caller that
 /// fetches only covering chunks gains nothing if the backend under it reads
 /// everything anyway.
+/// The stream fetches one part record at a time, in order, with no
+/// whole-object buffer standing between the provider and the reader.
+#[tokio::test]
+async fn exact_stream_serves_a_multi_part_body_one_part_at_a_time() {
+    let (home, ops) = make_cloud_home_with_ops();
+    let slot = exact_slot("audio/streamed-track");
+    let data: Vec<u8> = (0..CHUNK_SIZE + 1024)
+        .map(|value| (value % 251) as u8)
+        .collect();
+    crate::cloud::create_exact_bytes(&home, &slot, &data, &no_progress())
+        .await
+        .unwrap();
+
+    ops.clear_versioned_reads();
+    let mut stream = ExactSlotStorage::open_stream_at(&home, &slot)
+        .await
+        .expect("open the CloudKit exact stream");
+    let mut parts = Vec::new();
+    while let Some(part) = futures_util::StreamExt::next(&mut stream).await {
+        parts.push(part.expect("CloudKit body part").to_vec());
+    }
+
+    assert_eq!(
+        parts.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![CHUNK_SIZE, 1024]
+    );
+    assert_eq!(parts.concat(), data);
+    assert_eq!(
+        ops.versioned_reads(),
+        vec![
+            "audio/streamed-track".to_string(),
+            "audio/streamed-track.exact-part0".to_string(),
+            "audio/streamed-track.exact-part1".to_string(),
+        ],
+    );
+}
+
+/// A part the provider can no longer serve ends the stream with that error.
+/// The parts after a gap are not this object's bytes, so none follow.
+#[tokio::test]
+async fn a_failed_cloudkit_part_read_ends_the_stream_with_its_error() {
+    let (home, ops) = make_cloud_home_with_ops();
+    let slot = exact_slot("audio/broken-track");
+    let data: Vec<u8> = (0..CHUNK_SIZE + 1024)
+        .map(|value| (value % 251) as u8)
+        .collect();
+    crate::cloud::create_exact_bytes(&home, &slot, &data, &no_progress())
+        .await
+        .unwrap();
+    ops.delete_record(&CloudKitScope::Private, "audio/broken-track.exact-part1")
+        .expect("drop the second part record");
+
+    let mut stream = ExactSlotStorage::open_stream_at(&home, &slot)
+        .await
+        .expect("open the CloudKit exact stream");
+    let first = futures_util::StreamExt::next(&mut stream)
+        .await
+        .expect("the first part is served")
+        .expect("the first part succeeds");
+    assert_eq!(first.len(), CHUNK_SIZE);
+    let error = futures_util::StreamExt::next(&mut stream)
+        .await
+        .expect("the missing part is reported")
+        .expect_err("a missing part is not a clean end");
+    assert!(matches!(error, CloudHomeError::NotFound(_)), "{error}");
+    assert!(
+        futures_util::StreamExt::next(&mut stream).await.is_none(),
+        "nothing follows a failed part"
+    );
+}
+
 #[tokio::test]
 async fn exact_ranged_read_fetches_only_the_parts_it_covers() {
     let (home, ops) = make_cloud_home_with_ops();

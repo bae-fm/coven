@@ -27,3 +27,29 @@ pub(crate) async fn spawn_test_server(
     });
     (endpoint, shutdown_tx)
 }
+
+/// A response body that hands over `delivered` and then fails. Paired with a
+/// `Content-Length` naming the whole object, it is the provider that stops
+/// part-way through a body — the case a reader must refuse rather than accept
+/// as a short object.
+#[cfg(feature = "oauth-providers")]
+pub(crate) fn cut_body(delivered: Vec<u8>) -> axum::body::Body {
+    // The delivered bytes are handed over on their own poll, so the response
+    // reaches the client before the failure does. Failing in the same poll
+    // would abort the whole response and the client would never see a body.
+    axum::body::Body::from_stream(futures_util::stream::unfold(
+        Some(delivered),
+        |delivered| async move {
+            match delivered {
+                Some(delivered) => Some((Ok(bytes::Bytes::from(delivered)), None)),
+                None => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    Some((
+                        Err(std::io::Error::other("the provider cut the body")),
+                        None,
+                    ))
+                }
+            }
+        },
+    ))
+}

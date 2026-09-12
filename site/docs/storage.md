@@ -112,10 +112,8 @@ pub trait ExactSlotStorage: Send + Sync {
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError>;
     async fn read_range_at(&self, slot: &ObjectSlot, start: u64, end: u64)
         -> Result<Vec<u8>, CloudHomeError>;
-    async fn read_at_to_file(
-        &self, slot: &ObjectSlot, destination: &Path, progress: DownloadProgress,
-    )
-        -> Result<(), CloudFileReadError>;
+    async fn open_stream_at(&self, slot: &ObjectSlot)
+        -> Result<CloudObjectStream, CloudHomeError>;
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError>;
 }
 
@@ -130,6 +128,11 @@ pub trait ExactCloudHome: CloudHome + ExactSlotStorage {}
   exact slot. A revision mismatch is a competing writer; an unavailable or
   ambiguous result remains an error. The current record is not deleted during
   Store publication.
+- `open_stream_at` serves one exact object's stored bytes as the provider
+  delivers them, and nothing is written to disk on the way. The stream ends
+  only when the whole object has arrived; a provider that stops part-way ends
+  it with that error instead, which is what lets the reader above tell a
+  complete body from a truncated one while it authenticates each chunk.
 - `probe` checks that the backend is reachable with the configured credentials.
   Setup flows call it before persisting credentials, so a typo or a missing
   bucket fails at setup instead of via a delayed reconnect banner. The default

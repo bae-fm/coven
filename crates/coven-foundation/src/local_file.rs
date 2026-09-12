@@ -139,26 +139,10 @@ impl AtomicStagedFile {
         &self.destination
     }
 
-    /// Create another unpublished stage governed by the same durability policy.
-    pub async fn stage_peer(&self, destination: &Path) -> Result<Self, FileError> {
-        Self::create_with_file_sync(destination, self.file_sync.clone()).await
-    }
-
     pub async fn read_bytes(&self) -> Result<Vec<u8>, FileError> {
         tokio::fs::read(self.path())
             .await
             .map_err(|source| FileError::at("read staged blob", self.path(), source))
-    }
-
-    /// Hand the reserved path to a writer that performs its own atomic
-    /// replacement. The retained descriptor is closed first so publication
-    /// always names the replacement inode.
-    pub fn path_for_atomic_replacement(&mut self) -> &Path {
-        self.staged
-            .as_mut()
-            .expect("atomic stage is unpublished")
-            .close();
-        self.path()
     }
 
     pub async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), FileError> {

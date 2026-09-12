@@ -159,14 +159,13 @@ pub use coven_storage::CloudCipher;
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_storage::InMemoryCloudHome;
 pub use coven_storage::{
-    write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudKitAcceptedShareRecord,
-    CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity, CloudKitRecordCreate,
-    CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudKitShareAcceptance,
-    CloudKitSharePermission, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
-    ConditionalWriteOutcome, DownloadProgress, ExactCloudHome, ExactCreateOutcome,
-    ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink, S3CloudHome, UploadControl,
-    UploadProgress,
+    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps,
+    CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope,
+    CloudKitShare, CloudKitShareAcceptance, CloudKitSharePermission, CloudObjectStream,
+    CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome, DownloadProgress,
+    ExactCloudHome, ExactCreateOutcome, ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink,
+    S3CloudHome, UploadControl, UploadProgress,
 };
 pub use device_pairing::{ApproveDevicePairingError, StartDevicePairingError};
 pub use handle::{CovenHandle, RetryBlockedOperationError};

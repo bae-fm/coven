@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use super::provider_probe::ProviderProbeStorage;
 use super::CloudSyncObjectStorage;
-use crate::cloud::{BlobBody, CloudFileReadError, CloudHomeError, ExactCloudHome};
+use crate::cloud::{BlobBody, CloudHomeError, ExactCloudHome};
 use coven_keys::encryption::{
     EncryptionError, EncryptionService, KeyTag, NoncePolicy, SealedBlobHeader,
     SEALED_BLOB_HEADER_LEN,
@@ -74,17 +74,6 @@ pub struct CloudSyncConnection {
     /// The Store identity used to verify that blob append authority names this
     /// connection's author in its device registration.
     keypair: UserKeypair,
-}
-
-fn map_cloud_file_read_error(error: CloudFileReadError) -> StorageError {
-    match error {
-        CloudFileReadError::Source(error) => StorageError::from(error),
-        CloudFileReadError::SourceCleanup { source, cleanup } => StorageError::CleanupFailed {
-            operation: Box::new(StorageError::from(source)),
-            cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
-        },
-        CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
-    }
 }
 
 impl CloudSyncConnection {
@@ -539,24 +528,7 @@ where
         .map_err(|source| StorageError::Blocking { operation, source })?
 }
 
-async fn read_source_exact(
-    source: &mut crate::local_file::PlaintextReader,
-    len: usize,
-    locator_hash: ObjectHash,
-) -> Result<Vec<u8>, StorageError> {
-    let mut bytes = Vec::with_capacity(len);
-    while bytes.len() < len {
-        let chunk = source.next_chunk(len - bytes.len()).await?;
-        if chunk.is_empty() {
-            return Err(StorageError::InvalidContent(format!(
-                "blob {locator_hash} stored body ended after {} of {len} required bytes",
-                bytes.len()
-            )));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
-}
-
+#[cfg(test)]
+mod download_tests;
 #[cfg(test)]
 mod tests;

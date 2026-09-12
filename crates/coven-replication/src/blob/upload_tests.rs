@@ -20,8 +20,8 @@ use coven_protocol::objects::ObjectSlot;
 use coven_protocol::synced_schema::BlobDecl;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::{
-    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError, CloudHome,
-    CloudHomeError, CloudHomeJoinInfo, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
+    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, CloudObjectStream, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
     RevokeOutcome, UploadControl,
 };
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
@@ -271,13 +271,8 @@ impl ExactSlotStorage for InstrumentedHome {
         ExactSlotStorage::read_range_at(&self.inner, slot, start, end).await
     }
 
-    async fn read_at_to_file(
-        &self,
-        slot: &ObjectSlot,
-        destination: &std::path::Path,
-        progress: coven_storage::cloud::DownloadProgress,
-    ) -> Result<(), CloudFileReadError> {
-        ExactSlotStorage::read_at_to_file(&self.inner, slot, destination, progress).await
+    async fn open_stream_at(&self, slot: &ObjectSlot) -> Result<CloudObjectStream, CloudHomeError> {
+        ExactSlotStorage::open_stream_at(&self.inner, slot).await
     }
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {

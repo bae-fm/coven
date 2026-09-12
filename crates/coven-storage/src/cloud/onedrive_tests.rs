@@ -163,6 +163,111 @@ async fn exact_create_test_home() -> (
 }
 
 #[derive(Clone)]
+struct ExactReadEndpointState {
+    body: Vec<u8>,
+    /// How many bytes the response declares. A cut body declares the whole
+    /// object and delivers less.
+    declared: usize,
+}
+
+fn onedrive_item_metadata(size: usize) -> String {
+    serde_json::json!({
+        "id": "item-1",
+        "eTag": "\"revision-1\"",
+        "name": encode_key("protocol/copy"),
+        "parentReference": { "id": "folder456" },
+        "file": { "hashes": { "sha1Hash": "994b62b0e47abf4768a374def3bf8b963eab4abd" } },
+        "size": size,
+    })
+    .to_string()
+}
+
+async fn exact_read_endpoint(
+    State(state): State<ExactReadEndpointState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let path = request.uri().path().to_string();
+    if path.ends_with("/content") {
+        let body = if state.body.len() == state.declared {
+            Body::from(state.body.clone())
+        } else {
+            crate::cloud::test_server::cut_body(state.body.clone())
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-length", state.declared.to_string())
+            .body(body)
+            .expect("build content response");
+    }
+    if path.contains("/items/folder456:/") {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(onedrive_item_metadata(state.declared)))
+            .expect("build metadata response");
+    }
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Body::from(format!("unexpected request: {path}")))
+        .expect("build unexpected response")
+}
+
+async fn exact_read_test_home(
+    body: Vec<u8>,
+    declared: usize,
+) -> (OneDriveCloudHome, tokio::sync::oneshot::Sender<()>) {
+    let (endpoint, shutdown) = crate::cloud::test_server::spawn_test_server(
+        Router::new()
+            .fallback(exact_read_endpoint)
+            .with_state(ExactReadEndpointState { body, declared }),
+    )
+    .await;
+    (home().with_graph_api(endpoint), shutdown)
+}
+
+#[tokio::test]
+async fn exact_stream_serves_the_whole_onedrive_body() {
+    let body = b"onedrive item bytes".to_vec();
+    let (home, shutdown) = exact_read_test_home(body.clone(), body.len()).await;
+    let slot = ObjectSlot::logical("protocol/copy".to_string()).expect("valid slot");
+
+    let mut stream = ExactSlotStorage::open_stream_at(&home, &slot)
+        .await
+        .expect("open the OneDrive exact stream");
+    let mut received = Vec::new();
+    while let Some(part) = futures_util::StreamExt::next(&mut stream).await {
+        received.extend_from_slice(&part.expect("OneDrive body part"));
+    }
+
+    assert_eq!(received, body);
+    shutdown.send(()).expect("shut down OneDrive endpoint");
+}
+
+/// A body that stops mid-stream ends the stream with an error. It must not
+/// look like an object that simply finished early.
+#[tokio::test]
+async fn a_cut_onedrive_body_ends_its_stream_with_an_error() {
+    let (home, shutdown) = exact_read_test_home(b"onedrive ".to_vec(), 19).await;
+    let slot = ObjectSlot::logical("protocol/copy".to_string()).expect("valid slot");
+
+    let mut stream = ExactSlotStorage::open_stream_at(&home, &slot)
+        .await
+        .expect("open the OneDrive exact stream");
+    let mut received = Vec::new();
+    let error = loop {
+        match futures_util::StreamExt::next(&mut stream).await {
+            Some(Ok(part)) => received.extend_from_slice(&part),
+            Some(Err(error)) => break error,
+            None => panic!("a cut body must not end the stream cleanly"),
+        }
+    };
+
+    assert_eq!(received, b"onedrive ");
+    assert!(matches!(error, CloudHomeError::Backend { .. }), "{error}");
+    shutdown.send(()).expect("shut down OneDrive endpoint");
+}
+
+#[derive(Clone)]
 struct ConditionalState {
     endpoint: String,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,

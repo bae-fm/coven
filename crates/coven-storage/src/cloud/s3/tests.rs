@@ -751,6 +751,18 @@ struct FakePausedBodyObject {
     second: Vec<u8>,
     first_sent: Arc<tokio::sync::Notify>,
     release_second: Arc<tokio::sync::Notify>,
+    /// Set when this endpoint's response body is dropped, which is what a
+    /// client that closed the connection looks like from the server.
+    body_dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Flips its flag when the response body it rides in is dropped.
+struct BodyDropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for BodyDropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 async fn fake_s3_paused_body_endpoint(
@@ -767,21 +779,28 @@ async fn fake_s3_paused_body_endpoint(
     }
 
     let total_len = object.first.len() + object.second.len();
-    let stream = futures_util::stream::unfold((0u8, object), |(stage, object)| async move {
-        match stage {
-            0 => {
-                object.first_sent.notify_one();
-                let first = object.first.clone();
-                Some((Ok::<Bytes, std::io::Error>(Bytes::from(first)), (1, object)))
+    let dropped = BodyDropFlag(object.body_dropped.clone());
+    let stream = futures_util::stream::unfold(
+        (0u8, object, dropped),
+        |(stage, object, dropped)| async move {
+            match stage {
+                0 => {
+                    object.first_sent.notify_one();
+                    let first = object.first.clone();
+                    Some((
+                        Ok::<Bytes, std::io::Error>(Bytes::from(first)),
+                        (1, object, dropped),
+                    ))
+                }
+                1 => {
+                    object.release_second.notified().await;
+                    let second = object.second.clone();
+                    Some((Ok(Bytes::from(second)), (2, object, dropped)))
+                }
+                _ => None,
             }
-            1 => {
-                object.release_second.notified().await;
-                let second = object.second.clone();
-                Some((Ok(Bytes::from(second)), (2, object)))
-            }
-            _ => None,
-        }
-    });
+        },
+    );
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_LENGTH, total_len.to_string())
@@ -798,23 +817,6 @@ async fn spawn_fake_s3_paused_body_endpoint(
             .with_state(object),
     )
     .await
-}
-
-async fn atomic_temp_paths(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut entries = tokio::fs::read_dir(directory)
-        .await
-        .expect("read destination directory");
-    let mut temps = Vec::new();
-    while let Some(entry) = entries.next_entry().await.expect("read destination entry") {
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(coven_foundation::local_file::TEMP_BLOB_PREFIX)
-        {
-            temps.push(entry.path());
-        }
-    }
-    temps
 }
 
 #[derive(Clone)]
@@ -1470,16 +1472,13 @@ async fn exact_operations_reject_an_opaque_s3_locator() {
         .await
         .expect_err("opaque S3 read must fail");
     assert!(read_error.to_string().contains("must use its logical key"));
-    let destination = std::env::temp_dir().join("coven-mismatched-s3-locator");
-    let file_error = ExactSlotStorage::read_at_to_file(
-        &home,
-        &slot,
-        &destination,
-        crate::cloud::no_download_progress(),
-    )
-    .await
-    .expect_err("opaque S3 file read must fail");
-    assert!(file_error.to_string().contains("must use its logical key"));
+    let stream_error = ExactSlotStorage::open_stream_at(&home, &slot)
+        .await
+        .err()
+        .expect("opaque S3 stream read must fail");
+    assert!(stream_error
+        .to_string()
+        .contains("must use its logical key"));
     let delete_error = ExactSlotStorage::delete_at(&home, &slot)
         .await
         .expect_err("opaque S3 delete must fail");
@@ -1795,7 +1794,7 @@ async fn read_range_rejects_full_object_200_response() {
 }
 
 #[tokio::test]
-async fn exact_read_streams_object_to_file() {
+async fn exact_read_streams_the_whole_object_body() {
     let full_body = b"0123456789abcdefghijklmnopqrstuvwxyz".to_vec();
     let key = "storage/audio-object".to_string();
     let bucket = "coven-s3-appended-read".to_string();
@@ -1814,35 +1813,32 @@ async fn exact_read_streams_object_to_file() {
         ExactUploadVerification::Unchecked,
     )
     .await;
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let destination = tmp.path().join("object.bin");
     let slot = ObjectSlot::logical(key).unwrap();
 
-    ExactSlotStorage::read_at_to_file(
-        &home,
-        &slot,
-        &destination,
-        crate::cloud::no_download_progress(),
-    )
-    .await
-    .expect("stream exact object");
+    let mut stream = ExactSlotStorage::open_stream_at(&home, &slot)
+        .await
+        .expect("open exact object stream");
+    let mut received = Vec::new();
+    while let Some(part) = stream.next().await {
+        received.extend_from_slice(&part.expect("stream exact object part"));
+    }
 
-    assert_eq!(
-        tokio::fs::read(&destination)
-            .await
-            .expect("read destination"),
-        full_body
-    );
+    assert_eq!(received, full_body);
     shutdown.send(()).expect("shut down fake S3");
 }
 
+/// Dropping the returned stream is how a caller cancels a download. The pump
+/// task the S3 adapter runs on the cloud runtime must end with it rather than
+/// keep draining the object into a channel nobody reads; it does, and the
+/// closed connection is what the server sees.
 #[tokio::test]
-async fn canceling_exact_read_cannot_rename_over_destination_later() {
+async fn dropping_an_exact_stream_ends_its_pump_task() {
     let key = "storage/cancel-object".to_string();
     let bucket = "coven-s3-cancel-read".to_string();
     let first = b"partial".to_vec();
     let first_sent = Arc::new(tokio::sync::Notify::new());
     let release_second = Arc::new(tokio::sync::Notify::new());
+    let body_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (endpoint, shutdown) = spawn_fake_s3_paused_body_endpoint(FakePausedBodyObject {
         bucket: bucket.clone(),
         key: key.clone(),
@@ -1850,6 +1846,7 @@ async fn canceling_exact_read_cannot_rename_over_destination_later() {
         second: b" remainder".to_vec(),
         first_sent: first_sent.clone(),
         release_second: release_second.clone(),
+        body_dropped: body_dropped.clone(),
     })
     .await;
 
@@ -1861,56 +1858,38 @@ async fn canceling_exact_read_cannot_rename_over_destination_later() {
         ExactUploadVerification::Unchecked,
     )
     .await;
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let destination = tmp.path().join("object.bin");
-    tokio::fs::write(&destination, b"committed")
-        .await
-        .expect("seed destination");
     let slot = ObjectSlot::logical(key).unwrap();
-    let read_destination = destination.clone();
-    let read = tokio::spawn(async move {
-        ExactSlotStorage::read_at_to_file(
-            &home,
-            &slot,
-            &read_destination,
-            crate::cloud::no_download_progress(),
-        )
+    let mut stream = ExactSlotStorage::open_stream_at(&home, &slot)
         .await
-    });
+        .expect("open exact object stream");
     first_sent.notified().await;
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if atomic_temp_paths(tmp.path()).await.iter().any(|path| {
-                std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == first.len() as u64)
-            }) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("first response chunk was written to the temp file");
-
-    read.abort();
-    assert!(read.await.expect_err("read task canceled").is_cancelled());
-    release_second.notify_waiters();
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if atomic_temp_paths(tmp.path()).await.is_empty() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("canceled S3 task removed its temp file");
-
     assert_eq!(
-        tokio::fs::read(&destination)
+        stream
+            .next()
             .await
-            .expect("read destination"),
-        b"committed"
+            .expect("first body part")
+            .expect("first body part succeeds"),
+        first
     );
+
+    assert!(
+        !body_dropped.load(Ordering::SeqCst),
+        "the response body is still open while the caller holds the stream"
+    );
+
+    drop(stream);
+    release_second.notify_waiters();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if body_dropped.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the pump task dropped the response body after its receiver went away");
+
     shutdown.send(()).expect("shut down fake S3");
 }
 

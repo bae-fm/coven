@@ -469,21 +469,23 @@ impl S3CloudHome {
             .await
     }
 
-    async fn read_exact_to_file(
+    /// The exact object's body as a stream. The SDK body only advances on the
+    /// cloud runtime, so a task there pumps it into a bounded channel and this
+    /// returns the receiving end. The bound is how far ahead of its reader the
+    /// network is allowed to run; dropping the returned stream drops the
+    /// receiver, and the pump stops at its next send.
+    async fn open_exact_stream(
         &self,
         slot: &ObjectSlot,
-        destination: &std::path::Path,
-        progress: super::DownloadProgress,
-    ) -> Result<(), super::CloudFileReadError> {
-        slot.require_logical_key_for("S3")
-            .map_err(|error| super::CloudFileReadError::Source(CloudHomeError::from(error)))?;
+    ) -> Result<super::CloudObjectStream, CloudHomeError> {
+        slot.require_logical_key_for("S3")?;
         let full = self.full_key(slot.logical_key());
         let key = slot.logical_key().to_string();
         let client = self.client.clone();
         let bucket = self.bucket.clone();
-        let destination = destination.to_path_buf();
-        self.runtime
-            .run_file_read(move || async move {
+        let body = self
+            .runtime
+            .run_cloud(move || async move {
                 let response = client
                     .get_object()
                     .bucket(&bucket)
@@ -491,21 +493,29 @@ impl S3CloudHome {
                     .send()
                     .await
                     .map_err(|error| get_object_error(&key, error))?;
-                let stream = futures_util::stream::unfold(
-                    (response.body, key),
-                    |(mut body, key)| async move {
-                        body.next().await.map(|result| {
-                            let result = result.map_err(|error| {
-                                body_read_error("read appended body", &key, error)
-                            });
-                            (result, (body, key))
-                        })
-                    },
-                );
-                super::write_cloud_object_stream(&destination, Box::pin(stream), progress).await?;
-                Ok::<(), super::CloudFileReadError>(())
+                Ok(response.body)
             })
-            .await
+            .await?;
+        let key = slot.logical_key().to_string();
+        let (sender, receiver) =
+            tokio::sync::mpsc::channel::<Result<bytes::Bytes, CloudHomeError>>(4);
+        self.runtime
+            .spawn(move || async move {
+                let mut body = body;
+                while let Some(part) = body.next().await {
+                    let failed = part.is_err();
+                    let part =
+                        part.map_err(|error| body_read_error("read exact body", &key, error));
+                    if sender.send(part).await.is_err() || failed {
+                        return;
+                    }
+                }
+            })
+            .map_err(|error| CloudHomeError::transport("stream S3 exact body", error))?;
+        Ok(Box::pin(futures_util::stream::unfold(
+            receiver,
+            |mut receiver| async move { receiver.recv().await.map(|part| (part, receiver)) },
+        )))
     }
 
     async fn exact_metadata(&self, slot: &ObjectSlot) -> Result<S3ExactMetadata, CloudHomeError> {

@@ -165,62 +165,6 @@ pub enum ConditionalWriteOutcome {
 pub type CloudObjectStream =
     Pin<Box<dyn Stream<Item = Result<Bytes, CloudHomeError>> + Send + 'static>>;
 
-#[derive(Debug, thiserror::Error)]
-pub enum CloudFileReadError {
-    #[error(transparent)]
-    Source(#[from] CloudHomeError),
-    #[error("{source}; local cleanup failed: {cleanup}")]
-    SourceCleanup {
-        #[source]
-        source: CloudHomeError,
-        cleanup: coven_foundation::atomic_file::FileError,
-    },
-    #[error("local destination failed: {0}")]
-    Local(coven_foundation::atomic_file::FileError),
-}
-
-pub async fn write_cloud_object_stream(
-    destination: &Path,
-    stream: CloudObjectStream,
-    progress: DownloadProgress,
-) -> Result<u64, CloudFileReadError> {
-    use futures_util::StreamExt as _;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    let received = std::sync::Arc::new(AtomicU64::new(0));
-    let stream_received = std::sync::Arc::clone(&received);
-    let stream_progress = std::sync::Arc::clone(&progress);
-    let stream: CloudObjectStream = Box::pin(stream.map(move |item| {
-        if let Ok(bytes) = &item {
-            let done = stream_received.fetch_add(bytes.len() as u64, Ordering::SeqCst)
-                + bytes.len() as u64;
-            stream_progress(done);
-        }
-        item
-    }));
-    let staged = coven_foundation::local_file::AtomicStagedFile::create(destination)
-        .await
-        .map_err(CloudFileReadError::Local)?;
-    let (staged, written) =
-        staged
-            .write_byte_stream(stream)
-            .await
-            .map_err(|error| match error {
-                coven_foundation::local_file::ByteStreamWriteError::Source(error) => {
-                    CloudFileReadError::Source(error)
-                }
-                coven_foundation::local_file::ByteStreamWriteError::SourceCleanup {
-                    source,
-                    cleanup,
-                } => CloudFileReadError::SourceCleanup { source, cleanup },
-                coven_foundation::local_file::ByteStreamWriteError::Local(error) => {
-                    CloudFileReadError::Local(error)
-                }
-            })?;
-    staged.commit().await.map_err(CloudFileReadError::Local)?;
-    Ok(written)
-}
-
 impl CloudHomeError {
     pub fn backend(
         kind: StorageBackendFailure,
@@ -602,12 +546,11 @@ pub trait ExactSlotStorage: Send + Sync {
         end: u64,
     ) -> Result<Vec<u8>, CloudHomeError>;
 
-    async fn read_at_to_file(
-        &self,
-        slot: &ObjectSlot,
-        destination: &Path,
-        progress: DownloadProgress,
-    ) -> Result<(), CloudFileReadError>;
+    /// The exact object's stored bytes as the provider serves them, from the
+    /// first byte to its end. The stream ends only when the provider has
+    /// delivered the whole object; an error after the last byte still ends it
+    /// with that error.
+    async fn open_stream_at(&self, slot: &ObjectSlot) -> Result<CloudObjectStream, CloudHomeError>;
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError>;
 

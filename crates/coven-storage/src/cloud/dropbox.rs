@@ -1412,20 +1412,15 @@ impl ExactSlotStorage for DropboxCloudHome {
         })
     }
 
-    async fn read_at_to_file(
+    async fn open_stream_at(
         &self,
         slot: &ObjectSlot,
-        destination: &std::path::Path,
-        progress: super::DownloadProgress,
-    ) -> Result<(), super::CloudFileReadError> {
+    ) -> Result<super::CloudObjectStream, CloudHomeError> {
         let (response, _) = self.send_exact_read(slot).await?;
-        super::oauth_rest::response_to_file(
+        Ok(super::oauth_rest::response_stream(
             response,
-            destination,
             "read exact Dropbox body",
-            progress,
-        )
-        .await
+        ))
     }
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {

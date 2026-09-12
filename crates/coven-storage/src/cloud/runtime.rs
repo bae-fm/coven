@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use super::{CloudFileReadError, CloudHomeError};
+use super::CloudHomeError;
 
 tokio::task_local! {
     static CLOUD_RUNTIME_TASK: ();
@@ -86,22 +86,6 @@ impl CloudRuntime {
         self.run(operation)
             .await
             .map_err(|error| CloudHomeError::transport("run cloud operation", error))?
-    }
-
-    pub(crate) async fn run_file_read<T, F>(
-        &self,
-        operation: impl FnOnce() -> F + Send + 'static,
-    ) -> Result<T, CloudFileReadError>
-    where
-        T: Send + 'static,
-        F: Future<Output = Result<T, CloudFileReadError>> + Send + 'static,
-    {
-        self.run(operation).await.map_err(|error| {
-            CloudFileReadError::Source(CloudHomeError::transport(
-                "run cloud file-read operation",
-                error,
-            ))
-        })?
     }
 
     pub(crate) fn spawn<T, F>(
