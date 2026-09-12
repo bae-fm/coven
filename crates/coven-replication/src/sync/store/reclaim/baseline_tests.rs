@@ -614,3 +614,111 @@ async fn advancing_the_baseline_folds_the_settled_write_journal_into_it() {
         "only the writes the standing baseline does not state are journalled",
     );
 }
+
+/// Below an installed baseline a device keeps rows for other purposes —
+/// historical Circle epoch access, author-exclusion recovery — and those rows
+/// still name the packages their commits published. Folding one forward again
+/// would undo the completion the baseline's own summary already applied, so
+/// live reclaim state folds only the rows standing above the baseline.
+#[tokio::test]
+async fn an_old_retained_materialization_cannot_resurrect_a_completed_package() {
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let signer = UserKeypair::generate();
+    let (store, storage) = crate::sync::test_helpers::TestStore::create_with_connection(
+        &db,
+        db_store_dir.clone(),
+        "reclaim-completed-below-baseline",
+        signer.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let device = store
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
+        .await
+        .expect("bind reclaim Store");
+    let changeset =
+        crate::sync::test_helpers::open_test_db(crate::sync::test_helpers::test_store_dir())
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('completed-below-baseline', 'completed', NULL, \
+                 '0000000001000-0000-completed-below-baseline', '2026-01-01')",
+            ])
+            .await;
+    let activation = store
+        .publish_changeset("founder", 1, &changeset, db.schema_version())
+        .await
+        .expect("publish package activation");
+    let package = device
+        .load_commit_for_test(&activation)
+        .await
+        .expect("load package activation")
+        .value()
+        .store_package()
+        .expect("activation carries a Store package")
+        .clone();
+    let database = coven_database::StoreDatabase::new(&db);
+    let root = store.root().clone();
+    // The row that published the package, read while the device still holds it.
+    let materialization = database
+        .retained_merge_materialization(root.clone(), activation.clone())
+        .await
+        .expect("read the retained materialization that published the package");
+
+    device
+        .ensure_device_join_snapshot_for_test()
+        .await
+        .expect("publish and acknowledge a snapshot covering the package");
+    device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the covered package");
+    // Stand the device on a snapshot covering the completion, so the baseline's
+    // own summary is what folded it.
+    super::tests::publish_current_snapshot(&device).await;
+    let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
+        device
+            .materialized_frontier()
+            .await
+            .expect("read materialized frontier"),
+    )
+    .expect("shape materialized frontier");
+    device
+        .advance_baseline_by_acknowledging(frontier)
+        .await
+        .expect("advance the baseline onto the snapshot covering the completion")
+        .expect("the baseline advanced");
+    let baseline = database
+        .installed_replay_baseline()
+        .await
+        .expect("read the installed replay baseline");
+    assert!(
+        baseline.covers(&activation),
+        "the baseline covers the activation the completion released"
+    );
+
+    // A verifier standing on that baseline while still holding the covered row.
+    let mut history = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
+        .open_pinned(storage.as_ref(), &root)
+        .await
+        .expect("open a rooted history verifier");
+    history
+        .admit_installed_baseline(baseline)
+        .expect("stand on the installed baseline");
+    history
+        .admit_retained_history(std::slice::from_ref(&materialization))
+        .expect("hold the covered row the baseline stands over");
+
+    let live = history
+        .live_reclaim_state()
+        .expect("read live reclaim state at the baseline");
+    let released = coven_protocol::reclaim::AudienceBlobBindingPackage::Store(package);
+    assert!(
+        !live
+            .packages
+            .values()
+            .any(|retained| retained.matches_package(&released, &activation)),
+        "a retained row the baseline covers cannot put a completed package back in live state"
+    );
+}

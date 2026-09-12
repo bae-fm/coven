@@ -2333,6 +2333,31 @@ mod test_device {
                 .await
         }
 
+        /// The Circle packages reclamation discovers at a coverage, without
+        /// authorizing or deleting any of them. `authenticate` names commits to
+        /// load into the verifier's cache before discovery runs.
+        #[cfg(test)]
+        pub async fn circle_package_targets(
+            &self,
+            circle_id: coven_protocol::circle::CircleId,
+            coverage: &coven_protocol::store_commit::CommitFrontier,
+            authenticate: &[coven_protocol::store_commit::StoreBatchCommitRef],
+        ) -> Result<
+            Vec<(
+                coven_protocol::store_commit::StoreBatchCommitRef,
+                coven_protocol::store_commit::CirclePackageRef,
+            )>,
+            crate::sync::store::StoreReclaimError,
+        > {
+            self.store
+                .authorize_writer()
+                .await
+                .map_err(crate::sync::store::StoreReclaimError::from)?
+                .reclaim()
+                .circle_package_targets_for_test(circle_id, coverage, authenticate)
+                .await
+        }
+
         pub async fn prepare_peer_exclusion(
             &self,
             target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,

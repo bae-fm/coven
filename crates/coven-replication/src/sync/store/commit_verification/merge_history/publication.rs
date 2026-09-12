@@ -748,6 +748,37 @@ impl MergeHistoryVerifier<'_> {
         })
     }
 
+    /// Reclamation's live packages and unfinished authorizations at this
+    /// device's accepted history: the installed baseline's retained state folded
+    /// forward through the accepted suffix above it. Genesis when no snapshot is
+    /// installed.
+    ///
+    /// The suffix is the retained materializations the baseline does not cover.
+    /// A retained row the baseline already covers is never folded, so a
+    /// completion the baseline folded cannot be undone by the row that published
+    /// the package it released. Commits the verifier merely authenticated are
+    /// not history: only a retained row states that this device accepted one.
+    pub(crate) fn live_reclaim_state(
+        &self,
+    ) -> Result<store_commit::RetainedReclaimState, StorePullError> {
+        let mut state = self
+            .history
+            .baseline
+            .snapshot()
+            .map(|snapshot| snapshot.meta.history_summary.reclaim.clone())
+            .unwrap_or_else(store_commit::RetainedReclaimState::genesis);
+        state
+            .extend(
+                self.history
+                    .retained
+                    .iter()
+                    .filter(|(reference, _)| !self.history.baseline.covers(reference))
+                    .map(|(reference, retained)| (reference, retained.commit.value())),
+            )
+            .map_err(StorePullError::Protocol)?;
+        Ok(state)
+    }
+
     pub(crate) async fn load_snapshot_metadata(
         &self,
         reference: &store_commit::StoreSnapshotRef,

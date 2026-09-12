@@ -62,25 +62,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(self.commit_verifier.load_ref(reference).await?)
     }
 
-    pub(crate) async fn load_covered_commits(
-        &mut self,
-        coverage: &CommitFrontier,
-    ) -> Result<Vec<(StoreBatchCommitRef, VerifiedStoreBatchCommit)>, StorePullError> {
-        let mut commits = BTreeMap::new();
-        for tip in coverage.0.values() {
-            let mut cursor = Some(tip.clone());
-            while let Some(reference) = cursor {
-                if commits.contains_key(&reference) {
-                    break;
-                }
-                let commit = self.load_ref(&reference).await?;
-                cursor = commit.value().order.predecessor().cloned();
-                commits.insert(reference, commit);
-            }
-        }
-        Ok(commits.into_iter().collect())
-    }
-
     pub(crate) async fn commit_position_covers(
         &mut self,
         covering: &StoreBatchCommitRef,

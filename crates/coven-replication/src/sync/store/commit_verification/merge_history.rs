@@ -425,9 +425,13 @@ impl<'a> MergeHistoryVerifier<'a> {
                 self.membership_objects().remember_retained_proof(proof)?;
             }
             let commit_ref = materialization.commit_ref();
-            self.history
-                .retained
-                .insert(commit_ref.clone(), materialization.registrations().to_vec());
+            self.history.retained.insert(
+                commit_ref.clone(),
+                RetainedMergeMaterialization {
+                    commit: materialization.verified_commit().clone(),
+                    registrations: materialization.registrations().to_vec(),
+                },
+            );
             self.accepted_publications.insert(
                 commit_ref.clone(),
                 match materialization.acceptance().exact_publication() {
@@ -618,6 +622,14 @@ fn verified_merge_commit_closure(
     Ok(closure)
 }
 
+/// One retained materialization as the verifier holds it: the commit the row
+/// authenticated, and the registrations that row proved active at it.
+#[derive(Clone)]
+pub(crate) struct RetainedMergeMaterialization {
+    pub(crate) commit: VerifiedStoreBatchCommit,
+    pub(crate) registrations: Vec<ActivatedStoreDeviceRegistration>,
+}
+
 #[derive(Clone)]
 pub(crate) struct VerifiedMergeHistory {
     pub(crate) genesis: ResolvedStoreDeviceState,
@@ -628,14 +640,15 @@ pub(crate) struct VerifiedMergeHistory {
     /// a history are the same shape — `genesis` is the state before the first
     /// commit, `baseline` is the state at the positions the image covers.
     pub(crate) baseline: coven_database::InstalledReplayBaseline,
-    /// The commits this device still holds a retained materialization for, and
-    /// the registrations that row proved active at each of them.
+    /// The commits this device still holds a retained materialization for: the
+    /// commit that row authenticated and the registrations it proved active at
+    /// it.
     ///
     /// A baseline image keeps a closure of rows at or under its own coverage —
     /// historical Circle epoch access, author-exclusion recovery — because
     /// those paths read the rows rather than a replay. Being covered therefore
     /// does not mean the commit is gone; holding no row for it does.
-    pub(crate) retained: BTreeMap<StoreBatchCommitRef, Vec<ActivatedStoreDeviceRegistration>>,
+    pub(crate) retained: BTreeMap<StoreBatchCommitRef, RetainedMergeMaterialization>,
     pub(crate) commits: BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
 }
 
@@ -661,7 +674,7 @@ impl VerifiedMergeHistory {
     ) -> Option<&[ActivatedStoreDeviceRegistration]> {
         self.retained
             .get(reference)
-            .map(|registrations| registrations.as_slice())
+            .map(|retained| retained.registrations.as_slice())
     }
 
     /// The device state standing after `reference`, from the verified graph

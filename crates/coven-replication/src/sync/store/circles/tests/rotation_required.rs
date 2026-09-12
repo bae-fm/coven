@@ -334,6 +334,32 @@ impl RotationFixture {
             .await
     }
 
+    async fn owner_frontier(&self) -> coven_protocol::store_commit::CommitFrontier {
+        coven_protocol::store_commit::CommitFrontier::from_refs(
+            self.owner_device
+                .materialized_frontier()
+                .await
+                .expect("read the owner's materialized frontier"),
+        )
+        .expect("shape the owner's materialized frontier")
+    }
+
+    /// The Circle packages reclamation would consider at a coverage. Nothing is
+    /// authorized or deleted, so a test can watch discovery alone change.
+    async fn circle_package_targets(
+        &self,
+        coverage: &coven_protocol::store_commit::CommitFrontier,
+        authenticate: &[coven_protocol::store_commit::StoreBatchCommitRef],
+    ) -> Vec<(
+        coven_protocol::store_commit::StoreBatchCommitRef,
+        coven_protocol::store_commit::CirclePackageRef,
+    )> {
+        self.owner_device
+            .circle_package_targets(self.circle_id, coverage, authenticate)
+            .await
+            .expect("discover the Circle package reclaim targets")
+    }
+
     async fn release_retained_replay_ownership(&self) {
         self.db
             .release_retained_replay_ownership_for_test()

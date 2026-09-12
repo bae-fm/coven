@@ -447,7 +447,6 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         let targets = self
             .history()
             .circle_package_targets(circle_id, &frontier)
-            .await
             .map_err(StoreReclaimError::from)?;
         for (commit, package) in targets {
             // `permits` is the same predicate the pull path applies; a package it
@@ -676,7 +675,6 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             let targets = self
                 .history()
                 .circle_package_targets(circle_id, &selected.meta.bootstrap.coverage)
-                .await
                 .map_err(StoreReclaimError::from)?;
             for (commit, package) in targets {
                 if database
@@ -1066,6 +1064,32 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             .mark_store_reclaim_target_absent(operation, target)
             .await?;
         Ok(())
+    }
+
+    /// What the Circle-package legs would consider at this coverage, without
+    /// authorizing or deleting anything.
+    ///
+    /// `authenticate` is loaded into the verifier's commit cache first, so a
+    /// caller can put a commit this device never accepted in front of discovery.
+    #[cfg(test)]
+    pub(crate) async fn circle_package_targets_for_test(
+        &mut self,
+        circle_id: CircleId,
+        coverage: &CommitFrontier,
+        authenticate: &[StoreBatchCommitRef],
+    ) -> Result<
+        Vec<(
+            StoreBatchCommitRef,
+            coven_protocol::store_commit::CirclePackageRef,
+        )>,
+        StoreReclaimError,
+    > {
+        for reference in authenticate {
+            self.history().load_ref(reference).await?;
+        }
+        self.history()
+            .circle_package_targets(circle_id, coverage)
+            .map_err(StoreReclaimError::from)
     }
 }
 

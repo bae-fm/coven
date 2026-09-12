@@ -148,18 +148,13 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
             .await
     }
 
-    pub(crate) async fn load_covered_commits(
-        &mut self,
-        coverage: &CommitFrontier,
-    ) -> Result<
-        Vec<(StoreBatchCommitRef, VerifiedStoreBatchCommit)>,
-        crate::sync::store::pull::StorePullError,
-    > {
-        self.history.load_covered_commits(coverage).await
-    }
-
-    pub(crate) async fn circle_package_targets(
-        &mut self,
+    /// The Circle's live packages this coverage stands over, read from
+    /// reclamation's own live state rather than re-derived by loading the
+    /// commits the coverage names. A package the live state no longer holds is
+    /// one a completion released, and one whose activating commit object is
+    /// gone is still named here.
+    pub(crate) fn circle_package_targets(
+        &self,
         circle_id: coven_protocol::circle::CircleId,
         coverage: &CommitFrontier,
     ) -> Result<
@@ -169,18 +164,23 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         )>,
         crate::sync::store::pull::StorePullError,
     > {
-        let mut targets = std::collections::BTreeMap::new();
-        for (reference, commit) in self.load_covered_commits(coverage).await? {
-            if let Some(package) = commit
-                .value()
-                .circle_packages()
-                .iter()
-                .find(|package| package.circle_id == circle_id)
-            {
-                targets.insert(reference, package.clone());
-            }
-        }
-        Ok(targets.into_iter().collect())
+        let mut targets = self
+            .history
+            .live_reclaim_state()?
+            .packages
+            .into_values()
+            .filter_map(|retained| match retained.package {
+                coven_protocol::reclaim::AudienceBlobBindingPackage::Circle(package)
+                    if package.circle_id == circle_id
+                        && coverage.covers_commit(&retained.activation) =>
+                {
+                    Some((retained.activation, package))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        targets.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Ok(targets)
     }
 
     pub(crate) async fn commit_position_covers(

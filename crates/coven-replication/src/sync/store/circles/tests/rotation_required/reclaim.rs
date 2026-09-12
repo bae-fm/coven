@@ -593,3 +593,138 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
         "the revoked identity's seed image is reclaimed once the cascade completes"
     );
 }
+
+/// Discovery reads reclamation's live state, so a Circle package the accepted
+/// suffix published is listed before any snapshot folds it, and the completion
+/// that releases it removes it from the same answer — no new snapshot in
+/// between.
+#[tokio::test]
+async fn a_suffix_package_and_its_completion_update_discovery_before_a_snapshot() {
+    let fixture = RotationFixture::build("circle-package-suffix-discovery").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let (circle_package, published) = fixture
+        .publish_covered_circle_package(member_view, "00000000-0000-4000-8000-0000000000e1")
+        .await;
+    let coverage = fixture.owner_frontier().await;
+    let baseline = StoreDatabase::new(&fixture.db)
+        .installed_replay_baseline()
+        .await
+        .expect("read the installed replay baseline");
+    assert!(
+        !baseline.covers(&published),
+        "the package's activation stands in the accepted suffix, above the baseline"
+    );
+    assert!(
+        fixture
+            .circle_package_targets(&coverage, &[])
+            .await
+            .contains(&(published.clone(), circle_package.clone())),
+        "discovery lists a package the accepted suffix published"
+    );
+
+    fixture.release_retained_replay_ownership().await;
+    let result = fixture
+        .reclaim_packages()
+        .await
+        .expect("reclaim the discovered Circle package");
+    assert!(
+        result.packages_deleted >= 1,
+        "reclamation deleted the discovered Circle package: {result:?}"
+    );
+
+    assert!(
+        !fixture
+            .circle_package_targets(&coverage, &[])
+            .await
+            .iter()
+            .any(|(activation, _)| activation == &published),
+        "the completion the suffix carries removes the package from discovery"
+    );
+}
+
+/// A snapshot-covered package is discovered from live reclaim state, not by
+/// reading the commit that published it — so the activating commit object being
+/// gone from the provider does not hide the package from reclamation.
+#[tokio::test]
+async fn a_covered_circle_package_is_reclaimed_after_its_commit_object_is_gone() {
+    let fixture = RotationFixture::build("circle-package-commit-object-gone").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let (circle_package, published) = fixture
+        .publish_covered_circle_package(member_view, "00000000-0000-4000-8000-0000000000e2")
+        .await;
+    let owner_device = fixture
+        .store
+        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.signer)
+        .await
+        .expect("bind the Circle package owner Store");
+    fixture.release_retained_replay_ownership().await;
+
+    fixture.home.remove_exact_object(published.object.slot());
+    assert!(
+        !fixture.home.contains_exact_object(&published.object),
+        "the activating commit object is gone from the provider"
+    );
+
+    let result = fixture
+        .reclaim_packages()
+        .await
+        .expect("reclaim a covered Circle package whose activating commit object is gone");
+    assert!(
+        result.packages_deleted >= 1,
+        "reclamation deleted the covered Circle package: {result:?}"
+    );
+    assert!(
+        !owner_device
+            .circle_package_is_retained_for_replay_for_test(circle_package, published)
+            .await
+            .expect("read Circle package replay retention after reclaim"),
+        "the reclaimed Circle package no longer owns its object"
+    );
+}
+
+/// Authenticating a commit says the bytes match their reference, not that this
+/// device accepted it. A proposed candidate the verifier has read therefore
+/// contributes nothing to live reclaim state, even at a coverage that names it.
+#[tokio::test]
+async fn live_reclaim_state_ignores_unaccepted_candidates() {
+    let fixture = RotationFixture::build("circle-package-unaccepted-candidate").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    fixture
+        .capture_document(
+            "00000000-0000-4000-8000-0000000000e5",
+            Some(fixture.circle_id),
+            "2026-07-23T00:40:00Z",
+        )
+        .await;
+    let pending = fixture
+        .owner_device
+        .prepare_uploaded_pending_write_for_test()
+        .await
+        .expect("upload a Circle candidate without accepting its publication");
+    let candidate = pending.commit.value.reference().clone();
+    let [package] = pending.commit.value.value().circle_packages() else {
+        panic!("the Circle candidate carries exactly one Circle package");
+    };
+    let package = package.clone();
+
+    // Name the candidate as its own stream's tip, so acceptance is the only
+    // thing that can keep it out of the answer.
+    let mut coverage = fixture.owner_frontier().await;
+    coverage
+        .0
+        .insert(candidate.coord.stream_id, candidate.clone());
+
+    let discovered = fixture
+        .circle_package_targets(&coverage, std::slice::from_ref(&candidate))
+        .await;
+    assert!(
+        !discovered.contains(&(candidate.clone(), package)),
+        "a candidate the verifier authenticated but never accepted is not live reclaim state: {discovered:?}"
+    );
+}
