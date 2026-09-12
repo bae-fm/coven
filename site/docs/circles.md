@@ -372,8 +372,9 @@ allows reconstruction from an empty Circle base.
 
 Restore verifies the selected image and its exact coverage, then applies accepted
 Circle packages beyond that base. Missing or invalid required images fail restore;
-they do not authorize another base. The Store rows, Circle rows, routing, blob
-ownership, and receiving identity's access install in one transaction.
+they do not authorize another base. Circle rows, routing, blob ownership, and the
+receiving identity's access install in one transaction over the installed Store
+image, and the restored database becomes visible only once both have landed.
 
 Standalone Circle snapshots are sealed to their epoch's key. Restore selects an
 applicable image whose cut is covered by the accepted Store frontier; incomparable

@@ -372,8 +372,13 @@ fn install_record_payloads_on(
     closed: &ClosedRemoteObject,
 ) -> Result<(), DbError> {
     for (hash, bytes) in closed.payload_bytes() {
-        let written = crate::payload_store::write_payload_blocking(conn, store_dir, bytes)
-            .map_err(DbError::from)?;
+        let written = crate::payload_store::write_payload_blocking(
+            conn,
+            store_dir,
+            bytes,
+            crate::payload_store::CreatedPayloadFiles::untracked(),
+        )
+        .map_err(DbError::from)?;
         if written != *hash {
             return Err(DbError::Message(format!(
                 "remote object payload stored under {written}, named as {hash}"

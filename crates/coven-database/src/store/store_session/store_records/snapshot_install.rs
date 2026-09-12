@@ -2,8 +2,8 @@ use super::{StoreRecords, StoreTransaction};
 use crate::store::retained_replay::install_snapshot_replay_baseline_on;
 use crate::{
     install_store_founder_state_on, install_store_root_authority_on,
-    validate_snapshot_object_owners_on, CircleRestoreSelection, DbError, ResolvedStoreDeviceState,
-    StoreDatabase, StoreDeviceRegistrationRef, SyncedTable, VerifiedSnapshotBootstrapInstall,
+    validate_snapshot_object_owners_on, DbError, ResolvedStoreDeviceState, StoreDatabase,
+    StoreDeviceRegistrationRef, SyncedTable, VerifiedSnapshotBootstrapInstall,
 };
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -95,7 +95,6 @@ impl StoreTransaction<'_, '_> {
         schema_version: u32,
         routing_hash: crate::ObjectHash,
         synced_tables: &[SyncedTable],
-        receiver_wall_ms: u64,
     ) -> Result<(), DbError> {
         // Live, this one call is the bulk of a joining device's snapshot
         // install, and none of its steps is obviously the one: the checks are
@@ -167,20 +166,9 @@ impl StoreTransaction<'_, '_> {
         timings.record("record the coverage", coverage_started.elapsed(), 0);
         let blob_decls =
             crate::BlobDecls::from_tables(conn, synced_tables).map_err(DbError::from)?;
-        let circles_started = coven_foundation::clock::Stopwatch::start();
-        self.install_selected_snapshot_circles(
-            install,
-            &root,
-            schema_version,
-            routing_hash,
-            synced_tables,
-            &blob_decls,
-            receiver_wall_ms,
-        )?;
-        timings.record("install the circles", circles_started.elapsed(), 0);
         let baseline_started = coven_foundation::clock::Stopwatch::start();
         install_snapshot_replay_baseline_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            self.records(),
             schema_version,
             routing_hash,
             install.authority.clone(),
@@ -191,43 +179,10 @@ impl StoreTransaction<'_, '_> {
         Ok(())
     }
 
-    fn install_selected_snapshot_circles(
-        self,
-        install: &VerifiedSnapshotBootstrapInstall,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        schema_version: u32,
-        routing_hash: crate::ObjectHash,
-        synced_tables: &[SyncedTable],
-        blob_decls: &crate::BlobDecls,
-        receiver_wall_ms: u64,
-    ) -> Result<(), DbError> {
-        let CircleRestoreSelection::Selected(circle_installs) = &install.circle_selection else {
-            return Ok(());
-        };
-        #[cfg(any(test, feature = "test-utils"))]
-        if install.fail_circle_install {
-            return Err(DbError::Message(
-                "injected Circle install failure after Store install".to_string(),
-            ));
-        }
-        let prepared = super::retained_replay::PreparedRetainedReplayBaseline::new(
-            schema_version,
-            routing_hash,
-            crate::RetainedReplayAuthority::InstalledSnapshot(install.authority.clone()),
-            crate::connection_io::serialize_database_image(self.transaction)?,
-        );
-        let mut verified_authority = prepared.verify_authority(self.store_dir, blob_decls)?;
-        self.install_snapshot_circle_restore(
-            root,
-            circle_installs,
-            &mut verified_authority,
-            synced_tables,
-            receiver_wall_ms,
-        )
-        .map(|_| ())
-    }
-
-    pub(crate) fn restore_device_join_snapshot_circles(
+    /// Install the Circle images the recipient identity selected against the
+    /// Store snapshot this database already carries, then re-take the retained
+    /// replay image over them.
+    pub(crate) fn restore_snapshot_circles(
         self,
         root: &coven_protocol::store_commit::StoreRootRef,
         selection: &crate::StagedCircleRestore,
@@ -261,7 +216,7 @@ impl StoreTransaction<'_, '_> {
             synced_tables,
             receiver_wall_ms,
         )?;
-        StoreRecords::new(self.transaction, self.store_dir).replace_retained_replay_image(
+        self.records().replace_retained_replay_image(
             &baseline,
             baseline.schema_version,
             &crate::connection_io::serialize_database_image(self.transaction)?,
@@ -310,7 +265,7 @@ impl StoreTransaction<'_, '_> {
                         )
                     })?;
                     let founding = StoreDatabase::verified_circle_activation_on(
-                        StoreRecords::new(self.transaction, self.store_dir),
+                        self.records(),
                         verified_authority,
                         root,
                         *circle_id,
@@ -323,7 +278,7 @@ impl StoreTransaction<'_, '_> {
                     })?;
                     if current.control.value.epoch_id() != founding.control.value.epoch_id()
                         || !StoreDatabase::verified_circle_control_covers_on(
-                            StoreRecords::new(self.transaction, self.store_dir),
+                            self.records(),
                             verified_authority,
                             root,
                             *circle_id,
@@ -339,7 +294,7 @@ impl StoreTransaction<'_, '_> {
                 }
             };
             let activation = StoreDatabase::verified_circle_activation_on(
-                crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+                self.records(),
                 verified_authority,
                 root,
                 selected.image.circle_id(),

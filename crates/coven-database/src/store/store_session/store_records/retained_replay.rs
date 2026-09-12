@@ -51,17 +51,6 @@ impl PreparedRetainedReplayBaseline {
         }
     }
 
-    pub(super) fn verify_authority(
-        self,
-        store_dir: &coven_foundation::store_dir::StoreDir,
-        blob_decls: &crate::BlobDecls,
-    ) -> Result<crate::store::VerifiedStoreAuthority, DbError> {
-        let prepared = self.validate_image(store_dir, blob_decls)?;
-        Ok(crate::store::VerifiedStoreAuthority::for_replay_baseline(
-            prepared.baseline,
-        ))
-    }
-
     /// Validate the image from the bytes in hand, before they are stored.
     ///
     /// The installed-baseline check reads its image back out of the payload
@@ -738,19 +727,15 @@ impl StoreTransaction<'_, '_> {
     pub(crate) fn claimed_circle_bootstrap_coverage_refs(
         self,
     ) -> Result<Vec<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
-        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
-            .claimed_circle_bootstrap_coverage_refs()
+        self.records().claimed_circle_bootstrap_coverage_refs()
     }
 
     pub(crate) fn verified_payload(self, hash: ObjectHash) -> Result<Vec<u8>, DbError> {
-        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
-            .verified_payload(hash)
-            .map_err(DbError::from)
+        self.records().verified_payload(hash).map_err(DbError::from)
     }
 
     pub(crate) fn circle_replay_controls(self) -> Result<Vec<(String, String)>, DbError> {
-        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
-            .circle_replay_controls()
+        self.records().circle_replay_controls()
     }
 
     pub(crate) fn circle_activation_commit_ref(
@@ -758,7 +743,7 @@ impl StoreTransaction<'_, '_> {
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
-        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
+        self.records()
             .circle_activation_commit_ref(circle_id, control)
     }
 
@@ -766,10 +751,7 @@ impl StoreTransaction<'_, '_> {
         self,
         folded: &[crate::SettledStoreWrite],
     ) -> Result<Vec<crate::MergeReplayWrite>, DbError> {
-        StoreDatabase::load_folded_replay_journal_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-            folded,
-        )
+        StoreDatabase::load_folded_replay_journal_on(self.records(), folded)
     }
 
     pub(crate) fn merge_replay_journal(
@@ -782,7 +764,7 @@ impl StoreTransaction<'_, '_> {
         retracted_writes: &BTreeSet<coven_protocol::write::WriteId>,
     ) -> Result<Vec<crate::MergeReplayWrite>, DbError> {
         StoreDatabase::load_merge_replay_journal_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            self.records(),
             baseline,
             active_accepted_writes,
             retracted_writes,
@@ -799,7 +781,7 @@ impl StoreTransaction<'_, '_> {
         retracted_writes: &BTreeSet<coven_protocol::write::WriteId>,
     ) -> Result<Vec<crate::MergeReplayWrite>, DbError> {
         StoreDatabase::load_merge_replay_associations_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            self.records(),
             baseline,
             active_accepted_writes,
             retracted_writes,
@@ -840,9 +822,7 @@ impl StoreTransaction<'_, '_> {
         journal: crate::ReplayJournal<'_>,
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
     ) -> Result<crate::store::store_session::ReplayProjectionResult, DbError> {
-        let root = authority.required_root_authority_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-        )?;
+        let root = authority.required_root_authority_on(self.records())?;
         if &root != expected_root {
             return Err(DbError::Message(
                 "retained replay projection belongs to another Store root".to_string(),
@@ -908,7 +888,7 @@ impl StoreTransaction<'_, '_> {
         let input_hash = ObjectHash::digest(&canonical_input);
         let verified = authority
             .open_retained_materialization_on(
-                crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+                self.records(),
                 root,
                 &input,
                 input_hash,
@@ -1033,7 +1013,7 @@ impl StoreTransaction<'_, '_> {
             pending_joins,
         };
         let required = StoreDatabase::snapshot_required_retained_refs(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            self.records(),
             authority,
             root,
             coverage,
@@ -1044,10 +1024,7 @@ impl StoreTransaction<'_, '_> {
                 serde_json::from_str(&encoded).map_err(|error| {
                     DbError::context("snapshot author exclusion activation commit", error)
                 })?;
-            authority.retained_materialization_by_ref_on(
-                crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-                &reference,
-            )?;
+            authority.retained_materialization_by_ref_on(self.records(), &reference)?;
             let stream_id = reference.coord.stream_id.to_string();
             let sequence_sql = Database::sequence_to_sqlite(&stream_id, reference.coord.sequence)?;
             let (stored_ref, input_hash, canonical_input): (String, String, Vec<u8>) = conn
@@ -1126,7 +1103,7 @@ impl StoreTransaction<'_, '_> {
         self,
         baseline: &crate::RetainedReplayBaseline,
     ) -> Result<u64, DbError> {
-        let records = StoreRecords::new(self.transaction, self.store_dir);
+        let records = self.records();
         let coverage = RetainedReplayObjectCoverage::from_baseline(Some(baseline));
         let mut released = 0_u64;
         for (stream, sequence, reference, expected_hash) in
@@ -1188,8 +1165,7 @@ impl StoreTransaction<'_, '_> {
                 |row| row.get(0),
             )?;
             if exists {
-                let installed = StoreRecords::new(self.transaction, self.store_dir)
-                    .store_device_snapshot(&reference)?;
+                let installed = self.records().store_device_snapshot(&reference)?;
                 if installed != state {
                     return Err(DbError::Message(
                         "received snapshot conflicts with an installed exact device state".into(),
@@ -1224,10 +1200,8 @@ impl StoreTransaction<'_, '_> {
                 serde_json::from_str(&encoded).map_err(|error| {
                     DbError::context("snapshot retained device-state authority", error)
                 })?;
-            let materialization = authority.retained_materialization_by_ref_on(
-                crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-                &reference,
-            )?;
+            let materialization =
+                authority.retained_materialization_by_ref_on(self.records(), &reference)?;
             if materialization.root() != root {
                 return Err(DbError::Message(
                     "snapshot retained device state belongs to another Store root".to_string(),

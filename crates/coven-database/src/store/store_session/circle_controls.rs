@@ -44,9 +44,13 @@ fn persist_circle_operation_objects_on(
         if !installed.insert(expected) {
             continue;
         }
-        let actual =
-            crate::payload_store::write_payload_blocking(conn, store_dir, object.stored_bytes())
-                .map_err(|error| DbError::context(format!("install {domain} payload"), error))?;
+        let actual = crate::payload_store::write_payload_blocking(
+            conn,
+            store_dir,
+            object.stored_bytes(),
+            crate::payload_store::CreatedPayloadFiles::untracked(),
+        )
+        .map_err(|error| DbError::context(format!("install {domain} payload"), error))?;
         if actual != expected {
             return Err(DbError::Message(format!(
                 "{domain} payload installed as {actual}, referenced as {expected}"

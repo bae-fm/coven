@@ -390,8 +390,12 @@ impl StoreSession<'_> {
             &partitions,
             self.blob_decls,
         )?;
-        let changeset_hash =
-            crate::payload_store::write_payload_blocking(&tx, self.store_dir, &changeset)?;
+        let changeset_hash = crate::payload_store::write_payload_blocking(
+            &tx,
+            self.store_dir,
+            &changeset,
+            crate::payload_store::CreatedPayloadFiles::untracked(),
+        )?;
         crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
             .insert_store_write(&write_id, &partitions, changeset_hash, &base, &blob_facts)?;
         tx.commit().map_err(DbError::from)

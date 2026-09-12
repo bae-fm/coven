@@ -41,7 +41,7 @@ fn install(conn: &Connection, store_dir: &StoreDir, bytes: &[u8]) -> ObjectHash 
         .unchecked_transaction()
         .expect("begin payload installation");
     let hash = PayloadStore::new(&transaction, store_dir)
-        .install(bytes)
+        .install(bytes, CreatedPayloadFiles::untracked())
         .expect("install payload");
     transaction.commit().expect("commit payload installation");
     hash
@@ -108,7 +108,7 @@ fn payload_installation_requires_an_owning_transaction() {
     let hash = ObjectHash::digest(bytes);
 
     let error = PayloadStore::new(&conn, &store_dir)
-        .install(bytes)
+        .install(bytes, CreatedPayloadFiles::untracked())
         .expect_err("a bare connection must not install payload storage");
 
     assert!(error.to_string().contains("transaction"), "{error}");
@@ -148,6 +148,44 @@ fn compressed_payloads_over_the_inline_limit_live_in_the_file_spool() {
             .expect("decompress file payload"),
         file
     );
+}
+
+#[test]
+fn payload_installation_reports_only_the_spool_files_it_creates() {
+    let (_directory, store_dir, conn) = payload_store();
+    let bytes = incompressible_payload(23, INLINE_PAYLOAD_LIMIT * 2);
+    let path = store_dir.payload_spool_path(ObjectHash::digest(&bytes));
+
+    let created = std::cell::RefCell::new(Vec::new());
+    let transaction = conn
+        .unchecked_transaction()
+        .expect("begin the first installation");
+    PayloadStore::new(&transaction, &store_dir)
+        .install(&bytes, CreatedPayloadFiles::tracked(&created))
+        .expect("install the payload");
+    transaction.commit().expect("commit the first installation");
+    assert_eq!(created.into_inner(), vec![path.clone()]);
+
+    // Another database installing the same bytes into the same spool finds the
+    // file already there. It reuses that file, and must not report it as its
+    // own: removing it would take a file this installation never wrote.
+    let other = Connection::open_in_memory().expect("open the second payload database");
+    crate::apply_coven_schema(&other).expect("apply payload schema");
+    let created = std::cell::RefCell::new(Vec::new());
+    let transaction = other
+        .unchecked_transaction()
+        .expect("begin the reusing installation");
+    PayloadStore::new(&transaction, &store_dir)
+        .install(&bytes, CreatedPayloadFiles::tracked(&created))
+        .expect("install the payload over an identical spool file");
+    transaction
+        .commit()
+        .expect("commit the reusing installation");
+    assert!(
+        created.into_inner().is_empty(),
+        "an identical spool file belongs to whoever wrote it"
+    );
+    assert!(path.exists(), "the reused spool file stays where it was");
 }
 
 #[test]
@@ -203,7 +241,7 @@ fn conflicting_file_metadata_fails_without_replacing_the_file() {
         .unchecked_transaction()
         .expect("begin conflicting reinstall");
     let error = PayloadStore::new(&transaction, &store_dir)
-        .install(&bytes)
+        .install(&bytes, CreatedPayloadFiles::untracked())
         .expect_err("conflicting metadata must reject reinstall");
 
     assert!(error.to_string().contains("catalog records"), "{error}");
@@ -303,7 +341,9 @@ fn streamed_protocol_payloads_finish_inline() {
     let mut writer = PayloadStore::new(&transaction, &store_dir).writer();
     writer.write_all(&bytes).expect("stream payload");
 
-    let (hash, size) = writer.commit().expect("commit payload");
+    let (hash, size) = writer
+        .commit(CreatedPayloadFiles::untracked())
+        .expect("commit payload");
     transaction
         .commit()
         .expect("commit streamed payload installation");
@@ -339,7 +379,9 @@ fn streamed_placement_uses_the_finished_compressed_size() {
         for chunk in bytes.chunks(997) {
             writer.write_all(chunk).expect("stream payload chunk");
         }
-        let (hash, size) = writer.commit().expect("commit streamed payload");
+        let (hash, size) = writer
+            .commit(CreatedPayloadFiles::untracked())
+            .expect("commit streamed payload");
         transaction
             .commit()
             .expect("commit streamed payload installation");
@@ -370,7 +412,9 @@ fn reinstall_accepts_the_same_payload_from_different_compression_chunks() {
         for chunk in bytes.chunks(997) {
             writer.write_all(chunk).expect("stream payload chunk");
         }
-        let (hash, _) = writer.commit().expect("commit streamed payload");
+        let (hash, _) = writer
+            .commit(CreatedPayloadFiles::untracked())
+            .expect("commit streamed payload");
         transaction
             .commit()
             .expect("commit streamed payload installation");
@@ -385,7 +429,13 @@ fn reinstall_accepts_the_same_payload_from_different_compression_chunks() {
         for chunk in bytes.chunks(4093) {
             writer.write_all(chunk).expect("reinstall payload chunk");
         }
-        assert_eq!(writer.commit().expect("commit streamed reinstall").0, hash);
+        assert_eq!(
+            writer
+                .commit(CreatedPayloadFiles::untracked())
+                .expect("commit streamed reinstall")
+                .0,
+            hash
+        );
         transaction
             .commit()
             .expect("commit differently chunked reinstall");

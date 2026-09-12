@@ -41,6 +41,13 @@ impl<'storage> RestoringStore<'storage> {
         self.database.schema_version()
     }
 
+    /// The next stamp this restored store would mint, which must stand above
+    /// every `_updated_at` the restore installed.
+    #[cfg(test)]
+    pub(crate) fn stamp_for_test(&self) -> String {
+        self.database.stamp()
+    }
+
     #[cfg(test)]
     pub(crate) async fn scoped_snapshot_counts_for_test(
         &self,

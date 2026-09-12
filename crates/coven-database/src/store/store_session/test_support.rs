@@ -226,8 +226,12 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
         for (expected_hash, bytes) in &transfer.payloads {
-            let actual_hash =
-                crate::payload_store::write_payload_blocking(&transaction, self.store_dir, bytes)?;
+            let actual_hash = crate::payload_store::write_payload_blocking(
+                &transaction,
+                self.store_dir,
+                bytes,
+                crate::payload_store::CreatedPayloadFiles::untracked(),
+            )?;
             if actual_hash != *expected_hash {
                 return Err(DbError::Message(format!(
                     "transferred payload expected {expected_hash} but stored as {actual_hash}"
@@ -420,8 +424,12 @@ impl StoreSession<'_> {
         base: &str,
     ) -> Result<(), DbError> {
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let changeset_hash =
-            crate::payload_store::write_payload_blocking(&transaction, self.store_dir, b"")?;
+        let changeset_hash = crate::payload_store::write_payload_blocking(
+            &transaction,
+            self.store_dir,
+            b"",
+            crate::payload_store::CreatedPayloadFiles::untracked(),
+        )?;
         let owner_key = crate::payload_store::store_write_owner_key(write_id);
         transaction
             .execute(

@@ -171,7 +171,7 @@ impl StoreSession<'_> {
     fn install_payload_for_test(&self, bytes: &[u8]) -> Result<ObjectHash, DbError> {
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let hash = PayloadStore::new(&transaction, self.store_dir)
-            .install(bytes)
+            .install(bytes, CreatedPayloadFiles::untracked())
             .map_err(DbError::from)?;
         transaction.commit().map_err(DbError::from)?;
         Ok(hash)

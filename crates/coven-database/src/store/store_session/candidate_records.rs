@@ -164,7 +164,7 @@ impl super::StoreTransaction<'_, '_> {
         publication: &coven_protocol::store_commit::StorePublicationRef,
     ) -> Result<coven_protocol::remote_object::CandidateNonactivation, DbError> {
         let coverage = self.require_accepted_membership(authority, membership, publication)?;
-        let records = super::StoreRecords::new(self.transaction, self.store_dir);
+        let records = self.records();
         let root = authority.required_root_authority_on(records)?;
         let registration =
             authority.activated_registration_on(records, &root, &commit.author_registration)?;

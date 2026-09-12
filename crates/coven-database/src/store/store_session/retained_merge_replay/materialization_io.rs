@@ -111,7 +111,7 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         reference: &StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         StoreDatabase::load_retained_merge_materialization_by_ref_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            self.records(),
             root,
             registrations,
             reference,

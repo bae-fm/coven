@@ -8,7 +8,7 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         root: &coven_protocol::store_commit::StoreRootRef,
         access: &[crate::StagedCircleAccess],
     ) -> Result<(), DbError> {
-        let records = StoreRecords::new(self.transaction, self.store_dir);
+        let records = self.records();
         let materializations = authority.retained_replay_inputs_on(records, root)?;
         let baseline = authority.retained_replay_baseline_on(records)?.clone();
         let mut replacements = BTreeMap::new();
@@ -160,7 +160,7 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         authority: &mut crate::store::VerifiedStoreAuthority,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
-        let records = StoreRecords::new(self.transaction, self.store_dir);
+        let records = self.records();
         let materializations = authority.retained_replay_inputs_on(records, root)?;
         let baseline = authority.retained_replay_baseline_on(records)?.clone();
         // This transaction belongs to the unpublished image copy. Replace its

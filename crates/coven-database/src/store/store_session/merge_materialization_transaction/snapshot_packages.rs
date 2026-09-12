@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::store_session::{StoreRecords, StoreTransaction};
+use crate::store::store_session::StoreTransaction;
 use coven_protocol::audience_package::PackageAudience;
 use coven_protocol::reclaim::AudienceBlobBindingPackage;
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ impl StoreTransaction<'_, '_> {
         tables: &[SyncedTable],
         receiver_wall_ms: u64,
     ) -> Result<(), DbError> {
-        let records = StoreRecords::new(self.transaction, self.store_dir);
+        let records = self.records();
         let baseline = authority.retained_replay_baseline_on(records)?.clone();
         let crate::RetainedReplayAuthority::InstalledSnapshot(snapshot) = &baseline.authority
         else {

@@ -39,9 +39,7 @@ impl StoreTransaction<'_, '_> {
             .map(|snapshot| snapshot.accepted.snapshot.object.slot().clone())
             .filter(|slot| !protected.contains(slot))
             .collect::<BTreeSet<_>>();
-        for old in StoreRecords::new(self.transaction, self.store_dir)
-            .published_store_snapshots(root, lookup)?
-        {
+        for old in self.records().published_store_snapshots(root, lookup)? {
             let position = old.meta.publication_predecessor.next_position()?;
             if position >= accepted.publication.position
                 || protected.contains(old.reference.object.slot())

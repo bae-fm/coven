@@ -81,6 +81,7 @@ pub(crate) use circle_bootstrap_rows::verify_circle_bootstrap_rows;
 pub use circle_controls::PreparedCircleObjects;
 pub use device_join::DeviceJoinJournalStore;
 pub use host_sql::{SqlContext, SqlReadContext};
+pub(crate) use host_write_capture::remove_created_payload_files;
 pub use host_write_capture::{
     audience_moves_by_row, AudienceBlobMoveStaging, HostWriteBlobTransaction,
     StagedAudienceBlobRollback,

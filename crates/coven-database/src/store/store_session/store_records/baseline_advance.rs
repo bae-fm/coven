@@ -75,7 +75,7 @@ impl StoreTransaction<'_, '_> {
         blob_decls: &crate::BlobDecls,
         synced_tables: &[coven_protocol::synced_schema::SyncedTable],
     ) -> Result<AdvancedReplayBaseline, DbError> {
-        let records = StoreRecords::new(self.transaction, self.store_dir);
+        let records = self.records();
         let cut = snapshot_authority.metadata.coverage.clone();
         let snapshot_reference = snapshot_authority.snapshot.clone();
         let snapshot_hash = snapshot_reference.snapshot_hash;

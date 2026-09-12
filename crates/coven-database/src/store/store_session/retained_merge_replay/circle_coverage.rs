@@ -296,8 +296,6 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         )>,
         DbError,
     > {
-        StoreDatabase::circle_bootstrap_replay_inputs_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-        )
+        StoreDatabase::circle_bootstrap_replay_inputs_on(self.records())
     }
 }

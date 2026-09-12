@@ -52,16 +52,22 @@ impl StoreSession<'_> {
     ) -> Result<CircleSnapshotRef, DbError> {
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let image_hash = crate::payload_store::write_payload_blocking(&tx, self.store_dir, &rows)
-            .map_err(|source| SnapshotImageError::ProjectionPayloadStore {
-                operation: "spool Circle snapshot rows".to_string(),
-                source,
-            })
-            .map_err(snapshot_image_db_error)?;
+        let image_hash = crate::payload_store::write_payload_blocking(
+            &tx,
+            self.store_dir,
+            &rows,
+            crate::payload_store::CreatedPayloadFiles::untracked(),
+        )
+        .map_err(|source| SnapshotImageError::ProjectionPayloadStore {
+            operation: "spool Circle snapshot rows".to_string(),
+            source,
+        })
+        .map_err(snapshot_image_db_error)?;
         let image_prepared_hash = crate::payload_store::write_payload_blocking(
             &tx,
             self.store_dir,
             image_prepared.stored_bytes(),
+            crate::payload_store::CreatedPayloadFiles::untracked(),
         )
         .map_err(|error| DbError::context("spool prepared Circle snapshot image", error))?;
         let image_prepared_size = image_prepared.stored_bytes().len() as u64;

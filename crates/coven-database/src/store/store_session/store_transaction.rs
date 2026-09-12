@@ -25,7 +25,32 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         Self {
             transaction,
             store_dir,
+            created_payload_files: super::payload_store::CreatedPayloadFiles::untracked(),
         }
+    }
+
+    /// Report every spool file this transaction's payload installations create
+    /// to `created_files`, so the owner of an unfinished database can remove
+    /// them whether the transaction commits or rolls back.
+    pub(super) fn capturing_created_payload_files(
+        transaction: &'store rusqlite::Transaction<'connection>,
+        store_dir: &'store StoreDir,
+        created_files: super::payload_store::CreatedPayloadFiles<'store>,
+    ) -> Self {
+        Self {
+            transaction,
+            store_dir,
+            created_payload_files: created_files,
+        }
+    }
+
+    /// This transaction's rows and payloads, carrying its payload capture.
+    pub(crate) fn records(self) -> StoreRecords<'store> {
+        StoreRecords::capturing_created_payload_files(
+            self.transaction,
+            self.store_dir,
+            self.created_payload_files,
+        )
     }
 
     pub(super) fn require_accepted_membership(
@@ -37,7 +62,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         use coven_protocol::membership::MembershipFloor;
         use coven_protocol::store_commit::CommitFrontier;
         use std::collections::BTreeSet;
-        let records = StoreRecords::new(self.transaction, self.store_dir);
+        let records = self.records();
         let root = authority.required_root_authority_on(records)?;
         let boundary =
             super::observed_store_publication::load_store_current_publication_on(self.transaction)?;
@@ -106,18 +131,18 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
     }
 
     pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadStoreError> {
-        StoreRecords::new(self.transaction, self.store_dir).install_payload(bytes)
+        self.records().install_payload(bytes)
     }
 
     pub(crate) fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadStoreError> {
-        StoreRecords::new(self.transaction, self.store_dir).payload(hash)
+        self.records().payload(hash)
     }
 
     pub(crate) fn store_write_partitions(
         self,
         write_id: &str,
     ) -> Result<crate::PreparedStoreWritePartitions, DbError> {
-        StoreRecords::new(self.transaction, self.store_dir).store_write_partitions(write_id)
+        self.records().store_write_partitions(write_id)
     }
 
     pub(super) fn ensure_founder_replay_baseline(
@@ -127,7 +152,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         authority: crate::RetainedReplayGenesisAuthority,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         super::retained_replay::ensure_founder_replay_baseline_on(
-            StoreRecords::new(self.transaction, self.store_dir),
+            self.records(),
             schema_version,
             routing_hash,
             authority,
@@ -141,7 +166,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         authority: crate::RetainedReplayGenesisAuthority,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         super::retained_replay::install_generation_zero_replay_baseline_on(
-            StoreRecords::new(self.transaction, self.store_dir),
+            self.records(),
             schema_version,
             routing_hash,
             authority,
@@ -368,10 +393,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         if let Some(raw_prepared) = raw_prepared.as_deref() {
             let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
                 .map_err(|error| DbError::context("resolved prepared write", error))?;
-            let merge = authority.verified_prepared_store_commit_on(
-                StoreRecords::new(self.transaction, self.store_dir),
-                &prepared,
-            )?;
+            let merge = authority.verified_prepared_store_commit_on(self.records(), &prepared)?;
             let reference = merge.reference().clone();
             removable.push(remote_object_id(&reference.object));
             let active = super::active_store_publication::load_active_store_publication_on(tx)?

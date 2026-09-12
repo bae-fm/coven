@@ -201,7 +201,10 @@ impl DatabaseCore {
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<Self, OpenError> {
-        let core = Self::open_unseeded(
+        // Nothing outside this open owns the payload files a snapshot install
+        // creates here: the database this returns is the published one, and its
+        // store directory is the caller's to remove if a later step fails.
+        let (core, _created_payload_files) = Self::open_unseeded(
             path,
             store_dir,
             connection_durability,
@@ -218,6 +221,10 @@ impl DatabaseCore {
         Ok(core)
     }
 
+    /// Open without seeding the register clock, reporting the payload spool
+    /// files a snapshot install created so an owner of the still-unpublished
+    /// database can remove them. A failed open removes them itself.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn open_unseeded(
         path: &Path,
         store_dir: StoreDir,
@@ -230,6 +237,52 @@ impl DatabaseCore {
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
         capture_committed_changes: bool,
+    ) -> Result<(Self, Vec<PathBuf>), OpenError> {
+        let created_payload_files = std::cell::RefCell::new(Vec::new());
+        let opened = Self::open_unseeded_capturing_payloads(
+            path,
+            store_dir.clone(),
+            connection_durability,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            hlc,
+            coven_migration_policy,
+            migrations,
+            metadata_open,
+            capture_committed_changes,
+            crate::payload_store::CreatedPayloadFiles::tracked(&created_payload_files),
+        );
+        let created_payload_files = created_payload_files.into_inner();
+        match opened {
+            Ok(core) => Ok((core, created_payload_files)),
+            Err(operation) => Err(
+                match crate::store::remove_created_payload_files(&store_dir, created_payload_files)
+                {
+                    Ok(()) => operation,
+                    Err(cleanup) => OpenError::PreparationCleanup {
+                        operation: Box::new(operation),
+                        cleanup: Box::new(DbError::StagedBlobRollback(cleanup)),
+                    },
+                },
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_unseeded_capturing_payloads(
+        path: &Path,
+        store_dir: StoreDir,
+        connection_durability: crate::connection_io::ConnectionDurability,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        transfer_limits: coven_protocol::blob::TransferLimits,
+        hlc: Arc<Hlc>,
+        coven_migration_policy: CovenMigrationPolicy,
+        migrations: &[Migration],
+        metadata_open: CovenMetadataOpen<'_>,
+        capture_committed_changes: bool,
+        created_payload_files: crate::payload_store::CreatedPayloadFiles<'_>,
     ) -> Result<Self, OpenError> {
         // A device join spends most of its wall time inside this function, and
         // from the caller it is one opaque step. Every phase below scales with
@@ -401,7 +454,7 @@ impl DatabaseCore {
                             schema_version,
                             resolved.hash(),
                             &synced_tables,
-                            hlc.wall_now_ms(),
+                            created_payload_files,
                         )
                     })?;
                 }

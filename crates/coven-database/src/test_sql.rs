@@ -55,8 +55,13 @@ impl DatabaseTestSql<'_> {
             .connection
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let hash = crate::payload_store::write_payload_blocking(&transaction, store_dir, bytes)
-            .map_err(DbError::from)?;
+        let hash = crate::payload_store::write_payload_blocking(
+            &transaction,
+            store_dir,
+            bytes,
+            crate::payload_store::CreatedPayloadFiles::untracked(),
+        )
+        .map_err(DbError::from)?;
         transaction.commit().map_err(DbError::from)?;
         Ok(hash)
     }

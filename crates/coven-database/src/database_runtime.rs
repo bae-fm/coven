@@ -13,7 +13,7 @@ pub struct Database {
 /// Production databases live under their store directory. In-memory databases
 /// have no parent path, so the database opening boundary creates their
 /// process-local directory once and passes that dependency into the core.
-fn store_dir_of(path: &Path) -> coven_foundation::store_dir::StoreDir {
+pub(crate) fn store_dir_of(path: &Path) -> coven_foundation::store_dir::StoreDir {
     if path == Path::new(":memory:") {
         return coven_foundation::store_dir::StoreDir::new_ephemeral(
             std::env::temp_dir().join(format!("coven-in-memory-store-{}", uuid::Uuid::new_v4())),
@@ -63,6 +63,10 @@ impl Database {
         Ok(Self {
             connection: DatabaseConnection::start(core, thread_name)?,
         })
+    }
+
+    pub(crate) fn from_connection(connection: DatabaseConnection) -> Self {
+        Self { connection }
     }
 
     pub(crate) fn call_database<F, R>(
@@ -323,6 +327,36 @@ impl Database {
             coven_migration_policy,
             migrations,
             CovenMetadataOpen::VerifiedSnapshot(install),
+        )
+    }
+
+    /// Open `path` as the destination of a cold snapshot restore: install the
+    /// verified Store image and keep the database private to the returned
+    /// preparation until it finishes. The preparation owns `image` from here on
+    /// — a restore that never finishes takes the database files and every
+    /// payload file it wrote with it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_cold_snapshot(
+        image: SnapshotDatabaseImage,
+        install: &VerifiedSnapshotBootstrapInstall,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        transfer_limits: coven_protocol::blob::TransferLimits,
+        device_id: String,
+        clock: coven_foundation::clock::ClockRef,
+        coven_migration_policy: CovenMigrationPolicy,
+        migrations: &[Migration],
+    ) -> Result<crate::ColdSnapshotPreparation, OpenError> {
+        let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
+        DatabaseConnection::open_cold_snapshot(
+            image,
+            install,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            Arc::new(hlc),
+            coven_migration_policy,
+            migrations,
         )
     }
 

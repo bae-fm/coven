@@ -239,7 +239,7 @@ impl StoreTransaction<'_, '_> {
                 "received image has no accepted snapshot authority".into(),
             ));
         };
-        let records = StoreRecords::new(self.transaction, self.store_dir);
+        let records = self.records();
         let previous = load_replay_baseline_on(records)?.ok_or_else(|| {
             DbError::Message("checkpoint replacement has no installed replay baseline".into())
         })?;

@@ -615,19 +615,20 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
                 "device join bootstrap root differs from the installed exact root".to_string(),
             ));
         }
-        if !snapshot_circles.access.is_empty() || !snapshot_circles.bases.is_empty() {
-            let snapshot_floor = self.store.restore_device_join_snapshot_circles(
-                &root,
-                &snapshot_circles,
-                synced_tables,
-                blob_decls,
-                receiver_wall_ms,
-            )?;
-            if snapshot_floor > self.clock_floor {
-                self.clock_floor = snapshot_floor;
-            }
-            authority.forget_superseded_replay_baseline();
+        // Runs even for a selection with no Circles: the restore is also what
+        // drops the publisher's imported Circle bootstrap coverage, which a
+        // recipient that installs none of those images must not keep.
+        let snapshot_floor = self.store.restore_snapshot_circles(
+            &root,
+            &snapshot_circles,
+            synced_tables,
+            blob_decls,
+            receiver_wall_ms,
+        )?;
+        if snapshot_floor > self.clock_floor {
+            self.clock_floor = snapshot_floor;
         }
+        authority.forget_superseded_replay_baseline();
         install_store_founder_state_on(
             tx,
             &root,

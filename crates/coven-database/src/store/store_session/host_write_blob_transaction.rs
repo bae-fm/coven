@@ -3,14 +3,14 @@ use super::*;
 pub struct HostWriteBlobTransaction<'transaction, 'connection> {
     store: StoreTransaction<'transaction, 'connection>,
     verified_authority: &'transaction mut VerifiedStoreAuthority,
-    created_payload_files: &'transaction mut Vec<PathBuf>,
+    created_payload_files: &'transaction std::cell::RefCell<Vec<PathBuf>>,
 }
 
 impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connection> {
     pub(super) fn new(
         store: StoreTransaction<'transaction, 'connection>,
         verified_authority: &'transaction mut VerifiedStoreAuthority,
-        created_payload_files: &'transaction mut Vec<PathBuf>,
+        created_payload_files: &'transaction std::cell::RefCell<Vec<PathBuf>>,
     ) -> Self {
         Self {
             store,
@@ -28,7 +28,9 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
     ) -> Result<(), DbError> {
         let (hash, size) = PayloadStore::new(self.store.transaction, self.store.store_dir)
             .file_writer(source)?
-            .commit_for_capture(self.created_payload_files)?;
+            .commit(super::payload_store::CreatedPayloadFiles::tracked(
+                self.created_payload_files,
+            ))?;
         if hash != fact.plaintext_hash || size != fact.plaintext_size {
             return Err(DbError::Message(format!(
                 "captured blob {}/{}/{} source differs from its declared plaintext",
@@ -99,11 +101,12 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
     }
 }
 
-pub(super) fn rollback_captured_payload_files(
+/// Remove payload spool files an unfinished operation created, newest first.
+/// Reports every file it could not remove rather than any one of them.
+pub(crate) fn remove_created_payload_files(
     directory: &coven_foundation::store_dir::StoreDir,
     files: Vec<PathBuf>,
-    operation: DbError,
-) -> DbError {
+) -> Result<(), crate::StagedBlobRollbackFailures> {
     let mut failures = Vec::new();
     for path in files.into_iter().rev() {
         let cleanup = std::fs::remove_file(&path)
@@ -123,12 +126,23 @@ pub(super) fn rollback_captured_payload_files(
         }
     }
     if failures.is_empty() {
-        operation
+        Ok(())
     } else {
-        DbError::AudienceBlobRollbackFailed {
+        Err(crate::StagedBlobRollbackFailures(failures))
+    }
+}
+
+pub(super) fn rollback_captured_payload_files(
+    directory: &coven_foundation::store_dir::StoreDir,
+    files: Vec<PathBuf>,
+    operation: DbError,
+) -> DbError {
+    match remove_created_payload_files(directory, files) {
+        Ok(()) => operation,
+        Err(rollback) => DbError::AudienceBlobRollbackFailed {
             operation: Box::new(operation),
-            rollback: crate::StagedBlobRollbackFailures(failures),
-        }
+            rollback,
+        },
     }
 }
 

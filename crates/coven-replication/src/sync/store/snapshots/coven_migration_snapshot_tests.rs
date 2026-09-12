@@ -24,12 +24,7 @@ fn direct_open_fixture(
         &membership,
         None,
     )
-    .expect("construct verified snapshot install")
-    .with_circle_installs(coven_database::StagedCircleRestore {
-        access: Vec::new(),
-        bases: Vec::new(),
-        packages: None,
-    });
+    .expect("construct verified snapshot install");
     (database_image, install)
 }
 

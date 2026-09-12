@@ -1058,7 +1058,7 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
     ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
         circle_blob_opening_protection_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            self.records(),
             verified_store,
             root,
             circle_id,

@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::payload_store::{
     read_payload_blocking, read_verified_payload_blocking, write_payload_blocking,
-    PayloadStoreError,
+    CreatedPayloadFiles, PayloadStoreError,
 };
 use super::StoreTransaction;
 #[cfg(any(test, feature = "test-utils"))]
@@ -35,11 +35,30 @@ mod snapshot_install;
 pub(crate) struct StoreRecords<'store> {
     conn: &'store Connection,
     store_dir: &'store StoreDir,
+    created_payload_files: CreatedPayloadFiles<'store>,
 }
 
 impl<'store> StoreRecords<'store> {
     pub(super) fn new(conn: &'store Connection, store_dir: &'store StoreDir) -> Self {
-        Self { conn, store_dir }
+        Self {
+            conn,
+            store_dir,
+            created_payload_files: CreatedPayloadFiles::untracked(),
+        }
+    }
+
+    /// Report every spool file these records' payload installations create to
+    /// `created_files`, so the owner of an unfinished database can remove them.
+    pub(super) fn capturing_created_payload_files(
+        conn: &'store Connection,
+        store_dir: &'store StoreDir,
+        created_files: CreatedPayloadFiles<'store>,
+    ) -> Self {
+        Self {
+            conn,
+            store_dir,
+            created_payload_files: created_files,
+        }
     }
 
     pub(crate) fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadStoreError> {
@@ -51,7 +70,7 @@ impl<'store> StoreRecords<'store> {
     }
 
     pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadStoreError> {
-        write_payload_blocking(self.conn, self.store_dir, bytes)
+        write_payload_blocking(self.conn, self.store_dir, bytes, self.created_payload_files)
     }
 
     pub(crate) fn rebased_store_write(
@@ -806,6 +825,7 @@ impl<'store> StoreRecords<'store> {
             &transaction,
             self.store_dir,
             authority_bytes,
+            self.created_payload_files,
         )
         .map_err(|error| DbError::context("install retained replay authority", error))?;
         transaction

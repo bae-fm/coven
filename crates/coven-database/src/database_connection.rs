@@ -6,6 +6,8 @@ use tracing::error;
 mod snapshot_preparation;
 pub use crate::store::PreparedStoreSnapshot;
 use crate::store::SnapshotPreparationDirectory;
+pub use snapshot_preparation::ColdSnapshotPreparation;
+use snapshot_preparation::SnapshotPreparation;
 
 /// Database state used both by connection-thread SQL and caller-task
 /// coordination. One instance is created at open and shared by the connection
@@ -34,6 +36,10 @@ struct DatabaseContext {
     test_pause_points: TestPausePoints<DatabaseTestPoint>,
     #[cfg(any(test, feature = "test-utils"))]
     merge_materialization_failure: std::sync::Mutex<Option<MergeMaterializationFailurePoint>>,
+    /// Armed by a cold restore test to fail the next Circle restore after its
+    /// payload files land, standing in for a crash between the two installs.
+    #[cfg(any(test, feature = "test-utils"))]
+    fail_circle_restore: std::sync::atomic::AtomicBool,
 }
 
 /// The owned SQLite connection and its connection-lifetime verified state.
@@ -42,7 +48,7 @@ pub(crate) struct DatabaseCore {
     conn: Connection,
     verified_store_authority: crate::store::VerifiedStoreAuthority,
     context: Arc<DatabaseContext>,
-    snapshot_preparation: Option<SnapshotPreparationDirectory>,
+    snapshot_preparation: Option<SnapshotPreparation>,
 }
 
 impl DatabaseCore {
@@ -87,6 +93,8 @@ impl DatabaseCore {
                 test_pause_points: TestPausePoints::default(),
                 #[cfg(any(test, feature = "test-utils"))]
                 merge_materialization_failure: std::sync::Mutex::new(None),
+                #[cfg(any(test, feature = "test-utils"))]
+                fail_circle_restore: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
@@ -723,6 +731,9 @@ enum DbJob {
     Run(Box<dyn FnOnce(&mut DatabaseCore) + Send>),
     SealSnapshot(tokio::sync::oneshot::Sender<Result<PreparedStoreSnapshot, DbError>>),
     DiscardSnapshot(tokio::sync::oneshot::Sender<Result<(), DbError>>),
+    /// Hand the owned core off this worker with its connection still open, so a
+    /// finished preparation can start serving from the same database.
+    TakeCore(tokio::sync::oneshot::Sender<Result<DatabaseCore, DbError>>),
     Stop,
 }
 
@@ -778,6 +789,12 @@ impl ConnectionWorker {
                 DbJob::DiscardSnapshot(reply) => {
                     let discarded = self.core.discard_snapshot();
                     let _ = reply.send(discarded);
+                    return;
+                }
+                DbJob::TakeCore(reply) => {
+                    // Cancellation drops the core, which closes the connection
+                    // and releases the preparation it still holds.
+                    let _ = reply.send(Ok(self.core));
                     return;
                 }
                 DbJob::Stop => break,

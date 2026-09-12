@@ -147,6 +147,45 @@ impl RestoreTarget {
     }
 }
 
+/// The payload spool files a store directory holds, by path and content, so a
+/// test can say exactly which files an attempt added or left alone.
+fn payload_spool_files(
+    store_dir: &coven_foundation::store_dir::StoreDir,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let spool = store_dir.payload_spool_dir();
+    let Ok(entries) = std::fs::read_dir(&spool) else {
+        return std::collections::BTreeMap::new();
+    };
+    entries
+        .map(|entry| {
+            let path = entry.expect("read payload spool entry").path();
+            let bytes = std::fs::read(&path).expect("read payload spool file");
+            (path, bytes)
+        })
+        .collect()
+}
+
+/// Asserts that a failed restore left the destination exactly as it found it:
+/// no database, no SQLite sidecars, and no payload file it wrote.
+fn assert_restore_left_nothing(
+    target: &RestoreTarget,
+    before: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+) {
+    for suffix in ["", "-wal", "-shm"] {
+        let path = std::path::PathBuf::from(format!("{}{suffix}", target.database_path.display()));
+        assert!(
+            !path.exists(),
+            "a failed restore left {} behind",
+            path.display()
+        );
+    }
+    assert_eq!(
+        payload_spool_files(&target.store_dir),
+        *before,
+        "a failed restore changed the destination payload spool"
+    );
+}
+
 /// Restores the Store snapshot as `restorer` and installs it into `target`. The
 /// preparation is expected to verify; the install outcome is the caller's, since
 /// the failure cases are exactly what several of these tests assert on.
@@ -367,6 +406,7 @@ async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
 
     // The Store snapshot itself verifies; only the Circle image is sabotaged.
     let target = RestoreTarget::new();
+    let before = payload_spool_files(&target.store_dir);
     let outcome = restore_store_snapshot(
         &store,
         &db,
@@ -386,14 +426,13 @@ async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
             || error.to_string().contains("digest"),
         "the restore fails on image verification: {error}"
     );
-    assert!(
-        !target.database_path.exists(),
-        "a failed restore exposes no database at the target path"
-    );
+    // The Store image installed before the Circle selection ran, so this also
+    // says the committed install's payload files went with the destination.
+    assert_restore_left_nothing(&target, &before);
 }
 
 #[tokio::test]
-async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
+async fn restore_releases_the_destination_when_the_circle_install_fails() {
     let base =
         ActiveMemberCircleSnapshot::build("snapshot-restore-crash", CircleFixtureMode::Live).await;
     let ActiveMemberCircleSnapshot {
@@ -406,11 +445,12 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
     } = base;
 
     // The member restore selects its own leaf bootstrap as a Circle image to
-    // install. A failure injected into the Circle-decision step — the stand-in for
-    // a crash after the Store image is installed but before the Circle image is —
-    // must roll the whole install transaction back, leaving no database at all: not
-    // even the Store image on its own.
+    // install. A failure injected after that install wrote its payload files —
+    // the stand-in for a crash between the Store and Circle installs — must
+    // release the whole destination: no database, not even the Store image on
+    // its own, and none of the payload files either install created.
     let target = RestoreTarget::new();
+    let before = payload_spool_files(&target.store_dir);
     let outcome = store
         .prepare_snapshot_bootstrap(
             &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
@@ -442,11 +482,182 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
             "the restore fails at the Circle-install step: {error}"
         ),
     }
+    assert_restore_left_nothing(&target, &before);
+}
+
+#[tokio::test]
+async fn a_cold_restore_dropped_mid_way_removes_its_database_and_payloads() {
+    let base =
+        ActiveMemberCircleSnapshot::build("snapshot-restore-abandoned", CircleFixtureMode::Live)
+            .await;
+    let ActiveMemberCircleSnapshot {
+        db,
+        store,
+        member,
+        routing,
+        membership,
+        ..
+    } = base;
+
+    let target = RestoreTarget::new();
+    let before = payload_spool_files(&target.store_dir);
+    let bootstrap = store
+        .prepare_snapshot_bootstrap(
+            &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+            db.schema_version(),
+            &target.database_path,
+            &member,
+        )
+        .await
+        .expect("restore the Store snapshot");
+    let migrations = circle_routing_migrations();
+    let mut install = Box::pin(bootstrap.install(
+        &target.store_dir,
+        circle_routing_tables(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
+        "abandoned-restore-device".to_string(),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        &migrations,
+        coven_database::CovenMigrationPolicy::ApplyPending,
+        Some(&routing),
+    ));
+    // The Store install runs to completion inside the first poll, which then
+    // waits on the restore that follows it. That is the abandonment window the
+    // guard has to cover: the install is committed and nothing owns it yet.
+    let pending = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::future::Future::poll(install.as_mut(), context))
+    })
+    .await;
     assert!(
-        !target.database_path.exists(),
-        "the rolled-back restore exposes no database — the Store image did not commit \
-         separately from the Circle install"
+        pending.is_pending(),
+        "the restore must still be in flight when it is abandoned"
     );
+    assert!(
+        target.database_path.exists(),
+        "the Store install committed before the restore was abandoned"
+    );
+    assert_ne!(
+        payload_spool_files(&target.store_dir),
+        before,
+        "the Store install wrote payload files before the restore was abandoned"
+    );
+
+    drop(install);
+
+    assert_restore_left_nothing(&target, &before);
+}
+
+#[tokio::test]
+async fn a_finished_cold_restore_seeds_its_clock_with_recipient_rows() {
+    let base =
+        ActiveMemberCircleSnapshot::build("snapshot-restore-clock", CircleFixtureMode::Live).await;
+    let ActiveMemberCircleSnapshot {
+        db,
+        store,
+        member,
+        membership,
+        ..
+    } = base;
+
+    let target = RestoreTarget::new();
+    let restored = restore_store_snapshot(
+        &store,
+        &db,
+        &membership,
+        &member,
+        &target,
+        "clock-restore-device",
+    )
+    .await
+    .expect("restore the member's Circle content");
+
+    // The Circle rows land after the Store image opened, so the register clock
+    // is seeded once the restore is finished rather than at the open.
+    let rows = coven_database::DatabaseImageTest::open(&target.database_path)
+        .expect("read the restored rows");
+    let installed: String = rows
+        .query_row("SELECT MAX(_updated_at) FROM documents", [], |row| {
+            row.get(0)
+        })
+        .expect("the restore installs recipient Circle rows");
+    assert!(
+        restored.stamp_for_test() > installed,
+        "the restored clock must stand above its installed rows: {installed}"
+    );
+}
+
+#[tokio::test]
+async fn a_cold_restore_leaves_unrelated_spool_files_alone() {
+    let base =
+        ActiveMemberCircleSnapshot::build("snapshot-restore-reuse", CircleFixtureMode::Live).await;
+    let ActiveMemberCircleSnapshot {
+        db,
+        store,
+        member,
+        routing,
+        membership,
+        ..
+    } = base;
+
+    // One finished restore, to learn what a restore of this snapshot puts in a
+    // destination's payload spool.
+    let installed = RestoreTarget::new();
+    let _restored = restore_store_snapshot(
+        &store,
+        &db,
+        &membership,
+        &member,
+        &installed,
+        "spool-source-device",
+    )
+    .await
+    .expect("restore the member's Circle content");
+    let payloads = payload_spool_files(&installed.store_dir);
+    assert!(!payloads.is_empty(), "a restore writes payload spool files");
+
+    // A second destination whose spool already holds payload files of exactly
+    // that shape. They belong to whoever put them there; the failing attempt
+    // below owns only what it writes itself.
+    let target = RestoreTarget::new();
+    let spool = target.store_dir.payload_spool_dir();
+    std::fs::create_dir_all(&spool).expect("create the destination payload spool");
+    let before = payloads
+        .into_iter()
+        .map(|(source, bytes)| {
+            let path = spool.join(source.file_name().expect("payload file name"));
+            std::fs::write(&path, &bytes).expect("seed the destination payload spool");
+            (path, bytes)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let outcome = store
+        .prepare_snapshot_bootstrap(
+            &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+            db.schema_version(),
+            &target.database_path,
+            &member,
+        )
+        .await
+        .expect("restore the Store snapshot")
+        .fail_circle_install_for_test()
+        .install(
+            &target.store_dir,
+            circle_routing_tables(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            "reuse-restore-device".to_string(),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            &circle_routing_migrations(),
+            coven_database::CovenMigrationPolicy::ApplyPending,
+            Some(&routing),
+        )
+        .await;
+    assert!(
+        outcome.is_err(),
+        "an injected Circle-install failure must fail the whole restore"
+    );
+    assert_restore_left_nothing(&target, &before);
 }
 
 #[tokio::test]

@@ -203,7 +203,7 @@ impl StoreTransaction<'_, '_> {
                     DbError::context("parse prior Circle bootstrap coverage", error)
                 })?;
             let prior_activation = StoreDatabase::verified_circle_activation_on(
-                crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+                self.records(),
                 authority,
                 root,
                 bootstrap.circle_id(),

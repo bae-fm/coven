@@ -123,6 +123,29 @@ enum ExistingPayloadState {
     RepairableFile,
 }
 
+/// Where payload installation reports the spool files it created, so an owner
+/// outside the database transaction can remove them when the work they belong
+/// to is abandoned. An installation no such owner tracks reports to
+/// [`CreatedPayloadFiles::untracked`], and its files outlive a rollback.
+#[derive(Clone, Copy)]
+pub(crate) struct CreatedPayloadFiles<'capture>(Option<&'capture std::cell::RefCell<Vec<PathBuf>>>);
+
+impl<'capture> CreatedPayloadFiles<'capture> {
+    pub(crate) fn untracked() -> Self {
+        Self(None)
+    }
+
+    pub(crate) fn tracked(files: &'capture std::cell::RefCell<Vec<PathBuf>>) -> Self {
+        Self(Some(files))
+    }
+
+    fn record(self, path: PathBuf) {
+        if let Some(files) = self.0 {
+            files.borrow_mut().push(path);
+        }
+    }
+}
+
 /// One database connection's closed access to the payload bytes its rows own.
 /// The catalog on that connection selects inline SQLite bytes or the Store
 /// directory's file spool; callers never receive either dependency.
@@ -137,7 +160,11 @@ impl<'store> PayloadStore<'store> {
         Self { conn, store_dir }
     }
 
-    pub(crate) fn install(self, bytes: &[u8]) -> Result<ObjectHash, PayloadStoreError> {
+    pub(crate) fn install(
+        self,
+        bytes: &[u8],
+        created_files: CreatedPayloadFiles<'_>,
+    ) -> Result<ObjectHash, PayloadStoreError> {
         let hash = ObjectHash::digest(bytes);
         self.require_transaction(hash)?;
         let existing_file = match self.existing_payload_state(hash, bytes.len() as u64)? {
@@ -148,7 +175,10 @@ impl<'store> PayloadStore<'store> {
         let compressed = compress_payload(hash, bytes)?;
         if existing_file || compressed.len() > INLINE_PAYLOAD_LIMIT {
             self.record_file(hash, bytes.len() as u64, compressed.len() as u64)?;
-            write_payload_file_bytes_blocking(self.store_dir, hash, &compressed)?;
+            let renamed = write_payload_file_bytes_blocking(self.store_dir, hash, &compressed)?;
+            if !existing_file && renamed {
+                created_files.record(self.store_dir.payload_spool_path(hash));
+            }
         } else {
             self.record_inline(hash, bytes.len() as u64, &compressed)?;
         }
@@ -423,20 +453,9 @@ impl<'store> CompressedPayloadTarget<'store> {
 }
 
 impl<'store> PayloadWriter<'store> {
-    pub(crate) fn commit(self) -> Result<(ObjectHash, u64), PayloadStoreError> {
-        self.commit_tracking_created_files(None)
-    }
-
-    pub(super) fn commit_for_capture(
+    pub(crate) fn commit(
         self,
-        created_files: &mut Vec<PathBuf>,
-    ) -> Result<(ObjectHash, u64), PayloadStoreError> {
-        self.commit_tracking_created_files(Some(created_files))
-    }
-
-    fn commit_tracking_created_files(
-        self,
-        created_files: Option<&mut Vec<PathBuf>>,
+        created_files: CreatedPayloadFiles<'_>,
     ) -> Result<(ObjectHash, u64), PayloadStoreError> {
         let hash = self
             .hasher
@@ -472,9 +491,7 @@ impl<'store> PayloadWriter<'store> {
                     Err(error) => error.committed(),
                 };
                 if !existing_file && renamed {
-                    if let Some(created_files) = created_files {
-                        created_files.push(path.clone());
-                    }
+                    created_files.record(path.clone());
                 }
                 installation.map_err(|source| PayloadStoreError::AtomicFile { path, source })?;
             }
@@ -624,18 +641,22 @@ pub(crate) fn write_payload_blocking(
     conn: &Connection,
     store_dir: &StoreDir,
     bytes: &[u8],
+    created_files: CreatedPayloadFiles<'_>,
 ) -> Result<ObjectHash, PayloadStoreError> {
-    PayloadStore::new(conn, store_dir).install(bytes)
+    PayloadStore::new(conn, store_dir).install(bytes, created_files)
 }
 
+/// Returns whether the spool file at this payload's address was created here: a
+/// byte-identical file already in the spool is left as it stands, and belongs to
+/// whoever put it there.
 fn write_payload_file_bytes_blocking(
     store_dir: &StoreDir,
     hash: ObjectHash,
     bytes: &[u8],
-) -> Result<(), PayloadStoreError> {
+) -> Result<bool, PayloadStoreError> {
     let path = store_dir.payload_spool_path(hash);
     match std::fs::read(&path) {
-        Ok(installed) if installed == bytes => return Ok(()),
+        Ok(installed) if installed == bytes => return Ok(false),
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
@@ -663,10 +684,13 @@ fn write_payload_file_bytes_blocking(
             path: directory,
             source,
         })?;
-    staged
-        .commit(&path)
-        .map_err(|source| PayloadStoreError::AtomicFile { path, source })?;
-    Ok(())
+    let installation = staged.commit(&path);
+    let renamed = match &installation {
+        Ok(()) => true,
+        Err(error) => error.committed(),
+    };
+    installation.map_err(|source| PayloadStoreError::AtomicFile { path, source })?;
+    Ok(renamed)
 }
 
 /// Copy an existing file into the payload spool without reading it into one
@@ -679,7 +703,7 @@ pub(crate) fn write_payload_file_blocking(
 ) -> Result<(ObjectHash, u64), PayloadStoreError> {
     PayloadStore::new(conn, store_dir)
         .file_writer(source)?
-        .commit()
+        .commit(CreatedPayloadFiles::untracked())
 }
 
 /// Read a payload on the database's connection thread.

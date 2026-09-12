@@ -108,14 +108,18 @@ publication authority. Pull verifies the accepted continuation above that base;
 it does not fabricate a materialized commit row for each retired historical
 entry.
 
-Restore resolves Circle access for the receiving identity. It selects each
-Circle's verified image or founding base and applies accepted packages beyond
-that base in the same transaction as the Store image. A same-epoch successor
-without a new image continues the recipient's exact earlier bootstrap through
-verified control history. Missing or invalid required images fail installation.
-The snapshot author's cached access does not grant the receiver access. Join and
-restore complete their required membership, registration, eager-blob, and
-continuation work before returning the Store.
+Restore resolves Circle access for the receiving identity. The destination is
+opened once and stays private until it can serve: the Store image installs
+first, the receiving identity then re-resolves its own access against those
+installed rows, and the selected Circle images and accepted packages install
+beyond that base. Restore selects each Circle's verified image or founding base;
+a same-epoch successor without a new image continues the recipient's exact
+earlier bootstrap through verified control history. Missing or invalid required
+images fail installation, and the failed attempt takes the database files and
+every payload file it wrote with it. The snapshot author's cached access does
+not grant the receiver access. Join and restore complete their required
+membership, registration, eager-blob, and continuation work before returning the
+Store.
 
 ## Schema versions
 

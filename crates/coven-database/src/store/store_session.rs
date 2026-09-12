@@ -79,6 +79,7 @@ mod write_rebase;
 pub(crate) struct StoreTransaction<'store, 'connection> {
     transaction: &'store rusqlite::Transaction<'connection>,
     store_dir: &'store coven_foundation::store_dir::StoreDir,
+    created_payload_files: payload_store::CreatedPayloadFiles<'store>,
 }
 
 /// One Store SQL transaction and the authority facts staged beside it.
@@ -130,15 +131,10 @@ pub(crate) fn install_verified_snapshot_bootstrap_on(
     schema_version: u32,
     routing_hash: coven_protocol::store_commit::ObjectHash,
     synced_tables: &[coven_protocol::synced_schema::SyncedTable],
-    receiver_wall_ms: u64,
+    created_payload_files: payload_store::CreatedPayloadFiles<'_>,
 ) -> Result<(), DbError> {
-    StoreTransaction::new(transaction, store_dir).install_verified_snapshot_bootstrap(
-        install,
-        schema_version,
-        routing_hash,
-        synced_tables,
-        receiver_wall_ms,
-    )
+    StoreTransaction::capturing_created_payload_files(transaction, store_dir, created_payload_files)
+        .install_verified_snapshot_bootstrap(install, schema_version, routing_hash, synced_tables)
 }
 
 #[cfg(any(test, feature = "test-utils"))]

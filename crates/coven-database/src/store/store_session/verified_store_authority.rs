@@ -725,11 +725,7 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         root: &StoreRootRef,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceRegistration, DbError> {
-        authority.activated_registration_on(
-            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
-            root,
-            reference,
-        )
+        authority.activated_registration_on(self.records(), root, reference)
     }
 
     pub(super) fn retained_replay_baseline(

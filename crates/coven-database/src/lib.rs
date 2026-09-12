@@ -186,6 +186,7 @@ pub(crate) use circle_operation_records::{
 };
 pub use circle_operation_records::{parse_circle_operation_row, PreparedCircleOperationRow};
 pub use coven_protocol::objects::{ExactProtocolObject, PreparedProtocolObject};
+pub use database_connection::ColdSnapshotPreparation;
 pub use database_connection::PreparedStoreSnapshot;
 pub(crate) use database_connection::{DatabaseConnection, DatabaseCore};
 use database_open::CovenMetadataOpen;
@@ -944,6 +945,16 @@ pub struct StagedCircleRestore {
 }
 
 impl StagedCircleRestore {
+    /// The selection of a recipient with no Circle access. Installing it still
+    /// drops the publisher's imported Circle bootstrap coverage.
+    pub fn empty() -> Self {
+        Self {
+            access: Vec::new(),
+            bases: Vec::new(),
+            packages: None,
+        }
+    }
+
     /// Package replay starts at the selected image, or at the authenticated
     /// founding control when the recipient held active access from creation.
     pub fn coverage_cuts(
@@ -1010,11 +1021,6 @@ pub struct StagedCirclePackageRestore {
     pub packages: BTreeMap<StoreBatchCommitRef, Vec<AudiencePackage>>,
 }
 
-enum CircleRestoreSelection {
-    Pending,
-    Selected(StagedCircleRestore),
-}
-
 pub struct VerifiedSnapshotBootstrapInstall {
     snapshot: PublishedStoreSnapshot,
     store_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
@@ -1022,12 +1028,6 @@ pub struct VerifiedSnapshotBootstrapInstall {
     authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
     membership: InitialStoreMembershipAuthority,
     routing_key: Option<coven_protocol::circle::RowRoutingKey>,
-    circle_selection: CircleRestoreSelection,
-    /// Fail the Circle-install step of the install transaction, after the Store
-    /// image has been installed within it — a test's stand-in for a crash between
-    /// the Store and Circle installs, exercising the single-transaction rollback.
-    #[cfg(any(test, feature = "test-utils"))]
-    fail_circle_install: bool,
 }
 
 impl VerifiedSnapshotBootstrapInstall {
@@ -1082,28 +1082,7 @@ impl VerifiedSnapshotBootstrapInstall {
             authority,
             membership,
             routing_key,
-            circle_selection: CircleRestoreSelection::Pending,
-            #[cfg(any(test, feature = "test-utils"))]
-            fail_circle_install: false,
         })
-    }
-
-    /// Attach the Circle images selected against a throwaway query copy opened
-    /// through this same authority. Kept separate from `new` so one verified
-    /// install can first query and then install for real without re-verifying the
-    /// Store authority.
-    pub fn with_circle_installs(mut self, circle_installs: StagedCircleRestore) -> Self {
-        self.circle_selection = CircleRestoreSelection::Selected(circle_installs);
-        self
-    }
-
-    /// Arm the Circle-install failure injection: the install transaction rolls
-    /// back after the Store image is installed but before any Circle image
-    /// commits, standing in for a crash between the two installs.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn fail_circle_install_for_test(mut self) -> Self {
-        self.fail_circle_install = true;
-        self
     }
 }
 

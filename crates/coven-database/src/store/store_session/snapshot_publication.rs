@@ -40,6 +40,7 @@ impl StoreSession<'_> {
             &tx,
             self.store_dir,
             image_prepared.stored_bytes(),
+            crate::payload_store::CreatedPayloadFiles::untracked(),
         )
         .map_err(|error| DbError::context("spool prepared Store snapshot image", error))?;
         let image_prepared_size = image_prepared.stored_bytes().len() as u64;
@@ -90,13 +91,18 @@ impl StoreSession<'_> {
         // Spooled beside the image rather than carried in the row: a rollup
         // holds every membership object the Store has, which is KB-class and
         // belongs in the payload store.
-        let rollup_hash =
-            crate::payload_store::write_payload_blocking(&tx, self.store_dir, &rollup_bytes)
-                .map_err(|error| DbError::context("spool membership rollup", error))?;
+        let rollup_hash = crate::payload_store::write_payload_blocking(
+            &tx,
+            self.store_dir,
+            &rollup_bytes,
+            crate::payload_store::CreatedPayloadFiles::untracked(),
+        )
+        .map_err(|error| DbError::context("spool membership rollup", error))?;
         let rollup_prepared_hash = crate::payload_store::write_payload_blocking(
             &tx,
             self.store_dir,
             rollup_prepared.stored_bytes(),
+            crate::payload_store::CreatedPayloadFiles::untracked(),
         )
         .map_err(|error| DbError::context("spool prepared membership rollup", error))?;
         if rollup_hash != meta.membership_rollup.rollup_hash {

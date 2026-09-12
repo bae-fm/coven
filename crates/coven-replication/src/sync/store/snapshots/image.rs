@@ -410,12 +410,7 @@ impl PreparedDeviceJoinSnapshot {
                 authority,
                 membership,
                 Some(routing_encryption),
-            )?
-            .with_circle_installs(coven_database::StagedCircleRestore {
-                access: Vec::new(),
-                bases: Vec::new(),
-                packages: None,
-            });
+            )?;
             let db = Database::open_initialized_store(
                 &bound_path,
                 &install,
@@ -669,17 +664,16 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         self.coverage.position_count()
     }
 
-    /// Consume the verified bootstrap authority by opening its bound database file
-    /// and atomically installing the Store image together with the staged Circle
-    /// images the restoring identity selects.
+    /// Consume the verified bootstrap authority by opening its bound database
+    /// file as an unpublished restore destination, installing the Store image
+    /// and then the Circle images the restoring identity selects.
     ///
-    /// Circle staging runs between the raw image landing on disk and the final
-    /// install: a throwaway copy of the raw image is opened through the same
-    /// verified install authority so the identity's own access can be re-resolved
-    /// from the verified control chain (never the snapshot author's preserved
-    /// caches), selecting the Circle images the restored database can use. The
-    /// real install then applies the Store image and every selection inside one
-    /// transaction, so a partially installed union is never exposed.
+    /// The destination is opened once. It stays private to its preparation
+    /// until the Circle restore has landed, so the identity re-resolves its own
+    /// access from the verified control chain (never the snapshot author's
+    /// preserved caches) against the same database the restore publishes. Any
+    /// failure before that discards the preparation, taking the database files
+    /// and every payload file the attempt wrote with it.
     #[allow(clippy::too_many_arguments)]
     pub async fn install(
         self,
@@ -709,28 +703,67 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         } = self;
         let root = history_verifier.verified_root().clone();
         let bound_path = database_image.path().to_path_buf();
-        let result = async {
-            let database_bytes = std::fs::read(&bound_path)?;
-            if snapshot_db_hash(&database_bytes) != db_hash {
-                return Err(SnapshotError::BootstrapDatabaseChanged);
+        let database_bytes = match std::fs::read(&bound_path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return database_image
+                    .finish_operation(Err(SnapshotError::Io(error)))
+                    .map_err(SnapshotError::from);
             }
-            let root_ref = root.reference().clone();
-            let store_frontier = coverage.clone();
-            let install = verified_snapshot_bootstrap_install(
-                snapshot,
-                &root,
-                founder_registration,
-                authority,
-                &membership,
-                routing_encryption,
-            )?;
-
-            let local_membership =
-                coven_protocol::membership::LocalStoreMembership::from_membership(
-                    &membership,
-                    Some(&restorer_identity),
-                );
-            let circle_installs = if local_membership.allows_circle_access() {
+        };
+        if snapshot_db_hash(&database_bytes) != db_hash {
+            return database_image
+                .finish_operation(Err(SnapshotError::BootstrapDatabaseChanged))
+                .map_err(SnapshotError::from);
+        }
+        let root_ref = root.reference().clone();
+        let store_frontier = coverage.clone();
+        let install = match verified_snapshot_bootstrap_install(
+            snapshot,
+            &root,
+            founder_registration,
+            authority,
+            &membership,
+            routing_encryption,
+        ) {
+            Ok(install) => install,
+            Err(cause) => {
+                return database_image
+                    .finish_operation(Err(cause))
+                    .map_err(SnapshotError::from);
+            }
+        };
+        let local_membership = coven_protocol::membership::LocalStoreMembership::from_membership(
+            &membership,
+            Some(&restorer_identity),
+        );
+        // The preparation owns the staged image from here on: every failure
+        // below discards it together with the payload files the install wrote.
+        let preparation = Database::open_cold_snapshot(
+            database_image,
+            &install,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            device_id,
+            clock,
+            coven_migration_policy,
+            migrations,
+        )?;
+        #[cfg(any(test, feature = "test-utils"))]
+        if fail_circle_install {
+            preparation.fail_circle_restore_for_test();
+        }
+        // The selection runs against the destination's own installed rows, and
+        // the install that follows it lands even when nothing is selected: it is
+        // also what drops the publisher's imported Circle bootstrap coverage.
+        let verifier = &mut history_verifier;
+        let identity = &restorer_identity;
+        let restored = preparation
+            .restore_snapshot_circles(|restoring| async move {
+                if !local_membership.allows_circle_access() {
+                    return Ok(coven_database::StagedCircleRestore::empty());
+                }
                 let routing_key = routing_encryption
                     .map(|encryption| {
                         coven_protocol::circle::derive_row_routing_key(
@@ -739,104 +772,53 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                         )
                     })
                     .transpose()?;
-                let query_path = bound_path.with_extension("restore-select.db");
-                let query_image = SnapshotDatabaseImage::prepare(query_path)?;
-                if let Err(error) = std::fs::copy(&bound_path, query_image.path()) {
-                    return query_image
-                        .finish_operation(Err(SnapshotError::Io(error)))
-                        .map_err(SnapshotError::from);
-                }
-                let query_path = query_image.path().to_path_buf();
-                let staged = async {
-                    let query_db = Database::open_initialized_store(
-                        &query_path,
-                        &install,
-                        synced_tables.clone(),
-                        blob_tombstone_grace,
-                        transfer_limits,
-                        device_id.clone(),
-                        clock.clone(),
-                        coven_migration_policy,
-                        migrations,
-                    )
-                    .map_err(SnapshotError::from)?;
-                    let store_database = coven_database::StoreDatabase::from_database(query_db);
-                    crate::sync::store::snapshots::CircleSnapshotReader::new(
-                        &store_database,
-                        storage.as_ref(),
-                        &mut history_verifier,
-                    )
-                    .select_staged_installs(
-                        &store_frontier,
-                        &restorer_identity,
-                        routing_key.as_ref(),
-                        local_membership,
-                    )
-                    .await
-                }
-                .await;
-                query_image
-                    .finish_operation(staged)
-                    .map_err(SnapshotError::from)?
-            } else {
-                coven_database::StagedCircleRestore {
-                    access: Vec::new(),
-                    bases: Vec::new(),
-                    packages: None,
-                }
-            };
-            let install = install.with_circle_installs(circle_installs);
-            #[cfg(any(test, feature = "test-utils"))]
-            let install = if fail_circle_install {
-                install.fail_circle_install_for_test()
-            } else {
-                install
-            };
-            let db = Database::open_initialized_store(
-                &bound_path,
-                &install,
-                synced_tables,
-                blob_tombstone_grace,
-                transfer_limits,
-                device_id,
-                clock,
-                coven_migration_policy,
-                migrations,
-            )
-            .map_err(SnapshotError::from)?;
-            let database = coven_database::StoreDatabase::from_database(db);
-            let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
-                database.clone(),
-                storage.as_ref(),
-                root_ref.clone(),
-            );
-            let blob_cache =
-                crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
-            Ok(
-                crate::sync::store::authorization::history::AuthorizedStoreHistory::from_snapshot(
-                    super::SnapshotHistoryConstruction,
-                    database,
-                    routing_encryption.cloned(),
-                    storage,
-                    store_dir,
-                    blob_cache,
-                    history_verifier,
-                    blob_source,
+                crate::sync::store::snapshots::CircleSnapshotReader::new(
+                    &restoring,
+                    storage.as_ref(),
+                    verifier,
                 )
-                .bind_restore(membership, restorer_identity),
+                .select_staged_installs(
+                    &store_frontier,
+                    identity,
+                    routing_key.as_ref(),
+                    local_membership,
+                )
+                .await
+            })
+            .await;
+        if let Err(cause) = restored {
+            return match preparation.discard().await {
+                Ok(()) => Err(cause),
+                Err(cleanup) => Err(SnapshotError::StagedDatabaseCleanupAfterFailure {
+                    path: bound_path,
+                    cleanup: cleanup.to_string(),
+                    cause: Box::new(cause),
+                }),
+            };
+        }
+        let database = coven_database::StoreDatabase::from_database(
+            Database::finish_cold_snapshot(preparation).await?,
+        );
+        let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
+            database.clone(),
+            storage.as_ref(),
+            root_ref.clone(),
+        );
+        let blob_cache =
+            crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
+        Ok(
+            crate::sync::store::authorization::history::AuthorizedStoreHistory::from_snapshot(
+                super::SnapshotHistoryConstruction,
+                database,
+                routing_encryption.cloned(),
+                storage,
+                store_dir,
+                blob_cache,
+                history_verifier,
+                blob_source,
             )
-        }
-        .await;
-        match result {
-            Ok(database) => {
-                let committed_path = database_image.commit();
-                debug_assert_eq!(committed_path, bound_path);
-                Ok(database)
-            }
-            Err(cause) => database_image
-                .finish_operation(Err(cause))
-                .map_err(SnapshotError::from),
-        }
+            .bind_restore(membership, restorer_identity),
+        )
     }
 
     /// Arm the Circle-install failure injection carried into `install`'s
