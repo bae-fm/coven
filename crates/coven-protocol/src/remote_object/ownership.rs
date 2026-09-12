@@ -112,7 +112,7 @@ impl SharedObjectOwnership {
         } else {
             let activated_commits = self.activated.iter().filter_map(|owner| match owner {
                 SharedObjectOwner::StoreCommit(commit) => Some(commit),
-                SharedObjectOwner::Snapshot(_) | SharedObjectOwner::RetainedReplay(_) => None,
+                SharedObjectOwner::Snapshot(_) => None,
             });
             validate_owner_partition(&self.pending, activated_commits, &self.nonactivated)
         }
@@ -141,24 +141,6 @@ impl CandidateOwnership {
 pub enum SharedObjectOwner {
     StoreCommit(StoreBatchCommitRef),
     Snapshot(SnapshotObjectOwner),
-    RetainedReplay(RetainedReplayOwner),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RetainedReplayOwner {
-    Commit {
-        commit: StoreBatchCommitRef,
-        input_hash: ObjectHash,
-    },
-}
-
-impl RetainedReplayOwner {
-    pub fn commit(&self) -> &StoreBatchCommitRef {
-        match self {
-            Self::Commit { commit, .. } => commit,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -222,106 +204,6 @@ impl RemoteObjectRecord {
         self.validate()
     }
 
-    pub fn merge_retained_replay_owner(
-        &mut self,
-        owner: RetainedReplayOwner,
-    ) -> Result<(), RemoteObjectRecordError> {
-        let Self::SharedLiveSet(record) = self else {
-            return Err(RemoteObjectRecordError::DomainMismatch);
-        };
-        let OwnedObjectState::UploadedVerified { ownership } = &mut record.state else {
-            return Err(RemoteObjectRecordError::InvalidActivation);
-        };
-        ownership
-            .activated
-            .insert(SharedObjectOwner::RetainedReplay(owner));
-        self.validate()
-    }
-
-    pub fn remove_all_retained_replay_owners(&mut self) -> Result<(), RemoteObjectRecordError> {
-        let Self::SharedLiveSet(record) = self else {
-            return Ok(());
-        };
-        let OwnedObjectState::UploadedVerified { ownership } = &mut record.state else {
-            return Ok(());
-        };
-        ownership
-            .activated
-            .retain(|owner| !matches!(owner, SharedObjectOwner::RetainedReplay(_)));
-        self.validate()
-    }
-
-    pub fn remove_retained_replay_owner(
-        &mut self,
-        owner: &RetainedReplayOwner,
-    ) -> Result<(), RemoteObjectRecordError> {
-        let Self::SharedLiveSet(record) = self else {
-            return Err(RemoteObjectRecordError::DomainMismatch);
-        };
-        let OwnedObjectState::UploadedVerified { ownership } = &mut record.state else {
-            return Err(RemoteObjectRecordError::InvalidActivation);
-        };
-        if !ownership
-            .activated
-            .remove(&SharedObjectOwner::RetainedReplay(owner.clone()))
-        {
-            return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
-        }
-        self.retire_unowned_shared_live_set()?;
-        self.validate()
-    }
-
-    fn retire_unowned_shared_live_set(&mut self) -> Result<(), RemoteObjectRecordError> {
-        let Self::SharedLiveSet(record) = self else {
-            return Err(RemoteObjectRecordError::DomainMismatch);
-        };
-        let OwnedObjectState::UploadedVerified { ownership } = &record.state else {
-            return Err(RemoteObjectRecordError::InvalidActivation);
-        };
-        if !ownership.pending.is_empty() || !ownership.activated.is_empty() {
-            return Ok(());
-        }
-        if ownership.nonactivated.is_empty() {
-            return Err(RemoteObjectRecordError::EmptyOwnership);
-        }
-        let former_candidates = ownership.nonactivated.clone();
-        let package_domain = match &record.identity.domain {
-            SharedLiveSetObjectDomain::StorePackage { reference } => Some((
-                reference.candidate_family,
-                CandidateExclusiveObjectDomain::StorePackage {
-                    reference: reference.clone(),
-                },
-            )),
-            SharedLiveSetObjectDomain::CirclePackage { reference } => Some((
-                reference.package.candidate_family,
-                CandidateExclusiveObjectDomain::CirclePackage {
-                    reference: reference.clone(),
-                },
-            )),
-            SharedLiveSetObjectDomain::StoredBlob => None,
-            SharedLiveSetObjectDomain::StoreSnapshotImage { .. } => None,
-            SharedLiveSetObjectDomain::StoreMembershipRollup { .. } => None,
-            SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => None,
-        };
-        if let Some((family, domain)) = package_domain {
-            let identity = CandidateExclusiveTarget {
-                family,
-                domain,
-                semantic_hash: record.identity.semantic_hash,
-                object: record.identity.object.clone(),
-            };
-            let payloads = record.payloads.clone();
-            *self = Self::CandidateExclusive(CandidateObjectRecord {
-                identity,
-                payloads,
-                state: CandidateObjectState::CleanupPending { former_candidates },
-            });
-        } else {
-            record.state = OwnedObjectState::RetirementPending { former_candidates };
-        }
-        Ok(())
-    }
-
     pub fn merge_snapshot_owner(
         &mut self,
         stored: &crate::blob::locator::StoredBlobRef,
@@ -356,7 +238,7 @@ impl RemoteObjectRecord {
                         pending_store_snapshots.contains(metadata_slot)
                     }
                     SharedObjectOwner::Snapshot(SnapshotObjectOwner::Circle { .. }) => false,
-                    _ => true,
+                    SharedObjectOwner::StoreCommit(_) => true,
                 });
                 if let Some(owner) = owner {
                     ownership

@@ -382,37 +382,22 @@ fn nonactivating_the_last_pending_owner_of_unactivated_authority_is_refused() {
 }
 
 #[test]
-fn external_package_keeps_exact_ciphertext_identity_and_idempotent_replay_owner() {
+fn external_package_keeps_exact_ciphertext_identity() {
     let commit = test_commit_ref("external-package", 1);
     let (reference, package) = test_store_package(&commit);
     let domain = SharedLiveSetObjectDomain::StorePackage {
         reference: reference.clone(),
     };
-    let mut record =
+    let record =
         RemoteObjectRecord::activated_external_package(domain.clone(), &package, commit.clone())
             .expect("activate external package")
             .into_record();
-    let replay = RetainedReplayOwner::Commit {
-        commit: commit.clone(),
-        input_hash: ObjectHash::digest(b"retained input"),
-    };
-
-    record
-        .merge_retained_replay_owner(replay.clone())
-        .expect("pin external package");
-    record
-        .merge_retained_replay_owner(replay.clone())
-        .expect("repeat exact pin");
 
     assert_eq!(record.payloads(), &RemoteObjectPayloads::SpooledExternal);
     assert_eq!(record.object(), &reference.object);
-    assert_eq!(
-        record.retained_replay_owners().collect::<Vec<_>>(),
-        vec![&replay]
-    );
-    assert!(record
-        .validate_reclaimable_store_package(&reference, &commit)
-        .is_err());
+    record
+        .validate_activated_store_package(&reference, &commit)
+        .expect("the activating commit owns the external package");
 
     let mut wrong_plaintext = record.clone();
     let RemoteObjectRecord::SharedLiveSet(inner) = &mut wrong_plaintext else {
@@ -439,33 +424,19 @@ fn shared_blob_retains_each_commit_owner_independently() {
     let blob = test_stored_blob("shared-blob");
     let first = test_commit_ref("first-blob-owner", 1);
     let second = test_commit_ref("second-blob-owner", 2);
-    let first_replay = RetainedReplayOwner::Commit {
-        commit: first.clone(),
-        input_hash: ObjectHash::digest(b"first retained input"),
-    };
-    let second_replay = RetainedReplayOwner::Commit {
-        commit: second.clone(),
-        input_hash: ObjectHash::digest(b"second retained input"),
-    };
     let mut record = RemoteObjectRecord::activated_blob(&blob, first.clone())
         .expect("activate shared blob")
         .into_record();
     record
         .merge_blob_activation(&blob, &second)
         .expect("activate second blob owner");
-    record
-        .merge_retained_replay_owner(first_replay.clone())
-        .expect("pin first retained input");
-    record
-        .merge_retained_replay_owner(second_replay.clone())
-        .expect("pin second retained input");
 
     assert_eq!(
         record
-            .retained_replay_owners()
-            .cloned()
+            .stored_blob_commit_owners()
+            .into_iter()
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([first_replay, second_replay])
+        BTreeSet::from([first, second])
     );
     assert!(record.validate().is_ok());
 }

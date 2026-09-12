@@ -112,16 +112,14 @@ impl RemoteObjectRecord {
         Ok(())
     }
 
-    pub fn store_package_is_retained_for_replay(
+    /// Whether this record is the activated Store package the target names.
+    pub fn validate_activated_store_package(
         &self,
         target: &crate::store_commit::StorePackageRef,
         activation: &StoreBatchCommitRef,
-    ) -> Result<bool, RemoteObjectRecordError> {
-        let ownership = self.activated_store_package_ownership(target, activation)?;
-        Ok(ownership
-            .activated
-            .iter()
-            .any(|owner| matches!(owner, SharedObjectOwner::RetainedReplay(_))))
+    ) -> Result<(), RemoteObjectRecordError> {
+        self.activated_store_package_ownership(target, activation)
+            .map(drop)
     }
 
     fn activated_store_package_ownership<'a>(
@@ -151,16 +149,14 @@ impl RemoteObjectRecord {
         Ok(ownership)
     }
 
-    pub fn circle_package_is_retained_for_replay(
+    /// Whether this record is the activated Circle package the target names.
+    pub fn validate_activated_circle_package(
         &self,
         target: &crate::store_commit::CirclePackageRef,
         activation: &StoreBatchCommitRef,
-    ) -> Result<bool, RemoteObjectRecordError> {
-        let ownership = self.activated_circle_package_ownership(target, activation)?;
-        Ok(ownership
-            .activated
-            .iter()
-            .any(|owner| matches!(owner, SharedObjectOwner::RetainedReplay(_))))
+    ) -> Result<(), RemoteObjectRecordError> {
+        self.activated_circle_package_ownership(target, activation)
+            .map(drop)
     }
 
     fn activated_circle_package_ownership<'a>(
@@ -360,7 +356,7 @@ impl RemoteObjectRecord {
             .iter()
             .filter_map(|owner| match owner {
                 SharedObjectOwner::StoreCommit(commit) => Some(commit.clone()),
-                _ => None,
+                SharedObjectOwner::Snapshot(_) => None,
             })
             .collect()
     }
@@ -378,27 +374,7 @@ impl RemoteObjectRecord {
         owners.into_iter().flat_map(|owners| {
             owners.iter().filter_map(|owner| match owner {
                 SharedObjectOwner::Snapshot(owner) => Some(owner),
-                SharedObjectOwner::StoreCommit(_) | SharedObjectOwner::RetainedReplay(_) => None,
-            })
-        })
-    }
-
-    pub fn retained_replay_owners(&self) -> impl Iterator<Item = &RetainedReplayOwner> {
-        let owners = match self {
-            Self::SharedLiveSet(record) => match &record.state {
-                OwnedObjectState::UploadedVerified { ownership } => Some(&ownership.activated),
-                OwnedObjectState::Prepared { .. } | OwnedObjectState::RetirementPending { .. } => {
-                    None
-                }
-            },
-            Self::CandidateCommit(_) | Self::CandidateExclusive(_) | Self::RetainedAuthority(_) => {
-                None
-            }
-        };
-        owners.into_iter().flat_map(|owners| {
-            owners.iter().filter_map(|owner| match owner {
-                SharedObjectOwner::RetainedReplay(owner) => Some(owner),
-                SharedObjectOwner::StoreCommit(_) | SharedObjectOwner::Snapshot(_) => None,
+                SharedObjectOwner::StoreCommit(_) => None,
             })
         })
     }

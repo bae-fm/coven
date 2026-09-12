@@ -28,8 +28,8 @@ pub use domains::{
 pub use graph::{CandidateObjectGraph, CandidateObjectMaterial};
 pub use nonactivation::{CandidateNonactivation, CandidateNonactivationProof};
 pub use ownership::{
-    CandidateOwnership, OwnedObjectState, PendingCandidateOwnership, RetainedReplayOwner,
-    SharedObjectOwner, SharedObjectOwnership, SnapshotObjectOwner,
+    CandidateOwnership, OwnedObjectState, PendingCandidateOwnership, SharedObjectOwner,
+    SharedObjectOwnership, SnapshotObjectOwner,
 };
 pub use pending_release::PendingCandidateRelease;
 

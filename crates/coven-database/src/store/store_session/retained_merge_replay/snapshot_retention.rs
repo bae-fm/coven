@@ -29,7 +29,7 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
                 }
             }
         }
-        remove_retained_replay_ownership_from_snapshot_on(self.transaction)?;
+        clear_retained_replay_index_on(self.transaction)?;
         self.transaction
             .execute("DELETE FROM circle_access_cache", [])
             .map_err(DbError::from)?;
@@ -166,7 +166,7 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         // This transaction belongs to the unpublished image copy. Replace its
         // replay ownership with the public projection without touching the
         // publisher's payload claims or private replay baseline.
-        remove_retained_replay_ownership_from_snapshot_on(self.transaction)?;
+        clear_retained_replay_index_on(self.transaction)?;
         self.transaction
             .execute_batch(
                 "DELETE FROM retained_merge_materializations;

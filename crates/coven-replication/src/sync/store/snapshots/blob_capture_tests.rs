@@ -369,6 +369,8 @@ async fn snapshot_preserves_distinct_exact_objects_with_identical_blob_content()
 
     let retained_a = read_remote_record(&source, object_a).await;
     let retained_b = read_remote_record(&source, object_b).await;
+    let pinned_a = read_replay_pins(&source, object_a).await;
+    let pinned_b = read_replay_pins(&source, object_b).await;
     let successor_cut = snapshots
         .capture_snapshot_cut(Some(&EncryptionService::from_key([42; 32])))
         .await
@@ -386,7 +388,10 @@ async fn snapshot_preserves_distinct_exact_objects_with_identical_blob_content()
     let expected_owner = coven_protocol::remote_object::SnapshotObjectOwner::Store {
         metadata_slot: accepted_successor.reference.object.slot().clone(),
     };
-    for (stored, before) in [(object_a, retained_a), (object_b, retained_b)] {
+    for (stored, before, pinned_before) in [
+        (object_a, retained_a, pinned_a),
+        (object_b, retained_b, pinned_b),
+    ] {
         let after = read_remote_record(&source, stored).await;
         assert_eq!(
             after.snapshot_owners().collect::<Vec<_>>(),
@@ -397,10 +402,7 @@ async fn snapshot_preserves_distinct_exact_objects_with_identical_blob_content()
             after.stored_blob_commit_owners(),
             before.stored_blob_commit_owners()
         );
-        assert_eq!(
-            after.retained_replay_owners().collect::<Vec<_>>(),
-            before.retained_replay_owners().collect::<Vec<_>>()
-        );
+        assert_eq!(read_replay_pins(&source, stored).await, pinned_before);
         assert_remote_plaintext(storage.as_ref(), stored, bytes).await;
     }
     let image = read_published_image(storage.as_ref(), &store.root(), &successor).await;
@@ -834,6 +836,16 @@ async fn read_remote_record(
         .remote_object_for_test(stored.object().clone())
         .await
         .expect("read retained exact object ownership")
+}
+
+async fn read_replay_pins(
+    source: &Database,
+    stored: &StoredBlobRef,
+) -> std::collections::BTreeSet<coven_database::RetainedReplayOwner> {
+    source
+        .retained_replay_pins_for_test(stored.object().clone())
+        .await
+        .expect("read retained replay pins")
 }
 
 const PHOTO_ROWS: &str = "SELECT json_array(

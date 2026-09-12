@@ -36,7 +36,8 @@ pub(crate) use store_session::prepared_remote_objects::persist_prepared_audience
 pub mod publication_state;
 use replay_projection::ReplayProjection;
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) use retained_merge_replay::remove_retained_replay_ownership_from_snapshot_on;
+pub(crate) use retained_merge_replay::clear_retained_replay_index_on;
+pub use retained_merge_replay::RetainedReplayOwner;
 mod store_database;
 mod store_device_state;
 pub use store_database::StoreDatabase;

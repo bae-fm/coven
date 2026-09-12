@@ -5,12 +5,12 @@ use crate::store::materialization_models::{
 use crate::store::store_session::retained_merge_replay::RetainedCommitAuthority;
 use crate::store::store_session::verified_store_authority::VerifiedRegistrationLookup;
 use crate::store::store_session::StoreRecords;
+use crate::RetainedReplayOwner;
 use crate::{
     Database, DbError, OwnedVerifiedMergeMaterialization, RetainedReplayAuthority,
     RetainedReplayBaseline, StoreDatabase,
 };
 use coven_protocol::circle_activation::VerifiedCircleActivations;
-use coven_protocol::remote_object::RetainedReplayOwner;
 use coven_protocol::store_commit::{
     ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistrationRef,
 };
@@ -102,7 +102,7 @@ impl StoreRecords<'_> {
         )?;
         self.validate_retained_merge_pin_closure(
             &input,
-            &RetainedReplayOwner::Commit {
+            &RetainedReplayOwner {
                 commit: commit_ref.clone(),
                 input_hash,
             },

@@ -158,9 +158,8 @@ fn blob_graph_installation_does_not_require_sqlite_sidecar_paths() {
 #[test]
 fn exported_orphan_inventory_releases_snapshot_owners_without_releasing_commit_or_replay_owners() {
     use crate::tests::fixtures::{exact_blob_binding, test_commit_ref};
-    use coven_protocol::remote_object::{
-        RemoteObjectRecord, RetainedReplayOwner, SnapshotObjectOwner,
-    };
+    use crate::RetainedReplayOwner;
+    use coven_protocol::remote_object::{RemoteObjectRecord, SnapshotObjectOwner};
 
     let source = Connection::open_in_memory().expect("open live database");
     crate::apply_coven_schema(&source).expect("apply live schema");
@@ -186,12 +185,10 @@ fn exported_orphan_inventory_releases_snapshot_owners_without_releasing_commit_o
         .expect("second live blob owner");
     blob.merge_blob_activation(binding.blob(), &test_commit_ref())
         .expect("retain exact original commit provenance");
-    let replay = RetainedReplayOwner::Commit {
+    let replay = RetainedReplayOwner {
         commit: test_commit_ref(),
         input_hash: ObjectHash::digest(b"retained replay input"),
     };
-    blob.merge_retained_replay_owner(replay.clone())
-        .expect("retain replay blob");
     source
         .execute(
             "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
@@ -204,7 +201,7 @@ fn exported_orphan_inventory_releases_snapshot_owners_without_releasing_commit_o
     let transaction = source
         .unchecked_transaction()
         .expect("begin retained owner index");
-    let RetainedReplayOwner::Commit { commit, input_hash } = &replay;
+    let RetainedReplayOwner { commit, input_hash } = &replay;
     transaction
         .execute(
             "INSERT INTO retained_merge_materializations
@@ -253,8 +250,10 @@ fn exported_orphan_inventory_releases_snapshot_owners_without_releasing_commit_o
         "export preserves exact object identity"
     );
     assert_eq!(
-        record.retained_replay_owners().collect::<Vec<_>>(),
-        blob.retained_replay_owners().collect::<Vec<_>>()
+        crate::remote_object_records::indexed_retained_replay_owners_on(&exported, object_id)
+            .expect("read exported replay pins"),
+        std::collections::BTreeSet::from([replay]),
+        "the exported image keeps the replay pin in its index"
     );
     assert_eq!(
         crate::remote_object_records::load_remote_object_on(&source, object_id)

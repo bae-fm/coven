@@ -71,11 +71,6 @@ trait PullTestDatabaseOps {
     async fn stored_remote_objects(&self)
         -> Vec<coven_protocol::remote_object::RemoteObjectRecord>;
     async fn replace_retained_merge_input(&self, stream_id: String, canonical_input: Vec<u8>);
-    async fn replace_stored_remote_object(
-        &self,
-        object: &coven_protocol::objects::ExactObjectRef,
-        remote: &coven_protocol::remote_object::RemoteObjectRecord,
-    );
     async fn local_announcement_stream(&self) -> coven_protocol::membership::AuthorStreamId;
     async fn pull_exact_store_into(
         &self,
@@ -123,16 +118,6 @@ impl PullTestDatabaseOps for coven_database::Database {
         self.replace_retained_merge_input_for_test(stream_id, canonical_input)
             .await
             .expect("replace retained Merge input and its exact ownership closure");
-    }
-
-    async fn replace_stored_remote_object(
-        &self,
-        object: &coven_protocol::objects::ExactObjectRef,
-        remote: &coven_protocol::remote_object::RemoteObjectRecord,
-    ) {
-        self.replace_remote_object_for_test(object.clone(), remote.clone())
-            .await
-            .expect("replace test remote object");
     }
 
     async fn local_announcement_stream(&self) -> coven_protocol::membership::AuthorStreamId {
@@ -234,10 +219,7 @@ impl PullTestStoreDirOps for coven_foundation::store_dir::StoreDir {
     }
 }
 
-fn is_external_circle_package(
-    remote: &coven_protocol::remote_object::RemoteObjectRecord,
-    retained_for_replay: bool,
-) -> bool {
+fn is_external_circle_package(remote: &coven_protocol::remote_object::RemoteObjectRecord) -> bool {
     let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = remote else {
         return false;
     };
@@ -253,19 +235,12 @@ fn is_external_circle_package(
     else {
         return false;
     };
-    let has_commit = ownership.activated.iter().any(|owner| {
+    ownership.activated.iter().any(|owner| {
         matches!(
             owner,
             coven_protocol::remote_object::SharedObjectOwner::StoreCommit(_)
         )
-    });
-    let has_replay = ownership.activated.iter().any(|owner| {
-        matches!(
-            owner,
-            coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(_)
-        )
-    });
-    has_commit && has_replay == retained_for_replay
+    })
 }
 
 fn commit_stream_id(reference: &coven_protocol::store_commit::StoreBatchCommitRef) -> String {
@@ -1644,16 +1619,19 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
                         ownership
                     } if ownership.activated.contains(
                         &coven_protocol::remote_object::SharedObjectOwner::StoreCommit(commit.clone())
-                    ) && ownership.activated.contains(
-                        &coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                            coven_protocol::remote_object::RetainedReplayOwner::Commit {
-                                commit: commit.clone(),
-                                input_hash: parsed_input_hash,
-                            }
-                        )
                     )
                 )
     ));
+    assert_eq!(
+        target
+            .retained_replay_pins_for_test(package_ref.object.clone())
+            .await
+            .expect("read retained Store package replay pins"),
+        std::collections::BTreeSet::from([coven_database::RetainedReplayOwner {
+            commit: commit.clone(),
+            input_hash: parsed_input_hash,
+        }])
+    );
     let activation = retained["activation"]
         .as_object()
         .expect("retained activation input is an object");
@@ -1784,95 +1762,46 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     let target = crate::sync::test_helpers::open_test_db(target_store_dir.clone());
     storage.pull_into(&target, &target_store_dir).await;
 
-    let (_first_owner, first_package, first_remote) = target
+    let (_first_owner, first_package) = target
         .retained_store_package_pin_for_test(&first)
         .await
         .expect("load first retained Store package pin");
-    let (second_owner, second_package, second_remote) = target
+    let (second_owner, second_package) = target
         .retained_store_package_pin_for_test(&second)
         .await
         .expect("load second retained Store package pin");
+    let closure_error = "retained Merge replay ownership differs from its exact object closure";
 
-    let mut missing = second_remote.clone();
-    let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut missing
-    else {
-        unreachable!("retained package is shared")
-    };
-    let coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
-        &mut record.state
-    else {
-        unreachable!("retained package is activated")
-    };
-    assert!(ownership.activated.remove(
-        &coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone())
-    ));
     target
-        .replace_stored_remote_object(&second_package.object, &missing)
-        .await;
+        .delete_retained_replay_object_for_test(second_owner.clone(), second_package.object.clone())
+        .await
+        .expect("drop the second package's replay pin");
     let root = storage.root().clone();
     assert!(target
         .validate_retained_merge_replay_for_test(root)
         .await
         .expect_err("missing replay pin must fail durable retained-history verification")
         .to_string()
-        .contains("retained-replay ownership index"));
-    target
-        .replace_stored_remote_object(&second_package.object, &second_remote)
-        .await;
+        .contains(closure_error));
 
-    let mut tampered = missing;
-    let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut tampered
-    else {
-        unreachable!("retained package is shared")
+    let tampered = coven_database::RetainedReplayOwner {
+        commit: second_owner.commit.clone(),
+        input_hash: coven_protocol::store_commit::ObjectHash::digest(b"tampered input"),
     };
-    let coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
-        &mut record.state
-    else {
-        unreachable!("retained package is activated")
-    };
-    let coven_protocol::remote_object::RetainedReplayOwner::Commit { commit, .. } = &second_owner;
-    ownership.activated.insert(
-        coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
-            coven_protocol::remote_object::RetainedReplayOwner::Commit {
-                commit: commit.clone(),
-                input_hash: coven_protocol::store_commit::ObjectHash::digest(b"tampered input"),
-            },
-        ),
-    );
-    target
-        .replace_stored_remote_object(&second_package.object, &tampered)
-        .await;
-    let root = storage.root().clone();
     assert!(target
-        .validate_retained_merge_replay_for_test(root)
+        .insert_retained_replay_object_for_test(tampered, second_package.object.clone())
         .await
-        .expect_err("tampered replay pin must fail durable retained-history verification")
+        .expect_err("a replay pin cannot name a retained input that was never materialized")
         .to_string()
-        .contains("retained-replay ownership index"));
-    target
-        .replace_stored_remote_object(&second_package.object, &second_remote)
-        .await;
+        .contains("FOREIGN KEY constraint failed"));
 
-    let mut invented = first_remote;
-    let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut invented
-    else {
-        unreachable!("retained package is shared")
-    };
-    let coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
-        &mut record.state
-    else {
-        unreachable!("retained package is activated")
-    };
-    ownership.activated.insert(
-        coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone()),
-    );
     target
-        .replace_stored_remote_object(&first_package.object, &invented)
-        .await;
-    let second_owner_for_insert = second_owner.clone();
-    let first_object = first_package.object.clone();
+        .insert_retained_replay_object_for_test(second_owner.clone(), second_package.object)
+        .await
+        .expect("restore the second package's replay pin");
+
     target
-        .insert_retained_replay_object_for_test(second_owner_for_insert, first_object)
+        .insert_retained_replay_object_for_test(second_owner, first_package.object.clone())
         .await
         .expect("invent replay ownership index row");
     assert!(target
@@ -1880,14 +1809,14 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .await
         .expect_err("invented replay pin must block reclamation validation")
         .to_string()
-        .contains("ownership differs from its exact object closure"));
+        .contains(closure_error));
     let root = storage.root().clone();
     assert!(target
         .validate_retained_merge_replay_for_test(root)
         .await
         .expect_err("invented replay pin must fail durable retained-history verification")
         .to_string()
-        .contains("ownership differs from its exact object closure"));
+        .contains(closure_error));
 }
 
 #[tokio::test]
@@ -3427,16 +3356,18 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
                     ownership
                 } if ownership.activated.contains(
                     &coven_protocol::remote_object::SharedObjectOwner::StoreCommit(commit.clone())
-                ) && ownership.activated.contains(
-                    &coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                        coven_protocol::remote_object::RetainedReplayOwner::Commit {
-                            commit: commit.clone(),
-                            input_hash,
-                        }
-                    )
                 )
             )
     ));
+    assert_eq!(
+        db2.retained_replay_pins_for_test(stored.object().clone())
+            .await
+            .expect("read pulled blob replay pins"),
+        std::collections::BTreeSet::from([coven_database::RetainedReplayOwner {
+            commit: commit.clone(),
+            input_hash,
+        }])
+    );
 }
 
 /// A `CacheLazy` blob is never touched by a pull: its row crosses, its binding
@@ -3641,13 +3572,19 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
             .all(|change| !coven_database::is_routing_table(&change.table)),
         "host-visible row changes must not expose Coven routing tables"
     );
+    let circle_package = target
+        .stored_remote_objects()
+        .await
+        .into_iter()
+        .find(is_external_circle_package)
+        .expect("pulled Merge Circle package must carry external exact ownership");
     assert!(
-        target
-            .stored_remote_objects()
+        !target
+            .retained_replay_pins_for_test(circle_package.object().clone())
             .await
-            .iter()
-            .any(|remote| is_external_circle_package(remote, true)),
-        "pulled Merge Circle package must carry external exact and replay ownership"
+            .expect("read pulled Circle package replay pins")
+            .is_empty(),
+        "pulled Merge Circle package must stay pinned for replay"
     );
 }
 

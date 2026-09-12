@@ -412,9 +412,8 @@ impl Database {
         commit: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<
         (
-            coven_protocol::remote_object::RetainedReplayOwner,
+            crate::RetainedReplayOwner,
             coven_protocol::store_commit::StorePackageRef,
-            coven_protocol::remote_object::RemoteObjectRecord,
         ),
         DbError,
     > {
@@ -429,16 +428,12 @@ impl Database {
             retained["packages"][0]["store"]["reference"].clone(),
         )
         .map_err(|error| DbError::context("parse retained Store package reference", error))?;
-        let remote = self
-            .remote_object_for_test(reference.object.clone())
-            .await?;
         Ok((
-            coven_protocol::remote_object::RetainedReplayOwner::Commit {
+            crate::RetainedReplayOwner {
                 commit: commit.clone(),
                 input_hash,
             },
             reference,
-            remote,
         ))
     }
 
@@ -461,15 +456,6 @@ impl Database {
         object_id: coven_protocol::store_commit::ObjectHash,
     ) -> Result<bool, DbError> {
         self.test_sql(move |database| database.remote_object_id_exists(object_id))
-            .await
-    }
-
-    pub async fn replace_remote_object_for_test(
-        &self,
-        object: coven_protocol::objects::ExactObjectRef,
-        remote: coven_protocol::remote_object::RemoteObjectRecord,
-    ) -> Result<(), DbError> {
-        self.test_sql(move |database| database.replace_remote_object(&object, &remote))
             .await
     }
 
@@ -667,9 +653,7 @@ impl Database {
 
     pub async fn release_retained_replay_ownership_for_test(&self) -> Result<(), DbError> {
         self.test_sql(|database| {
-            database.transaction(|transaction| {
-                transaction.remove_retained_replay_ownership_from_snapshot()
-            })
+            database.transaction(|transaction| transaction.clear_retained_replay_index())
         })
         .await
     }

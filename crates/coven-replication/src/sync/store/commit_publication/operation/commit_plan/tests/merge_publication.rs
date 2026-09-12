@@ -65,18 +65,17 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
                                 fixture.commit_ref().clone()
                             )
                         )
-                        && ownership.activated.iter().any(|owner| matches!(
-                            owner,
-                            coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                                coven_protocol::remote_object::RetainedReplayOwner::Commit {
-                                    commit,
-                                    ..
-                                }
-                            ) if commit == &fixture.commit_ref()
-                        ))
-                        && ownership.activated.len() == 2
+                        && ownership.activated.len() == 1
                 )
     ));
+    assert!(
+        fixture
+            .retained_replay_pins(&fixture.package_object())
+            .await
+            .iter()
+            .any(|owner| owner.commit == fixture.commit_ref()),
+        "the published Store package stays pinned by its own retained materialization"
+    );
     let commit = fixture
         .stored_remote_object(&fixture.commit_ref().object)
         .await;

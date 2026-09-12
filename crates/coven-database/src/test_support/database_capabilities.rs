@@ -361,10 +361,27 @@ impl Database {
 
     pub async fn insert_retained_replay_object_for_test(
         &self,
-        owner: coven_protocol::remote_object::RetainedReplayOwner,
+        owner: crate::RetainedReplayOwner,
         object: coven_protocol::objects::ExactObjectRef,
     ) -> Result<(), DbError> {
         self.test_sql(move |database| database.insert_retained_replay_object(&owner, &object))
+            .await
+    }
+
+    pub async fn delete_retained_replay_object_for_test(
+        &self,
+        owner: crate::RetainedReplayOwner,
+        object: coven_protocol::objects::ExactObjectRef,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| database.delete_retained_replay_object(&owner, &object))
+            .await
+    }
+
+    pub async fn retained_replay_pins_for_test(
+        &self,
+        object: coven_protocol::objects::ExactObjectRef,
+    ) -> Result<std::collections::BTreeSet<crate::RetainedReplayOwner>, DbError> {
+        self.test_sql(move |database| database.retained_replay_pins(&object))
             .await
     }
 

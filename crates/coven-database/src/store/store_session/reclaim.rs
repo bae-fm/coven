@@ -7,7 +7,7 @@ use crate::{
     record_reclaimed_store_package_on, store_reclaim_journal_error,
     update_store_reclaim_operation_on, ActiveStorePublication, ActiveStorePublicationOwner,
 };
-use coven_protocol::remote_object::{remote_object_id, RetainedReplayOwner};
+use coven_protocol::remote_object::remote_object_id;
 use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StorePackageRef};
 
 pub mod journal;
@@ -220,26 +220,27 @@ impl StoreSession<'_> {
             return Ok(false);
         }
         let remote = load_remote_object_on(self.conn, object_id)?;
-        let retained = remote
-            .store_package_is_retained_for_replay(target, activation)
+        remote
+            .validate_activated_store_package(target, activation)
             .map_err(|error| {
                 DbError::context(
                     format!("validate Store package {object_id} replay ownership"),
                     error,
                 )
             })?;
-        if !retained {
+        let owners =
+            crate::remote_object_records::indexed_retained_replay_owners_on(self.conn, object_id)?;
+        if owners.is_empty() {
             return Ok(false);
         }
-        for owner in remote.retained_replay_owners() {
-            let RetainedReplayOwner::Commit { commit, input_hash } = owner;
+        for owner in &owners {
             let retained = self
                 .verified_store_authority
                 .validate_retained_materialization_by_ref_on(
                     crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
-                    commit,
+                    &owner.commit,
                 )?;
-            if retained.root() != root || retained.input_hash() != *input_hash {
+            if retained.root() != root || retained.input_hash() != owner.input_hash {
                 return Err(DbError::Message(
                     "Store package replay owner differs from retained materialization".to_string(),
                 ));
@@ -267,26 +268,27 @@ impl StoreSession<'_> {
             return Ok(false);
         }
         let remote = load_remote_object_on(self.conn, object_id)?;
-        let retained = remote
-            .circle_package_is_retained_for_replay(target, activation)
+        remote
+            .validate_activated_circle_package(target, activation)
             .map_err(|error| {
                 DbError::context(
                     format!("validate Circle package {object_id} replay ownership"),
                     error,
                 )
             })?;
-        if !retained {
+        let owners =
+            crate::remote_object_records::indexed_retained_replay_owners_on(self.conn, object_id)?;
+        if owners.is_empty() {
             return Ok(false);
         }
-        for owner in remote.retained_replay_owners() {
-            let RetainedReplayOwner::Commit { commit, input_hash } = owner;
+        for owner in &owners {
             let retained = self
                 .verified_store_authority
                 .validate_retained_materialization_by_ref_on(
                     crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
-                    commit,
+                    &owner.commit,
                 )?;
-            if retained.root() != root || retained.input_hash() != *input_hash {
+            if retained.root() != root || retained.input_hash() != owner.input_hash {
                 return Err(DbError::Message(
                     "Circle package replay owner differs from retained materialization".to_string(),
                 ));
@@ -400,11 +402,19 @@ impl StoreSession<'_> {
             .map_err(DbError::from)?;
         if exists {
             let remote = load_remote_object_on(conn, object_id)?;
-            if remote.snapshot_owners().next().is_some()
-                || remote.retained_replay_owners().next().is_some()
-            {
+            if remote.snapshot_owners().next().is_some() {
                 return Ok(true);
             }
+        }
+        let pinned: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM retained_replay_objects WHERE object_id = ?1)",
+                [object_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if pinned {
+            return Ok(true);
         }
         let mut statement = conn
             .prepare("SELECT bootstrap_ref FROM circle_bootstrap_coverage")

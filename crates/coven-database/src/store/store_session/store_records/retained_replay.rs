@@ -990,7 +990,7 @@ impl StoreTransaction<'_, '_> {
                 )));
             }
         }
-        let replay_owner = RetainedReplayOwner::Commit {
+        let replay_owner = RetainedReplayOwner {
             commit: reference.clone(),
             input_hash,
         };
@@ -1071,9 +1071,7 @@ impl StoreTransaction<'_, '_> {
                 .map_err(|error| DbError::context("snapshot retained replay input", error))?;
             retained.push((reference, input_hash, canonical_input, input));
         }
-        crate::store::retained_merge_replay::remove_retained_replay_ownership_from_snapshot_on(
-            conn,
-        )?;
+        crate::store::retained_merge_replay::clear_retained_replay_index_on(conn)?;
         conn.execute("DELETE FROM retained_merge_materializations", [])
             .map_err(DbError::from)?;
         for (reference, input_hash, canonical_input, input) in retained {
@@ -1101,7 +1099,7 @@ impl StoreTransaction<'_, '_> {
                     error,
                 )
             })?;
-            let owner = RetainedReplayOwner::Commit {
+            let owner = RetainedReplayOwner {
                 commit: reference,
                 input_hash,
             };
@@ -1150,7 +1148,7 @@ impl StoreTransaction<'_, '_> {
                     "retained replay ownership input changed during baseline installation".into(),
                 ));
             }
-            let owner = RetainedReplayOwner::Commit {
+            let owner = RetainedReplayOwner {
                 commit: reference,
                 input_hash,
             };

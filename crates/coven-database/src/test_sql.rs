@@ -338,29 +338,6 @@ impl DatabaseTestSql<'_> {
         .collect()
     }
 
-    pub(crate) fn replace_remote_object(
-        &self,
-        object: &coven_protocol::objects::ExactObjectRef,
-        remote: &coven_protocol::remote_object::RemoteObjectRecord,
-    ) -> Result<(), DbError> {
-        let object_id = coven_protocol::remote_object::remote_object_id(object);
-        let state = serde_json::to_string(remote)
-            .map_err(|error| DbError::context("serialize test remote object", error))?;
-        let updated = self
-            .connection
-            .execute(
-                "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
-                rusqlite::params![object_id.to_string(), state],
-            )
-            .map_err(DbError::from)?;
-        if updated != 1 {
-            return Err(DbError::Message(
-                "test remote object disappeared".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     pub(crate) fn remote_object_exists(
         &self,
         object: &coven_protocol::objects::ExactObjectRef,
@@ -760,92 +737,7 @@ impl DatabaseTestSql<'_> {
     ) -> Result<(), DbError> {
         self.transaction(|transaction| {
             transaction.defer_foreign_keys().map_err(DbError::from)?;
-            let stored_hash: String = transaction
-                .query_row(
-                    "SELECT input_hash FROM retained_merge_materializations
-                     WHERE device_id = ?1 AND seq = 1",
-                    [stream_id],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            let old_hash = stored_hash
-                .parse()
-                .map_err(|error| DbError::context("stored retained input hash", error))?;
             let new_hash = coven_protocol::store_commit::ObjectHash::digest(canonical_input);
-            let rows = transaction
-                .query(
-                    "SELECT indexed.object_id, remote.state
-                     FROM retained_replay_objects AS indexed
-                     JOIN remote_objects AS remote ON remote.object_id = indexed.object_id
-                     WHERE indexed.device_id = ?1 AND indexed.seq = 1
-                     ORDER BY indexed.object_id",
-                    [stream_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
-                .map_err(DbError::from)?;
-            if rows.is_empty() {
-                return Err(DbError::Message(
-                    "retained Merge input has no indexed replay objects".to_string(),
-                ));
-            }
-            for (object_id, state) in rows {
-                let mut remote: coven_protocol::remote_object::RemoteObjectRecord =
-                    serde_json::from_str(&state).map_err(|error| {
-                        DbError::context(format!("parse retained replay object {object_id}"), error)
-                    })?;
-                let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) =
-                    &mut remote
-                else {
-                    return Err(DbError::Message(format!(
-                        "retained replay object {object_id} is not shared"
-                    )));
-                };
-                let coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
-                    ownership,
-                } = &mut record.state
-                else {
-                    return Err(DbError::Message(format!(
-                        "retained replay object {object_id} is not activated"
-                    )));
-                };
-                let old_owner = ownership
-                    .activated
-                    .iter()
-                    .find_map(|owner| match owner {
-                        coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                            coven_protocol::remote_object::RetainedReplayOwner::Commit {
-                                commit,
-                                input_hash,
-                            },
-                        ) if *input_hash == old_hash => Some((owner.clone(), commit.clone())),
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        DbError::Message(format!(
-                            "retained replay object {object_id} lacks its indexed owner"
-                        ))
-                    })?;
-                ownership.activated.remove(&old_owner.0);
-                ownership.activated.insert(
-                    coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                        coven_protocol::remote_object::RetainedReplayOwner::Commit {
-                            commit: old_owner.1,
-                            input_hash: new_hash,
-                        },
-                    ),
-                );
-                transaction
-                    .execute(
-                        "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
-                        rusqlite::params![
-                            object_id,
-                            serde_json::to_string(&remote).map_err(|error| {
-                                DbError::context("serialize rebound retained replay object", error)
-                            })?
-                        ],
-                    )
-                    .map_err(DbError::from)?;
-            }
             transaction
                 .execute(
                     "UPDATE retained_merge_materializations
@@ -861,14 +753,19 @@ impl DatabaseTestSql<'_> {
                     rusqlite::params![stream_id, new_hash.to_string()],
                 )
                 .map_err(DbError::from)?;
-            transaction
+            let rebound = transaction
                 .execute(
                     "UPDATE retained_replay_objects SET input_hash = ?2
                      WHERE device_id = ?1 AND seq = 1",
                     rusqlite::params![stream_id, new_hash.to_string()],
                 )
-                .map(|_| ())
-                .map_err(DbError::from)
+                .map_err(DbError::from)?;
+            if rebound == 0 {
+                return Err(DbError::Message(
+                    "retained Merge input has no indexed replay objects".to_string(),
+                ));
+            }
+            Ok(())
         })
     }
 
@@ -938,12 +835,10 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn insert_retained_replay_object(
         &self,
-        owner: &coven_protocol::remote_object::RetainedReplayOwner,
+        owner: &crate::RetainedReplayOwner,
         object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<(), DbError> {
-        let coven_protocol::remote_object::RetainedReplayOwner::Commit { commit, input_hash } =
-            owner;
-        let sequence = i64::try_from(commit.coord.sequence())
+        let sequence = i64::try_from(owner.commit.coord.sequence())
             .map_err(|error| DbError::context("invalid sequence", error))?;
         self.connection
             .execute(
@@ -951,15 +846,55 @@ impl DatabaseTestSql<'_> {
                  (device_id, seq, commit_ref, input_hash, object_id)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![
-                    commit.coord.stream_id.to_string(),
+                    owner.commit.coord.stream_id.to_string(),
                     sequence,
-                    serde_json::to_string(commit).map_err(DbError::from)?,
-                    input_hash.to_string(),
+                    serde_json::to_string(&owner.commit).map_err(DbError::from)?,
+                    owner.input_hash.to_string(),
                     coven_protocol::remote_object::remote_object_id(object).to_string(),
                 ],
             )
             .map(|_| ())
             .map_err(DbError::from)
+    }
+
+    /// Drop one object's pin from the replay index, leaving the rest of the
+    /// retained materialization's closure in place.
+    pub(crate) fn delete_retained_replay_object(
+        &self,
+        owner: &crate::RetainedReplayOwner,
+        object: &coven_protocol::objects::ExactObjectRef,
+    ) -> Result<(), DbError> {
+        let sequence = i64::try_from(owner.commit.coord.sequence())
+            .map_err(|error| DbError::context("invalid sequence", error))?;
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM retained_replay_objects
+                 WHERE device_id = ?1 AND seq = ?2 AND object_id = ?3",
+                rusqlite::params![
+                    owner.commit.coord.stream_id.to_string(),
+                    sequence,
+                    coven_protocol::remote_object::remote_object_id(object).to_string(),
+                ],
+            )
+            .map_err(DbError::from)?;
+        if deleted != 1 {
+            return Err(DbError::Message(format!(
+                "deleting one replay pin removed {deleted} index rows"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Every retained materialization that pins this object for replay.
+    pub(crate) fn retained_replay_pins(
+        &self,
+        object: &coven_protocol::objects::ExactObjectRef,
+    ) -> Result<std::collections::BTreeSet<crate::RetainedReplayOwner>, DbError> {
+        crate::remote_object_records::indexed_retained_replay_owners_on(
+            self.connection,
+            coven_protocol::remote_object::remote_object_id(object),
+        )
     }
 
     pub(crate) fn materialized_commit_exists(

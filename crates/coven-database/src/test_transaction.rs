@@ -30,16 +30,6 @@ impl DatabaseTestTransaction<'_, '_> {
         self.transaction.query_row(sql, params, map)
     }
 
-    pub(crate) fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
-    where
-        P: rusqlite::Params,
-        F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
-    {
-        let mut statement = self.transaction.prepare(sql)?;
-        let values = statement.query_map(params, map)?.collect();
-        values
-    }
-
     pub(crate) fn defer_foreign_keys(&self) -> rusqlite::Result<()> {
         self.transaction
             .pragma_update(None, "defer_foreign_keys", true)
@@ -105,8 +95,8 @@ impl DatabaseTestTransaction<'_, '_> {
         )
     }
 
-    pub(crate) fn remove_retained_replay_ownership_from_snapshot(&self) -> Result<(), DbError> {
-        crate::store::remove_retained_replay_ownership_from_snapshot_on(self.transaction)
+    pub(crate) fn clear_retained_replay_index(&self) -> Result<(), DbError> {
+        crate::store::clear_retained_replay_index_on(self.transaction)
     }
 
     pub(crate) fn delete_materialized_commit(

@@ -788,6 +788,16 @@ async fn assert_receivers(
             .remote_object_for_test(stored.object().clone())
             .await
             .expect(context);
+        let left_pins = left
+            .database
+            .retained_replay_pins_for_test(stored.object().clone())
+            .await
+            .expect(context);
+        let right_pins = right
+            .database
+            .retained_replay_pins_for_test(stored.object().clone())
+            .await
+            .expect(context);
         for (side, remote) in [("online", &left_owner), ("delayed", &right_owner)] {
             assert!(
                 remote.snapshot_owners().all(|owner| {
@@ -808,11 +818,7 @@ async fn assert_receivers(
             right_owner.snapshot_owners().collect::<Vec<_>>(),
             "{context}: snapshot blob owners"
         );
-        assert_eq!(
-            left_owner.retained_replay_owners().collect::<Vec<_>>(),
-            right_owner.retained_replay_owners().collect::<Vec<_>>(),
-            "{context}: replay blob owners"
-        );
+        assert_eq!(left_pins, right_pins, "{context}: replay blob pins");
         assert_eq!(
             left_owner.stored_blob_commit_owners(),
             right_owner.stored_blob_commit_owners(),

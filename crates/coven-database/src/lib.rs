@@ -74,8 +74,7 @@ use coven_protocol::membership::{
 };
 use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
 use coven_protocol::remote_object::{
-    remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, RetainedReplayOwner,
-    SharedLiveSetObjectDomain,
+    remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, SharedLiveSetObjectDomain,
 };
 use coven_protocol::store_commit::{
     ack_slot_prefix, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef, SnapshotMeta,
@@ -85,6 +84,7 @@ use coven_protocol::store_commit::{
 use coven_protocol::synced_schema::SyncedTable;
 use coven_protocol::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
+pub use store::RetainedReplayOwner;
 
 pub use rusqlite;
 

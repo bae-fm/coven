@@ -66,7 +66,6 @@ fn releasing_candidate_preserves_every_other_shared_owner() {
     let candidate = test_commit_ref("covered-owner", 1);
     let pending = test_commit_ref("pending-owner", 1);
     let activated = test_commit_ref("activated-owner", 2);
-    let replay = test_commit_ref("replay-owner", 3);
     let blob = test_stored_blob("multiply-owned");
     let mut original = RemoteObjectRecord::candidate_owned_blob(&blob, candidate.clone(), true)
         .expect("prepare uploaded blob")
@@ -87,10 +86,6 @@ fn releasing_candidate_preserves_every_other_shared_owner() {
         SharedObjectOwner::Snapshot(SnapshotObjectOwner::Circle {
             activation: StreamActivationId::from_digest(ObjectHash::digest(b"Circle activation")),
             generation: 2,
-        }),
-        SharedObjectOwner::RetainedReplay(RetainedReplayOwner::Commit {
-            commit: replay,
-            input_hash: ObjectHash::digest(b"retained input"),
         }),
     ]);
     original.validate().expect("valid shared ownership");

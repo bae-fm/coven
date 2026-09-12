@@ -1,6 +1,13 @@
 use super::*;
 use crate::query_mapped_rows;
 
+/// One retained materialization's claim on the objects its replay still needs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RetainedReplayOwner {
+    pub commit: StoreBatchCommitRef,
+    pub input_hash: ObjectHash,
+}
+
 /// The Store objects a replay baseline still needs. Circle packages have their
 /// own coverage and remain under their continuing replay owner.
 pub(crate) enum RetainedReplayObjectCoverage<'a> {
@@ -107,7 +114,7 @@ fn retained_merge_object_ids(
     for retained in input
         .packages
         .iter()
-        .filter(|package| coverage.retains(owner.commit(), package))
+        .filter(|package| coverage.retains(&owner.commit, package))
     {
         object_ids.insert(remote_object_id(retained.object()));
         for binding in retained.package().blob_bindings() {
@@ -194,23 +201,13 @@ pub(crate) fn replace_retained_merge_object_ownership_on(
     }
     let retired = indexed.difference(&expected).copied().collect::<Vec<_>>();
     for object_id in &retired {
-        let RetainedReplayOwner::Commit { input_hash, .. } = owner;
-        let mut remote = load_remote_object_on(conn, *object_id)?;
-        if !remote
-            .retained_replay_owners()
-            .any(|actual| actual == owner)
-        {
-            return Err(DbError::Message(format!(
-                "retained replay index names an absent owner for {object_id}"
-            )));
-        }
-        remote
-            .remove_retained_replay_owner(owner)
-            .map_err(DbError::from)?;
-        update_remote_object_on(conn, *object_id, &remote)?;
         let removed = conn.execute(
             "DELETE FROM retained_replay_objects WHERE object_id = ?1 AND commit_ref = ?2 AND input_hash = ?3",
-            rusqlite::params![object_id.to_string(), serde_json::to_string(owner.commit())?, input_hash.to_string()],
+            rusqlite::params![
+                object_id.to_string(),
+                serde_json::to_string(&owner.commit)?,
+                owner.input_hash.to_string()
+            ],
         )?;
         if removed != 1 {
             return Err(DbError::Message(format!(
@@ -218,7 +215,7 @@ pub(crate) fn replace_retained_merge_object_ownership_on(
             )));
         }
     }
-    let commit = owner.commit();
+    let commit = &owner.commit;
     let mut pinned = BTreeSet::new();
     for retained in input
         .packages
@@ -226,17 +223,8 @@ pub(crate) fn replace_retained_merge_object_ownership_on(
         .filter(|package| coverage.retains(commit, package))
     {
         let object_id = remote_object_id(retained.object());
-        let mut remote = load_remote_object_on(conn, object_id)?;
+        let remote = load_remote_object_on(conn, object_id)?;
         validate_retained_package_remote(&remote, retained, commit)?;
-        remote
-            .merge_retained_replay_owner(owner.clone())
-            .map_err(|error| {
-                DbError::context(
-                    format!("pin retained package {object_id} for replay"),
-                    error,
-                )
-            })?;
-        update_remote_object_on(conn, object_id, &remote)?;
         index_retained_replay_owner_on(conn, object_id, owner)?;
         pinned.insert(object_id);
         for binding in retained.package().blob_bindings() {
@@ -245,14 +233,8 @@ pub(crate) fn replace_retained_merge_object_ownership_on(
             if !pinned.insert(object_id) {
                 continue;
             }
-            let mut remote = load_remote_object_on(conn, object_id)?;
+            let remote = load_remote_object_on(conn, object_id)?;
             validate_retained_blob_remote(&remote, stored, commit)?;
-            remote
-                .merge_retained_replay_owner(owner.clone())
-                .map_err(|error| {
-                    DbError::context(format!("pin retained blob {object_id} for replay"), error)
-                })?;
-            update_remote_object_on(conn, object_id, &remote)?;
             index_retained_replay_owner_on(conn, object_id, owner)?;
         }
     }
@@ -266,7 +248,7 @@ pub(crate) fn validate_retained_merge_pin_closure_on(
     owner: &RetainedReplayOwner,
     coverage: &RetainedReplayObjectCoverage<'_>,
 ) -> Result<(), DbError> {
-    let commit = owner.commit();
+    let commit = &owner.commit;
     for retained in input
         .packages
         .iter()
@@ -274,28 +256,10 @@ pub(crate) fn validate_retained_merge_pin_closure_on(
     {
         let remote = load_remote_object_on(conn, remote_object_id(retained.object()))?;
         validate_retained_package_remote(&remote, retained, commit)?;
-        if !remote
-            .retained_replay_owners()
-            .any(|actual| actual == owner)
-        {
-            return Err(DbError::Message(format!(
-                "retained package {} is missing its exact replay owner",
-                remote_object_id(retained.object())
-            )));
-        }
         for binding in retained.package().blob_bindings() {
             let stored = binding.blob();
             let remote = load_remote_object_on(conn, remote_object_id(stored.object()))?;
             validate_retained_blob_remote(&remote, stored, commit)?;
-            if !remote
-                .retained_replay_owners()
-                .any(|actual| actual == owner)
-            {
-                return Err(DbError::Message(format!(
-                    "retained blob {} is missing its exact replay owner",
-                    remote_object_id(stored.object())
-                )));
-            }
         }
     }
     let expected = retained_merge_object_ids(input, owner, coverage);
@@ -303,7 +267,7 @@ pub(crate) fn validate_retained_merge_pin_closure_on(
     if actual != expected {
         return Err(DbError::Message(format!(
             "retained Merge replay ownership differs from its exact object closure for {:?}: missing {:?}, extra {:?}",
-            owner.commit(),
+            owner.commit,
             expected.difference(&actual).collect::<Vec<_>>(),
             actual.difference(&expected).collect::<Vec<_>>(),
         )));
@@ -315,16 +279,15 @@ fn indexed_retained_merge_objects(
     conn: &Connection,
     owner: &RetainedReplayOwner,
 ) -> Result<BTreeSet<ObjectHash>, DbError> {
-    let RetainedReplayOwner::Commit { commit, input_hash } = owner;
     let StoreCommitCoord {
         stream_id,
         sequence,
-    } = &commit.coord;
+    } = &owner.commit.coord;
     let stream_id = stream_id.to_string();
     let sequence = Database::sequence_to_sqlite(&stream_id, *sequence)?;
-    let commit_ref = serde_json::to_string(commit)
+    let commit_ref = serde_json::to_string(&owner.commit)
         .map_err(|error| DbError::context("serialize retained replay commit ref", error))?;
-    let input_hash = input_hash.to_string();
+    let input_hash = owner.input_hash.to_string();
     query_mapped_rows(
         conn,
         "SELECT object_id FROM retained_replay_objects
@@ -342,30 +305,10 @@ fn indexed_retained_merge_objects(
     .collect::<Result<BTreeSet<_>, DbError>>()
 }
 
-pub(crate) fn remove_retained_replay_ownership_from_snapshot_on(
+/// Drop every replay pin an exported or adopted image must not inherit.
+pub(crate) fn clear_retained_replay_index_on(
     conn: &rusqlite::Transaction<'_>,
 ) -> Result<(), DbError> {
-    let object_ids = query_mapped_rows(
-        conn,
-        "SELECT DISTINCT object_id FROM retained_replay_objects ORDER BY object_id",
-        [],
-        |row| row.get::<_, String>(0),
-    )?;
-    for encoded in object_ids {
-        let object_id = encoded
-            .parse()
-            .map_err(|error| DbError::context("snapshot retained replay object id", error))?;
-        let mut remote = load_remote_object_on(conn, object_id)?;
-        remote
-            .remove_all_retained_replay_owners()
-            .map_err(|error| {
-                DbError::context(
-                    format!("remove snapshot retained replay owner from {object_id}"),
-                    error,
-                )
-            })?;
-        update_remote_object_on(conn, object_id, &remote)?;
-    }
     conn.execute("DELETE FROM retained_replay_objects", [])
         .map_err(DbError::from)?;
     Ok(())

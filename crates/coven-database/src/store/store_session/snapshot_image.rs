@@ -369,9 +369,12 @@ impl SnapshotDatabaseImage {
             [id.to_string()],
             |row| row.get(0),
         )?;
-        Ok(!live
-            && remote.snapshot_owners().next().is_none()
-            && remote.retained_replay_owners().next().is_none())
+        let pinned_for_replay: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM retained_replay_objects WHERE object_id = ?1)",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(!live && !pinned_for_replay && remote.snapshot_owners().next().is_none())
     }
 
     pub async fn read(&self) -> Result<Vec<u8>, SnapshotImageError> {

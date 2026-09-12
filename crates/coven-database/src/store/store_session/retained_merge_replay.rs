@@ -6,8 +6,9 @@ pub(crate) use circle_coverage::{
 };
 mod materialization_io;
 mod retained_objects;
+pub use retained_objects::RetainedReplayOwner;
 pub(crate) use retained_objects::{
-    canonical_retained_merge_packages, remove_retained_replay_ownership_from_snapshot_on,
+    canonical_retained_merge_packages, clear_retained_replay_index_on,
     replace_retained_merge_object_ownership_on, validate_retained_merge_pin_closure_on,
     RetainedReplayObjectCoverage,
 };
@@ -18,7 +19,7 @@ use crate::{RetainedReplayAuthority, RetainedReplayBaseline};
 use coven_protocol::audience_package::AudiencePackage;
 use coven_protocol::blob::locator::{RemoteAudience, StoredBlobRef};
 use coven_protocol::remote_object::{
-    remote_object_id, RemoteObjectRecord, RetainedReplayOwner, SharedLiveSetObjectDomain,
+    remote_object_id, RemoteObjectRecord, SharedLiveSetObjectDomain,
 };
 use coven_protocol::store_commit::{
     CommitFrontier, ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,

@@ -139,6 +139,16 @@ impl PreparedWriteFixture {
             .expect("load stored remote object")
     }
 
+    pub(super) async fn retained_replay_pins(
+        &self,
+        object: &coven_protocol::objects::ExactObjectRef,
+    ) -> std::collections::BTreeSet<coven_database::RetainedReplayOwner> {
+        self.db
+            .retained_replay_pins_for_test(object.clone())
+            .await
+            .expect("load retained replay pins")
+    }
+
     pub(super) async fn remote_object_exists(
         &self,
         object: &coven_protocol::objects::ExactObjectRef,

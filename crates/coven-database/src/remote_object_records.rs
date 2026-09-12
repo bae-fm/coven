@@ -71,16 +71,6 @@ pub(crate) fn load_remote_object_on(
             "prepared remote object key is {object_id}, exact reference hashes to {actual}"
         )));
     }
-    let indexed = indexed_retained_replay_owners_on(conn, object_id)?;
-    let embedded = remote
-        .retained_replay_owners()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if embedded != indexed {
-        return Err(DbError::Message(format!(
-            "prepared remote object {object_id} differs from its retained-replay ownership index"
-        )));
-    }
     Ok(remote)
 }
 
@@ -157,7 +147,7 @@ pub(crate) fn indexed_retained_replay_owners_on(
                 "retained replay object {object_id} index differs from its commit coordinate"
             )));
         }
-        if !owners.insert(RetainedReplayOwner::Commit { commit, input_hash }) {
+        if !owners.insert(RetainedReplayOwner { commit, input_hash }) {
             return Err(DbError::Message(format!(
                 "retained replay object {object_id} repeats an owner"
             )));
@@ -171,16 +161,15 @@ pub(crate) fn index_retained_replay_owner_on(
     object_id: ObjectHash,
     owner: &RetainedReplayOwner,
 ) -> Result<(), DbError> {
-    let RetainedReplayOwner::Commit { commit, input_hash } = owner;
     let StoreCommitCoord {
         stream_id,
         sequence,
-    } = &commit.coord;
+    } = &owner.commit.coord;
     let device_id = stream_id.to_string();
     let sequence = Database::sequence_to_sqlite(&device_id, *sequence)?;
-    let commit_ref = serde_json::to_string(commit)
+    let commit_ref = serde_json::to_string(&owner.commit)
         .map_err(|error| DbError::context("serialize retained replay commit ref", error))?;
-    let input_hash = input_hash.to_string();
+    let input_hash = owner.input_hash.to_string();
     conn.execute(
         "INSERT INTO retained_replay_objects
          (device_id, seq, commit_ref, input_hash, object_id)

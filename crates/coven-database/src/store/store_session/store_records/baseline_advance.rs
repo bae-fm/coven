@@ -28,7 +28,7 @@ use std::collections::BTreeSet;
 use super::retained_replay::PreparedRetainedReplayBaseline;
 use super::{StoreRecords, StoreTransaction};
 use crate::store::verified_store_authority::VerifiedStoreLookup;
-use crate::{DbError, ObjectHash, RetainedReplayOwner};
+use crate::{DbError, ObjectHash};
 use coven_protocol::store_commit::{CommitFrontier, StoreBatchCommitRef, StoreRootRef};
 
 /// What one advancement retired, for the reclaim report that follows it.
@@ -153,7 +153,7 @@ impl StoreTransaction<'_, '_> {
         let records = StoreRecords::new(conn, self.store_dir);
         let mut retired_commits = 0u64;
         let mut released_pins = 0u64;
-        for (stream_id, sequence, encoded_ref, input_hash) in
+        for (stream_id, sequence, encoded_ref, _input_hash) in
             records.retained_materialization_rows()?
         {
             let reference: StoreBatchCommitRef = serde_json::from_str(&encoded_ref)
@@ -161,14 +161,8 @@ impl StoreTransaction<'_, '_> {
             if !cut.covers_commit(&reference) || retained_by_baseline.contains(&encoded_ref) {
                 continue;
             }
-            let owner = RetainedReplayOwner::Commit {
-                commit: reference,
-                input_hash: input_hash.parse().map_err(|error| {
-                    DbError::context(format!("retained replay input hash {input_hash}"), error)
-                })?,
-            };
             released_pins = released_pins
-                .checked_add(self.release_replay_pins(&stream_id, sequence, &owner)?)
+                .checked_add(self.release_replay_pins(&stream_id, sequence)?)
                 .ok_or_else(|| {
                     DbError::Message("released replay pin count exceeded u64".to_string())
                 })?;
@@ -276,50 +270,19 @@ impl StoreTransaction<'_, '_> {
             .map_err(|_| DbError::Message("folded write count exceeded u64".to_string()))
     }
 
-    /// Remove one commit's replay ownership from every object it pinned.
+    /// Remove one commit's replay pins from the index.
     ///
     /// The objects keep the commit owner that activated them, so releasing a
     /// pin makes a package reclaimable rather than unowned.
-    fn release_replay_pins(
-        &self,
-        stream_id: &str,
-        sequence: i64,
-        owner: &RetainedReplayOwner,
-    ) -> Result<u64, DbError> {
-        let conn = self.transaction;
-        let object_ids = crate::query_mapped_rows(
-            conn,
-            "SELECT object_id FROM retained_replay_objects
-             WHERE device_id = ?1 AND seq = ?2
-             ORDER BY object_id",
-            rusqlite::params![stream_id, sequence],
-            |row| row.get::<_, String>(0),
-        )?
-        .into_iter()
-        .map(|encoded| {
-            encoded.parse::<ObjectHash>().map_err(|error| {
-                DbError::context(format!("retained replay object id {encoded}"), error)
-            })
-        })
-        .collect::<Result<BTreeSet<_>, DbError>>()?;
-        for object_id in &object_ids {
-            let mut remote = crate::load_remote_object_on(conn, *object_id)?;
-            remote
-                .remove_retained_replay_owner(owner)
-                .map_err(|error| {
-                    DbError::context(
-                        format!("release superseded replay owner from {object_id}"),
-                        error,
-                    )
-                })?;
-            crate::update_remote_object_on(conn, *object_id, &remote)?;
-        }
-        conn.execute(
-            "DELETE FROM retained_replay_objects WHERE device_id = ?1 AND seq = ?2",
-            rusqlite::params![stream_id, sequence],
-        )
-        .map_err(DbError::from)?;
-        u64::try_from(object_ids.len())
+    fn release_replay_pins(&self, stream_id: &str, sequence: i64) -> Result<u64, DbError> {
+        let released = self
+            .transaction
+            .execute(
+                "DELETE FROM retained_replay_objects WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id, sequence],
+            )
+            .map_err(DbError::from)?;
+        u64::try_from(released)
             .map_err(|_| DbError::Message("released replay pin count exceeded u64".to_string()))
     }
 }
