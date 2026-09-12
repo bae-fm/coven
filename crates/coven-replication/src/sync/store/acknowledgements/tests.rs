@@ -521,13 +521,6 @@ async fn acknowledgement_slot_winner_is_adopted(state: SlotWinnerState, carries_
                 .expect("read drained acknowledgement outbox")
                 .is_none()
         );
-        assert!(
-            coven_database::StoreDatabase::new(&loser_db)
-                .protocol_inert_object(loser.reference.object)
-                .await
-                .expect("read losing acknowledgement inert state")
-                .is_none()
-        );
         for object_id in losing_object_ids {
             let exists = loser_db
                 .remote_object_id_exists_for_test(object_id)

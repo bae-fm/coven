@@ -190,8 +190,14 @@ fn pulled_retained_authority_merges_an_exact_additional_commit_owner() {
     assert!(ownership.nonactivated.is_empty());
 }
 
-#[test]
-fn nonactivation_preserves_another_pending_membership_authority_owner() {
+/// An uploaded membership-entry authority whose one pending candidate signed
+/// its own abandonment, with the nonactivation that abandonment proves.
+fn test_abandoned_membership_authority_candidate() -> (
+    membership::MembershipEntryRef,
+    Vec<u8>,
+    RemoteObjectRecord,
+    CandidateNonactivation,
+) {
     let owner = coven_keys::keys::UserKeypair::generate();
     let root_hash = ObjectHash::digest(b"retained membership nonactivation");
     let author = crate::circle_test_fixtures::merge_device_authority(
@@ -319,19 +325,27 @@ fn nonactivation_preserves_another_pending_membership_authority_owner() {
     )
     .expect("bind nonactivation to the signed candidate and abandonment");
 
-    let remaining = test_commit_ref("remaining-membership-owner", 1);
     let (reference, canonical) = test_membership_entry();
     let mut record =
         test_membership_entry_record(reference.clone(), canonical.clone(), candidate_ref)
             .expect("prepare membership authority");
     record.mark_uploaded_verified().expect("record upload");
+    (reference, canonical, record, nonactivation)
+}
+
+#[test]
+fn nonactivation_preserves_another_pending_membership_authority_owner() {
+    let (reference, canonical, mut record, nonactivation) =
+        test_abandoned_membership_authority_candidate();
+    let remaining = test_commit_ref("remaining-membership-owner", 1);
     record
         .add_retained_authority_candidate(remaining.clone())
         .expect("retain another pending candidate");
-    assert!(record
+
+    record
         .begin_candidate_nonactivation(nonactivation.clone())
-        .expect("nonactivate only the abandoned candidate")
-        .is_none());
+        .expect("nonactivate only the abandoned candidate");
+
     record
         .validate_payload(&canonical)
         .expect("retained authority still names the exact membership entry");
@@ -347,10 +361,23 @@ fn nonactivation_preserves_another_pending_membership_authority_owner() {
     assert!(ownership.activated.is_empty());
     assert_eq!(ownership.nonactivated, vec![nonactivation.clone()]);
     let expected = record.clone();
-    assert!(record
+    record
         .begin_candidate_nonactivation(nonactivation)
-        .expect("repeat exact nonactivation")
-        .is_none());
+        .expect("repeat exact nonactivation");
+    assert_eq!(record, expected);
+}
+
+#[test]
+fn nonactivating_the_last_pending_owner_of_unactivated_authority_is_refused() {
+    let (_reference, _canonical, mut record, nonactivation) =
+        test_abandoned_membership_authority_candidate();
+    let expected = record.clone();
+
+    let error = record
+        .begin_candidate_nonactivation(nonactivation)
+        .expect_err("an authority cannot give up its only owner");
+
+    assert!(matches!(error, RemoteObjectRecordError::EmptyOwnership));
     assert_eq!(record, expected);
 }
 

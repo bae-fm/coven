@@ -1,6 +1,4 @@
 use crate::*;
-#[cfg(any(test, feature = "test-utils"))]
-use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord};
 use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
 use coven_protocol::write::WriteId;
@@ -311,27 +309,6 @@ impl StoreSession<'_> {
     ) -> Result<PreparedAudienceObjects, DbError> {
         load_prepared_audience_objects_on(self.conn, self.store_dir, write_id)
     }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    fn protocol_inert_object(
-        &self,
-        object: ExactObjectRef,
-    ) -> Result<Option<coven_protocol::remote_object::ProtocolInertObject>, DbError> {
-        let conn = self.conn;
-        let object_id = remote_object_id(&object);
-        let exists: bool = conn
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM protocol_inert_objects WHERE object_id = ?1
-                 )",
-                [object_id.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
-        exists
-            .then(|| load_protocol_inert_object_on(conn, object_id))
-            .transpose()
-    }
 }
 
 impl StoreDatabase {
@@ -428,15 +405,6 @@ impl StoreDatabase {
             packages: loaded.packages,
             blobs: verified_blobs,
         })
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn protocol_inert_object(
-        &self,
-        object: ExactObjectRef,
-    ) -> Result<Option<coven_protocol::remote_object::ProtocolInertObject>, DbError> {
-        self.call_store(move |session| session.protocol_inert_object(object))
-            .await
     }
 }
 

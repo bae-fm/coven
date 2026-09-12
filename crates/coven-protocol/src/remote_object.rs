@@ -22,9 +22,8 @@ mod pending_release;
 mod reclaim;
 
 pub use domains::{
-    CandidateExclusiveObjectDomain, CandidateExclusiveTarget, ProtocolInertObject,
-    RetainedAuthorityObjectDomain, RetainedAuthorityObjectRef, SharedLiveSetObjectDomain,
-    SharedLiveSetObjectRef,
+    CandidateExclusiveObjectDomain, CandidateExclusiveTarget, RetainedAuthorityObjectDomain,
+    RetainedAuthorityObjectRef, SharedLiveSetObjectDomain, SharedLiveSetObjectRef,
 };
 pub use graph::{CandidateObjectGraph, CandidateObjectMaterial};
 pub use nonactivation::{CandidateNonactivation, CandidateNonactivationProof};

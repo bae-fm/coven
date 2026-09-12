@@ -469,7 +469,7 @@ impl RemoteObjectRecord {
     pub fn begin_candidate_nonactivation(
         &mut self,
         nonactivation: CandidateNonactivation,
-    ) -> Result<Option<ProtocolInertObject>, RemoteObjectRecordError> {
+    ) -> Result<(), RemoteObjectRecordError> {
         nonactivation.validate()?;
         let candidate = nonactivation.reference()?;
         match self {
@@ -509,26 +509,17 @@ impl RemoteObjectRecord {
                 RetainedAuthorityObjectState::Prepared { .. } => {
                     return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
                 }
-                RetainedAuthorityObjectState::UploadedVerified { .. } => {
-                    let RetainedAuthorityObjectState::UploadedVerified { ownership } =
-                        &record.state
-                    else {
-                        unreachable!("matched uploaded retained authority")
-                    };
-                    let mut ownership = ownership.clone();
-                    if !ownership.pending.remove(&candidate) {
-                        ensure_candidate_nonactivation(&ownership.nonactivated, &candidate)?;
-                        return Ok(None);
+                RetainedAuthorityObjectState::UploadedVerified { ownership } => {
+                    let mut updated = ownership.clone();
+                    if !updated.pending.remove(&candidate) {
+                        ensure_candidate_nonactivation(&updated.nonactivated, &candidate)?;
+                        return Ok(());
                     }
-                    ownership.nonactivated.push(nonactivation);
-                    if ownership.pending.is_empty() && ownership.activated.is_empty() {
-                        return ProtocolInertObject::new(
-                            record.identity.clone(),
-                            ownership.nonactivated,
-                        )
-                        .map(Some);
+                    updated.nonactivated.push(nonactivation);
+                    if updated.pending.is_empty() && updated.activated.is_empty() {
+                        return Err(RemoteObjectRecordError::EmptyOwnership);
                     }
-                    record.state = RetainedAuthorityObjectState::UploadedVerified { ownership };
+                    *ownership = updated;
                 }
             },
             Self::SharedLiveSet(record) => match &mut record.state {
@@ -560,7 +551,7 @@ impl RemoteObjectRecord {
             },
         }
         self.validate()?;
-        Ok(None)
+        Ok(())
     }
 
     pub fn cleanup_target(&self) -> Option<&ExactObjectRef> {

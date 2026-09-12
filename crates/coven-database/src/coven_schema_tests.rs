@@ -170,7 +170,6 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
     let carries_bytes = std::collections::BTreeSet::from([
         ("store_writes", "prepared".to_string()),
         ("remote_objects", "state".to_string()),
-        ("protocol_inert_objects", "state".to_string()),
         ("outbound_store_snapshot", "meta_prepared".to_string()),
         ("outbound_store_snapshot", "blobs".to_string()),
         ("outbound_circle_snapshot", "meta_prepared".to_string()),
@@ -285,57 +284,6 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
     assert_eq!(
         actual, classified,
         "bookkeeping JSON columns changed; classify the new column and keep large payloads in the payload spool as required by plans/payload-spool.md"
-    );
-}
-
-#[test]
-fn active_and_protocol_inert_object_identities_are_disjoint() {
-    let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
-    apply_coven_schema(&conn).expect("apply coven schema");
-    let active_first = "a".repeat(64);
-    conn.execute(
-        "INSERT INTO remote_objects (object_id, state) VALUES (?1, '{}')",
-        [&active_first],
-    )
-    .expect("insert active object");
-    assert!(
-        conn.execute(
-            "INSERT INTO protocol_inert_objects (object_id, state) VALUES (?1, '{}')",
-            [&active_first],
-        )
-        .is_err(),
-        "an active object identity must not also become protocol-inert"
-    );
-
-    let inert_first = "b".repeat(64);
-    conn.execute(
-        "INSERT INTO protocol_inert_objects (object_id, state) VALUES (?1, '{}')",
-        [&inert_first],
-    )
-    .expect("insert protocol-inert object");
-    assert!(
-        conn.execute(
-            "INSERT INTO remote_objects (object_id, state) VALUES (?1, '{}')",
-            [&inert_first],
-        )
-        .is_err(),
-        "a protocol-inert object identity must not return to active ownership"
-    );
-    assert!(
-        conn.execute(
-            "UPDATE remote_objects SET object_id = ?1 WHERE object_id = ?2",
-            [&inert_first, &active_first],
-        )
-        .is_err(),
-        "an active identity update must not collide with protocol-inert ownership"
-    );
-    assert!(
-        conn.execute(
-            "UPDATE protocol_inert_objects SET object_id = ?1 WHERE object_id = ?2",
-            [&active_first, &inert_first],
-        )
-        .is_err(),
-        "a protocol-inert identity update must not collide with active ownership"
     );
 }
 

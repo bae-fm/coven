@@ -254,35 +254,6 @@ pub struct RetainedAuthorityObjectRef {
     pub object: ExactObjectRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProtocolInertObject {
-    pub identity: RetainedAuthorityObjectRef,
-    pub(crate) former_candidates: Vec<CandidateNonactivation>,
-}
-
-impl ProtocolInertObject {
-    pub(super) fn new(
-        identity: RetainedAuthorityObjectRef,
-        former_candidates: Vec<CandidateNonactivation>,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        let value = Self {
-            identity,
-            former_candidates,
-        };
-        value.validate()?;
-        Ok(value)
-    }
-
-    pub fn object_id(&self) -> ObjectHash {
-        remote_object_id(&self.identity.object)
-    }
-
-    pub fn validate(&self) -> Result<(), RemoteObjectRecordError> {
-        validate_nonactivations(&self.former_candidates)
-    }
-}
-
 impl RetainedAuthorityObjectRef {
     pub(super) fn validate_semantic(&self, bytes: &[u8]) -> Result<(), RemoteObjectRecordError> {
         validate_semantic_hash(self.semantic_hash, bytes)

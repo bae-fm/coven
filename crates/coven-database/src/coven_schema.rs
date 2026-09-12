@@ -233,13 +233,6 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
-            protocol_inert_objects,
-            "
-    object_id TEXT PRIMARY KEY CHECK (length(object_id) = 64),
-    state TEXT NOT NULL CHECK (json_valid(state))
-"
-        );
-        $visit!(
             reclaimed_store_packages,
             "
     object_id TEXT PRIMARY KEY CHECK (length(object_id) = 64),

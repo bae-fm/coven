@@ -211,37 +211,6 @@ pub(crate) fn index_retained_replay_owner_on(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn load_protocol_inert_object_on(
-    conn: &Connection,
-    object_id: ObjectHash,
-) -> Result<coven_protocol::remote_object::ProtocolInertObject, DbError> {
-    let state: String = conn
-        .query_row(
-            "SELECT state FROM protocol_inert_objects WHERE object_id = ?1",
-            [object_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
-    let inert: coven_protocol::remote_object::ProtocolInertObject = serde_json::from_str(&state)
-        .map_err(|error| {
-            DbError::context(
-                format!("protocol-inert object {object_id} has invalid closed state"),
-                error,
-            )
-        })?;
-    inert
-        .validate()
-        .map_err(|error| DbError::context(format!("protocol-inert object {object_id}"), error))?;
-    if inert.object_id() != object_id {
-        return Err(DbError::Message(format!(
-            "protocol-inert object key is {object_id}, exact reference hashes to {}",
-            inert.object_id()
-        )));
-    }
-    Ok(inert)
-}
-
 pub(crate) fn load_reclaimed_store_package_on(
     conn: &Connection,
     object_id: ObjectHash,
@@ -382,18 +351,6 @@ pub(crate) fn record_reclaimed_store_package_on(
             )));
         }
     }
-    let inert_exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM protocol_inert_objects WHERE object_id = ?1)",
-            [object_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
-    if inert_exists {
-        return Err(DbError::Message(format!(
-            "reclaimed Store package {object_id} is protocol-inert"
-        )));
-    }
     let state = serde_json::to_string(reclaimed)
         .map_err(|error| DbError::context("serialize reclaimed Store package", error))?;
     let inserted = conn
@@ -519,20 +476,6 @@ fn ensure_remote_object_is_writable_on(
             "prepared {domain} {object_id} is a reclaimed Store package"
         )));
     }
-    let inert_exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(
-                 SELECT 1 FROM protocol_inert_objects WHERE object_id = ?1
-             )",
-            [object_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
-    if inert_exists {
-        return Err(DbError::Message(format!(
-            "prepared {domain} {object_id} is already protocol-inert"
-        )));
-    }
     Ok(())
 }
 
@@ -600,7 +543,7 @@ pub(crate) fn begin_remote_candidate_nonactivation_on(
     nonactivation: coven_protocol::remote_object::CandidateNonactivation,
 ) -> Result<Option<ExactObjectRef>, DbError> {
     let mut remote = load_remote_object_on(conn, object_id)?;
-    let inert = remote
+    remote
         .begin_candidate_nonactivation(nonactivation)
         .map_err(|error| {
             DbError::context(
@@ -608,47 +551,8 @@ pub(crate) fn begin_remote_candidate_nonactivation_on(
                 error,
             )
         })?;
-    finish_remote_candidate_nonactivation_on(conn, object_id, remote, inert)
-}
-
-pub(crate) fn finish_remote_candidate_nonactivation_on(
-    conn: &rusqlite::Transaction<'_>,
-    object_id: ObjectHash,
-    remote: RemoteObjectRecord,
-    inert: Option<coven_protocol::remote_object::ProtocolInertObject>,
-) -> Result<Option<ExactObjectRef>, DbError> {
-    let Some(inert) = inert else {
-        let cleanup = remote.cleanup_target().cloned();
-        update_remote_object_on(conn, object_id, &remote)?;
-        return Ok(cleanup);
-    };
-    if inert.object_id() != object_id {
-        return Err(DbError::Message(format!(
-            "protocol-inert object {object_id} changed its exact identity"
-        )));
-    }
-    inert
-        .validate()
-        .map_err(|error| DbError::context(format!("protocol-inert object {object_id}"), error))?;
-    let encoded = serde_json::to_string(&inert)
-        .map_err(|error| DbError::context("serialize protocol-inert object", error))?;
-    if !delete_remote_object_on(conn, object_id)? {
-        return Err(DbError::Message(format!(
-            "remote object {object_id} disappeared during protocol-inert transition"
-        )));
-    }
-    let inserted = conn
-        .execute(
-            "INSERT INTO protocol_inert_objects (object_id, state) VALUES (?1, ?2)",
-            (object_id.to_string(), encoded),
-        )
-        .map_err(DbError::from)?;
-    if inserted != 1 {
-        return Err(DbError::Message(format!(
-            "protocol-inert object {object_id} was not inserted"
-        )));
-    }
-    Ok(None)
+    update_remote_object_on(conn, object_id, &remote)?;
+    Ok(remote.cleanup_target().cloned())
 }
 
 pub(crate) fn mark_remote_object_uploaded_on(

@@ -93,38 +93,6 @@ pub(crate) const BLOB_MAKE_REMOTE_INTENTS_V0_COLUMNS: &str = "
 ";
 
 pub(crate) const OBJECT_OWNERSHIP_TRIGGERS: &str = "
-CREATE TRIGGER IF NOT EXISTS remote_object_identity_must_not_be_inert_on_insert
-BEFORE INSERT ON remote_objects
-WHEN EXISTS (
-    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'remote object identity is protocol-inert');
-END;
-CREATE TRIGGER IF NOT EXISTS remote_object_identity_must_not_be_inert_on_update
-BEFORE UPDATE OF object_id ON remote_objects
-WHEN EXISTS (
-    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'remote object identity is protocol-inert');
-END;
-CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_remote_on_insert
-BEFORE INSERT ON protocol_inert_objects
-WHEN EXISTS (
-    SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'protocol-inert object identity has active ownership');
-END;
-CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_remote_on_update
-BEFORE UPDATE OF object_id ON protocol_inert_objects
-WHEN EXISTS (
-    SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'protocol-inert object identity has active ownership');
-END;
 CREATE TRIGGER IF NOT EXISTS remote_object_identity_must_not_be_reclaimed_on_insert
 BEFORE INSERT ON remote_objects
 WHEN EXISTS (
@@ -141,28 +109,10 @@ WHEN EXISTS (
 BEGIN
     SELECT RAISE(ABORT, 'remote object identity is a reclaimed Store package');
 END;
-CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_reclaimed_on_insert
-BEFORE INSERT ON protocol_inert_objects
-WHEN EXISTS (
-    SELECT 1 FROM reclaimed_store_packages WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'protocol-inert object identity is a reclaimed Store package');
-END;
-CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_reclaimed_on_update
-BEFORE UPDATE OF object_id ON protocol_inert_objects
-WHEN EXISTS (
-    SELECT 1 FROM reclaimed_store_packages WHERE object_id = NEW.object_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'protocol-inert object identity is a reclaimed Store package');
-END;
 CREATE TRIGGER IF NOT EXISTS reclaimed_store_package_identity_must_be_closed_on_insert
 BEFORE INSERT ON reclaimed_store_packages
 WHEN EXISTS (
     SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
-    UNION ALL
-    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
 )
 BEGIN
     SELECT RAISE(ABORT, 'reclaimed Store package identity has another ownership state');
@@ -171,8 +121,6 @@ CREATE TRIGGER IF NOT EXISTS reclaimed_store_package_identity_must_be_closed_on_
 BEFORE UPDATE OF object_id ON reclaimed_store_packages
 WHEN EXISTS (
     SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
-    UNION ALL
-    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
 )
 BEGIN
     SELECT RAISE(ABORT, 'reclaimed Store package identity has another ownership state');

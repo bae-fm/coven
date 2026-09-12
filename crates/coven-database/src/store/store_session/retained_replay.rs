@@ -277,10 +277,6 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
     ("payload_cleanup", ReplayTableDisposition::Preserve),
     ("payload_owners", ReplayTableDisposition::Preserve),
     ("payload_storage", ReplayTableDisposition::Preserve),
-    (
-        "protocol_inert_objects",
-        ReplayTableDisposition::ExactTransition,
-    ),
     ("protocol_state", ReplayTableDisposition::Preserve),
     (
         "published_blob_drop_intents",

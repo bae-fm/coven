@@ -26,8 +26,6 @@ use crate::local_store_identity::validate_host_device_id_on;
 pub(crate) use crate::remote_object_records::begin_remote_candidate_nonactivation_on;
 pub use crate::remote_object_records::candidate_graph_exact_objects;
 pub(crate) use crate::remote_object_records::index_retained_replay_owner_on;
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use crate::remote_object_records::load_protocol_inert_object_on;
 pub(crate) use crate::remote_object_records::load_remote_object_on;
 pub(crate) use crate::remote_object_records::mark_remote_object_uploaded_on;
 pub(crate) use crate::remote_object_records::mark_reusable_retained_authority_uploaded_on;
