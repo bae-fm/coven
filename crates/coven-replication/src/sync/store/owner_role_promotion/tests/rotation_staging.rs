@@ -160,10 +160,7 @@ async fn complete_installed_removal(proof: CompletionProof) {
         .expect("pull installed the exact removal");
     let completion = || StoreMembershipJournalCompletion::Mutation {
         intent_hash: row.intent_hash,
-        progress_bytes: serde_json::to_vec(&serde_json::json!({
-            "state": "revoke_activated", "candidate": candidate.reference,
-        }))
-        .unwrap(),
+        progress: None,
         remote_objects: remotes
             .iter()
             .map(|remote| remote.record().clone())
@@ -227,5 +224,99 @@ async fn complete_installed_removal(proof: CompletionProof) {
         matches!(local, LocalRotation::Committed { mutation, .. } if mutation == row.intent_hash),
         "accepted removal must commit its retained rotation: {local:?}"
     );
+    let completed = database
+        .outbound_membership_mutation()
+        .await
+        .unwrap()
+        .expect("the removal journal outlives its activation");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&completed.progress_bytes).unwrap(),
+        serde_json::json!({ "state": "pending" }),
+        "a removal's journal row carries Pending for its whole life"
+    );
     assert!(database.active_store_publication().await.unwrap().is_none());
+}
+
+/// The rotation gate is the only record of a removal's activation, so a journal
+/// row whose gate is gone names no rotation this device may carry — it is
+/// refused before any provider request rather than restaged under a new gate.
+#[tokio::test]
+async fn a_removal_journal_without_its_gate_is_refused() {
+    let fixture = PromotionCandidate::build("removal-without-its-gate").await;
+    let database = StoreDatabase::new(&fixture.owner_db);
+    let member = keys::public_key_hex(&fixture.member);
+    fixture
+        .store
+        .bind_device_in(
+            &fixture.owner_db,
+            fixture.owner_db_store_dir.clone(),
+            &fixture.owner,
+        )
+        .await
+        .expect("bind removal owner")
+        .pull_store()
+        .await
+        .expect("install accepted predecessor");
+    fixture.home.fail_exact_create_before_call(1);
+    fixture
+        .store
+        .remove_member(
+            &fixture.owner_db,
+            fixture.owner_db_store_dir.clone(),
+            &fixture.owner,
+            &member,
+            &fixture.encryption,
+            &crate::sync::test_helpers::TestCustody::default(),
+        )
+        .await
+        .expect_err("stage the removal before its first upload");
+    let row = database
+        .outbound_membership_mutation()
+        .await
+        .unwrap()
+        .expect("the interrupted removal stays durable");
+    assert!(database.load_rotation_gate().await.unwrap().is_some());
+    fixture
+        .owner_db
+        .delete_protocol_state(coven_protocol::objects::ROTATION_GATE_STATE_KEY)
+        .await
+        .expect("drop the gate the staged removal opened");
+    let access = fixture.home.access_requests();
+    fixture.home.clear_exact_creates();
+    let error = fixture
+        .store
+        .remove_member(
+            &fixture.owner_db,
+            fixture.owner_db_store_dir.clone(),
+            &fixture.owner,
+            &member,
+            &fixture.encryption,
+            &crate::sync::test_helpers::TestCustody::default(),
+        )
+        .await
+        .expect_err("a removal whose gate is gone cannot resume");
+    assert!(
+        error
+            .to_string()
+            .contains("removal journal has no matching rotation gate"),
+        "{error}"
+    );
+    assert_eq!(
+        fixture.home.access_requests(),
+        access,
+        "a refused removal issues no provider access request"
+    );
+    assert!(
+        fixture.home.exact_creates().is_empty(),
+        "a refused removal uploads nothing"
+    );
+    assert_eq!(
+        database
+            .outbound_membership_mutation()
+            .await
+            .unwrap()
+            .map(|retained| retained.intent_hash),
+        Some(row.intent_hash),
+        "the refusal leaves the journal row it could not carry"
+    );
 }

@@ -229,7 +229,10 @@ pub enum StoreMembershipJournalCompletion {
     },
     Mutation {
         intent_hash: ObjectHash,
-        progress_bytes: Vec<u8>,
+        /// The journal progress this activation records, for the mutations that
+        /// keep one. A removal's activation is the rotation gate's committed
+        /// local rotation, so it carries no progress of its own.
+        progress: Option<Vec<u8>>,
         remote_objects: Vec<crate::remote_object::RemoteObjectRecord>,
     },
     OwnerPromotion {

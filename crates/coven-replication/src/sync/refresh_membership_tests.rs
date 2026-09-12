@@ -10,6 +10,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let encryption = EncryptionService::from_key(old_key);
     let ExactStoreFixture {
         store: storage,
+        home: _,
         cloud_storage: _,
         db: owner_db,
         db_store_dir: owner_db_store_dir,
@@ -131,6 +132,7 @@ async fn admission_after_rotation_uses_the_membership_selected_keyring() {
     let initial = EncryptionService::from_key([52u8; 32]);
     let ExactStoreFixture {
         store: storage,
+        home: _,
         cloud_storage,
         db: owner_db,
         db_store_dir: owner_db_store_dir,

@@ -97,8 +97,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     "activated removal journal is absent during key adoption".to_string(),
                 )
             })?;
-        let intent_hash =
-            membership_mutation::validate_revoke_rotation_adoption(row, adopted_generation)?;
+        let intent_hash = membership_mutation::validate_revoke_rotation_adoption(
+            row,
+            self.database.load_rotation_gate().await?,
+            adopted_generation,
+        )?;
         let gate = self
             .database
             .complete_local_rotation_adoption(intent_hash, adopted_generation)

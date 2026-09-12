@@ -4,7 +4,7 @@ use coven_protocol::membership::{self, MemberRole, StoreAuthorityChange};
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
 use coven_protocol::remote_object::ClosedRemoteObject;
-use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
+use coven_protocol::store_commit::ObjectHash;
 use coven_storage::cloud::{CloudAccessState, CloudHomeJoinInfo};
 
 use crate::sync::store::membership::MembershipMutationError;
@@ -133,14 +133,18 @@ impl RevokeMutationPlan {
     }
 }
 
+/// What an admission has already done that its retry must not repeat: the
+/// provider access it was granted, and the activation that published it.
+///
+/// A removal keeps no progress of its own — its rotation gate holds the same
+/// facts, and the rotation itself consults the gate — so a removal's journal row
+/// carries [`MembershipMutationProgress::Pending`] for its whole life.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum MembershipMutationProgress {
     Pending,
     AdmissionGranted { join_info: CloudHomeJoinInfo },
     AdmissionActivated { join_info: CloudHomeJoinInfo },
-    RevokeAccessRemoved,
-    RevokeActivated { candidate: StoreBatchCommitRef },
 }
 
 impl MembershipMutationProgress {
@@ -171,10 +175,6 @@ impl MutationPersistence {
             .update_membership_mutation_progress(self.intent_hash, bytes)
             .await?;
         Ok(())
-    }
-
-    pub(super) fn intent_hash(&self) -> ObjectHash {
-        self.intent_hash
     }
 
     pub(super) async fn complete(&self) -> Result<(), MembershipMutationError> {

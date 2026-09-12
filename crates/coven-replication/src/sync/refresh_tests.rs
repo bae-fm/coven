@@ -172,6 +172,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 struct ExactStoreFixture {
     store: Arc<TestStore>,
     cloud_storage: Arc<coven_storage::CloudSyncConnection>,
+    home: Arc<coven_storage::InMemoryCloudHome>,
     db: coven_database::Database,
     db_store_dir: coven_foundation::store_dir::StoreDir,
 }
@@ -179,12 +180,13 @@ struct ExactStoreFixture {
 async fn exact_store(owner: &UserKeypair, encryption: &EncryptionService) -> ExactStoreFixture {
     let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
+    let home = crate::sync::test_helpers::test_cloud_home();
     let (store, cloud_storage) = Box::pin(TestStore::create_encrypted_with_connection(
         &owner_db,
         owner_db_store_dir.clone(),
         LIB_ID,
         owner.clone(),
-        crate::sync::test_helpers::test_cloud_home(),
+        home.clone(),
         encryption.clone(),
     ))
     .await
@@ -195,6 +197,7 @@ async fn exact_store(owner: &UserKeypair, encryption: &EncryptionService) -> Exa
     ExactStoreFixture {
         store,
         cloud_storage,
+        home,
         db: owner_db,
         db_store_dir: owner_db_store_dir,
     }
@@ -260,6 +263,7 @@ async fn a_pre_rotation_sealed_key_does_not_roll_the_device_back() {
     let encryption = EncryptionService::from_key(old_key);
     let ExactStoreFixture {
         store: storage,
+        home: _,
         cloud_storage: _,
         db: owner_db,
         db_store_dir: owner_db_store_dir,
@@ -372,6 +376,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     let encryption = EncryptionService::from_key(old_key);
     let ExactStoreFixture {
         store: storage,
+        home: _,
         cloud_storage: _,
         db: owner_db,
         db_store_dir: owner_db_store_dir,
@@ -485,6 +490,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
 
     let ExactStoreFixture {
         store: storage,
+        home: _,
         cloud_storage: _,
         db: founder_db,
         db_store_dir: founder_db_store_dir,
@@ -653,6 +659,7 @@ async fn removed_owner_key_is_not_adopted() {
     let encryption = EncryptionService::from_key(current_key);
     let ExactStoreFixture {
         store: storage,
+        home: _,
         cloud_storage: _,
         db: owner_db,
         db_store_dir: owner_db_store_dir,
@@ -760,6 +767,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     let encryption = EncryptionService::from_key(key);
     let ExactStoreFixture {
         store: storage,
+        home: _,
         cloud_storage,
         db: owner_db,
         db_store_dir: owner_db_store_dir,
@@ -888,6 +896,7 @@ async fn one_cycle_loads_exact_membership_once() {
     let encryption = EncryptionService::from_key(key);
     let ExactStoreFixture {
         store: storage,
+        home: _,
         cloud_storage: _,
         db: owner_db,
         db_store_dir: owner_db_store_dir,
@@ -976,6 +985,7 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     let encryption = EncryptionService::from_key(old_key);
     let ExactStoreFixture {
         store: storage,
+        home,
         cloud_storage: _,
         db,
         db_store_dir,
@@ -1089,9 +1099,62 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
         );
     }
 
+    // Restarting the device rebuilds the in-memory gate from the durable one, so
+    // the unfinished removal survives a process boundary rather than only a
+    // retained handle.
+    let reopened_store_dir = crate::sync::test_helpers::test_store_dir();
+    db.vacuum_into_for_test(reopened_store_dir.db_path().to_string_lossy().into_owned())
+        .await
+        .expect("copy the unfinished removal's database");
+    crate::sync::test_helpers::copy_payload_files(&db_store_dir, &reopened_store_dir);
+    let reopened = coven_database::Database::open_synthetic_for_test(
+        &reopened_store_dir.db_path(),
+        reopened_store_dir.clone(),
+        crate::sync::test_helpers::test_synced_tables(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
+        "test-device".into(),
+        Arc::new(SystemClock),
+        &crate::sync::test_helpers::test_migrations(),
+    )
+    .expect("reopen the unfinished removal's store directory");
+    let reopened_store = coven_database::StoreDatabase::new(&reopened);
+    let row = reopened_store
+        .outbound_membership_mutation()
+        .await
+        .unwrap()
+        .expect("the unfinished removal keeps its journal row across the reopen");
+    let durable_gate = reopened_store
+        .load_rotation_gate()
+        .await
+        .unwrap()
+        .expect("the unfinished removal keeps its rotation gate across the reopen");
+    assert!(
+        matches!(
+            durable_gate.local(),
+            Some(coven_protocol::objects::LocalRotation::Committed { generation, mutation })
+                if generation.get() == 2 && mutation == row.intent_hash
+        ),
+        "the gate records the removal's committed rotation: {durable_gate:?}",
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&row.progress_bytes).unwrap(),
+        serde_json::json!({ "state": "pending" }),
+        "the removal records its progress in the gate, not in its journal row",
+    );
+    let reopened_rotation = PendingRotation::none();
+    reopened_rotation.install_durable_gate(Some(durable_gate));
+    reopened_rotation
+        .check(Some(1))
+        .expect_err("a restarted device still refuses to seal under the superseded generation");
+
     // Retrying the exact removal closes its journal and durable gate now that
-    // custody is writable.
+    // custody is writable. The entry is published, provider access is already
+    // removed and the candidate is accepted, so the retry repeats none of it.
     ks.allow_writes();
+    let reopened_cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
+    let access_requests = home.access_requests();
+    home.clear_exact_creates();
     let fingerprint = Box::pin(
         RefreshTestStoreOps::remove_member_with_local_state_for_test(
             &storage,
@@ -1099,10 +1162,10 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
             &pubkey_hex(&member),
             &encryption,
             &ks,
-            &cipher,
-            &pending_rotation,
-            &db,
-            db_store_dir.clone(),
+            &reopened_cipher,
+            &reopened_rotation,
+            &reopened,
+            reopened_store_dir.clone(),
         ),
     )
     .await
@@ -1112,14 +1175,32 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
         "the retry returns the key fingerprint"
     );
     assert_eq!(
-        cipher_generation(&cipher),
+        cipher_generation(&reopened_cipher),
         2,
         "retrying the removal adopts the rotated key",
     );
     assert_eq!(
-        pending_rotation.pending_generation(),
+        home.access_requests(),
+        access_requests,
+        "the retry issues no second access-removal request",
+    );
+    assert!(
+        home.exact_creates().is_empty(),
+        "the retry publishes nothing a second time",
+    );
+    assert_eq!(
+        reopened_rotation.pending_generation(),
         None,
         "the retried removal clears this device's own rotation-pending gate",
+    );
+    assert!(
+        reopened_store
+            .outbound_membership_mutation()
+            .await
+            .unwrap()
+            .is_none()
+            && reopened_store.load_rotation_gate().await.unwrap().is_none(),
+        "the completed removal clears its journal row and its gate together",
     );
 }
 

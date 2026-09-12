@@ -44,20 +44,30 @@ pub(super) fn publication_predecessor_changed(
     coord.as_ref() == expected
 }
 
+/// The removal whose rotation `adopted_generation` adopts, taken from the
+/// journal row and the gate together: the row names the plan, and the gate's
+/// committed local rotation is the removal's activation.
 pub(super) fn validate_revoke_rotation_adoption(
     row: coven_database::DurableMembershipMutation,
+    gate: Option<coven_protocol::objects::RotationGate>,
     adopted_generation: u64,
 ) -> Result<coven_protocol::store_commit::ObjectHash, MembershipMutationError> {
     let intent_hash = row.intent_hash;
-    let (plan, progress) = decode_membership_mutation(row)?;
+    let (plan, _) = decode_membership_mutation(row)?;
     let MembershipMutationPlan::Revoke(plan) = plan else {
         return Err(MembershipMutationError::InvalidDurableMutation(
             "key adoption found another membership mutation".to_string(),
         ));
     };
-    if !matches!(progress, MembershipMutationProgress::RevokeActivated { .. }) {
+    if !matches!(
+        gate.and_then(|gate| gate.local()),
+        Some(coven_protocol::objects::LocalRotation::Committed {
+            generation,
+            mutation,
+        }) if generation.get() == adopted_generation && mutation == intent_hash
+    ) {
         return Err(MembershipMutationError::InvalidDurableMutation(
-            "key adoption found a removal that is not activated".to_string(),
+            "key adoption found a removal whose rotation is not committed".to_string(),
         ));
     }
     let planned_generation =

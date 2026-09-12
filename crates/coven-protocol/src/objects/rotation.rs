@@ -121,7 +121,7 @@ impl LocalRotation {
 
 impl RotationGate {
     /// This device's own rotation, if the gate holds one.
-    fn local(&self) -> Option<LocalRotation> {
+    pub fn local(&self) -> Option<LocalRotation> {
         match self {
             Self::Local(local) | Self::LocalAndPeer { local, .. } => Some(*local),
             Self::Peer { .. } => None,

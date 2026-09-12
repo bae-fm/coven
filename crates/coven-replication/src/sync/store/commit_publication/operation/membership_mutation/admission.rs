@@ -539,9 +539,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .await?;
                 Ok(join_info)
             }
-            _ => Err(MembershipMutationError::InvalidDurableMutation(
-                "admission carries member-removal progress".into(),
-            )),
         }
     }
 
@@ -588,7 +585,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 plan.candidate.clone(),
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
                     intent_hash,
-                    progress_bytes: MembershipMutationProgress::AdmissionActivated { join_info: join_info.clone() }.encode()?,
+                    progress: Some(MembershipMutationProgress::AdmissionActivated { join_info: join_info.clone() }.encode()?),
                     remote_objects: remotes.into_iter().map(|remote| remote.into_record()).collect(),
                 },
             ).await?;

@@ -61,7 +61,6 @@ pub use domains::{
     StoreEncryptedProtocolObjectDomain,
 };
 pub use provider_binding::*;
-#[cfg(any(test, feature = "test-utils"))]
 pub use rotation::LocalRotation;
 pub use rotation::RotationPending;
 #[cfg(any(test, feature = "test-utils"))]

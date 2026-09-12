@@ -299,13 +299,13 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             }
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
                 intent_hash,
-                progress_bytes,
+                progress,
                 remote_objects,
             } => self.record_activated_membership_candidate_mutation(
                 intent_hash,
                 candidate,
                 &remote_objects,
-                progress_bytes,
+                progress,
                 &history_evidence.membership_proof.as_ref().ok_or_else(|| {
                     DbError::Message("membership mutation completion has no exact membership proof".into())
                 })?.entry_value,
@@ -420,7 +420,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         intent_hash: ObjectHash,
         candidate: &StoreBatchCommitRef,
         remote_objects: &[coven_protocol::remote_object::RemoteObjectRecord],
-        progress_bytes: Vec<u8>,
+        progress: Option<Vec<u8>>,
         entry: &coven_protocol::membership::MembershipEntry,
     ) -> Result<(), DbError> {
         let mut unique = std::collections::BTreeSet::new();
@@ -438,20 +438,22 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.activate_store_operation_remote_objects(candidate, &object_ids)?;
-        if self
-            .store
-            .transaction
-            .execute(
-                "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
-                 WHERE singleton = 1 AND intent_hash = ?2",
-                rusqlite::params![progress_bytes, intent_hash.to_string()],
-            )
-            .map_err(DbError::from)?
-            != 1
-        {
-            return Err(DbError::Message(
-                "membership mutation changed during activated recording".to_string(),
-            ));
+        if let Some(progress) = progress {
+            if self
+                .store
+                .transaction
+                .execute(
+                    "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
+                     WHERE singleton = 1 AND intent_hash = ?2",
+                    rusqlite::params![progress, intent_hash.to_string()],
+                )
+                .map_err(DbError::from)?
+                != 1
+            {
+                return Err(DbError::Message(
+                    "membership mutation changed during activated recording".to_string(),
+                ));
+            }
         }
         if let Some(generation) = membership_rotation_generation(entry)? {
             super::commit_rotation_candidate_on(self.store.transaction, intent_hash, generation)?;

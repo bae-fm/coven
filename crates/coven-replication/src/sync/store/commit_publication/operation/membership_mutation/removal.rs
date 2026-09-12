@@ -4,6 +4,7 @@ use super::{
 };
 use coven_keys::encryption::{self, EncryptionService};
 use coven_protocol::membership::{MemberRole, SealedStoreKey, StoreAuthorityChange};
+use coven_protocol::objects::LocalRotation;
 use coven_storage as cloud_storage;
 use coven_storage::cloud::{CloudAccessOutcome, CloudAccessState, RevokeOutcome};
 use std::collections::BTreeMap;
@@ -158,14 +159,14 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
     }
 
     pub(crate) async fn execute(mut self) -> Result<MembershipRevocation, MembershipMutationError> {
-        let (mut plan, mut progress, mut intent_hash) = match self
+        let (mut plan, mut intent_hash) = match self
             .operation
             .outbound_membership_mutation()
             .await?
         {
             Some(row) => {
                 let intent_hash = row.intent_hash;
-                let (pending, progress) = decode_membership_mutation(row)?;
+                let (pending, _) = decode_membership_mutation(row)?;
                 let MembershipMutationPlan::Revoke(plan) = pending else {
                     return Err(MembershipMutationError::PendingMutation(
                         "an admission is pending".to_string(),
@@ -180,7 +181,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         "the pending removal has different immutable inputs".to_string(),
                     ));
                 }
-                (plan, progress, intent_hash)
+                (plan, intent_hash)
             }
             None => {
                 self.operation
@@ -243,18 +244,16 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 let plan = Box::pin(self.build_revoke_mutation(&operation_plan, write_id)).await?;
                 let remote_objects = plan.candidate_remote_objects()?;
                 let encoded = MembershipMutationPlan::Revoke(plan.clone()).encode()?;
-                let progress = MembershipMutationProgress::Pending;
-                let progress_bytes = progress.encode()?;
                 let intent_hash = self
                     .operation
                     .stage_membership_mutation(
                         encoded,
-                        progress_bytes,
+                        MembershipMutationProgress::Pending.encode()?,
                         remote_objects,
                         (*plan.candidate).clone(),
                     )
                     .await?;
-                (plan, progress, intent_hash)
+                (plan, intent_hash)
             }
         };
         loop {
@@ -266,10 +265,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         || active.membership_abandonment().is_some())
             });
             if !continuing {
-                match self
-                    .execute_plan(plan.clone(), progress.clone(), intent_hash)
-                    .await
-                {
+                match self.execute_plan(plan.clone(), intent_hash).await {
                     Ok(keyring) => return Ok(MembershipRevocation::Activated(keyring)),
                     Err(error)
                         if super::publication_predecessor_changed(
@@ -351,67 +347,73 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     "reprepared membership mutation changed its durable owner".into(),
                 ));
             }
-            let (_, retained_progress) = decode_membership_mutation(row)?;
-            progress = retained_progress;
         }
     }
 
+    /// Carry one staged removal to its activated rotation.
+    ///
+    /// The rotation gate is the removal's progress record: staging opened it as
+    /// this device's candidate, and the activating install committed it in the
+    /// same transaction that recorded the accepted candidate. So the gate says
+    /// which half of the removal is already durable — a committed local rotation
+    /// naming this journal row means the entry is published, provider access is
+    /// removed and the candidate is accepted, and all that is left is to install
+    /// the chain and hand back the rotated keyring.
     async fn execute_plan(
         &mut self,
         plan: RevokeMutationPlan,
-        mut progress: MembershipMutationProgress,
         intent_hash: coven_protocol::store_commit::ObjectHash,
     ) -> Result<EncryptionService, MembershipMutationError> {
         let operation = &mut *self.operation;
         let pending_rotation = self.pending_rotation;
 
-        let pending_generation =
-            EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
-                .map_err(MembershipMutationError::Encryption)?
-                .current_generation();
-        match &progress {
-            MembershipMutationProgress::RevokeActivated { .. } => {
-                pending_rotation.mark_committed_mutation(pending_generation, intent_hash)
-            }
-            _ => pending_rotation.mark_candidate(pending_generation, intent_hash),
-        }
-        .map_err(MembershipMutationError::RotationState)?;
-        let persistence = operation.membership_mutation_persistence(intent_hash);
-        let remote_objects = plan.candidate_remote_objects()?;
-        if matches!(
-            progress,
-            MembershipMutationProgress::AdmissionGranted { .. }
-                | MembershipMutationProgress::AdmissionActivated { .. }
-        ) {
-            return Err(MembershipMutationError::InvalidDurableMutation(
-                "removal carries admission progress".to_string(),
-            ));
-        }
-        let publication = plan.candidate.prepared_membership_publication()?;
-        let mut validated_chain = operation.membership.with_exact_entry(&publication.entry)?;
-        if let MembershipMutationProgress::RevokeActivated { candidate } = &progress {
-            if candidate != &plan.candidate.reference {
-                return Err(MembershipMutationError::InvalidDurableMutation(
-                    "membership activation names another candidate".to_string(),
-                ));
-            }
-            validated_chain.activate_head_ref(publication.head_ref.clone())?;
-            operation.membership = validated_chain;
-            return EncryptionService::from_keyring_payload(plan.keyring_payload)
-                .map_err(MembershipMutationError::Encryption);
-        }
         let keyring = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
             .map_err(MembershipMutationError::Encryption)?;
+        let pending_generation = keyring.current_generation();
+        let activated = match operation
+            .database
+            .load_rotation_gate()
+            .await?
+            .and_then(|gate| gate.local())
+        {
+            Some(LocalRotation::Committed {
+                generation,
+                mutation,
+            }) if mutation == intent_hash && generation.get() == pending_generation => true,
+            Some(LocalRotation::Candidate {
+                generation,
+                mutation,
+            }) if mutation == intent_hash && generation.get() == pending_generation => false,
+            _ => {
+                return Err(MembershipMutationError::InvalidDurableMutation(
+                    "removal journal has no matching rotation gate".to_string(),
+                ))
+            }
+        };
+        if activated {
+            pending_rotation.mark_committed_mutation(pending_generation, intent_hash)
+        } else {
+            pending_rotation.mark_candidate(pending_generation, intent_hash)
+        }
+        .map_err(MembershipMutationError::RotationState)?;
+
+        let publication = plan.candidate.prepared_membership_publication()?;
+        let mut validated_chain = operation.membership.with_exact_entry(&publication.entry)?;
         // Chain validation bound the entry's sealed keys to every remaining
         // member when `with_exact_entry` added it; what remains to check is
         // that the keyring this plan rotates to is the one that entry names.
-        if validated_chain.keyring_generation_of(&publication.entry)
-            != Some(keyring.current_generation())
-        {
+        if validated_chain.keyring_generation_of(&publication.entry) != Some(pending_generation) {
             return Err(MembershipMutationError::InvalidDurableMutation(
                 "planned removal keyring generation differs from its exact entry".to_string(),
             ));
         }
+        if activated {
+            validated_chain.activate_head_ref(publication.head_ref.clone())?;
+            operation.membership = validated_chain;
+            return Ok(keyring);
+        }
+
+        let remote_objects = plan.candidate_remote_objects()?;
         operation
             .publish_membership_authority(&plan.candidate, &remote_objects)
             .await?;
@@ -426,20 +428,13 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 ))
             }
         }
-        if matches!(progress, MembershipMutationProgress::Pending) {
-            progress = MembershipMutationProgress::RevokeAccessRemoved;
-            persistence.record_progress(&progress).await?;
-        }
         let candidate = plan.candidate;
         let reference = operation
             .publish_membership_activation(
                 candidate.clone(),
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
-                    intent_hash: persistence.intent_hash(),
-                    progress_bytes: MembershipMutationProgress::RevokeActivated {
-                        candidate: candidate.reference.clone(),
-                    }
-                    .encode()?,
+                    intent_hash,
+                    progress: None,
                     remote_objects: remote_objects
                         .into_iter()
                         .map(|remote| remote.into_record())
@@ -453,7 +448,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             ));
         }
         pending_rotation
-            .mark_committed_mutation(keyring.current_generation(), persistence.intent_hash())
+            .mark_committed_mutation(pending_generation, intent_hash)
             .map_err(MembershipMutationError::RotationState)?;
         Ok(keyring)
     }
