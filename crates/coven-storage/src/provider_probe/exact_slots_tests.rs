@@ -32,10 +32,10 @@ async fn exact_probe_settles_a_lost_create_response() {
     let probe_id = ProviderProbeId::from_bytes([17; 32]);
     let winner = probe_payload(&probe_id, ProbePayloadLabel::ExactCreateFirst);
 
-    // The second contender's create never reaches the provider, so the run ends
-    // with the first contender's object standing and no durable record of who
-    // won. The create response is lost with the run that issued it.
-    home.fail_exact_create_before_call(2);
+    // The second contender's create reaches no conclusion: neither its response
+    // nor its settlement gets through, so the run ends with the first
+    // contender's object standing and no durable record of who won.
+    home.lose_exact_create_outcome_on_call(2);
     let interrupted = storage
         .probe_exact_slots(&journal, probe_id, &binding)
         .await;

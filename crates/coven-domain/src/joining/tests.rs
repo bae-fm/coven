@@ -320,7 +320,11 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts(
         .complete_device_provider_admission(readiness)
         .await
         .expect("complete provider admission");
-    home.fail_exact_create_before_call(1);
+    // Finalization first re-creates the joining device's authority object,
+    // which the provider already holds, so a failure there settles against
+    // the stored bytes. The first create that publishes new bytes is the
+    // membership entry, and that is the one to interrupt.
+    home.fail_exact_create_before_call(2);
     let interrupted = owner_store.finalize_device_join(completion.clone()).await;
     assert!(
         interrupted.is_err(),

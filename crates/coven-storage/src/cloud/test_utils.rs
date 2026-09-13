@@ -121,6 +121,7 @@ pub struct InMemoryCloudHome {
     exact_creates: Arc<Mutex<Vec<ObjectSlot>>>,
     fail_exact_create_before: Arc<AtomicUsize>,
     fail_exact_create_after: Arc<AtomicUsize>,
+    lose_exact_create_outcome: Arc<AtomicUsize>,
     lose_next_conditional_replace_response: Arc<AtomicBool>,
     conditional_replace_pause: Arc<Mutex<Option<OperationPause>>>,
     exact_create_pause: Arc<Mutex<Option<AppendPause>>>,
@@ -201,6 +202,7 @@ impl InMemoryCloudHome {
             exact_creates: Arc::new(Mutex::new(Vec::new())),
             fail_exact_create_before: Arc::new(AtomicUsize::new(0)),
             fail_exact_create_after: Arc::new(AtomicUsize::new(0)),
+            lose_exact_create_outcome: Arc::new(AtomicUsize::new(0)),
             lose_next_conditional_replace_response: Arc::new(AtomicBool::new(false)),
             conditional_replace_pause: Arc::new(Mutex::new(None)),
             exact_create_pause: Arc::new(Mutex::new(None)),
@@ -322,18 +324,32 @@ impl InMemoryCloudHome {
         );
     }
 
-    /// Reset the exact-create counter and fail before the selected call stores bytes.
+    /// Reset the exact-create counter and fail the selected call before its
+    /// bytes land. The settlement still observes the slot: empty, the transport
+    /// error surfaces; holding another object, the create is rejected as
+    /// occupied.
     pub fn fail_exact_create_before_call(&self, call: usize) {
         assert!(call > 0, "create call numbers are 1-based");
         self.exact_create_count.store(0, Ordering::SeqCst);
         self.fail_exact_create_before.store(call, Ordering::SeqCst);
     }
 
-    /// Reset the exact-create counter and lose the response after the selected create.
+    /// Reset the exact-create counter and lose the selected call's response
+    /// after its bytes land. The settlement finds the uploaded object in the
+    /// slot and reports it as already present.
     pub fn fail_exact_create_after_call(&self, call: usize) {
         assert!(call > 0, "create call numbers are 1-based");
         self.exact_create_count.store(0, Ordering::SeqCst);
         self.fail_exact_create_after.store(call, Ordering::SeqCst);
+    }
+
+    /// Reset the exact-create counter and leave the selected call without a
+    /// conclusion: its bytes never land, and the settlement cannot reach the
+    /// provider either, so the caller learns nothing about the slot.
+    pub fn lose_exact_create_outcome_on_call(&self, call: usize) {
+        assert!(call > 0, "create call numbers are 1-based");
+        self.exact_create_count.store(0, Ordering::SeqCst);
+        self.lose_exact_create_outcome.store(call, Ordering::SeqCst);
     }
 
     /// Commit the next conditional replacement but return a transport error,
@@ -696,11 +712,17 @@ impl InMemoryCloudHome {
         .map_err(CloudHomeError::from)
     }
 
+    /// The raw create: bytes land, or the call fails. Occupancy is reported as
+    /// [`CloudHomeError::AlreadyExists`] and a lost response as a transport
+    /// error after the bytes are already visible, the two results the shared
+    /// settlement in [`ExactSlotStorage::create_at`] has to resolve. A call
+    /// armed to reach no conclusion is already unresolved when it returns:
+    /// the settlement it would run cannot reach the provider either.
     async fn create_at_slot(
         &self,
         upload: &super::ExactUpload<'_>,
         control: &super::UploadControl,
-    ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
+    ) -> Result<(), CloudHomeError> {
         if self.fail_writes.load(Ordering::SeqCst) {
             return Err(CloudHomeError::Transport(
                 "InMemoryCloudHome: armed write failure".into(),
@@ -716,18 +738,25 @@ impl InMemoryCloudHome {
                 "InMemoryCloudHome: forced failure before exact create call {call}"
             )));
         }
+        if self.lose_exact_create_outcome.load(Ordering::SeqCst) == call {
+            self.lose_exact_create_outcome.store(0, Ordering::SeqCst);
+            return Err(CloudHomeError::UnresolvedOutcome {
+                operation: Box::new(CloudHomeError::Transport(format!(
+                    "InMemoryCloudHome: exact create call {call} reached no conclusion"
+                ))),
+                settlement: Box::new(CloudHomeError::Transport(format!(
+                    "InMemoryCloudHome: settlement of exact create call {call} is unreachable"
+                ))),
+            });
+        }
         let bytes = upload.body().await?.collect().await?;
         control.report(bytes.len() as u64);
         {
             let mut writes = self.writes.lock().unwrap();
-            if let Some(existing) = writes.values.get(&key) {
-                return if upload.object().verify(&existing.bytes).is_ok() {
-                    Ok(super::ExactCreateOutcome::AlreadyPresent)
-                } else {
-                    Err(CloudHomeError::SlotCollision(key))
-                };
+            if writes.values.contains_key(&key) {
+                return Err(CloudHomeError::AlreadyExists(key));
             }
-            writes.insert(key.clone(), bytes);
+            writes.insert(key, bytes);
         }
         let pause = self
             .exact_create_pause
@@ -742,30 +771,30 @@ impl InMemoryCloudHome {
         }
         if self.fail_exact_create_after.load(Ordering::SeqCst) == call {
             self.fail_exact_create_after.store(0, Ordering::SeqCst);
-            let stored_matches = self
-                .writes
-                .lock()
-                .unwrap()
-                .values
-                .get(&key)
-                .is_some_and(|stored| upload.object().verify(&stored.bytes).is_ok());
-            if !stored_matches {
-                return Err(CloudHomeError::Transport(format!(
-                    "InMemoryCloudHome: forced failure after exact create call {call}"
-                )));
-            }
+            return Err(CloudHomeError::Transport(format!(
+                "InMemoryCloudHome: forced failure after exact create call {call}"
+            )));
         }
-        let stored_matches = self
+        Ok(())
+    }
+
+    /// What a provider that exposes stored size and content hash proves about
+    /// an exact create: the slot holds exactly the uploaded object. Reads the
+    /// stored bytes directly rather than through the exact read path, so the
+    /// check does not count as a download.
+    async fn verify_exact_upload(
+        &self,
+        upload: &super::ExactUpload<'_>,
+    ) -> Result<(), CloudHomeError> {
+        let slot = upload.object().slot();
+        let key = Self::exact_storage_key(slot)?;
+        let stored = self
             .writes
             .lock()
             .unwrap()
-            .values
-            .get(&key)
-            .is_some_and(|stored| upload.object().verify(&stored.bytes).is_ok());
-        if !stored_matches {
-            return Err(CloudHomeError::SlotCollision(key));
-        }
-        Ok(super::ExactCreateOutcome::Created)
+            .bytes(&key)
+            .ok_or_else(|| CloudHomeError::NotFound(slot.logical_key().to_string()))?;
+        upload.verify_stored_bytes(&stored)
     }
 
     async fn read_exact(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
@@ -1139,7 +1168,15 @@ impl ExactSlotStorage for InMemoryCloudHome {
         upload: &super::ExactUpload<'_>,
         control: &super::UploadControl,
     ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
-        InMemoryCloudHome::create_at_slot(self, upload, control).await
+        match InMemoryCloudHome::create_at_slot(self, upload, control).await {
+            Err(unresolved @ CloudHomeError::UnresolvedOutcome { .. }) => Err(unresolved),
+            operation => {
+                super::exact_upload::settle_exact_create(operation, |_| {
+                    self.verify_exact_upload(upload)
+                })
+                .await
+            }
+        }
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {

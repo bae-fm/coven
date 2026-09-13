@@ -164,6 +164,69 @@ async fn exact_create_is_visible_before_a_lost_response() {
     task.await.unwrap().unwrap();
 }
 
+/// A create whose bytes landed but whose response was lost settles against
+/// the stored object: the caller sees the object present, and no second
+/// create is issued for it.
+#[tokio::test]
+async fn a_lost_create_response_settles_against_the_stored_object() {
+    let h = InMemoryCloudHome::new();
+    let slot = h.allocate_slot("store-v1/test/one.json").await.unwrap();
+    h.fail_exact_create_after_call(1);
+    let outcome = create_exact_bytes(&h, &slot, b"first", &no_progress())
+        .await
+        .unwrap();
+    assert_eq!(outcome, crate::cloud::ExactCreateOutcome::AlreadyPresent);
+    assert_eq!(h.read_at(&slot).await.unwrap(), b"first");
+    assert_eq!(h.exact_create_count(), 1);
+}
+
+/// A create that fails before its bytes land settles against the slot it
+/// left untouched: empty, the transport failure surfaces; holding another
+/// object, the create is rejected as occupied.
+#[tokio::test]
+async fn a_create_that_never_landed_settles_against_the_slot() {
+    let h = InMemoryCloudHome::new();
+    let slot = h.allocate_slot("store-v1/test/one.json").await.unwrap();
+    h.fail_exact_create_before_call(1);
+    assert!(matches!(
+        create_exact_bytes(&h, &slot, b"first", &no_progress()).await,
+        Err(CloudHomeError::Transport(_))
+    ));
+    assert!(matches!(
+        h.read_at(&slot).await,
+        Err(CloudHomeError::NotFound(_))
+    ));
+
+    create_exact_bytes(&h, &slot, b"winner", &no_progress())
+        .await
+        .unwrap();
+    h.fail_exact_create_before_call(1);
+    assert!(matches!(
+        create_exact_bytes(&h, &slot, b"loser", &no_progress()).await,
+        Err(CloudHomeError::SlotCollision(_))
+    ));
+    assert_eq!(h.read_at(&slot).await.unwrap(), b"winner");
+}
+
+/// A create that reaches no conclusion stays unresolved for its caller: the
+/// slot is untouched and nothing about it was observed.
+#[tokio::test]
+async fn a_create_without_a_conclusion_is_unresolved() {
+    let h = InMemoryCloudHome::new();
+    let slot = h.allocate_slot("store-v1/test/one.json").await.unwrap();
+    h.lose_exact_create_outcome_on_call(1);
+    assert!(matches!(
+        create_exact_bytes(&h, &slot, b"first", &no_progress()).await,
+        Err(CloudHomeError::UnresolvedOutcome { operation, settlement })
+            if matches!(*operation, CloudHomeError::Transport(_))
+                && matches!(*settlement, CloudHomeError::Transport(_))
+    ));
+    assert!(matches!(
+        h.read_at(&slot).await,
+        Err(CloudHomeError::NotFound(_))
+    ));
+}
+
 #[tokio::test]
 async fn exact_create_never_overwrites() {
     let h = InMemoryCloudHome::new();
