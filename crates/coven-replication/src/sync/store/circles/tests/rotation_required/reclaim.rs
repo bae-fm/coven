@@ -728,3 +728,85 @@ async fn live_reclaim_state_ignores_unaccepted_candidates() {
         "a candidate the verifier authenticated but never accepted is not live reclaim state: {discovered:?}"
     );
 }
+
+/// A member keeps a Circle package pinned for its own replay until a bootstrap
+/// cut covers the package's commit, which its join-time bootstrap never will.
+/// The owner's reclaim of that package waited for the member's own
+/// acknowledgement of the covering Circle snapshot, so the completion the
+/// member pulls closes the object here too: the pin leaves with the object
+/// record, and the materialized row stays.
+#[tokio::test]
+async fn a_member_closes_a_reclaimed_circle_package_it_still_pins_for_replay() {
+    let fixture = RotationFixture::build("circle-package-reclaim-member-pin").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let (circle_package, published) = fixture
+        .publish_covered_circle_package(member_view, "00000000-0000-4000-8000-0000000000c4")
+        .await;
+    let object = circle_package.package.object.clone();
+    fixture.release_retained_replay_ownership().await;
+    let result = fixture
+        .reclaim_packages()
+        .await
+        .expect("reclaim the covered Circle package");
+    assert!(
+        !fixture.home.contains_exact_object(&object),
+        "reclamation deleted the snapshot-covered Circle package: {result:?}"
+    );
+    assert_eq!(
+        member_replay_pins(&fixture.member_db, &object).await,
+        vec![published.clone()],
+        "the member still pins the package the owner reclaimed"
+    );
+
+    member_view.pull().await;
+
+    assert!(
+        member_replay_pins(&fixture.member_db, &object)
+            .await
+            .is_empty(),
+        "the completion released the member's replay pin"
+    );
+    assert!(
+        !fixture
+            .member_db
+            .remote_object_exists_for_test(object)
+            .await
+            .expect("read the member's object record"),
+        "the completion closed the member's object record"
+    );
+    assert!(
+        member_document_present(&fixture.member_db, "00000000-0000-4000-8000-0000000000c4").await,
+        "the member's materialized row is untouched"
+    );
+}
+
+/// The commits whose retained materializations pin `object` on `db`.
+async fn member_replay_pins(
+    db: &coven_database::Database,
+    object: &coven_protocol::objects::ExactObjectRef,
+) -> Vec<coven_protocol::store_commit::StoreBatchCommitRef> {
+    db.retained_replay_pins_for_test(object.clone())
+        .await
+        .expect("read replay pins")
+        .into_iter()
+        .map(|owner| owner.commit)
+        .collect()
+}
+
+async fn member_document_present(db: &coven_database::Database, id: &str) -> bool {
+    let id = id.to_string();
+    StoreDatabase::new(db)
+        .read(move |sql| {
+            sql.query_row(
+                "SELECT EXISTS(SELECT 1 FROM documents WHERE id = ?1)",
+                [id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("access the member's documents projection")
+        .expect("read the member's documents projection")
+}

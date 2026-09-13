@@ -156,6 +156,26 @@ pub(crate) fn indexed_retained_replay_owners_on(
     Ok(owners)
 }
 
+/// Drop every replay pin this device holds on `object_id`.
+///
+/// A pin says this device's replay still needs the provider's copy of the
+/// object, which is what refuses to reclaim it. Once a reclaim of the object
+/// has been authorized and completed, the provider no longer holds it, so the
+/// pin guards nothing: the retained input keeps the bytes replay applies.
+pub(crate) fn release_retained_replay_pins_on(
+    conn: &Connection,
+    object_id: ObjectHash,
+) -> Result<u64, DbError> {
+    let released = conn
+        .execute(
+            "DELETE FROM retained_replay_objects WHERE object_id = ?1",
+            [object_id.to_string()],
+        )
+        .map_err(DbError::from)?;
+    u64::try_from(released)
+        .map_err(|_| DbError::Message("released replay pin count exceeds u64".to_string()))
+}
+
 pub(crate) fn index_retained_replay_owner_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
@@ -319,6 +339,15 @@ pub(crate) fn record_reclaimed_store_package_on(
             }
         }
         .map_err(|error| DbError::context(format!("close reclaimed package {object_id}"), error))?;
+        // This device may still pin the object for its own replay: a package
+        // stays pinned until this device's own baseline advances past its
+        // commit, and a Circle package until a bootstrap cut covers it, neither
+        // of which the reclaiming device waits for. What it did wait for is
+        // every device's acknowledgement of the covering snapshot, this one's
+        // included, so the completion closing here is the authority this pin
+        // deferred to. The pin leaves with the object record; the retained
+        // input keeps the package bytes replay applies.
+        release_retained_replay_pins_on(conn, object_id)?;
         // A stored blob is referenced by a chain: row bindings name its locator row,
         // which names its remote object. All three leave in this transaction or none
         // does. The bindings that remain here are stale by construction — the reclaim
