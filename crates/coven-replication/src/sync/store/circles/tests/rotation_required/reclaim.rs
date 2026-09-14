@@ -810,3 +810,99 @@ async fn member_document_present(db: &coven_database::Database, id: &str) -> boo
         .expect("access the member's documents projection")
         .expect("read the member's documents projection")
 }
+
+/// The owner's replay baseline advances over a Store snapshot that covers the
+/// commit which activated a recipient's Circle bootstrap image. The activation
+/// is still the evidence the bootstrap reclaim is re-verified against, and the
+/// baseline keeps that commit's retained materialization precisely so the
+/// Circle paths can still read it — so the reclaim authorization the owner
+/// publishes afterwards must still authenticate, and the seed image must still
+/// be reclaimed once the recipient advances past it.
+#[tokio::test]
+async fn circle_bootstrap_reclaim_survives_a_baseline_advance_past_its_activation() {
+    let fixture = RotationFixture::build("circle-bootstrap-reclaim-baseline-advance").await;
+    let circle_id = fixture.circle_id;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let image_object = fixture.member_seed_image(circle_id).await;
+    let activation = StoreDatabase::new(&fixture.member_db)
+        .circle_bootstrap_coverage_ref(circle_id)
+        .await
+        .expect("read member Circle bootstrap coverage")
+        .expect("the member's projection seeded from a real bootstrap coverage row")
+        .activation_commit;
+
+    // Publish Store-audience content so an ordinary snapshot has something to
+    // stand over, and let the member materialize it.
+    fixture
+        .capture_document(
+            "00000000-0000-4000-8000-0000000000f1",
+            None,
+            "2026-07-23T00:30:00Z",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
+        .await
+        .expect("publish the Store document");
+    member_view.pull().await;
+
+    // A snapshot over the accepted history covers the member's bootstrap
+    // activation commit, and the owner stands its replay baseline on it.
+    fixture
+        .components
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            std::num::NonZeroU64::new(1).expect("one commit is a threshold"),
+        )
+        .await
+        .expect("publish a Store snapshot and advance the replay baseline");
+    let baseline = StoreDatabase::new(&fixture.db)
+        .installed_replay_baseline()
+        .await
+        .expect("read the installed replay baseline");
+    assert!(
+        baseline.covers(&activation),
+        "the advanced baseline stands over the bootstrap activation commit"
+    );
+    assert!(
+        StoreDatabase::new(&fixture.db)
+            .retained_merge_materialization_refs()
+            .await
+            .expect("read the materializations the advanced baseline keeps")
+            .contains(&activation),
+        "the baseline keeps the bootstrap activation's own materialization"
+    );
+
+    // The member acknowledges a frontier past its bootstrap seed, so the seed is
+    // superseded and reclaimable.
+    member_view
+        .publish_acknowledgements("2026-07-23T00:40:00Z")
+        .await;
+    fixture
+        .components
+        .run_cycle(
+            &coven_foundation::clock::SystemClock,
+            None,
+            coven_foundation::config::Config::DEFAULT_SNAPSHOT_COMMIT_THRESHOLD,
+        )
+        .await
+        .expect("owner activates the member acknowledgement");
+
+    fixture.release_retained_replay_ownership().await;
+    fixture
+        .reclaim_packages()
+        .await
+        .expect("reclaim the superseded seed image under an advanced baseline");
+    assert!(
+        !fixture.bootstrap_image_present(&image_object).await,
+        "the seed image is reclaimed once the recipient advances past it"
+    );
+}

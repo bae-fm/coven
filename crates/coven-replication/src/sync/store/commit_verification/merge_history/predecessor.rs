@@ -42,14 +42,21 @@ pub(super) fn predecessor_verifies_provider_administrator_grant(
 
 /// What a search of a commit's predecessor history found.
 ///
-/// The third answer is the one an installed baseline forces. A device that
+/// An installed baseline is what separates the first two answers. A device that
 /// advanced its baseline retired the commits under it, so a position the
 /// baseline covers is in this device's predecessor history — the coverage
-/// exists because the device verified and materialized every commit behind it —
-/// but the body that would answer anything further about it is gone.
+/// exists because the device verified and materialized every commit behind it.
+/// Whether its body is still here is a separate question: the baseline keeps a
+/// closure of materializations at or under its own coverage — author-exclusion
+/// activations, Circle bootstrap activations, materializations carrying a
+/// Circle package no bootstrap cut covers — and a covered position holding one
+/// of those rows answers with the verified commit the row authenticated, the
+/// same way a position in the suffix does. `Covered` is the position whose body
+/// really is gone.
 pub(crate) enum PredecessorSearch<'a> {
-    Found(&'a VerifiedMergeHistoryCommit),
-    /// The reference is one the installed baseline restates.
+    Found(&'a VerifiedStoreBatchCommit),
+    /// The reference is one the installed baseline restates, and this device
+    /// kept no materialization behind it.
     Covered,
     Absent,
 }
@@ -72,16 +79,23 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
     /// `matches`, down to the installed baseline.
     ///
     /// `expected` is the reference the caller is really after, so that a search
-    /// that reaches the baseline can say whether the thing it wanted is under
-    /// it rather than reporting a bare absence. Pass `None` when the search is
-    /// over bodies rather than for one known position.
+    /// answers for a position the baseline covers — with the commit the kept
+    /// materialization authenticated, or as `Covered` when the device kept none
+    /// — rather than reporting a bare absence for history the walk cannot reach
+    /// past the baseline. Pass `None` when the search is over bodies rather
+    /// than for one known position.
     pub(super) fn find(
         &self,
         expected: Option<&StoreBatchCommitRef>,
         mut matches: impl FnMut(&StoreBatchCommitRef, &StoreBatchCommit) -> bool,
     ) -> Result<PredecessorSearch<'a>, StorePullError> {
-        if expected.is_some_and(|reference| self.history.superseded(reference)) {
-            return Ok(PredecessorSearch::Covered);
+        if let Some(reference) =
+            expected.filter(|reference| self.history.baseline.covers(reference))
+        {
+            return Ok(match self.history.retained.get(reference) {
+                Some(retained) => PredecessorSearch::Found(&retained.commit),
+                None => PredecessorSearch::Covered,
+            });
         }
         let mut pending = self.frontier.to_vec();
         let mut visited = BTreeSet::new();
@@ -98,7 +112,7 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                 )
             })?;
             if matches(&reference, verified.verified.value()) {
-                return Ok(PredecessorSearch::Found(verified));
+                return Ok(PredecessorSearch::Found(&verified.verified));
             }
             pending.extend(commit_predecessor_references(verified.verified.value()));
         }
@@ -232,7 +246,6 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
             }
         };
         let names_package = activating
-            .verified
             .value()
             .circle_packages()
             .contains(&activation.package);
@@ -290,15 +303,13 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         };
         let names_target = match target {
             coven_protocol::reclaim::ReclaimTarget::StorePackage(store) => {
-                activation.verified.value().store_package() == Some(&store.package)
+                activation.value().store_package() == Some(&store.package)
             }
             coven_protocol::reclaim::ReclaimTarget::CirclePackage(circle) => activation
-                .verified
                 .value()
                 .circle_packages()
                 .contains(&circle.package),
             coven_protocol::reclaim::ReclaimTarget::CircleBootstrapImage(bootstrap) => activation
-                .verified
                 .value()
                 .circle_controls()
                 .iter()
@@ -374,7 +385,7 @@ impl MergeHistoryVerifier<'_> {
                     .to_string(),
             ));
         };
-        verify_circle_control_in_predecessor(&predecessor.verified, activation)
+        verify_circle_control_in_predecessor(predecessor, activation)
     }
 }
 
