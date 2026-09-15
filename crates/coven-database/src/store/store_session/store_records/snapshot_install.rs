@@ -1,4 +1,6 @@
-use super::{StoreRecords, StoreTransaction};
+#[cfg(any(test, feature = "test-utils"))]
+use super::StoreRecords;
+use super::StoreTransaction;
 use crate::store::retained_replay::install_snapshot_replay_baseline_on;
 use crate::{
     install_store_founder_state_on, install_store_root_authority_on,
