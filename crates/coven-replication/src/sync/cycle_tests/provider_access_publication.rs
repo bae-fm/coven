@@ -367,8 +367,16 @@ fn assert_registration_matches(
     assert_eq!(actual.state, expected.state);
 }
 
+/// Signing a provider admission accepts nothing into the Store. The approval
+/// is its own evidence — the administrator's signature over the member, the
+/// provider principals, the Store root, the expected registration, the
+/// provider-administrator grant and the exact access locator — and the Attempt
+/// the owner accepts afterwards is the only Store operation the exchange
+/// produces. So the joining device prepares its registration request from the
+/// approval alone, against the same authenticated boundary the offer was made
+/// on, and reaching the Store is the Attempt's job.
 #[tokio::test]
-async fn provider_approval_requires_its_activation_in_the_observed_publication() {
+async fn provider_approval_reaches_the_store_only_through_its_attempt() {
     let OwnerAndMember {
         owner,
         owner_db,
@@ -411,12 +419,42 @@ async fn provider_approval_requires_its_activation_in_the_observed_publication()
     )
     .await;
     let attempt = approval.request.offer.attempt_id;
-    let journal_before = pending.status(attempt).expect("read pending join state");
+    assert_eq!(
+        database
+            .store_current_publication()
+            .await
+            .expect("read acceptance after approval")
+            .record(),
+        before.record(),
+        "approving provider access accepts no Store operation"
+    );
+
+    let request = joiner
+        .prepare_registration_request(approval.clone())
+        .await
+        .expect("an authenticated approval prepares its own registration request");
+    let journal_prepared = pending.status(attempt).expect("read prepared join state");
+
+    let provisional = owner_device
+        .accept_device_registration_request(request.clone())
+        .await
+        .expect("accept the registration request");
     let accepted = database
         .store_current_publication()
         .await
-        .expect("read accepted approval");
+        .expect("read the publication accepting the Attempt");
     assert_ne!(accepted.record(), before.record());
+    let opening = owner_device
+        .load_commit_for_test(&provisional.publication_authorization.attempt_activation)
+        .await
+        .expect("load the accepted Attempt");
+    assert!(opening
+        .device_join_attempt_decisions()
+        .contains(&coven_protocol::store_commit::DeviceJoinAttemptDecisionRef::Attempt(attempt)));
+
+    // Serve the boundary that predates the Attempt. Preparation reads no Store
+    // history for the approval, so the same request comes back and the journal
+    // does not move.
     let slot = &owner_device
         .protocol_root_for_test()
         .descriptor
@@ -426,8 +464,6 @@ async fn provider_approval_requires_its_activation_in_the_observed_publication()
         ProtocolObjectDomain::StoreCurrentPublication,
     );
     let prefix = coven_protocol::store_commit::store_current_publication_semantic_prefix();
-    // All signed approval and activation objects remain readable, but the
-    // provider serves an authenticated boundary that does not accept them.
     let ConditionalWriteOutcome::Replaced(stale_version) = cloud_storage
         .replace_protocol_record_if_version(
             &context,
@@ -444,69 +480,14 @@ async fn provider_approval_requires_its_activation_in_the_observed_publication()
     else {
         panic!("test owns the current provider revision")
     };
-    let rejection = joiner
-        .prepare_registration_request(approval.clone())
-        .await
-        .expect_err("an authentic activation must also be accepted");
-    assert!(
-        rejection
-            .to_string()
-            .contains("absent from current accepted Store history"),
-        "{rejection}"
-    );
-    assert_eq!(
-        pending.status(attempt).expect("read preserved join state"),
-        journal_before
-    );
-    let ConditionalWriteOutcome::Replaced(restored_version) = cloud_storage
-        .replace_protocol_record_if_version(
-            &context,
-            slot,
-            prefix,
-            &stale_version,
-            accepted.record().to_bytes(),
-        )
-        .await
-        .expect("restore the accepted boundary")
-    else {
-        panic!("test owns the current provider revision")
-    };
-    joiner
-        .prepare_registration_request(approval.clone())
-        .await
-        .expect("the same join can continue once its activation is accepted");
-
-    let journal_accepted = pending.records().expect("read accepted join journal");
-    // Reuse the owner that accepted the activation. Its cache cannot establish
-    // acceptance when the provider serves a boundary that omits the commit.
-    let ConditionalWriteOutcome::Replaced(stale_version) = cloud_storage
-        .replace_protocol_record_if_version(
-            &context,
-            slot,
-            prefix,
-            &restored_version,
-            before.record().to_bytes(),
-        )
-        .await
-        .expect("serve the earlier boundary after acceptance")
-    else {
-        panic!("test owns the current provider revision")
-    };
-    let rejection = joiner
+    let retried = joiner
         .prepare_registration_request(approval)
         .await
-        .expect_err("cached acceptance cannot replace the observed publication");
-    assert!(
-        rejection
-            .to_string()
-            .contains("absent from current accepted Store history"),
-        "{rejection}"
-    );
+        .expect("preparation does not depend on the observed publication");
+    assert_eq!(retried, request);
     assert_eq!(
-        pending
-            .records()
-            .expect("read preserved accepted join journal"),
-        journal_accepted
+        pending.status(attempt).expect("read preserved join state"),
+        journal_prepared
     );
     assert!(matches!(
         cloud_storage
@@ -518,7 +499,7 @@ async fn provider_approval_requires_its_activation_in_the_observed_publication()
                 accepted.record().to_bytes(),
             )
             .await
-            .expect("restore the accepted boundary after cache verification"),
+            .expect("restore the accepted boundary"),
         ConditionalWriteOutcome::Replaced(_)
     ));
 }

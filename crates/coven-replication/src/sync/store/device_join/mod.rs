@@ -14,10 +14,8 @@ use coven_database::DeviceJoinBootstrapPlan;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::objects::{ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding};
 use coven_protocol::provider::{
-    ActivatedStoreMemberProviderAccessGrant, CrossPrincipalProbeChallenge,
-    CrossPrincipalProbeResponse, DeviceJoinChallengePublicationAuthorization,
-    ProviderAccessGrantId, ProviderAdminGrantId, ProviderAdminGrantRecord,
-    StoreMemberProviderAccessGrantRef,
+    CrossPrincipalProbeChallenge, CrossPrincipalProbeResponse,
+    DeviceJoinChallengePublicationAuthorization, ProviderAdminGrantId, ProviderAdminGrantRecord,
 };
 use coven_protocol::store_commit::{
     DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceReadinessProof, ObjectHash,

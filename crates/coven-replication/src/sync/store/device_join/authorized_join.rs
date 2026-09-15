@@ -7,8 +7,8 @@ mod same_principal;
 
 pub use admission::DeviceProviderAccessAdministrator;
 
-/// One device admits a join: it answers the access request, prepares the
-/// storage grant, signs the approval, registers the joining device and
+/// One device admits a join: it answers the access request, creates the
+/// provider authority, signs the approval, registers the joining device and
 /// activates it. Every step below runs against the same journal row, under the
 /// provider-administrator grant this device itself holds.
 pub(crate) struct AuthorizedJoin<'operation, 'storage> {
@@ -320,21 +320,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if provider_admin != *offer.provider_admin {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
-        let administrator = self
-            .join_history()
-            .load_registration(&provider_admin.administrator)
-            .await?
-            .value;
         self.verify_device_admission_approval(request.approval())?;
-        if let Some(access_grant) = request.approval().access_grant() {
-            self.join_history()
-                .verify_accepted_provider_access_activation(
-                    access_grant,
-                    &provider_admin,
-                    &administrator,
-                )
-                .await?;
-        }
         if !self.local_writer.is_current_owner(&self.membership) {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
@@ -428,11 +414,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         request: DeviceRegistrationRequest,
     ) -> Result<ProvisionalDeviceBootstrap, DeviceJoinError> {
-        let access_grant = request
-            .approval()
-            .access_grant()
-            .ok_or(DeviceJoinError::ApprovalMismatch)?
-            .clone();
+        if !matches!(
+            request.approval().admission,
+            DeviceProviderAdmission::CrossPrincipal { .. }
+        ) {
+            return Err(DeviceJoinError::ApprovalMismatch);
+        }
         let offer = self.validate_registration_request(&request).await?;
         let journal = self.journal(offer.attempt_id);
         let durable = journal.current().await?;
@@ -467,14 +454,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         self.database
             .reach_test_point(coven_database::DatabaseTestPoint::DeviceJoinAttemptPositionHeld)
             .await;
-        let cut = plan.predecessor_cut()?;
-        if !self
-            .join_history()
-            .history_cut_covers(&cut, &access_grant.activation)
-            .await?
-        {
-            return Err(DeviceJoinError::ApprovalActivationMissing);
-        }
         let requested = if matches!(
             &*durable.progress,
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::RegistrationRequested(_))
@@ -682,7 +661,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
 
 fn prepared_operation_attempt_id(operation: &OwnerJoinPublication) -> DeviceJoinAttemptId {
     match operation {
-        OwnerJoinPublication::ProviderAccessGrant { request, .. } => request.offer.attempt_id,
         OwnerJoinPublication::Attempt { request }
         | OwnerJoinPublication::SamePrincipalActivation { request } => {
             request.approval().request.offer.attempt_id
@@ -697,10 +675,6 @@ fn owner_publication_object_location(
     operation: &OwnerJoinPublication,
 ) -> (coven_protocol::objects::ProtocolObjectContext, String) {
     let (domain, prefix) = match operation {
-        OwnerJoinPublication::ProviderAccessGrant { grant, .. } => (
-            ProtocolObjectDomain::ProviderAccessGrant,
-            coven_protocol::store_commit::provider_access_grant_semantic_prefix(&grant.grant_id),
-        ),
         OwnerJoinPublication::Abandonment { offer, .. } => (
             ProtocolObjectDomain::DeviceJoinAbandonment,
             coven_protocol::store_commit::device_join_abandonment_semantic_prefix(offer.attempt_id),

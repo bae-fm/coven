@@ -212,9 +212,9 @@ impl TransportFixture {
             None => home.clone(),
         };
         let access_administrator = cross_principal.then(|| {
-            coven_replication::sync::test_helpers::TestDropboxAccessAdministrator {
-                namespace_id: CROSS_PRINCIPAL_NAMESPACE.to_string(),
-            }
+            coven_replication::sync::test_helpers::TestDropboxAccessAdministrator::new(
+                CROSS_PRINCIPAL_NAMESPACE.to_string(),
+            )
         });
         (
             Self {

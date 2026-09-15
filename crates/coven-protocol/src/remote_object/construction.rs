@@ -158,23 +158,6 @@ impl RemoteObjectRecord {
         )
     }
 
-    pub fn candidate_activated_provider_access_grant(
-        reference: crate::provider::StoreMemberProviderAccessGrantRef,
-        canonical_signed_bytes: &[u8],
-        stored_bytes: &[u8],
-        owner: StoreBatchCommitRef,
-    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
-        let object = reference.object.clone();
-        Self::candidate_activated_retained_authority(
-            RetainedAuthorityObjectDomain::ProviderAccessGrant { reference },
-            ObjectHash::digest(canonical_signed_bytes),
-            object,
-            canonical_signed_bytes,
-            stored_bytes,
-            owner,
-        )
-    }
-
     pub fn candidate_activated_device_join_abandonment(
         reference: crate::store_commit::DeviceJoinAbandonmentRef,
         canonical_signed_bytes: &[u8],

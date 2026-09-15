@@ -260,16 +260,6 @@ pub(super) fn validate_retained_authority_identity(
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
-        RetainedAuthorityObjectDomain::ProviderAccessGrant { reference } => {
-            let grant: crate::provider::StoreMemberProviderAccessGrant =
-                serde_json::from_slice(canonical_semantic_bytes)?;
-            reference
-                .verify(&grant)
-                .map_err(|_| RemoteObjectRecordError::StoredReferenceMismatch)?;
-            if reference.object != identity.object {
-                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-            }
-        }
         RetainedAuthorityObjectDomain::DeviceJoinAbandonment { reference } => {
             let abandonment: crate::store_commit::device_join_exchange::DeviceJoinAbandonmentObject =
                 serde_json::from_slice(canonical_semantic_bytes)?;

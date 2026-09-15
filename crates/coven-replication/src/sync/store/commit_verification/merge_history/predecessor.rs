@@ -22,16 +22,6 @@ pub(super) fn predecessor_provider_admin_state(
     predecessor.resolved().provider_admin.combined_state()
 }
 
-pub(super) fn predecessor_verifies_provider_administrator(
-    predecessor: &MembershipChain,
-    grant_id: &provider::ProviderAdminGrantId,
-    executor: &StoreDeviceRegistrationRef,
-    expected: &provider::ProviderAdminGrantRecord,
-) -> bool {
-    let state = predecessor_provider_admin_state(predecessor);
-    state.authorizes(grant_id, executor) && state.records().get(grant_id) == Some(expected)
-}
-
 pub(super) fn predecessor_verifies_provider_administrator_grant(
     predecessor: &MembershipChain,
     grant_id: &provider::ProviderAdminGrantId,

@@ -54,25 +54,6 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         self.history.load_store_ack(reference, registration).await
     }
 
-    pub(crate) async fn verify_accepted_provider_access_activation(
-        &mut self,
-        access: &coven_protocol::provider::ActivatedStoreMemberProviderAccessGrant,
-        provider_admin: &coven_protocol::provider::ProviderAdminGrantRecord,
-        administrator: &StoreDeviceRegistration,
-    ) -> Result<(), StorePullError> {
-        self.history
-            .verify_accepted_provider_access_activation(access, provider_admin, administrator)
-            .await
-    }
-
-    pub(crate) async fn history_cut_covers(
-        &mut self,
-        cut: &coven_protocol::store_commit::StoreHistoryCut,
-        target: &StoreBatchCommitRef,
-    ) -> Result<bool, StorePullError> {
-        self.history.history_cut_covers(cut, target).await
-    }
-
     pub(crate) async fn verify_attempt_and_prepare_bootstrap(
         &mut self,
         attempt_id: DeviceJoinAttemptId,

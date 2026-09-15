@@ -3,8 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::provider::DeviceJoinChallengePublicationAuthorization;
-use crate::provider::StoreMemberProviderAccessGrant;
+use crate::provider::{DeviceJoinChallengePublicationAuthorization, ProviderAccessLocator};
 use crate::store_commit::device_join_exchange::{
     DeviceJoinAbandonment, DeviceJoinAbandonmentObject, DeviceJoinActivation, DeviceJoinOffer,
     DeviceJoinReadiness, DeviceProviderAccessRequest, DeviceProviderAdmissionApproval,
@@ -54,9 +53,9 @@ pub enum DeviceJoinStatus {
     Abandoned {
         abandonment: DeviceJoinAbandonment,
     },
-    ProviderAccessGrantPublished {
+    AccessGranted {
         request: DeviceProviderAccessRequest,
-        grant: StoreMemberProviderAccessGrant,
+        locator: ProviderAccessLocator,
     },
     StorePublicationPending {
         operation: OwnerJoinPublication,
@@ -88,14 +87,16 @@ pub enum OwnerJoinProgress {
     Offered(DeviceJoinOffer),
     /// The joining device asked for provider access. The admitting device holds
     /// the store's provider-administrator grant, so answering this request, the
-    /// grant it prepares, and the approval it signs are all its own steps.
+    /// provider authority it creates, and the approval it signs are all its own
+    /// steps.
     AccessRequested(DeviceProviderAccessRequest),
     StorePublicationPrepared(PreparedOwnerJoinPublication),
-    AccessGrantActivated {
+    /// The physical provider authority exists. Recorded before the challenge is
+    /// prepared so a failure past this point retries the rest of the admission
+    /// without creating a second authority the Store would never name.
+    AccessGranted {
         request: DeviceProviderAccessRequest,
-        grant: StoreMemberProviderAccessGrant,
-        grant_ref: crate::provider::StoreMemberProviderAccessGrantRef,
-        activation: StoreBatchCommitRef,
+        locator: ProviderAccessLocator,
     },
     ApprovalPrepared(DeviceProviderAdmissionApproval),
     RegistrationRequested(DeviceRegistrationRequest),
@@ -140,10 +141,6 @@ pub enum OwnerJoinProgress {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerJoinPublication {
-    ProviderAccessGrant {
-        request: DeviceProviderAccessRequest,
-        grant: StoreMemberProviderAccessGrant,
-    },
     Attempt {
         request: DeviceRegistrationRequest,
     },
@@ -214,18 +211,8 @@ impl PreparedOwnerJoinPublication {
         }
         let registration = self.candidate.registration_activation.as_ref();
         let exact = match &self.operation {
-            OwnerJoinPublication::ProviderAccessGrant { request, grant } => {
-                request.offer.attempt_id == attempt_id
-                    && operations.device_join_attempt_decisions.is_empty()
-                    && operations.device_registrations.is_empty()
-                    && registration.is_none()
-                    && matches!(operations.provider_access_grants.as_slice(), [reference]
-                        if reference.verify(grant).is_ok()
-                            && reference.object.verify(&grant.to_bytes()).is_ok())
-            }
             OwnerJoinPublication::Attempt { request } => {
                 request.approval().request.offer.attempt_id == attempt_id
-                    && operations.provider_access_grants.is_empty()
                     && operations.device_registrations.is_empty()
                     && registration.is_none()
                     && operations.device_join_attempt_decisions
@@ -235,7 +222,6 @@ impl PreparedOwnerJoinPublication {
                 offer.attempt_id == attempt_id
                     && abandonment.attempt_id == attempt_id
                     && abandonment.owner_registration == offer.owner_registration
-                    && operations.provider_access_grants.is_empty()
                     && operations.device_registrations.is_empty()
                     && registration.is_none()
                     && matches!(operations.device_join_attempt_decisions.as_slice(),
@@ -247,7 +233,6 @@ impl PreparedOwnerJoinPublication {
             OwnerJoinPublication::SamePrincipalActivation { request } => {
                 let expected = request.expected_registration();
                 request.approval().request.offer.attempt_id == attempt_id
-                    && operations.provider_access_grants.is_empty()
                     && operations.device_join_attempt_decisions
                         == [DeviceJoinAttemptDecisionRef::Attempt(attempt_id)]
                     && matches!((operations.device_registrations.as_slice(), registration),
@@ -261,7 +246,6 @@ impl PreparedOwnerJoinPublication {
                 let request = &completion.bootstrap().bootstrap.request;
                 let expected = request.expected_registration();
                 completion.attempt_id() == attempt_id
-                    && operations.provider_access_grants.is_empty()
                     && operations.device_join_attempt_decisions.is_empty()
                     && matches!((operations.device_registrations.as_slice(), registration),
                         ([reference], Some(activated))
@@ -313,15 +297,6 @@ impl PreparedOwnerJoinPublication {
         let candidate = &self.candidate;
         let activation = candidate.reference.clone();
         Ok(match &self.operation {
-            OwnerJoinPublication::ProviderAccessGrant { grant, .. } => {
-                let reference = candidate.commit.provider_access_grants()[0].clone();
-                Some(crate::remote_object::RemoteObjectRecord::candidate_activated_provider_access_grant(
-                    reference,
-                    &grant.to_bytes(),
-                    &grant.to_bytes(),
-                    activation,
-                )?)
-            }
             OwnerJoinPublication::Abandonment { abandonment, .. } => {
                 let DeviceJoinAttemptDecisionRef::Abandoned(reference) =
                     &candidate.commit.device_join_attempt_decisions()[0]
@@ -376,14 +351,6 @@ impl PreparedOwnerJoinPublication {
         self.validate_for(attempt_id)?;
         let activation = self.candidate.reference.clone();
         Ok(match &self.operation {
-            OwnerJoinPublication::ProviderAccessGrant { request, grant } => {
-                OwnerJoinProgress::AccessGrantActivated {
-                    request: request.clone(),
-                    grant: grant.clone(),
-                    grant_ref: self.candidate.commit.provider_access_grants()[0].clone(),
-                    activation,
-                }
-            }
             OwnerJoinPublication::Attempt { request } => {
                 OwnerJoinProgress::AttemptActivated(ProvisionalDeviceBootstrap {
                     request: Box::new(request.clone()),
@@ -451,20 +418,6 @@ impl PreparedOwnerJoinPublication {
             .as_ref()
             .map(ActivatedStoreDeviceRegistration::reference);
         match (&self.operation, progress) {
-            (
-                OwnerJoinPublication::ProviderAccessGrant { request, grant },
-                OwnerJoinProgress::AccessGrantActivated {
-                    request: accepted_request,
-                    grant: accepted_grant,
-                    grant_ref,
-                    activation,
-                },
-            ) => {
-                request == accepted_request
-                    && grant == accepted_grant
-                    && candidate.commit.provider_access_grants() == std::slice::from_ref(grant_ref)
-                    && activation == &candidate.reference
-            }
             (
                 OwnerJoinPublication::Attempt { request },
                 OwnerJoinProgress::AttemptActivated(bootstrap),
@@ -621,7 +574,7 @@ impl DeviceJoinJournalRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 /// The two sides of a join. One device admits — it answers the access
-/// request, prepares the storage grant, signs the approval, registers the
+/// request, creates the provider authority, signs the approval, registers the
 /// device and activates it — and the other is the device being admitted.
 pub enum DeviceJoinRole {
     Owner,
@@ -656,14 +609,12 @@ pub(crate) fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoin
                 operation: prepared.operation.clone(),
             }
         }
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AccessGrantActivated {
-            request,
-            grant,
-            ..
-        }) => DeviceJoinStatus::ProviderAccessGrantPublished {
-            request: request.clone(),
-            grant: grant.clone(),
-        },
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AccessGranted { request, locator }) => {
+            DeviceJoinStatus::AccessGranted {
+                request: request.clone(),
+                locator: locator.clone(),
+            }
+        }
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ApprovalPrepared(approval))
         | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ApprovalReceived(approval)) => {
             DeviceJoinStatus::AwaitingRegistrationRequest {
@@ -736,7 +687,7 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
         DeviceJoinRoleProgress::Owner(
             OwnerJoinProgress::AccessRequested(_)
             | OwnerJoinProgress::StorePublicationPrepared(_)
-            | OwnerJoinProgress::AccessGrantActivated { .. }
+            | OwnerJoinProgress::AccessGranted { .. }
             | OwnerJoinProgress::RegistrationRequested(_)
             | OwnerJoinProgress::AttemptActivated(_)
             | OwnerJoinProgress::ChallengeCreateIntent(_)

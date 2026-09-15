@@ -121,7 +121,6 @@ pub use coven_protocol::{
     ExactSlotProbeReceipt, MemberInfo, MemberRole, ObjectHash, ProviderAccessLocator,
     ProviderAccessWithdrawal, ProviderAdminGrantId, ProviderAdminGrantRecord,
     ProviderCapabilityProof, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceId,
-    StoreMemberProviderAccessGrantRef,
 };
 pub use coven_protocol::{
     AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,

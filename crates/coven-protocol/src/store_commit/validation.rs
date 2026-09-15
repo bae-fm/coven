@@ -69,8 +69,6 @@ pub enum StoreProtocolError {
     DeviceReadinessMismatch,
     #[error("device join outcome differs from its exact attempt or closed outcome variant")]
     JoinOutcomeMismatch,
-    #[error("provider access activation contains duplicate or contradictory exact authority")]
-    ProviderAccessMismatch,
     #[error("Owner recovery node differs from its exact registration lifecycle")]
     OwnerRecoveryMismatch,
     #[error("Store device state differs from its signed predecessor state")]
@@ -222,12 +220,6 @@ pub fn device_exclusion_outcome_semantic_prefix(
     proposal_id: StoreDeviceExclusionProposalId,
 ) -> String {
     format!("{STORE_DEVICE_EXCLUSION_OUTCOME_PREFIX}{target}/{proposal_id}")
-}
-
-pub fn provider_access_grant_semantic_prefix(
-    grant_id: &crate::provider::ProviderAccessGrantId,
-) -> String {
-    format!("{STORE_PROVIDER_ACCESS_GRANT_PREFIX}{}", grant_id.0)
 }
 
 pub fn owner_recovery_semantic_prefix(

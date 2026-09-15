@@ -272,9 +272,6 @@ pub enum RetainedAuthorityObjectDomain {
     CircleAcknowledgement {
         reference: CircleAckRef,
     },
-    ProviderAccessGrant {
-        reference: crate::provider::StoreMemberProviderAccessGrantRef,
-    },
     DeviceJoinAbandonment {
         reference: crate::store_commit::DeviceJoinAbandonmentRef,
     },

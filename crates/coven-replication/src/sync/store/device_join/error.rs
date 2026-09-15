@@ -4,9 +4,7 @@ pub enum DeviceJoinError {
     InvalidSignature,
     #[error("device join offer does not name one active Store/member/provider authority")]
     OfferMismatch,
-    #[error(
-        "device provider admission approval differs from its request or activated access grant"
-    )]
+    #[error("device provider admission approval differs from its request or provider admission")]
     ApprovalMismatch,
     #[error("device registration request differs from its offer, approval, or reserved slots")]
     RegistrationRequestMismatch,
@@ -44,8 +42,6 @@ pub enum DeviceJoinError {
     OwnerAuthorityRequired,
     #[error("device join requires the selected effective provider administrator")]
     ProviderAdministratorRequired,
-    #[error("device join attempt cut does not include its provider-access activation")]
-    ApprovalActivationMissing,
     #[error("device join activation is not materialized in the installed Store database")]
     ActivationNotMaterialized,
     #[error(transparent)]

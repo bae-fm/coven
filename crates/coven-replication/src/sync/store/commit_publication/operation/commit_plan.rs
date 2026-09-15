@@ -7,7 +7,7 @@ use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreCommitOrder, StoreHistoryCut, StoreRootRef,
 };
-use coven_protocol::{circle_control, membership, provider, store_commit};
+use coven_protocol::{circle_control, membership, store_commit};
 mod plan;
 mod publication;
 

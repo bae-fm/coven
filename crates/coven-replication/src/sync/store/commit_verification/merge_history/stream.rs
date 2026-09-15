@@ -1,26 +1,6 @@
 use super::*;
 
 impl<'a> MergeHistoryVerifier<'a> {
-    pub(crate) async fn history_cut_covers(
-        &mut self,
-        cut: &StoreHistoryCut,
-        target: &StoreBatchCommitRef,
-    ) -> Result<bool, StorePullError> {
-        let Some(covering) = cut.0.get(&target.coord.stream_id) else {
-            return Ok(false);
-        };
-        self.commit_position_covers(covering, target)
-            .await
-            .map_err(|error| match error {
-                CommitCoverageError::Object(error) => StorePullError::Object(error),
-                CommitCoverageError::MissingAncestry { commit_hash } => {
-                    StorePullError::InvalidState(format!(
-                        "exact Store ancestry is missing commit {commit_hash}"
-                    ))
-                }
-            })
-    }
-
     pub(crate) async fn registration_activation(
         &self,
         activated: &ActivatedStoreDeviceRegistrationRef,

@@ -97,12 +97,3 @@ pub(super) fn validate_device_join_attempt_decision_refs(
     }
     Ok(())
 }
-
-pub(super) fn validate_provider_access_refs(
-    grants: &[crate::provider::StoreMemberProviderAccessGrantRef],
-) -> Result<(), StoreProtocolError> {
-    if grants.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(StoreProtocolError::ProviderAccessMismatch);
-    }
-    Ok(())
-}

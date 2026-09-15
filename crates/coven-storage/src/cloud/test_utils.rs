@@ -127,6 +127,7 @@ pub struct InMemoryCloudHome {
     exact_create_pause: Arc<Mutex<Option<AppendPause>>>,
     probe_pause: Arc<Mutex<Option<OperationPause>>>,
     probe_failure: Arc<Mutex<Option<coven_protocol::objects::StorageBackendFailure>>>,
+    fail_next_slot_allocations: Arc<AtomicUsize>,
     exact_full_read_count: Arc<AtomicUsize>,
     exact_full_read_delay_millis: Arc<AtomicU64>,
     exact_list_count: Arc<AtomicUsize>,
@@ -208,6 +209,7 @@ impl InMemoryCloudHome {
             exact_create_pause: Arc::new(Mutex::new(None)),
             probe_pause: Arc::new(Mutex::new(None)),
             probe_failure: Arc::new(Mutex::new(None)),
+            fail_next_slot_allocations: Arc::new(AtomicUsize::new(0)),
             exact_full_read_count: Arc::new(AtomicUsize::new(0)),
             exact_list_count: Arc::new(AtomicUsize::new(0)),
             exact_listed_prefixes: Arc::new(Mutex::new(Vec::new())),
@@ -402,6 +404,14 @@ impl InMemoryCloudHome {
 
     pub fn fail_next_probe_with(&self, failure: coven_protocol::objects::StorageBackendFailure) {
         *self.probe_failure.lock().unwrap() = Some(failure);
+    }
+
+    /// Make the next `n` slot allocations fail with a retryable transport
+    /// error. Each failed call consumes one; once `n` are spent, allocation
+    /// serves normally. Use it to interrupt a caller between an effect it has
+    /// already produced and the object it was about to reserve a place for.
+    pub fn fail_next_slot_allocations(&self, n: usize) {
+        self.fail_next_slot_allocations.store(n, Ordering::SeqCst);
     }
 
     pub fn exact_create_count(&self) -> usize {
@@ -1133,6 +1143,19 @@ impl ExactSlotStorage for InMemoryCloudHome {
     }
 
     async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
+        if self
+            .fail_next_slot_allocations
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(CloudHomeError::backend(
+                coven_protocol::objects::StorageBackendFailure::Transport,
+                "allocate slot in in-memory cloud home",
+                std::io::Error::other("injected slot allocation failure"),
+            ));
+        }
         let inflight = self
             .exact_slot_allocation_inflight
             .fetch_add(1, Ordering::SeqCst)

@@ -11,16 +11,6 @@ impl ProviderAdminGrantId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ProviderAccessGrantId(pub ObjectHash);
-
-impl ProviderAccessGrantId {
-    pub fn from_random_bytes(bytes: [u8; 32]) -> Self {
-        Self(ObjectHash::from_digest(bytes))
-    }
-}
-
 /// Stable provider authority that can be withdrawn without rediscovering a
 /// member by mutable account metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,117 +192,6 @@ impl ProviderAccessLocator {
             ))
         }
     }
-}
-
-/// The wire body of one member's provider access grant. Every field here is
-/// signed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreMemberProviderAccessGrantBody {
-    pub grant_id: ProviderAccessGrantId,
-    pub member_pubkey: String,
-    pub provider: ProviderDeviceBinding,
-    pub locator: ProviderAccessLocator,
-    pub administrator_grant: ProviderAdminGrantId,
-    pub administrator: StoreDeviceRegistrationRef,
-}
-
-impl crate::store_commit::SignedBody for StoreMemberProviderAccessGrantBody {
-    const DOMAIN: &'static [u8] = MEMBER_ACCESS_GRANT_DOMAIN;
-}
-
-pub type StoreMemberProviderAccessGrant =
-    crate::store_commit::Signed<StoreMemberProviderAccessGrantBody>;
-
-impl StoreMemberProviderAccessGrant {
-    #[allow(clippy::too_many_arguments)]
-    pub fn signed(
-        grant_id: ProviderAccessGrantId,
-        member_pubkey: String,
-        provider: ProviderDeviceBinding,
-        locator: ProviderAccessLocator,
-        administrator_grant: ProviderAdminGrantId,
-        administrator: StoreDeviceRegistrationRef,
-        store: &StoreProviderBinding,
-        administrator_registration: &StoreDeviceRegistration,
-        administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
-    ) -> Result<Self, ProviderProbeError> {
-        administrator.verify_registration(administrator_registration)?;
-        if administrator_signer.public_key_hex() != administrator_registration.device_signing_pubkey
-        {
-            return invalid("provider access grant signer is not the administrator device");
-        }
-        locator.validate_for(store, &provider)?;
-        Ok(crate::store_commit::Signed::sign_by_device(
-            StoreMemberProviderAccessGrantBody {
-                grant_id,
-                member_pubkey,
-                provider,
-                locator,
-                administrator_grant,
-                administrator,
-            },
-            administrator_signer,
-        ))
-    }
-
-    pub fn grant_hash(&self) -> ObjectHash {
-        self.hash()
-    }
-
-    pub fn verify(
-        &self,
-        store: &StoreProviderBinding,
-        administrator: &StoreDeviceRegistration,
-    ) -> Result<(), ProviderProbeError> {
-        self.administrator.verify_registration(administrator)?;
-        self.provider
-            .validate_for(store)
-            .map_err(ProviderProbeError::Storage)?;
-        self.locator
-            .validate_for(store, &self.provider)
-            .map_err(ProviderProbeError::Storage)?;
-        if self
-            .verify_by(&administrator.device_signing_pubkey)
-            .is_err()
-        {
-            return invalid("provider access grant signature is invalid");
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreMemberProviderAccessGrantRef {
-    pub grant_id: ProviderAccessGrantId,
-    pub grant_hash: ObjectHash,
-    pub object: ExactObjectRef,
-}
-
-impl StoreMemberProviderAccessGrantRef {
-    pub fn from_grant(grant: &StoreMemberProviderAccessGrant, object: ExactObjectRef) -> Self {
-        Self {
-            grant_id: grant.grant_id.clone(),
-            grant_hash: grant.grant_hash(),
-            object,
-        }
-    }
-
-    pub fn verify(&self, grant: &StoreMemberProviderAccessGrant) -> Result<(), ProviderProbeError> {
-        if self.grant_id != grant.grant_id || self.grant_hash != grant.grant_hash() {
-            return invalid("provider access grant reference differs from its signed grant");
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ActivatedStoreMemberProviderAccessGrant {
-    pub grant: StoreMemberProviderAccessGrant,
-    pub grant_ref: StoreMemberProviderAccessGrantRef,
-    pub activation: StoreBatchCommitRef,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -109,7 +109,6 @@ pub(crate) const STORE_DEVICE_JOIN_CLEANUP_RECEIPT_PREFIX: &str =
     "store-v1/device-join-cleanup-receipts/";
 pub(crate) const STORE_DEVICE_EXCLUSION_OUTCOME_PREFIX: &str =
     "store-v1/device-exclusion-outcomes/";
-pub(crate) const STORE_PROVIDER_ACCESS_GRANT_PREFIX: &str = "store-v1/provider-access/grants/";
 pub(crate) const STORE_OWNER_RECOVERY_PREFIX: &str = "store-v1/recovery/";
 pub(crate) const STORE_SNAPSHOT_META_PREFIX: &str = "store-v1/snapshots/";
 pub(crate) const STORE_SNAPSHOT_IMAGE_PREFIX: &str = "store-v1/snapshot-images/";

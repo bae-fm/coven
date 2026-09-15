@@ -493,7 +493,6 @@ pub struct StoreCommitOperations {
     pub circle_acknowledgements: Vec<CircleAckRef>,
     pub control: Option<StoreControl>,
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
-    pub provider_access_grants: Vec<crate::provider::StoreMemberProviderAccessGrantRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
     pub stream_activations: Vec<StreamActivation>,
@@ -520,7 +519,6 @@ impl StoreCommitOperations {
             && self.circle_acknowledgements.is_empty()
             && self.control.is_none()
             && self.device_join_attempt_decisions.is_empty()
-            && self.provider_access_grants.is_empty()
             && self.device_registrations.is_empty()
             && self.device_exclusion_outcomes.is_empty()
             && self.circle_controls.len() == 1
@@ -534,7 +532,6 @@ impl StoreCommitOperations {
             circle_acknowledgements: _,
             control,
             device_join_attempt_decisions,
-            provider_access_grants,
             device_registrations,
             device_exclusion_outcomes,
             stream_activations,
@@ -544,7 +541,6 @@ impl StoreCommitOperations {
         } = self;
         control.is_none()
             && device_join_attempt_decisions.is_empty()
-            && provider_access_grants.is_empty()
             && device_registrations.is_empty()
             && device_exclusion_outcomes.is_empty()
             && stream_activations.is_empty()
@@ -577,7 +573,6 @@ pub struct StoreCommitOperationsInput<'a> {
     pub circle_acknowledgements: Vec<CircleAckRef>,
     pub control: Option<StoreControl>,
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
-    pub provider_access_grants: Vec<crate::provider::StoreMemberProviderAccessGrantRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
     pub stream_activations: Vec<StreamActivation>,
@@ -594,7 +589,6 @@ impl StoreCommitOperationsInput<'_> {
             circle_acknowledgements: Vec::new(),
             control: None,
             device_join_attempt_decisions: Vec::new(),
-            provider_access_grants: Vec::new(),
             device_registrations: Vec::new(),
             device_exclusion_outcomes: Vec::new(),
             stream_activations: Vec::new(),

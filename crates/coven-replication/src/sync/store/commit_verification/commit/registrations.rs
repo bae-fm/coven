@@ -298,38 +298,4 @@ impl<'a> StoreCommitVerifier<'a> {
             object: object.clone(),
         })
     }
-
-    pub(crate) async fn load_provider_access_grant(
-        &self,
-        reference: &coven_protocol::provider::StoreMemberProviderAccessGrantRef,
-        administrator: &StoreDeviceRegistration,
-    ) -> Result<
-        VerifiedObject<coven_protocol::provider::StoreMemberProviderAccessGrant>,
-        StoreObjectError,
-    > {
-        let context = ProtocolObjectContext::signed_plaintext(
-            self.root.reference().store_root_hash,
-            ProtocolObjectDomain::ProviderAccessGrant,
-        );
-        let semantic_prefix = provider_access_grant_semantic_prefix(&reference.grant_id);
-        let expected = reference.clone();
-        let administrator = administrator.clone();
-        let store = self.root.protocol().descriptor.provider.clone();
-        self.load_exact_object(
-            &context,
-            &reference.object,
-            &semantic_prefix,
-            reference.grant_hash,
-            move |bytes| {
-                let grant: coven_protocol::provider::StoreMemberProviderAccessGrant =
-                    decode_protocol_object(bytes)?;
-                expected
-                    .verify(&grant)
-                    .and_then(|()| grant.verify(&store, &administrator))
-                    .map_err(|_| StoreProtocolError::ProviderAccessMismatch)?;
-                Ok(grant)
-            },
-        )
-        .await
-    }
 }

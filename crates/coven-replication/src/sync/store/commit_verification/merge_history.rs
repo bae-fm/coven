@@ -35,9 +35,7 @@ mod loaders;
 mod membership_control;
 mod nonactivation;
 mod predecessor;
-use predecessor::{
-    predecessor_verifies_provider_administrator, predecessor_verifies_provider_administrator_grant,
-};
+use predecessor::predecessor_verifies_provider_administrator_grant;
 mod promotion;
 mod publication;
 mod rollup;

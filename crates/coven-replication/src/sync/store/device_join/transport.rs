@@ -839,7 +839,7 @@ impl<'store> StoreDeviceJoinTransport<'store> {
             Some(
                 DeviceJoinStatus::AwaitingAccessRequest { .. }
                 | DeviceJoinStatus::AwaitingProviderAdmission { .. }
-                | DeviceJoinStatus::ProviderAccessGrantPublished { .. }
+                | DeviceJoinStatus::AccessGranted { .. }
                 | DeviceJoinStatus::AwaitingRegistrationRequest { .. }
                 | DeviceJoinStatus::AwaitingBootstrap { .. }
                 | DeviceJoinStatus::Abandoned { .. }
@@ -1010,7 +1010,7 @@ impl<'attempt> AttemptTransport<'attempt> {
                 }
                 Some(
                     DeviceJoinStatus::AwaitingProviderAdmission { request }
-                    | DeviceJoinStatus::ProviderAccessGrantPublished { request, .. },
+                    | DeviceJoinStatus::AccessGranted { request, .. },
                 ) => {
                     on_progress(AdmittingDeviceJoinProgress::GrantingProviderAccess);
                     let approval = self
@@ -1077,22 +1077,6 @@ impl<'attempt> AttemptTransport<'attempt> {
                     self.publish(DeviceJoinAction::TransferSamePrincipalJoin(join.clone()))
                         .await?;
                     return Ok(DeviceJoinDriveOutcome::Activated(join.activation));
-                }
-                Some(DeviceJoinStatus::StorePublicationPending {
-                    operation: OwnerJoinPublication::ProviderAccessGrant { request, .. },
-                }) => {
-                    on_progress(AdmittingDeviceJoinProgress::GrantingProviderAccess);
-                    let approval = self
-                        .step(
-                            "authorize provider access",
-                            self.store
-                                .authorize_device_provider_access(request, access_administrator),
-                        )
-                        .await?;
-                    self.publish(DeviceJoinAction::TransferProviderAdmissionApproval(
-                        approval,
-                    ))
-                    .await?;
                 }
                 Some(DeviceJoinStatus::StorePublicationPending {
                     operation:

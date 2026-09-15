@@ -106,9 +106,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts(
             },
         },
     ));
-    let access_administrator = TestDropboxAccessAdministrator {
-        namespace_id: namespace_id.to_string(),
-    };
+    let access_administrator = TestDropboxAccessAdministrator::new(namespace_id.to_string());
     let admission = store
         .admit_member(
             &owner_db,
@@ -208,15 +206,23 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts(
         .await
         .expect("authorize provider access");
     if compaction == Some(JoinCompaction::ProviderApproval) {
-        compact_pending_join(
-            peer.as_ref().expect("compaction publisher"),
-            &owner_store,
-            &approval
-                .access_grant()
-                .expect("cross-principal access grant")
-                .activation,
-        )
-        .await;
+        // The approval is the whole provider-access evidence: nothing about it
+        // was accepted into the Store, so there is no commit of its own for a
+        // snapshot to keep. Compacting over everything accepted so far is the
+        // real test — the registration request and the Attempt below have to
+        // stand on the approval's own signatures.
+        let accepted = owner_database
+            .materialized_frontier()
+            .await
+            .expect("load accepted frontier at approval");
+        let snapshot =
+            compact_history(peer.as_ref().expect("compaction publisher"), &owner_store).await;
+        for reference in accepted.values() {
+            assert!(
+                snapshot.meta.coverage.covers_commit(reference),
+                "compaction left the approval's accepted history uncovered: {reference:?}"
+            );
+        }
     }
     let registration_request = new_client()
         .prepare_registration_request(approval.clone())
@@ -444,6 +450,18 @@ async fn compact_pending_join(
     administrator: &TestDevice,
     pending_activation: &coven_protocol::store_commit::StoreBatchCommitRef,
 ) -> coven_database::PublishedStoreSnapshot {
+    let snapshot = compact_history(peer, administrator).await;
+    assert!(snapshot.meta.coverage.covers_commit(pending_activation));
+    snapshot
+}
+
+/// Publish a snapshot from an independent device, install it on the
+/// administrator and retire everything it covers, while the joining device is
+/// paused mid-exchange.
+async fn compact_history(
+    peer: &TestDevice,
+    administrator: &TestDevice,
+) -> coven_database::PublishedStoreSnapshot {
     let (_, accepted) = peer
         .pull_store()
         .await
@@ -453,7 +471,6 @@ async fn compact_pending_join(
         .publish_snapshot_generation_for_test()
         .await
         .expect("peer compacts pending join history");
-    assert!(snapshot.meta.coverage.covers_commit(pending_activation));
     let (_, accepted) = administrator
         .pull_store()
         .await

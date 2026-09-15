@@ -56,7 +56,7 @@ pub use provider::{
     CloudKitAcceptedShare, CrossPrincipalProbeReceipt, ExactSlotProbeReceipt,
     ProviderAccessLocator, ProviderAccessWithdrawal, ProviderAdminChange, ProviderAdminGrantId,
     ProviderAdminGrantRecord, ProviderAdminMembershipChange, ProviderAdminState,
-    ProviderCapabilityProof, ProviderProbeId, StoreMemberProviderAccessGrantRef,
+    ProviderCapabilityProof, ProviderProbeId,
 };
 pub use store_commit::{
     CommitFrontier, DeviceJoinAttemptId, ObjectHash, StoreBatchCommitRef, StoreCommitCoord,

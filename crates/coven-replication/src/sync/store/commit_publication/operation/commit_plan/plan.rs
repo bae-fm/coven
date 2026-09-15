@@ -11,7 +11,6 @@ pub(crate) enum StoreOperationBatch {
         circle_acknowledgements: Vec<CircleAckActivation>,
     },
 
-    ProviderAccessGrant(super::provider::StoreMemberProviderAccessGrantRef),
     Attempt(coven_protocol::store_commit::DeviceJoinAttemptId),
     SamePrincipalDeviceJoin {
         attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
@@ -59,7 +58,6 @@ impl StoreOperationBatch {
             | Self::MergeMembershipActivation { entry, .. } => Some(entry),
             Self::Circle { .. }
             | Self::Acknowledgement { .. }
-            | Self::ProviderAccessGrant(_)
             | Self::Attempt(_)
             | Self::Abandonment(_)
             | Self::AbandonCandidates(_)

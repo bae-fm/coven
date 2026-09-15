@@ -100,7 +100,6 @@ async fn same_principal_admission_reuses_existing_provider_access() {
         approval.admission,
         coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::SamePrincipal
     ));
-    assert!(approval.access_grant().is_none());
     assert!(
         storage.exact_creates().is_empty(),
         "same-principal approval must not publish a provider-access object",
@@ -192,7 +191,7 @@ async fn pre_attempt_device_join_abandonment_is_observed_and_retry_safe() {
 }
 
 #[tokio::test]
-async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_merge() {
+async fn interrupted_provider_admission_reuses_its_recorded_access_locator() {
     let OwnerAndMember {
         owner,
         owner_db,
@@ -210,19 +209,18 @@ async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_me
         &EncryptionService::from_key([49; 32]),
     )
     .await;
-    exercise_provider_access_grant_create_interruption(
+    exercise_interrupted_provider_admission(
         &coven_database::StoreDatabase::new(&owner_db),
         &owner_db_store_dir,
         &storage,
         &owner,
         &member,
-        ExactCreateInterruption::BeforeVisibility,
     )
     .await;
 }
 
 #[tokio::test]
-async fn provider_access_grant_create_settles_lost_response_on_merge() {
+async fn cross_principal_challenge_create_resumes_after_pre_visibility_failure() {
     let OwnerAndMember {
         owner,
         owner_db,
@@ -240,13 +238,43 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
         &EncryptionService::from_key([50; 32]),
     )
     .await;
-    exercise_provider_access_grant_create_interruption(
-        &coven_database::StoreDatabase::new(&owner_db),
+    exercise_challenge_create_interruption(
+        &owner_db,
         &owner_db_store_dir,
         &storage,
         &owner,
         &member,
-        ExactCreateInterruption::AfterVisibility,
+        ChallengeCreateInterruption::BeforeVisibility,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cross_principal_challenge_create_settles_lost_response() {
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        owner_db_store_dir,
+        storage,
+        member,
+        ..
+    } = cross_principal_owner_and_member().await;
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &member,
+        &EncryptionService::from_key([51; 32]),
+    )
+    .await;
+    exercise_challenge_create_interruption(
+        &owner_db,
+        &owner_db_store_dir,
+        &storage,
+        &owner,
+        &member,
+        ChallengeCreateInterruption::AfterVisibility,
     )
     .await;
 }
@@ -357,4 +385,270 @@ async fn cross_principal_device_join_materializes_rows_written_after_the_snapsho
         "Written after the snapshot",
         "the bootstrap must materialize the rows of every commit past the snapshot",
     );
+}
+
+/// An admission interrupted between the physical provider grant and the
+/// approval that attests it must resume without granting again: a second
+/// authority would be left behind with nothing naming it.
+fn exercise_interrupted_provider_admission<'a>(
+    owner_db: &'a coven_database::StoreDatabase,
+    owner_db_store_dir: &'a StoreDir,
+    storage: &'a TestStore,
+    owner: &'a UserKeypair,
+    member: &'a UserKeypair,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        use coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission;
+
+        use crate::sync::store::{DeviceJoinRole, DeviceJoinStatus};
+
+        let owner_device = storage
+            .bind_store_device(owner_db, owner_db_store_dir.clone(), owner)
+            .await
+            .expect("bind owner Store");
+        let pending_dir = tempfile::tempdir().expect("create pending join directory");
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+            pending_dir.path().join("pending-device-join.sqlite"),
+        )
+        .expect("open pending join journal");
+        let offer = owner_device
+            .begin_device_join(&pubkey_hex(member))
+            .await
+            .expect("begin exact device join");
+        let attempt_id = offer.attempt_id;
+        let peer = storage
+            .cross_principal_device_for_test(member, "joining-account")
+            .await
+            .expect("bind joining provider principal");
+        let pending_join = peer
+            .open_pending_device_join(&pending, member, offer)
+            .await
+            .expect("bind pending Store join");
+        let request = pending_join
+            .prepare_provider_access_request()
+            .await
+            .expect("prepare exact provider access request");
+
+        // The challenge reserves its slots right after the physical grant, so
+        // failing the next allocation lands the interruption in the window the
+        // recorded locator exists to cover.
+        storage.fail_next_slot_allocations(1);
+        let interrupted = peer
+            .authorize_device_provider_access(&owner_device, request.clone())
+            .await;
+        assert!(
+            interrupted.is_err(),
+            "the injected challenge failure surfaces"
+        );
+        assert_eq!(
+            peer.access_grants_issued(),
+            1,
+            "the interrupted admission created the provider authority"
+        );
+        let durable_locator = match owner_db
+            .device_join_status(attempt_id, DeviceJoinRole::Owner)
+            .await
+            .expect("load interrupted admission status")
+        {
+            Some(DeviceJoinStatus::AccessGranted { locator, .. }) => locator,
+            status => panic!("unexpected interrupted admission status: {status:?}"),
+        };
+
+        let approval = peer
+            .authorize_device_provider_access(&owner_device, request)
+            .await
+            .expect("resume the interrupted admission");
+        assert_eq!(
+            peer.access_grants_issued(),
+            1,
+            "the resumed admission reuses the recorded provider authority"
+        );
+        let DeviceProviderAdmission::CrossPrincipal { locator, .. } = &approval.admission else {
+            panic!("cross-principal admission carries its provider access locator");
+        };
+        assert_eq!(
+            locator, &durable_locator,
+            "the approval attests the exact authority the journal recorded"
+        );
+
+        let retry = peer
+            .authorize_device_provider_access(&owner_device, (*approval.request).clone())
+            .await
+            .expect("retry completed provider access authorization");
+        assert_eq!(retry, approval);
+        assert_eq!(peer.access_grants_issued(), 1);
+        assert!(matches!(
+            owner_db
+                .device_join_status(attempt_id, DeviceJoinRole::Owner)
+                .await
+                .expect("load completed provider access status"),
+            Some(DeviceJoinStatus::AwaitingRegistrationRequest { .. })
+        ));
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ChallengeCreateInterruption {
+    BeforeVisibility,
+    AfterVisibility,
+}
+
+/// Publishing the cross-principal challenge creates one provider object, and
+/// the admission has to survive losing that create's outcome either way: a
+/// failure before the bytes are visible leaves the attempt where it was, and a
+/// lost response after they land settles against the stored bytes. Neither
+/// creates a second challenge object, and neither grants provider access again.
+fn exercise_challenge_create_interruption<'a>(
+    owner_db: &'a Database,
+    owner_db_store_dir: &'a StoreDir,
+    storage: &'a TestStore,
+    owner: &'a UserKeypair,
+    member: &'a UserKeypair,
+    interruption: ChallengeCreateInterruption,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        use coven_protocol::store_commit::device_join_exchange::{
+            DeviceProviderAdmission, DeviceProviderChallengePublication,
+        };
+
+        use crate::sync::store::{DeviceJoinRole, DeviceJoinStatus};
+
+        let pending_dir = tempfile::tempdir().expect("create pending join directory");
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+            pending_dir.path().join("pending-device-join.sqlite"),
+        )
+        .expect("open pending join journal");
+        let peer = storage
+            .cross_principal_device_for_test(member, "joining-account")
+            .await
+            .expect("bind joining provider principal");
+        let (mut pending_join, owner_device, approval) = prepare_cross_principal_approval(
+            owner_db,
+            owner_db_store_dir.clone(),
+            storage,
+            owner,
+            member,
+            &pending,
+            &peer,
+        )
+        .await;
+        let attempt_id = approval.request.offer.attempt_id;
+        let DeviceProviderAdmission::CrossPrincipal {
+            challenge: approved_challenge,
+            ..
+        } = &approval.admission
+        else {
+            panic!("cross-principal admission carries its probe challenge")
+        };
+        let approved_challenge = approved_challenge.clone();
+        let administrator_slot = approved_challenge.administrator_object.slot.clone();
+
+        let request = pending_join
+            .prepare_registration_request(approval)
+            .await
+            .expect("prepare the registration request");
+        let provisional = owner_device
+            .accept_device_registration_request(request)
+            .await
+            .expect("accept the registration request");
+        let database = StoreDatabase::new(owner_db);
+        assert!(matches!(
+            database
+                .device_join_status(attempt_id, DeviceJoinRole::Owner)
+                .await
+                .expect("load the accepted attempt status"),
+            Some(DeviceJoinStatus::AwaitingChallengePublication { .. })
+        ));
+
+        // The challenge object is the next exact create either way, so call 1
+        // after this reset is the one that carries it.
+        storage.clear_exact_creates();
+        match interruption {
+            ChallengeCreateInterruption::BeforeVisibility => {
+                storage.fail_exact_create_before_call(1)
+            }
+            ChallengeCreateInterruption::AfterVisibility => storage.fail_exact_create_after_call(1),
+        }
+        let first = owner_device
+            .publish_device_provider_challenge(provisional.clone())
+            .await;
+        let ready = match interruption {
+            ChallengeCreateInterruption::BeforeVisibility => {
+                assert!(
+                    first.is_err(),
+                    "the injected create fails before the challenge is visible"
+                );
+                assert!(
+                    matches!(
+                        database
+                            .device_join_status(attempt_id, DeviceJoinRole::Owner)
+                            .await
+                            .expect("load the interrupted challenge status"),
+                        Some(DeviceJoinStatus::AwaitingChallengePublication { .. })
+                    ),
+                    "a challenge that never became visible leaves the attempt where it was"
+                );
+                owner_device
+                    .publish_device_provider_challenge(provisional.clone())
+                    .await
+                    .expect("resume challenge publication")
+            }
+            ChallengeCreateInterruption::AfterVisibility => {
+                first.expect("lost create response settles against the stored challenge")
+            }
+        };
+        let DeviceProviderChallengePublication::CrossPrincipal {
+            challenge: published,
+        } = &ready.challenge_publication
+        else {
+            panic!("a cross-principal attempt publishes its probe challenge")
+        };
+        assert_eq!(
+            published, &approved_challenge,
+            "the published challenge is the one the approval signed"
+        );
+
+        // Creates are counted where they are issued, so the pre-visibility
+        // variant shows the attempt that carried no bytes alongside the retry
+        // that landed them. Either way the object exists once.
+        let challenge_creates = |storage: &TestStore| {
+            storage
+                .exact_creates()
+                .iter()
+                .filter(|slot| *slot == &administrator_slot)
+                .count()
+        };
+        let creates_through_publication = challenge_creates(storage);
+        assert_eq!(
+            creates_through_publication,
+            match interruption {
+                ChallengeCreateInterruption::BeforeVisibility => 2,
+                ChallengeCreateInterruption::AfterVisibility => 1,
+            },
+            "the challenge object landed once"
+        );
+
+        let retry = owner_device
+            .publish_device_provider_challenge(provisional)
+            .await
+            .expect("retry completed challenge publication");
+        assert_eq!(retry, ready);
+        assert_eq!(
+            challenge_creates(storage),
+            creates_through_publication,
+            "a published challenge is read back, not created again"
+        );
+        assert_eq!(
+            peer.access_grants_issued(),
+            1,
+            "publishing the challenge does not grant provider access again"
+        );
+        assert!(matches!(
+            database
+                .device_join_status(attempt_id, DeviceJoinRole::Owner)
+                .await
+                .expect("load the published challenge status"),
+            Some(DeviceJoinStatus::AwaitingReadiness { .. })
+        ));
+    })
 }

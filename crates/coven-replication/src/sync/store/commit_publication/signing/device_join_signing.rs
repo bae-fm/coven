@@ -109,31 +109,4 @@ impl LocalStoreWriter {
             &self.registration.value().device_signing_pubkey,
         )
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn sign_provider_access_grant(
-        &self,
-        grant_id: coven_protocol::provider::ProviderAccessGrantId,
-        member_pubkey: String,
-        peer_provider: coven_protocol::objects::ProviderDeviceBinding,
-        locator: coven_protocol::provider::ProviderAccessLocator,
-        provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId,
-        provider_admin_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
-        store_provider: &coven_protocol::objects::StoreProviderBinding,
-    ) -> Result<
-        coven_protocol::provider::StoreMemberProviderAccessGrant,
-        coven_protocol::provider::ProviderProbeError,
-    > {
-        coven_protocol::provider::StoreMemberProviderAccessGrant::signed(
-            grant_id,
-            member_pubkey,
-            peer_provider,
-            locator,
-            provider_admin_grant,
-            provider_admin_registration,
-            store_provider,
-            self.registration.value(),
-            &self.device_signer,
-        )
-    }
 }

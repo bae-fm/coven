@@ -138,7 +138,10 @@ fn owner_adjacent(previous: &OwnerJoinProgress, next: &OwnerJoinProgress) -> boo
             OwnerJoinProgress::Offered(_),
             OwnerJoinProgress::AccessRequested(_)
         ) | (
-            OwnerJoinProgress::AccessGrantActivated { .. },
+            OwnerJoinProgress::AccessRequested(_),
+            OwnerJoinProgress::AccessGranted { .. }
+        ) | (
+            OwnerJoinProgress::AccessGranted { .. },
             OwnerJoinProgress::ApprovalPrepared(_)
         ) | (
             OwnerJoinProgress::ApprovalPrepared(_),
@@ -170,10 +173,6 @@ fn owner_publication_follows(
 
     match (previous, operation) {
         (
-            OwnerJoinProgress::AccessRequested(previous),
-            OwnerJoinPublication::ProviderAccessGrant { request, .. },
-        ) => previous == request,
-        (
             OwnerJoinProgress::RegistrationRequested(previous),
             OwnerJoinPublication::Attempt { request }
             | OwnerJoinPublication::SamePrincipalActivation { request },
@@ -186,9 +185,7 @@ fn owner_publication_follows(
             let durable_offer = match previous {
                 OwnerJoinProgress::Offered(durable) => Some(durable),
                 OwnerJoinProgress::AccessRequested(request) => Some(request.offer.as_ref()),
-                OwnerJoinProgress::AccessGrantActivated { request, .. } => {
-                    Some(request.offer.as_ref())
-                }
+                OwnerJoinProgress::AccessGranted { request, .. } => Some(request.offer.as_ref()),
                 OwnerJoinProgress::ApprovalPrepared(approval) => {
                     Some(approval.request.offer.as_ref())
                 }
@@ -208,7 +205,6 @@ fn prepared_operation_attempt_id(
 ) -> coven_protocol::store_commit::DeviceJoinAttemptId {
     use coven_protocol::store_commit::device_join_journal::OwnerJoinPublication;
     match operation {
-        OwnerJoinPublication::ProviderAccessGrant { request, .. } => request.offer.attempt_id,
         OwnerJoinPublication::Attempt { request }
         | OwnerJoinPublication::SamePrincipalActivation { request } => {
             request.approval().request.offer.attempt_id

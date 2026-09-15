@@ -70,7 +70,6 @@ impl StoreRecords<'_> {
             || !operations.circle_acknowledgements.is_empty()
             || operations.control.is_some()
             || !operations.device_join_attempt_decisions.is_empty()
-            || !operations.provider_access_grants.is_empty()
             || !operations.device_registrations.is_empty()
             || !operations.device_exclusion_outcomes.is_empty()
             || !operations.stream_activations.is_empty()

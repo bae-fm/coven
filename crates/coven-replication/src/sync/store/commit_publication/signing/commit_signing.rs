@@ -384,17 +384,6 @@ impl LocalStoreWriter {
                     ..StoreCommitOperationsInput::empty()
                 },
             ),
-            StoreOperationBatch::ProviderAccessGrant(grant) => sign_ops(
-                context,
-                write_id,
-                registration_ref,
-                registration,
-                signer,
-                StoreCommitOperationsInput {
-                    provider_access_grants: vec![grant],
-                    ..StoreCommitOperationsInput::empty()
-                },
-            ),
             StoreOperationBatch::Attempt(attempt) => sign_ops(
                 context,
                 write_id,

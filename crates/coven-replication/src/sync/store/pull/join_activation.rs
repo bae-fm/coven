@@ -19,7 +19,6 @@ pub(crate) fn verify_device_join_activation_commit(
     if !activates_this_attempt
         || !attempt_shape
         || commit.device_registrations().len() != 1
-        || !commit.provider_access_grants().is_empty()
         || !commit.circle_controls().is_empty()
         || !commit.circle_packages().is_empty()
         || commit.store_package().is_some()

@@ -228,19 +228,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.commit_verifier.prefetch_store_packages(commits).await
     }
 
-    pub(crate) async fn load_provider_access_grant(
-        &self,
-        reference: &coven_protocol::provider::StoreMemberProviderAccessGrantRef,
-        administrator: &StoreDeviceRegistration,
-    ) -> Result<
-        VerifiedObject<coven_protocol::provider::StoreMemberProviderAccessGrant>,
-        StoreObjectError,
-    > {
-        self.commit_verifier
-            .load_provider_access_grant(reference, administrator)
-            .await
-    }
-
     pub(crate) async fn load_merge_commit_registrations(
         &mut self,
         commit: &StoreBatchCommit,

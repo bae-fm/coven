@@ -143,8 +143,28 @@ pub fn user_keypair_from_seed(seed: [u8; 32]) -> UserKeypair {
 /// Grants a Dropbox shared-folder membership to whichever peer account asks —
 /// the provider-side step a cross-principal admission needs before the joining
 /// device can write to the store's namespace.
+///
+/// Counts its own calls. Creating the physical authority twice for one join
+/// would leave the first one behind with nothing naming it, so a resumed
+/// admission has to reuse the locator it already recorded, and that is what the
+/// count proves.
 pub struct TestDropboxAccessAdministrator {
-    pub namespace_id: String,
+    namespace_id: String,
+    grants: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl TestDropboxAccessAdministrator {
+    pub fn new(namespace_id: String) -> Self {
+        Self {
+            namespace_id,
+            grants: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// How many times the provider was asked to create member access.
+    pub fn grants_issued(&self) -> usize {
+        self.grants.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 #[async_trait::async_trait]
@@ -162,6 +182,8 @@ impl crate::sync::store::DeviceProviderAccessAdministrator for TestDropboxAccess
                 "test Dropbox access administrator received a non-Dropbox peer".to_string(),
             ));
         };
+        self.grants
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(
             coven_protocol::provider::ProviderAccessLocator::DropboxSharedFolderMember {
                 namespace_id: self.namespace_id.clone(),
@@ -177,6 +199,12 @@ pub struct CrossPrincipalTestDevice {
 }
 
 impl CrossPrincipalTestDevice {
+    /// How many times this joining principal's admission asked the provider to
+    /// create member access.
+    pub fn access_grants_issued(&self) -> usize {
+        self.access_administrator.grants_issued()
+    }
+
     pub async fn pending_device_join_observation(
         &self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
@@ -3195,6 +3223,10 @@ impl TestStore {
         self.home.fail_exact_create_before_call(call);
     }
 
+    pub fn fail_next_slot_allocations(&self, n: usize) {
+        self.home.fail_next_slot_allocations(n);
+    }
+
     pub fn exact_creates(&self) -> Vec<coven_protocol::objects::ObjectSlot> {
         self.home.exact_creates()
     }
@@ -4385,9 +4417,7 @@ impl TestStore {
                 self.storage
                     .connection_for_test_identity_and_home(identity.clone(), peer_home),
             ),
-            access_administrator: TestDropboxAccessAdministrator {
-                namespace_id: namespace_id.clone(),
-            },
+            access_administrator: TestDropboxAccessAdministrator::new(namespace_id.clone()),
         })
     }
 

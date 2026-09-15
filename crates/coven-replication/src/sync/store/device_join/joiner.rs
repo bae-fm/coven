@@ -1049,21 +1049,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             .load_registration(&approval.request.offer.owner_registration)
             .await?
             .value;
-        let administrator = self
-            .history_verifier
-            .load_registration(&approval.request.offer.provider_admin.administrator)
-            .await?
-            .value;
         approval.verify(self.history_verifier.verified_root().object(), &owner)?;
-        if let Some(access_grant) = approval.access_grant() {
-            self.history_verifier
-                .verify_accepted_provider_access_activation(
-                    access_grant,
-                    &approval.request.offer.provider_admin,
-                    &administrator,
-                )
-                .await?;
-        }
         let storage = self.storage;
         let live = storage.provider_binding().await?;
         if live.store != approval.request.offer.provider

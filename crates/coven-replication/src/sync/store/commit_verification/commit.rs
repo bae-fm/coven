@@ -19,9 +19,9 @@ use coven_protocol::remote_object;
 use coven_protocol::store_commit::*;
 use coven_protocol::store_commit::{
     ack_slot_prefix, device_exclusion_outcome_semantic_prefix,
-    founder_registration_semantic_prefix, package_semantic_prefix,
-    provider_access_grant_semantic_prefix, registration_semantic_prefix, SnapshotMeta, StoreAck,
-    StoreAckRef, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposal, StoreSnapshotRef,
+    founder_registration_semantic_prefix, package_semantic_prefix, registration_semantic_prefix,
+    SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef,
+    StoreDeviceExclusionProposal, StoreSnapshotRef,
 };
 use coven_storage::run_blocking_object_verification;
 use coven_storage::CloudSyncObjectStorage;

@@ -2,7 +2,7 @@ use super::identifiers::commit_stream_id;
 use super::operation_refs::{
     validate_commit_acknowledgement, validate_commit_circle_acknowledgements,
     validate_device_exclusion_refs, validate_device_join_attempt_decision_refs,
-    validate_device_registration_refs, validate_provider_access_refs,
+    validate_device_registration_refs,
 };
 use super::validation::{
     validate_commit_order, validate_commit_predecessor_states, validate_membership_coord,
@@ -102,11 +102,6 @@ impl StoreBatchCommit {
                     .iter()
                     .map(|reference| reference.object.clone()),
             )
-            .chain(
-                self.provider_access_grants()
-                    .iter()
-                    .map(|reference| reference.object.clone()),
-            )
             .chain(self.device_join_attempt_decisions().iter().filter_map(
                 |decision| match decision {
                     DeviceJoinAttemptDecisionRef::Attempt(_) => None,
@@ -179,12 +174,6 @@ impl StoreBatchCommit {
     pub fn device_join_attempt_decisions(&self) -> &[DeviceJoinAttemptDecisionRef] {
         self.operations().map_or(&[], |operations| {
             operations.device_join_attempt_decisions.as_slice()
-        })
-    }
-
-    pub fn provider_access_grants(&self) -> &[crate::provider::StoreMemberProviderAccessGrantRef] {
-        self.operations().map_or(&[], |operations| {
-            operations.provider_access_grants.as_slice()
         })
     }
 

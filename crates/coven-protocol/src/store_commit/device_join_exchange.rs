@@ -3,9 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::membership::MembershipGrantId;
 use crate::objects::{ObjectSlot, PreparedExactObject};
 use crate::provider::{
-    ActivatedStoreMemberProviderAccessGrant, CrossPrincipalProbeChallenge,
-    CrossPrincipalProbeReceipt, CrossPrincipalProbeResponse,
-    DeviceJoinChallengePublicationAuthorization, ProviderAdminGrantRecord,
+    CrossPrincipalProbeChallenge, CrossPrincipalProbeReceipt, CrossPrincipalProbeResponse,
+    DeviceJoinChallengePublicationAuthorization, ProviderAccessLocator, ProviderAdminGrantRecord,
 };
 use crate::store_commit::{Signed, SignedBody};
 use crate::{ProviderDeviceBinding, StoreProviderBinding};
@@ -225,7 +224,13 @@ impl DeviceProviderAccessRequestBody {
 pub enum DeviceProviderAdmission {
     SamePrincipal,
     CrossPrincipal {
-        access_grant: Box<ActivatedStoreMemberProviderAccessGrant>,
+        /// The exact provider authority the administrator created for this
+        /// member. The approval's own signature is what attests it: the offer
+        /// binds the administrator registration to the Owner registration that
+        /// signs this approval, and the nested offer and request already bind
+        /// the member, the provider principals, the Store root, the expected
+        /// registration and the provider-administrator grant.
+        locator: ProviderAccessLocator,
         challenge: CrossPrincipalProbeChallenge,
     },
 }
@@ -248,7 +253,6 @@ impl DeviceProviderAdmissionApprovalBody {
     fn validate_shape(
         &self,
         store_root: &crate::objects::VerifiedObject<StoreProtocolRoot>,
-        owner: &StoreDeviceRegistration,
     ) -> Result<(), DeviceJoinExchangeError> {
         let offer = &self.request.offer;
         if store_root.object != offer.store_root.object
@@ -261,16 +265,8 @@ impl DeviceProviderAdmissionApprovalBody {
         let same_principal = offer.provider_admin.provider == self.request.peer_provider;
         match &self.admission {
             DeviceProviderAdmission::SamePrincipal if same_principal => {}
-            DeviceProviderAdmission::CrossPrincipal { access_grant, .. }
-                if !same_principal
-                    && access_grant.grant.member_pubkey == offer.member_pubkey
-                    && access_grant.grant.provider == self.request.peer_provider
-                    && access_grant.grant_ref.grant_id == access_grant.grant.grant_id
-                    && access_grant.grant_ref.grant_hash == access_grant.grant.grant_hash()
-                    && access_grant.grant.administrator_grant == offer.provider_admin.grant_id
-                    && access_grant.grant.administrator == offer.provider_admin.administrator =>
-            {
-                access_grant.grant.verify(&offer.provider, owner)?;
+            DeviceProviderAdmission::CrossPrincipal { locator, .. } if !same_principal => {
+                locator.validate_for(&offer.provider, &self.request.peer_provider)?;
             }
             _ => return Err(DeviceJoinExchangeError::ApprovalMismatch),
         }
@@ -279,13 +275,6 @@ impl DeviceProviderAdmissionApprovalBody {
 }
 
 impl DeviceProviderAdmissionApproval {
-    pub fn access_grant(&self) -> Option<&ActivatedStoreMemberProviderAccessGrant> {
-        match &self.admission {
-            DeviceProviderAdmission::SamePrincipal => None,
-            DeviceProviderAdmission::CrossPrincipal { access_grant, .. } => Some(access_grant),
-        }
-    }
-
     pub fn signed(
         request: DeviceProviderAccessRequest,
         admission: DeviceProviderAdmission,
@@ -300,21 +289,21 @@ impl DeviceProviderAdmissionApproval {
             request: Box::new(request),
             admission,
         };
-        body.validate_shape(store_root, owner)?;
+        body.validate_shape(store_root)?;
         Ok(Signed::sign(body, owner_device_signer))
     }
 
     /// One registration answers the whole approval: the device that signed the
     /// offer is the device that holds the store's provider-administrator grant,
-    /// so it is also the signer of this approval and of the access grant inside
-    /// it.
+    /// so it is also the signer of this approval and of the provider access it
+    /// attests.
     pub fn verify(
         &self,
         store_root: &crate::objects::VerifiedObject<StoreProtocolRoot>,
         owner: &StoreDeviceRegistration,
     ) -> Result<(), DeviceJoinExchangeError> {
         self.request.verify(owner)?;
-        self.body().validate_shape(store_root, owner)?;
+        self.body().validate_shape(store_root)?;
         self.verify_by(&owner.device_signing_pubkey)
             .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
