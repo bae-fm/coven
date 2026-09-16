@@ -752,6 +752,28 @@ impl Store {
             .await
     }
 
+    /// Move provider administration to the active registration a Store device
+    /// id names.
+    pub(crate) async fn transfer_provider_administration_to_device(
+        &self,
+        device_id: coven_protocol::store_commit::StoreDeviceId,
+    ) -> Result<(), crate::sync::store::membership::MembershipOpsError> {
+        let target = self
+            .database
+            .activated_store_device_registration_for_device(device_id)
+            .await
+            .map_err(membership::MembershipOpsError::from)?
+            .ok_or(membership::MembershipOpsError::TransferTargetNotActive)?;
+        let mut authorization = self
+            .authorize_writer()
+            .await
+            .map_err(StoreError::from)
+            .map_err(membership::MembershipOpsError::from)?;
+        authorization
+            .transfer_provider_administration(target.reference())
+            .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn remove_member(
         &self,

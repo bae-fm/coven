@@ -1168,6 +1168,15 @@ impl SyncComponents {
             .await
     }
 
+    pub(crate) async fn transfer_provider_administration(
+        &self,
+        device_id: coven_protocol::StoreDeviceId,
+    ) -> Result<(), super::store::MembershipOpsError> {
+        self.store
+            .transfer_provider_administration_to_device(device_id)
+            .await
+    }
+
     pub(crate) async fn remove_member(
         &self,
         public_key_hex: &str,

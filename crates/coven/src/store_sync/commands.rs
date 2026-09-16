@@ -64,6 +64,20 @@ impl StoreSync {
             .map_err(Into::into)
     }
 
+    pub(crate) async fn transfer_provider_administration(
+        &self,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<(), SyncError> {
+        let active = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
+        if !active.is_encrypted() {
+            return Err(SyncError::NotEncryptedHome);
+        }
+        active
+            .transfer_provider_administration(device_id)
+            .await
+            .map_err(Into::into)
+    }
+
     pub(crate) async fn propose_device_exclusion(
         &self,
         device_id: crate::StoreDeviceId,

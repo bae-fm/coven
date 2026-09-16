@@ -45,6 +45,8 @@ pub(super) async fn publish_current_snapshot(device: &crate::sync::test_helpers:
 /// Store packages, released from replay retention so both are reclaim-eligible.
 struct ReclaimJourneyFixture {
     db: coven_database::Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
+    signer: UserKeypair,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
@@ -128,12 +130,41 @@ impl ReclaimJourneyFixture {
 
         Self {
             db,
+            db_store_dir,
+            signer,
             store,
             storage,
             home,
             device,
             packages,
         }
+    }
+
+    /// Activate one more device of the same identity and hand back the handles
+    /// a test needs to author from it.
+    async fn second_device(
+        &self,
+    ) -> (
+        coven_database::Database,
+        crate::sync::test_helpers::TestDevice,
+        StoreDeviceRegistrationRef,
+    ) {
+        let second_store_dir = crate::sync::test_helpers::test_store_dir();
+        let second_db = crate::sync::test_helpers::open_test_db(second_store_dir.clone());
+        let second = self
+            .store
+            .activate_joined_device(
+                &self.db,
+                self.db_store_dir.clone(),
+                &second_db,
+                second_store_dir,
+                &self.signer,
+                "0000000009000-0000-second-device",
+            )
+            .await
+            .expect("activate a second device of the same identity");
+        let registration = second.activated_registration_ref().await;
+        (second_db, second, registration)
     }
 
     async fn stuck_operations(&self) -> Vec<coven_database::StuckReclaimOperation> {

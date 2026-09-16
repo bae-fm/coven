@@ -44,6 +44,13 @@ fn unactivated_reclaim(
 async fn journal_unactivated_absence(
     fixture: &ReclaimJourneyFixture,
 ) -> DurableStoreReclaimOperation {
+    journal_unactivated_absence_in(fixture, &fixture.db).await
+}
+
+async fn journal_unactivated_absence_in(
+    fixture: &ReclaimJourneyFixture,
+    db: &coven_database::Database,
+) -> DurableStoreReclaimOperation {
     let (authorization, target, authorization_activation) = unactivated_reclaim(fixture);
     let operation = DurableStoreReclaimOperation::AbsentVerified {
         authorization: authorization.clone(),
@@ -55,9 +62,7 @@ async fn journal_unactivated_absence(
         authorization_activation,
     )
     .expect("shape the verified absence");
-    fixture
-        .db
-        .install_reclaimed_store_package_for_test(operation.clone(), reclaimed)
+    db.install_reclaimed_store_package_for_test(operation.clone(), reclaimed)
         .await
         .expect("journal the verified absence");
     operation
@@ -69,9 +74,16 @@ async fn publish_completion(
     fixture: &ReclaimJourneyFixture,
     absence: DurableStoreReclaimOperation,
 ) -> Result<(), StoreReclaimError> {
-    let database = coven_database::StoreDatabase::new(&fixture.db);
-    let mut writer = fixture
-        .device
+    publish_completion_from(&fixture.db, &fixture.device, absence).await
+}
+
+async fn publish_completion_from(
+    db: &coven_database::Database,
+    device: &crate::sync::test_helpers::TestDevice,
+    absence: DurableStoreReclaimOperation,
+) -> Result<(), StoreReclaimError> {
+    let database = coven_database::StoreDatabase::new(db);
+    let mut writer = device
         .authorize_writer()
         .await
         .expect("authorize the completion author");
@@ -112,6 +124,46 @@ async fn a_completion_commit_for_an_unknown_authorization_is_refused() {
         format!("{error:?}")
             .contains("reclaim completion authorization is absent from predecessor history"),
         "{error:?}",
+    );
+}
+
+/// Receipt publication reads one administrator, so moving administration moves
+/// who may publish one. After the transfer the former administrator's
+/// completion is refused at its predecessor, while the new administrator's gets
+/// past that check and is refused only by the authorization it names.
+#[tokio::test]
+async fn a_transfer_moves_who_may_publish_a_reclaim_receipt() {
+    let fixture = ReclaimJourneyFixture::build("reclaim-completion-transferred").await;
+    let (second_db, second, second_registration) = fixture.second_device().await;
+    fixture
+        .device
+        .transfer_provider_administration(&second_registration)
+        .await
+        .expect("the administrator transfers administration");
+
+    let absence = journal_unactivated_absence(&fixture).await;
+    let error = publish_completion(&fixture, absence)
+        .await
+        .expect_err("the former administrator's completion is refused");
+    assert!(
+        format!("{error:?}").contains(
+            "reclaim completion author is not the provider administrator at its exact predecessor"
+        ),
+        "{error:?}",
+    );
+
+    second
+        .run_cycle(None)
+        .await
+        .expect("the new administrator replays the transfer");
+    let absence = journal_unactivated_absence_in(&fixture, &second_db).await;
+    let error = publish_completion_from(&second_db, &second, absence)
+        .await
+        .expect_err("the completion still names an unknown authorization");
+    assert!(
+        format!("{error:?}")
+            .contains("reclaim completion authorization is absent from predecessor history"),
+        "the new administrator passes the administrator check: {error:?}",
     );
 }
 

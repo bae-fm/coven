@@ -45,8 +45,8 @@ signs a [`MembershipEntryBody`](rustdoc:struct:coven_protocol::membership::Membe
 the Store id, author and Owner grant, stream coordinate, previous-entry hash,
 observed dependencies, display timestamp, and
 [`StoreAuthorityChange`](rustdoc:enum:coven_protocol::membership::StoreAuthorityChange).
-The change records a grant, removal, device registration activation, or a
-device exclusion proposal or outcome.
+The change records a grant, removal, device registration activation, device
+exclusion proposal or outcome, or a transfer of provider administration.
 
 The signature covers the complete body.
 [`verify_membership_entry`](rustdoc:fn:coven_protocol::membership::verify_membership_entry)
@@ -152,8 +152,8 @@ forms:
 One thing is not a role at all. Admitting a device to a store means handing it
 access to the bucket or folder the store lives in, and that is a request to the
 storage provider, not a signature. Exactly one *device* makes those requests:
-the provider administrator, named by its exact device registration. It is the
-device that created the store, bound to that store's signed root.
+the provider administrator, named by its exact device registration. It starts
+as the device that created the store, bound to that store's signed root.
 
 The administrator is the device that offers a device join and approves the
 provider access behind it, and the only device that may publish a reclaim
@@ -161,9 +161,20 @@ receipt or retire a superseded snapshot's artifacts. Being an owner is not
 enough, and neither is signing in to the same provider account: the check is
 against that one registration.
 
-Administration does not move. A store whose founding device is lost keeps its
-data and its membership, but cannot admit new devices or publish a reclaim
-receipt until that device comes back.
+Administration moves by an accepted membership change like any other. The
+current administrator signs a transfer naming another device of the same store,
+both devices must be active where the chain says so, and once the change is
+accepted every device resolves the new administrator from the chain — including
+a device that restored from a snapshot and never saw the transfer happen. Only
+the current administrator can sign one, so a store whose administering device is
+lost keeps its data and its membership but cannot admit new devices until that
+device comes back.
+
+The transfer carries protocol authority and nothing else. A Google Drive or
+OneDrive folder belongs to whoever created it and coven cannot move that; an S3
+store's shared credential needs nothing moved. What checks that the new
+administrator can actually reach the provider is the capability probe it runs
+when it acts.
 
 ## The store keyring
 

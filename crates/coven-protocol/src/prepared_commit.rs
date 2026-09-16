@@ -221,7 +221,8 @@ impl PreparedStoreOperationCommit {
         let publication = self.prepared_membership_publication()?;
         match &publication.entry.change {
             super::membership::StoreAuthorityChange::RemoveMember { .. }
-            | super::membership::StoreAuthorityChange::SetMember { .. } => {}
+            | super::membership::StoreAuthorityChange::SetMember { .. }
+            | super::membership::StoreAuthorityChange::TransferProviderAdministration { .. } => {}
             super::membership::StoreAuthorityChange::Founder { .. }
             | super::membership::StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | super::membership::StoreAuthorityChange::DeviceExclusionProposal { .. }

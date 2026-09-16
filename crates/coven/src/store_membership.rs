@@ -45,6 +45,14 @@ impl StoreMembership {
         self.sync.remove_store_member(public_key_hex).await
     }
 
+    pub(crate) async fn transfer_provider_administration(
+        &self,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<(), SyncError> {
+        let _mutation = self.mutations.lock().await;
+        self.sync.transfer_provider_administration(device_id).await
+    }
+
     pub(crate) async fn propose_device_exclusion(
         &self,
         device_id: crate::StoreDeviceId,

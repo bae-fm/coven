@@ -1001,6 +1001,32 @@ mod test_device {
             self.store.membership_for_test().await
         }
 
+        /// This device's own activated registration, as the reference a signed
+        /// artifact names when it names this device.
+        pub async fn activated_registration_ref(
+            &self,
+        ) -> coven_protocol::store_commit::StoreDeviceRegistrationRef {
+            let durable = self
+                .latest_local_store_device_registration()
+                .await
+                .expect("read the local registration")
+                .expect("the device has a local registration");
+            coven_protocol::store_commit::StoreDeviceRegistrationRef {
+                device_id: durable.device_id,
+                registration_hash: durable.registration_hash,
+                object: durable.prepared.reference().clone(),
+            }
+        }
+
+        pub async fn transfer_provider_administration(
+            &self,
+            target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        ) -> Result<(), crate::sync::store::MembershipOpsError> {
+            self.store
+                .transfer_provider_administration_to_device(target.device_id)
+                .await
+        }
+
         pub async fn latest_local_store_position(
             &self,
         ) -> Result<
@@ -4441,9 +4467,37 @@ impl TestStore {
         published_at: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<JoinedTestStore, TestError>> + 'a>>
     {
+        let observer = self.founder.clone();
+        self.install_cross_principal_device_admitted_by(
+            observer,
+            joining_store_dir,
+            synced_tables,
+            migrations,
+            binary_schema_version,
+            identity,
+            peer_account_id,
+            published_at,
+        )
+    }
+
+    /// The same cross-principal join, admitted by `observer` rather than by the
+    /// founder — the shape a Store takes once administration has moved.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn install_cross_principal_device_admitted_by<'a>(
+        &'a self,
+        observer: TestDevice,
+        joining_store_dir: StoreDir,
+        synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
+        migrations: Vec<coven_database::Migration>,
+        binary_schema_version: u32,
+        identity: &'a UserKeypair,
+        peer_account_id: &'a str,
+        published_at: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<JoinedTestStore, TestError>> + 'a>>
+    {
         Box::pin(async move {
             let open_synced_tables = synced_tables.clone();
-            let observer = self.founder.clone();
             // The joining device installs a snapshot, so the Store has to have
             // published one — the same precondition production has.
             observer.ensure_device_join_snapshot_for_test().await?;

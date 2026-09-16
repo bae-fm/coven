@@ -338,6 +338,14 @@ impl StoreSession<'_> {
                     ..
                 },
             ) => before == after && old_email == new_email && old_role == new_role,
+            (
+                StoreAuthorityChange::TransferProviderAdministration {
+                    administrator: before,
+                },
+                StoreAuthorityChange::TransferProviderAdministration {
+                    administrator: after,
+                },
+            ) => before == after,
             _ => false,
         };
         if !same_request {

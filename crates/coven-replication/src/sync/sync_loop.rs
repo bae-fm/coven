@@ -590,6 +590,16 @@ impl SyncLoopHandle {
         self.inner.components.remove_member(public_key_hex).await
     }
 
+    pub async fn transfer_provider_administration(
+        &self,
+        device_id: coven_protocol::StoreDeviceId,
+    ) -> Result<(), super::store::MembershipOpsError> {
+        self.inner
+            .components
+            .transfer_provider_administration(device_id)
+            .await
+    }
+
     pub async fn drain_uploads(
         &self,
     ) -> Result<crate::blob::DrainOutcome, super::store::StoreError> {

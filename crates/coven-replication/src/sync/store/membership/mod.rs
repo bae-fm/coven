@@ -72,6 +72,10 @@ pub enum MembershipOpsError {
     ChainHasNoFounder,
     #[error("sharing requires an encrypted cloud home")]
     NotEncryptedHome,
+    #[error("the local Store device is not the provider administrator")]
+    NotProviderAdministrator,
+    #[error("the provider administration transfer target is not an active Store device")]
+    TransferTargetNotActive,
 }
 
 mod mutation;

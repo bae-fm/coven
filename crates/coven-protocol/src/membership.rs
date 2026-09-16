@@ -169,6 +169,16 @@ pub enum StoreAuthorityChange {
     DeviceExclusionOutcome {
         outcome: super::store_commit::StoreDeviceExclusionOutcomeRef,
     },
+    /// Move provider administration to another registered device of this Store.
+    ///
+    /// The entry records protocol authority only. The physical provider grant
+    /// the new administrator acts under is the provider's own — a Drive or
+    /// OneDrive folder owner is not something coven can move, and S3's shared
+    /// credential needs nothing moved — and the capability probe is what checks
+    /// the new administrator can act, when it acts.
+    TransferProviderAdministration {
+        administrator: StoreDeviceRegistrationRef,
+    },
 }
 
 impl StoreAuthorityChange {
@@ -179,7 +189,8 @@ impl StoreAuthorityChange {
             Self::RemoveMember { .. }
             | Self::DeviceRegistrationActivation { .. }
             | Self::DeviceExclusionProposal { .. }
-            | Self::DeviceExclusionOutcome { .. } => None,
+            | Self::DeviceExclusionOutcome { .. }
+            | Self::TransferProviderAdministration { .. } => None,
         }
     }
 }
@@ -555,6 +566,8 @@ pub enum MembershipError {
     PrunedAuthorStream,
     #[error("membership author stream exhausted its sequence space")]
     SequenceExhausted,
+    #[error("provider administration has concurrent accepted transfers")]
+    ConcurrentProviderAdministrationTransfer,
     #[error("membership graph contains conflicting authority")]
     Conflict,
     #[error("membership entry {coord:?} was prepared against different accepted authority")]
@@ -586,7 +599,8 @@ pub struct ResolvedStoreMembership {
     pub grants:
         BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
     /// The registration that administers provider access at this state: the
-    /// Store root's own administrator.
+    /// Store root's own administrator, overridden by the latest accepted
+    /// transfer on the chain.
     pub provider_administrator: StoreDeviceRegistrationRef,
     pub state_hash: ObjectHash,
 }
@@ -611,7 +625,8 @@ pub struct MembershipChain {
     resolved: ResolvedStoreMembership,
     head_refs: Vec<MembershipHeadRef>,
     /// The Store root's provider administrator: the founder registration the
-    /// signed root descriptor binds its founder grant to.
+    /// signed root descriptor binds its founder grant to. Transfers on the
+    /// chain override it; nothing else does.
     root_administrator: StoreDeviceRegistrationRef,
 }
 

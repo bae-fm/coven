@@ -652,3 +652,81 @@ fn exercise_challenge_create_interruption<'a>(
         ));
     })
 }
+
+/// Admitting a join is one device's job, named by its exact registration.
+/// Moving administration moves that job: the device that gave it away can no
+/// longer even offer a join, and the device that received it runs the whole
+/// cross-principal admission.
+#[tokio::test]
+async fn a_transfer_moves_who_may_admit_a_cross_principal_join() {
+    use crate::sync::store::DeviceJoinError;
+
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        owner_db_store_dir,
+        storage,
+        member,
+        ..
+    } = cross_principal_owner_and_member().await;
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &member,
+        &EncryptionService::from_key([44; 32]),
+    )
+    .await;
+    let second_store_dir = crate::sync::test_helpers::test_store_dir();
+    let second_db = crate::sync::test_helpers::open_test_db(second_store_dir.clone());
+    let second = storage
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &second_db,
+            second_store_dir,
+            &owner,
+            T0,
+        )
+        .await
+        .expect("activate the owner's second device");
+    let second_registration = second.activated_registration_ref().await;
+    let founder = storage
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
+        .await
+        .expect("bind the founding device");
+
+    founder
+        .transfer_provider_administration(&second_registration)
+        .await
+        .expect("the administrator transfers administration");
+    second
+        .run_cycle(None)
+        .await
+        .expect("the new administrator replays the transfer");
+
+    let error = founder
+        .begin_device_join(&pubkey_hex(&member))
+        .await
+        .expect_err("the former administrator can no longer offer a join");
+    assert!(
+        matches!(error, DeviceJoinError::ProviderAdministratorRequired),
+        "{error:?}",
+    );
+
+    let member_store_dir = crate::sync::test_helpers::test_store_dir();
+    storage
+        .install_cross_principal_device_admitted_by(
+            second,
+            member_store_dir,
+            crate::sync::test_helpers::test_synced_tables(),
+            crate::sync::test_helpers::test_migrations(),
+            SCHEMA_VERSION,
+            &member,
+            "member-account",
+            T0,
+        )
+        .await
+        .expect("the new administrator admits the cross-principal join");
+}

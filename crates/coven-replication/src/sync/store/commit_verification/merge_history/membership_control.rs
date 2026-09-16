@@ -406,6 +406,34 @@ impl<'a> MergeHistoryVerifier<'a> {
             return VerifiedCircleActivations::membership_control(commit, commit_ref)
                 .map_err(StorePullError::from);
         }
+        if let protocol_membership::StoreAuthorityChange::TransferProviderAdministration {
+            administrator,
+        } = &opened_entry.value.change
+        {
+            // The administrator is whoever the predecessor resolves, and only
+            // that exact registration can hand it on. Both ends have to be
+            // active devices at this commit's predecessor cut, so a transfer
+            // can neither be signed by nor land on a device the Store has
+            // already excluded.
+            let current = predecessor_membership.provider_administrator();
+            if &commit.author_registration != current
+                || administrator == current
+                || !device_state_has_active_registration(predecessor_state, current)
+                || !device_state_has_active_registration(predecessor_state, administrator)
+                || !commit.stream_activations().is_empty()
+                || !commit.device_registrations().is_empty()
+                || !commit.device_exclusion_outcomes().is_empty()
+            {
+                return Err(StorePullError::InvalidState(
+                    "Merge provider-administration transfer differs from its accepted authority"
+                        .to_string(),
+                ));
+            }
+            let mut successor_membership = predecessor_membership.clone();
+            successor_membership.add_entry(opened_entry.value)?;
+            return VerifiedCircleActivations::membership_control(commit, commit_ref)
+                .map_err(StorePullError::from);
+        }
         let protocol_membership::StoreAuthorityChange::SetMember {
             user_pubkey,
             role:

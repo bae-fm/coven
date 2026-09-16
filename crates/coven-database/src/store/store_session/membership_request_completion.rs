@@ -11,6 +11,9 @@ enum MembershipRequestCompletion {
     Satisfied,
     RejectedAdmission,
     AuthorityRetired,
+    /// A provider-administration transfer that can no longer be published from
+    /// this device, retired without its change ever being accepted.
+    TransferWithdrawn,
 }
 
 impl MembershipRequestCompletion {
@@ -48,6 +51,20 @@ impl MembershipRequestCompletion {
                 "retained membership removal is not satisfied",
             ),
             (
+                Self::Satisfied,
+                StoreAuthorityChange::TransferProviderAdministration { administrator },
+            ) => (
+                membership.provider_administrator() == administrator,
+                "retained provider-administration transfer is not satisfied",
+            ),
+            (
+                Self::TransferWithdrawn,
+                StoreAuthorityChange::TransferProviderAdministration { administrator },
+            ) => (
+                membership.provider_administrator() != administrator,
+                "withdrawn provider-administration transfer was accepted after all",
+            ),
+            (
                 Self::Satisfied | Self::RejectedAdmission,
                 StoreAuthorityChange::SetMember {
                     user_pubkey,
@@ -76,7 +93,9 @@ impl MembershipRequestCompletion {
                         grants.len() == 1 && !matching,
                         "retained membership admission is not rejected by an accepted grant",
                     ),
-                    Self::AuthorityRetired => unreachable!("authority retirement is handled above"),
+                    Self::AuthorityRetired | Self::TransferWithdrawn => unreachable!(
+                        "authority retirement and transfer withdrawal are handled above"
+                    ),
                 }
             }
             _ => {
@@ -253,6 +272,28 @@ impl StoreDatabase {
         self.call_store(move |session| {
             session.complete_retired_membership_request(
                 MembershipRequestCompletion::AuthorityRetired,
+                intent_hash,
+                expected,
+                accepted,
+                membership,
+            )
+        })
+        .await
+    }
+
+    /// Retire a provider-administration transfer this device can no longer
+    /// publish — it is not the administrator any more, or the target is no
+    /// longer an active device — without its change having been accepted.
+    pub async fn complete_withdrawn_membership_transfer(
+        &self,
+        intent_hash: ObjectHash,
+        expected: ActiveStorePublication,
+        accepted: coven_protocol::store_commit::StoreCurrentPublicationRecord,
+        membership: MembershipChain,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| {
+            session.complete_retired_membership_request(
+                MembershipRequestCompletion::TransferWithdrawn,
                 intent_hash,
                 expected,
                 accepted,

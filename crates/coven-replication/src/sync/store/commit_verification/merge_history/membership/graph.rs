@@ -348,6 +348,7 @@ pub(super) fn validate_owner_grant_records(
             }
             StoreAuthorityChange::SetMember { .. }
             | StoreAuthorityChange::RemoveMember { .. }
+            | StoreAuthorityChange::TransferProviderAdministration { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
             | StoreAuthorityChange::DeviceExclusionOutcome { .. } => {}

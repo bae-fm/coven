@@ -1,6 +1,7 @@
 //! Store membership operations authorized by a retained local writer.
 
 mod admission;
+mod provider_administration;
 mod removal;
 
 use crate::sync::store::membership::MembershipMutationError;
@@ -87,3 +88,6 @@ mod tests;
 
 #[cfg(test)]
 mod authority_upload_tests;
+
+#[cfg(test)]
+mod provider_administration_tests;

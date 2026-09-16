@@ -18,7 +18,8 @@ pub(super) fn validate_membership_retirement_barriers(
             StoreAuthorityChange::Founder { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => continue,
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::TransferProviderAdministration { .. } => continue,
         };
         if retired != &barriers.keys().cloned().collect::<BTreeSet<_>>() {
             let barrier_grants = barriers.keys().cloned().collect::<BTreeSet<_>>();
@@ -88,7 +89,8 @@ pub(super) fn validate_membership_sealed_keys(
             StoreAuthorityChange::Founder { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => continue,
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::TransferProviderAdministration { .. } => continue,
         };
         let causal_generation = membership_causal_generation(entries, &entry.dependencies);
         if causal_generation.checked_add(1) != Some(rotation_generation)
@@ -135,7 +137,8 @@ pub(super) fn membership_causal_generation(
             | StoreAuthorityChange::SetMember { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => None,
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::TransferProviderAdministration { .. } => None,
         })
         .max()
         .unwrap_or(coven_keys::encryption::INITIAL_KEY_GENERATION)
@@ -149,6 +152,59 @@ pub(super) fn reduce_store_membership(
         CausalGrantStatus::Resolved(reduced) => Ok(reduced),
         CausalGrantStatus::Conflict(_) => Err(MembershipError::Conflict),
     }
+}
+
+/// The registration that administers provider access: the Store root's own
+/// administrator, overridden by the latest accepted transfer on this chain.
+///
+/// Accepted membership is linear. Every accepted entry names the complete
+/// effective frontier of the entries before it as its dependencies, and
+/// accepted publications replay in publication-position order, so at most one
+/// transfer can see every other one. A transfer set with no such maximum is
+/// history no accepted chain can produce; it is refused here, never ordered.
+pub(super) fn resolve_provider_administrator(
+    root_administrator: &StoreDeviceRegistrationRef,
+    entries: &[MembershipEntry],
+    included: &BTreeSet<MembershipCoord>,
+) -> Result<StoreDeviceRegistrationRef, MembershipError> {
+    let transfers = entries
+        .iter()
+        .filter(|entry| included.contains(&entry.coord()))
+        .filter_map(|entry| match &entry.change {
+            StoreAuthorityChange::TransferProviderAdministration { administrator } => {
+                Some((entry, administrator))
+            }
+            StoreAuthorityChange::Founder { .. }
+            | StoreAuthorityChange::SetMember { .. }
+            | StoreAuthorityChange::RemoveMember { .. }
+            | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+            | StoreAuthorityChange::DeviceExclusionProposal { .. }
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    if transfers.is_empty() {
+        return Ok(root_administrator.clone());
+    }
+    let coords = transfers
+        .iter()
+        .map(|(entry, _)| entry.coord())
+        .collect::<BTreeSet<_>>();
+    let mut latest = None;
+    for (entry, administrator) in &transfers {
+        let coord = entry.coord();
+        let observed = causal_grants::history_closure(entries, &entry.dependencies);
+        if !coords
+            .iter()
+            .all(|other| *other == coord || observed.contains(other))
+        {
+            continue;
+        }
+        if latest.is_some() {
+            return Err(MembershipError::ConcurrentProviderAdministrationTransfer);
+        }
+        latest = Some((*administrator).clone());
+    }
+    latest.ok_or(MembershipError::ConcurrentProviderAdministrationTransfer)
 }
 
 pub(super) fn normalize_store_membership(
@@ -224,7 +280,8 @@ pub(super) fn normalize_store_membership(
                         })
                         .collect(),
                 },
-                StoreAuthorityChange::DeviceRegistrationActivation { .. }
+                StoreAuthorityChange::TransferProviderAdministration { .. }
+                | StoreAuthorityChange::DeviceRegistrationActivation { .. }
                 | StoreAuthorityChange::DeviceExclusionProposal { .. }
                 | StoreAuthorityChange::DeviceExclusionOutcome { .. } => CausalChange::Control,
             };
@@ -304,7 +361,8 @@ pub(super) fn membership_retirement_barrier(
         StoreAuthorityChange::Founder { .. }
         | StoreAuthorityChange::DeviceRegistrationActivation { .. }
         | StoreAuthorityChange::DeviceExclusionProposal { .. }
-        | StoreAuthorityChange::DeviceExclusionOutcome { .. } => return None,
+        | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+        | StoreAuthorityChange::TransferProviderAdministration { .. } => return None,
     };
     barriers.get(grant).cloned()
 }

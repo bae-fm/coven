@@ -19,6 +19,25 @@ impl LocalStoreWriter {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Sign the entry that moves provider administration to `administrator`.
+    pub(crate) fn sign_provider_administration_transfer(
+        &self,
+        chain: &coven_protocol::membership::MembershipChain,
+        stream_id: coven_protocol::membership::AuthorStreamId,
+        administrator: coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        timestamp: String,
+    ) -> Result<
+        coven_protocol::membership::MembershipEntry,
+        coven_protocol::membership::MembershipError,
+    > {
+        chain.signed_provider_administration_transfer_in_stream(
+            &self.identity,
+            stream_id,
+            administrator,
+            timestamp,
+        )
+    }
+
     pub(crate) fn sign_set_member(
         &self,
         chain: &coven_protocol::membership::MembershipChain,

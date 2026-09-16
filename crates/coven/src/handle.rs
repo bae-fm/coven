@@ -1257,6 +1257,21 @@ impl CovenHandle {
         self.membership.admit(public_key_hex, None, role).await
     }
 
+    /// Hand provider administration to another active device of this Store.
+    ///
+    /// Only the device that administers provider access now can do this, and it
+    /// moves protocol authority alone: the provider-side folder or credential
+    /// the administrator acts through is the provider's own and does not move
+    /// with it.
+    pub async fn transfer_provider_administration(
+        &self,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<(), SyncError> {
+        self.membership
+            .transfer_provider_administration(device_id)
+            .await
+    }
+
     /// Propose excluding one Store device and return the code that identifies
     /// the exact activated proposal.
     pub async fn propose_device_exclusion(

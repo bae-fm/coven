@@ -37,6 +37,24 @@ impl MembershipChain {
         Ok(entry)
     }
 
+    /// Move provider administration to another registered device of this Store.
+    /// The chain reducer resolves the administrator; the Store verifier is what
+    /// pins this entry's commit author to the administrator it replaces.
+    pub fn signed_provider_administration_transfer_in_stream(
+        &self,
+        signer: &UserKeypair,
+        stream_id: AuthorStreamId,
+        administrator: StoreDeviceRegistrationRef,
+        created_at: String,
+    ) -> Result<MembershipEntry, MembershipError> {
+        self.signed_change_in_stream(
+            signer,
+            stream_id,
+            StoreAuthorityChange::TransferProviderAdministration { administrator },
+            created_at,
+        )
+    }
+
     pub fn signed_set_member_with_anchor_and_sealed_key_in_stream(
         &self,
         signer: &UserKeypair,

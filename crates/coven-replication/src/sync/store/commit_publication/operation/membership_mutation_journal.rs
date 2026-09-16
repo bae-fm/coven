@@ -19,6 +19,7 @@ use crate::sync::store::membership::MembershipMutationError;
 pub(super) enum MembershipMutationPlan {
     Admission(AdmissionMutationPlan),
     Revoke(RevokeMutationPlan),
+    TransferProviderAdministration(TransferAdministrationMutationPlan),
 }
 
 impl MembershipMutationPlan {
@@ -55,6 +56,33 @@ impl AdmissionMutationPlan {
                 } if user_pubkey == member_pubkey
                     && provider_account_email.as_deref() == member_email
                     && entry_role.role() == *role
+            ))
+    }
+}
+
+/// One staged transfer of provider administration. It carries only its
+/// candidate: a transfer touches no provider access and no keyring, so there is
+/// no progress of its own to remember.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TransferAdministrationMutationPlan {
+    pub(super) candidate: Box<PreparedStoreOperationCommit>,
+}
+
+impl TransferAdministrationMutationPlan {
+    pub(super) fn matches_request(
+        &self,
+        author_pubkey: &str,
+        target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        store_id: &str,
+    ) -> Result<bool, MembershipMutationError> {
+        let publication = self.candidate.prepared_membership_publication()?;
+        Ok(publication.entry.author_pubkey == author_pubkey
+            && publication.entry.store_id == store_id
+            && matches!(
+                &publication.entry.change,
+                StoreAuthorityChange::TransferProviderAdministration { administrator }
+                    if administrator == target
             ))
     }
 }

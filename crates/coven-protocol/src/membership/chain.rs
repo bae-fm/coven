@@ -227,7 +227,8 @@ impl MembershipChain {
             | StoreAuthorityChange::RemoveMember { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => None,
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+            | StoreAuthorityChange::TransferProviderAdministration { .. } => None,
         })
     }
 
@@ -515,7 +516,8 @@ impl MembershipChain {
                     retirement_device_state,
                     ..
                 } => (retirement_barriers, retirement_device_state),
-                StoreAuthorityChange::DeviceRegistrationActivation { .. }
+                StoreAuthorityChange::TransferProviderAdministration { .. }
+                | StoreAuthorityChange::DeviceRegistrationActivation { .. }
                 | StoreAuthorityChange::DeviceExclusionProposal { .. }
                 | StoreAuthorityChange::DeviceExclusionOutcome { .. }
                 | StoreAuthorityChange::Founder { .. } => continue,
@@ -579,7 +581,9 @@ impl MembershipChain {
         validate_membership_retirement_barriers(entries)?;
         validate_membership_sealed_keys(entries)?;
         let reduced = reduce_store_membership(entries)?;
-        let resolved = resolved_store_membership(&reduced, root_administrator.clone(), entries)?;
+        let provider_administrator =
+            resolve_provider_administrator(root_administrator, entries, &reduced.included)?;
+        let resolved = resolved_store_membership(&reduced, provider_administrator, entries)?;
         Ok((reduced.included, resolved))
     }
 
