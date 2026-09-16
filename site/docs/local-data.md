@@ -86,7 +86,7 @@ gate forms:
 
 ```rust
 SyncedTable::new("todos", RowIdentity::IndependentUuid) // inherits the list's gate
-    .inherits_audience_through("list_id")
+    .gated_through("list_id")
 SyncedTable::new("attachments", RowIdentity::IndependentUuid).remote_root()
 SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared")
 SyncedTable::new("workspaces", RowIdentity::IndependentUuid).gated_by_descendants()
@@ -95,7 +95,7 @@ SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience")
 
 - `new(name, row_identity)` declares the table synced with no gate of its own. It
   syncs unconditionally unless it names a foreign key to inherit a gate through.
-- `inherits_audience_through(column)` names the one foreign key this table takes
+- `gated_through(column)` names the one foreign key this table takes
   its gate from, whatever the chain ends at: a gated root, an audience root, a
   remote root, or a kept ancestor. A table with a foreign key into a gated table
   must name it — coven refuses to choose among a table's foreign keys, because
@@ -112,7 +112,7 @@ SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience")
   the store and this device). Audience roots require an opaque cloud home and are
   covered on the [Circles](/docs/circles#declaring-audience-routing) page.
 
-A table is one root kind or plain, never two at once; `inherits_audience_through`
+A table is one root kind or plain, never two at once; `gated_through`
 is the plain table's own declaration and never combines with a root kind. Two
 further properties are orthogonal to the gate and covered in
 [Blobs](/docs/blobs): a table may *carry a blob* (`carries_blob`), and it may be

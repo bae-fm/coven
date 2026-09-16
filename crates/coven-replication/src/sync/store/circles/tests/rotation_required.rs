@@ -40,7 +40,7 @@ fn circle_routing_tables() -> Vec<coven_protocol::synced_schema::SyncedTable> {
             "document_files",
             coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )
-        .inherits_audience_through("document_id")
+        .gated_through("document_id")
         .carries_blob(coven_protocol::synced_schema::BlobDecl::new(
             "files",
             coven_protocol::blob::Provenance::HostProvided,

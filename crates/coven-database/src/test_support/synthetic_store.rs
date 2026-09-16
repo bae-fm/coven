@@ -92,12 +92,12 @@ pub fn test_synced_tables() -> Vec<SyncedTable> {
             "note_tags",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id"),
+        .gated_through("note_id"),
         SyncedTable::new(
             "note_photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id"),
+        .gated_through("note_id"),
     ]
 }
 
@@ -118,12 +118,12 @@ pub fn test_synced_tables_with_blob(decl: BlobDecl) -> Vec<SyncedTable> {
             "note_tags",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id"),
+        .gated_through("note_id"),
         SyncedTable::new(
             "note_photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id")
+        .gated_through("note_id")
         .carries_blob(decl),
     ]
 }
@@ -142,12 +142,12 @@ pub fn test_synced_tables_remote_root_with_blob(decl: BlobDecl) -> Vec<SyncedTab
             "note_tags",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id"),
+        .gated_through("note_id"),
         SyncedTable::new(
             "note_photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id")
+        .gated_through("note_id")
         .carries_blob(decl),
     ]
 }
@@ -172,18 +172,18 @@ pub fn test_synced_tables_with_user_and_host_blobs(
             "note_tags",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id"),
+        .gated_through("note_id"),
         SyncedTable::new(
             "note_photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id")
+        .gated_through("note_id")
         .carries_blob(photo_decl),
         SyncedTable::new(
             "note_covers",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id")
+        .gated_through("note_id")
         .carries_blob(cover_decl),
     ]
 }
@@ -467,12 +467,12 @@ pub fn remote_root_db(
                 "note_tags",
                 coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
-            .inherits_audience_through("note_id"),
+            .gated_through("note_id"),
             SyncedTable::new(
                 "note_photos",
                 coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
-            .inherits_audience_through("note_id")
+            .gated_through("note_id")
             .carries_blob(decl),
         ],
         test_migrations(),

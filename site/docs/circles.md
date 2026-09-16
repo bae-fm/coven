@@ -49,7 +49,7 @@ and a table uses at most one:
 ```rust
 SyncedTable::new("lists", RowIdentity::IndependentUuid).scoped_by("audience")
 SyncedTable::new("todos", RowIdentity::IndependentUuid)
-    .inherits_audience_through("list_id")
+    .gated_through("list_id")
 ```
 
 - [`scoped_by(column)`](rustdoc:method:coven::SyncedTable::scoped_by) makes the
@@ -57,7 +57,7 @@ SyncedTable::new("todos", RowIdentity::IndependentUuid)
   is Store, the reserved value `local` is Local, and any other value is a
   canonical committed `CircleId`. Moving a row between audiences is an ordinary
   SQL update to that column (see [Moving a row](#moving-a-row)).
-- [`inherits_audience_through(column)`](rustdoc:method:coven::SyncedTable::inherits_audience_through)
+- [`gated_through(column)`](rustdoc:method:coven::SyncedTable::gated_through)
   makes a descendant table take its audience from the parent row named by the
   foreign key in `column`. It is the same declaration a table under a
   [gated root](/docs/local-data#gated-roots) uses: every plain table with a

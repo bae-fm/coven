@@ -17,7 +17,7 @@ fn scoped_snapshot_tables() -> Vec<SyncedTable> {
             "paragraphs",
             coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )
-        .inherits_audience_through("document_id"),
+        .gated_through("document_id"),
     ]
 }
 

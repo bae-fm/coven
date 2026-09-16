@@ -728,7 +728,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
             "comments",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id"),
+        .gated_through("note_id"),
     ];
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = Database::open_synthetic_for_test(

@@ -57,7 +57,7 @@ fn a_scoped_descendant_requires_a_declared_gate_parent() {
         &c,
         &[
             plain("notes").scoped_by("audience"),
-            plain("note_tags").inherits_audience_through("note_id"),
+            plain("note_tags").gated_through("note_id"),
         ],
     )
     .expect("build explicitly declared audience inheritance");
@@ -97,7 +97,7 @@ fn an_undeclared_join_row_referencing_a_gated_root_is_refused() {
             &c,
             &[
                 plain("roots").gated_by("shared"),
-                plain("children").inherits_audience_through(column),
+                plain("children").gated_through(column),
             ],
         )
         .expect("either declaration builds");
@@ -164,7 +164,7 @@ fn a_declared_ancestor_edge_is_followed_whatever_its_depth() {
             plain("aouter").gated_by_descendants(),
             plain("zinner").gated_by_descendants(),
             plain("zgated").gated_by("shared"),
-            plain("joiner").inherits_audience_through(column),
+            plain("joiner").gated_through(column),
         ]
     };
 
@@ -227,7 +227,7 @@ fn a_declaration_naming_a_column_with_no_foreign_key_is_refused() {
         &c,
         &[
             plain("roots").gated_by("shared"),
-            plain("children").inherits_audience_through("note"),
+            plain("children").gated_through("note"),
         ],
     );
     assert!(
@@ -262,7 +262,7 @@ fn a_declaration_naming_a_column_two_foreign_keys_use_is_refused() {
         &[
             plain("roots").gated_by("shared"),
             plain("mirrors"),
-            plain("children").inherits_audience_through("root_id"),
+            plain("children").gated_through("root_id"),
         ],
     );
     assert!(
@@ -285,10 +285,7 @@ fn a_declaration_pointing_at_an_undeclared_table_is_refused() {
              ) STRICT;",
     );
 
-    let error = build_error(
-        &c,
-        &[plain("children").inherits_audience_through("note_id")],
-    );
+    let error = build_error(&c, &[plain("children").gated_through("note_id")]);
     assert!(
         error
             .to_string()
@@ -322,7 +319,7 @@ fn a_declaration_selecting_a_composite_relationship_is_refused() {
         &c,
         &[
             plain("roots").gated_by("shared"),
-            plain("children").inherits_audience_through("root_left"),
+            plain("children").gated_through("root_left"),
         ],
     );
     assert!(
@@ -351,16 +348,14 @@ fn a_declaration_on_a_root_or_an_ancestor_is_refused() {
     let roles = [
         plain("releases")
             .gated_by("managed")
-            .inherits_audience_through("album_id"),
+            .gated_through("album_id"),
         plain("releases")
             .scoped_by("audience")
-            .inherits_audience_through("album_id"),
-        plain("releases")
-            .remote_root()
-            .inherits_audience_through("album_id"),
+            .gated_through("album_id"),
+        plain("releases").remote_root().gated_through("album_id"),
         plain("releases")
             .gated_by_descendants()
-            .inherits_audience_through("album_id"),
+            .gated_through("album_id"),
     ];
 
     for releases in roles {
@@ -388,10 +383,7 @@ fn a_declared_chain_that_reaches_no_terminus_is_refused() {
 
     let error = build_error(
         &c,
-        &[
-            plain("tags"),
-            plain("tag_synonyms").inherits_audience_through("tag_id"),
-        ],
+        &[plain("tags"), plain("tag_synonyms").gated_through("tag_id")],
     );
     assert!(
         error.to_string().contains(
@@ -420,8 +412,8 @@ fn a_declared_cycle_is_refused() {
     let error = build_error(
         &c,
         &[
-            plain("first").inherits_audience_through("second_id"),
-            plain("second").inherits_audience_through("first_id"),
+            plain("first").gated_through("second_id"),
+            plain("second").gated_through("first_id"),
         ],
     );
     assert!(
@@ -439,13 +431,13 @@ fn a_declared_cycle_is_refused() {
 fn work_graph_tables() -> Vec<SyncedTable> {
     vec![
         plain("releases").gated_by("managed"),
-        plain("tracks").inherits_audience_through("release_id"),
+        plain("tracks").gated_through("release_id"),
         plain("works").gated_by_descendants(),
         plain("artists").gated_by_descendants(),
-        plain("track_works").inherits_audience_through("track_id"),
-        plain("track_artists").inherits_audience_through("track_id"),
-        plain("work_artists").inherits_audience_through("artist_id"),
-        plain("work_parts").inherits_audience_through("child_work_id"),
+        plain("track_works").gated_through("track_id"),
+        plain("track_artists").gated_through("track_id"),
+        plain("work_artists").gated_through("artist_id"),
+        plain("work_parts").gated_through("child_work_id"),
     ]
 }
 
@@ -669,9 +661,9 @@ fn a_container_work_survives_while_another_shared_part_still_names_it() {
 fn audio_format_tables() -> Vec<SyncedTable> {
     vec![
         plain("releases").gated_by("managed"),
-        plain("tracks").inherits_audience_through("release_id"),
-        plain("audio_formats").inherits_audience_through("track_id"),
-        plain("audio_format_segments").inherits_audience_through("audio_format_id"),
+        plain("tracks").gated_through("release_id"),
+        plain("audio_formats").gated_through("track_id"),
+        plain("audio_format_segments").gated_through("audio_format_id"),
     ]
 }
 

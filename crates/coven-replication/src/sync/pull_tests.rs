@@ -3470,7 +3470,7 @@ fn open_scoped_circle_test_db(
                 "comments",
                 coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
-            .inherits_audience_through("note_id"),
+            .gated_through("note_id"),
         ],
         vec![coven_database::Migration::sql(
             1,
@@ -3721,7 +3721,7 @@ fn scoped_fk_circle_db(
                 "comments",
                 coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
-            .inherits_audience_through("note_id"),
+            .gated_through("note_id"),
         ],
         vec![coven_database::Migration::sql(
             1,

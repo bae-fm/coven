@@ -172,8 +172,7 @@ fn a_child_deleted_while_its_parent_moves_local_keeps_its_prior_audience() {
         &conn,
         &[
             SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience"),
-            SyncedTable::new("comments", RowIdentity::IndependentUuid)
-                .inherits_audience_through("note_id"),
+            SyncedTable::new("comments", RowIdentity::IndependentUuid).gated_through("note_id"),
         ],
     )
     .expect("build scoped gates");
@@ -738,8 +737,7 @@ fn audience_prune_removes_stale_scoped_subtrees_and_keeps_local_rows() {
     .expect("install matching inactive mirror");
     let tables = vec![
         SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience"),
-        SyncedTable::new("comments", RowIdentity::IndependentUuid)
-            .inherits_audience_through("note_id"),
+        SyncedTable::new("comments", RowIdentity::IndependentUuid).gated_through("note_id"),
     ];
     let gates = Gates::from_tables(&conn, &tables).expect("build scoped gates");
 

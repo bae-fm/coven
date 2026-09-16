@@ -92,7 +92,7 @@ fn child_gate_follows_the_foreign_keys_named_parent_column() {
             "children",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("parent_code"),
+        .gated_through("parent_code"),
     ];
 
     let gates = Gates::from_tables(&c, &tables).expect("build gate model");
@@ -138,12 +138,12 @@ fn test_synced_tables() -> Vec<SyncedTable> {
             "note_tags",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id"),
+        .gated_through("note_id"),
         SyncedTable::new(
             "note_photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id"),
+        .gated_through("note_id"),
     ]
 }
 
@@ -368,7 +368,7 @@ fn remote_root_child_resolves_as_remote_and_belongs_to_root_subtree() {
             "note_photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("note_id"),
+        .gated_through("note_id"),
     ];
     let gates = Gates::from_tables(&c, &tables).expect("gates");
 
@@ -700,12 +700,12 @@ fn multi_hop_fk_inheritance() {
             "photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("album_id"),
+        .gated_through("album_id"),
         SyncedTable::new(
             "comments",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("photo_id"),
+        .gated_through("photo_id"),
     ];
 
     // Private album with a 2-level subtree: all cut.
@@ -771,12 +771,12 @@ fn delete_gated_false_strips_private_subtrees_in_place() {
             "photos",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("album_id"),
+        .gated_through("album_id"),
         SyncedTable::new(
             "comments",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("photo_id"),
+        .gated_through("photo_id"),
         SyncedTable::new(
             "settings",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
@@ -830,12 +830,12 @@ fn album_tables() -> Vec<SyncedTable> {
             "album_artists",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("album_id"),
+        .gated_through("album_id"),
         SyncedTable::new(
             "tracks",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("release_id"),
+        .gated_through("release_id"),
     ]
 }
 
@@ -1979,23 +1979,23 @@ fn album_asset_tables() -> Vec<SyncedTable> {
             "album_artists",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("album_id"),
+        .gated_through("album_id"),
         SyncedTable::new(
             "tracks",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("release_id"),
+        .gated_through("release_id"),
         SyncedTable::new(
             "covers",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("release_id")
+        .gated_through("release_id")
         .asset(),
         SyncedTable::new(
             "artist_images",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("artist_id")
+        .gated_through("artist_id")
         .asset(),
     ]
 }
@@ -2266,7 +2266,7 @@ fn asset_marker_excludes_a_child_the_back_edge_would_keep() {
             "artist_images",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("album_id");
+        .gated_through("album_id");
         let image = if asset { image.asset() } else { image };
         vec![
             SyncedTable::new(
@@ -2326,7 +2326,7 @@ fn work_part_tables() -> Vec<SyncedTable> {
             "tracks",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("release_id"),
+        .gated_through("release_id"),
         SyncedTable::new(
             "works",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
@@ -2336,12 +2336,12 @@ fn work_part_tables() -> Vec<SyncedTable> {
             "track_works",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("track_id"),
+        .gated_through("track_id"),
         SyncedTable::new(
             "work_parts",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("child_work_id"),
+        .gated_through("child_work_id"),
     ]
 }
 
@@ -2629,7 +2629,7 @@ fn a_shared_row_naming_a_gate_false_root_is_refused_at_the_write() {
             "playlist_items",
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
-        .inherits_audience_through("playlist_id"),
+        .gated_through("playlist_id"),
     ];
     let gates = Gates::from_tables(&c, &tables).expect("gates");
     assert_eq!(

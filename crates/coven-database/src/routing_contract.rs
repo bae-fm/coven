@@ -538,8 +538,7 @@ mod tests {
 
     fn declarations() -> Vec<SyncedTable> {
         vec![
-            SyncedTable::new("children", RowIdentity::IndependentUuid)
-                .inherits_audience_through("parent_id"),
+            SyncedTable::new("children", RowIdentity::IndependentUuid).gated_through("parent_id"),
             SyncedTable::new("parents", RowIdentity::IndependentUuid).scoped_by("audience"),
         ]
     }
@@ -564,8 +563,7 @@ mod tests {
         );
 
         let changed = vec![
-            SyncedTable::new("children", RowIdentity::SharedKey)
-                .inherits_audience_through("parent_id"),
+            SyncedTable::new("children", RowIdentity::SharedKey).gated_through("parent_id"),
             declarations[1].clone(),
         ];
         assert_ne!(

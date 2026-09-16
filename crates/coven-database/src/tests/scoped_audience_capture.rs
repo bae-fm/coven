@@ -398,8 +398,7 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
         "capture-device",
         vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
-            SyncedTable::new("transactions", RowIdentity::SharedKey)
-                .inherits_audience_through("account_id"),
+            SyncedTable::new("transactions", RowIdentity::SharedKey).gated_through("account_id"),
         ],
         vec![Migration::sql(
             1,
@@ -685,8 +684,7 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         "capture-device",
         vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
-            SyncedTable::new("transactions", RowIdentity::SharedKey)
-                .inherits_audience_through("account_id"),
+            SyncedTable::new("transactions", RowIdentity::SharedKey).gated_through("account_id"),
         ],
         vec![Migration::sql(
             1,
@@ -1156,7 +1154,7 @@ async fn validates_every_outgoing_synced_fk_audience() {
         vec![
             SyncedTable::new("homes", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("targets", RowIdentity::SharedKey).scoped_by("audience"),
-            SyncedTable::new("links", RowIdentity::SharedKey).inherits_audience_through("home_id"),
+            SyncedTable::new("links", RowIdentity::SharedKey).gated_through("home_id"),
         ],
         vec![Migration::sql(
             1,
@@ -1327,10 +1325,8 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
         vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("requirements", RowIdentity::SharedKey).scoped_by("audience"),
-            SyncedTable::new("transactions", RowIdentity::SharedKey)
-                .inherits_audience_through("account_id"),
-            SyncedTable::new("line_items", RowIdentity::SharedKey)
-                .inherits_audience_through("transaction_id"),
+            SyncedTable::new("transactions", RowIdentity::SharedKey).gated_through("account_id"),
+            SyncedTable::new("line_items", RowIdentity::SharedKey).gated_through("transaction_id"),
         ],
         vec![Migration::sql(
             1,
@@ -1656,8 +1652,7 @@ async fn scoped_descendant_keeps_store_ancestor() {
         vec![
             SyncedTable::new("folders", RowIdentity::SharedKey).gated_by_descendants(),
             SyncedTable::new("documents", RowIdentity::SharedKey).scoped_by("audience"),
-            SyncedTable::new("details", RowIdentity::SharedKey)
-                .inherits_audience_through("document_id"),
+            SyncedTable::new("details", RowIdentity::SharedKey).gated_through("document_id"),
         ],
         vec![Migration::sql(
             1,

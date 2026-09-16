@@ -20,7 +20,7 @@ async fn covered_circle_replacement(retire_store_package: bool) {
     tables.extend([
         SyncedTable::new("documents", RowIdentity::SharedKey).scoped_by("audience"),
         SyncedTable::new("document_files", RowIdentity::SharedKey)
-            .inherits_audience_through("document_id")
+            .gated_through("document_id")
             .carries_blob(BlobDecl::new(
                 "files",
                 Provenance::HostProvided,

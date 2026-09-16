@@ -91,7 +91,7 @@ impl<'schema> GateModelConstruction<'schema> {
 
         // Classify each table's downward gate-parent. Roots and ancestors are
         // termini; a plain table inherits through the foreign key it declares
-        // with `inherits_audience_through` — coven never elects one for it.
+        // with `gated_through` — coven never elects one for it.
         // Ancestors are deferred: their upward keep-children are built below,
         // once every declared downward parent is known, so an ancestor is
         // inserted already complete — never empty-then-filled.

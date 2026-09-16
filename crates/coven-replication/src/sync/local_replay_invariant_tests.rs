@@ -35,8 +35,7 @@ fn inherited_parent_child_schema() -> (Vec<SyncedTable>, Vec<Migration>) {
     (
         vec![
             SyncedTable::new("parents", RowIdentity::SharedKey).gated_by("shared"),
-            SyncedTable::new("children", RowIdentity::SharedKey)
-                .inherits_audience_through("parent_id"),
+            SyncedTable::new("children", RowIdentity::SharedKey).gated_through("parent_id"),
         ],
         vec![Migration::sql(
             1,
@@ -596,8 +595,7 @@ fn sideways_ancestor_schema() -> (Vec<SyncedTable>, Vec<Migration>) {
             SyncedTable::new("artists", RowIdentity::SharedKey).gated_by_descendants(),
             SyncedTable::new("albums", RowIdentity::SharedKey).gated_by_descendants(),
             SyncedTable::new("releases", RowIdentity::SharedKey).gated_by("shared"),
-            SyncedTable::new("album_artists", RowIdentity::SharedKey)
-                .inherits_audience_through("album_id"),
+            SyncedTable::new("album_artists", RowIdentity::SharedKey).gated_through("album_id"),
         ],
         vec![Migration::sql(
             1,

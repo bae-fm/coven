@@ -54,7 +54,7 @@ let handle = Coven::builder(store_dir, config)
         SyncedTable::new("workspaces", RowIdentity::IndependentUuid),
         SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared"),
         SyncedTable::new("todos", RowIdentity::IndependentUuid)
-            .inherits_audience_through("list_id"),
+            .gated_through("list_id"),
     ])
     .coven_migration_policy(CovenMigrationPolicy::ApplyPending)
     .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
@@ -77,7 +77,7 @@ syncs every row and makes blobs on those rows and descendants always Remote,
 row sync only while its boolean column is true, and
 [`gated_by_descendants`](rustdoc:method:coven::SyncedTable::gated_by_descendants)
 keeps an ancestor row alive only while a gated descendant survives, and
-[`inherits_audience_through`](rustdoc:method:coven::SyncedTable::inherits_audience_through)
+[`gated_through`](rustdoc:method:coven::SyncedTable::gated_through)
 names the foreign key a plain table takes its gate from. Here `lists` is a gated
 root, and `todos` name `list_id` as the foreign key they inherit that gate
 through. Tables you don't pass are local-only and never leave the device. The
@@ -280,7 +280,7 @@ use coven::{BlobDecl, CacheFill, Provenance};
 //   blob id = the row's primary key; opaque home, so no cloud_path column;
 //   master-scoped; the user's own file, fetched into every device's cache on pull.
 SyncedTable::new("todos", RowIdentity::IndependentUuid)
-    .inherits_audience_through("list_id")
+    .gated_through("list_id")
     .carries_blob(
         BlobDecl::new("todo-files", Provenance::UserProvided, CacheFill::CacheEager),
     )
