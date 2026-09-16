@@ -28,7 +28,6 @@ fn database() -> coven_database::StoreDatabase {
     let database = coven_database::Database::open(
         std::path::Path::new(":memory:"),
         Vec::new(),
-        chrono::Duration::days(30),
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "status-test".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),

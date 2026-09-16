@@ -11,8 +11,8 @@ use coven_protocol::synced_schema::BlobDecl;
 use coven_replication::sync::test_helpers::TestStore;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::{
-    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    ExactCreateOutcome, ExactSlotStorage, ExactUpload, UploadControl,
+    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, ExactCreateOutcome,
+    ExactSlotStorage, ExactUpload, UploadControl,
 };
 use coven_storage::CloudCipher;
 use rusqlite::{params, OptionalExtension};
@@ -370,35 +370,6 @@ async fn second_open_of_one_store_is_refused_until_the_first_handle_drops() {
         .migrations(vec![files_migration()])
         .open()
         .expect("open succeeds after the first handle drops");
-}
-
-#[tokio::test]
-async fn a_zero_or_negative_blob_tombstone_grace_is_refused_at_open() {
-    for grace in [chrono::Duration::zero(), chrono::Duration::seconds(-1)] {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new_ephemeral(tmp.path());
-        let result = builder(dir)
-            .synced_tables(vec![files_table()])
-            .migrations(vec![files_migration()])
-            .blob_tombstone_grace(grace)
-            .open();
-        assert!(
-            matches!(result, Err(CovenError::InvalidBlobTombstoneGrace)),
-            "grace {grace:?} must be refused at open",
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_positive_blob_tombstone_grace_opens() {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new_ephemeral(tmp.path());
-    builder(dir)
-        .synced_tables(vec![files_table()])
-        .migrations(vec![files_migration()])
-        .blob_tombstone_grace(chrono::Duration::hours(1))
-        .open()
-        .expect("a positive grace opens");
 }
 
 fn open_remote_root_files_handle() -> (tempfile::TempDir, CovenHandle) {
@@ -2736,24 +2707,6 @@ impl GateCloudHome {
 
 #[async_trait]
 impl CloudHome for GateCloudHome {
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        self.gate().await;
-        self.inner.put_object(key, data).await
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        self.gate().await;
-        self.inner.open_multipart(key, total_len).await
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        self.inner.multipart_threshold()
-    }
-
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         self.gate().await;
         self.inner.read(key).await

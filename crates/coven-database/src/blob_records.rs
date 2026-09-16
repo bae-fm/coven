@@ -157,6 +157,33 @@ pub(crate) fn record_stored_locator_on(
     validate_stored_locator_on(conn, stored)
 }
 
+/// Require an exact object to be accepted history before a caller releases its
+/// row's hold on it.
+///
+/// Accepted reclaim retires orphans out of this same index, so an object it
+/// names has an owner. One missing from it belongs to a publication that has
+/// not happened: its upload journal is what created it and what must take it
+/// back out, and releasing it here would leave nobody holding it.
+pub(crate) fn require_accepted_stored_blob_on(
+    conn: &Connection,
+    stored: &StoredBlobRef,
+) -> Result<(), DbError> {
+    let object_id = remote_object_id(stored.object());
+    let indexed: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM blob_locators WHERE remote_object_id = ?1)",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if !indexed {
+        return Err(DbError::Message(format!(
+            "exact blob {object_id} is not accepted history, so releasing its row would strand it"
+        )));
+    }
+    validate_stored_locator_on(conn, stored)
+}
+
 pub(crate) fn validate_stored_locator_on(
     conn: &Connection,
     expected: &StoredBlobRef,

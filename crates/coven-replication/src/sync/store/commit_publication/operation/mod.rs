@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod blob_lifecycle;
-pub(crate) use blob_lifecycle::TombstoneGcError;
 mod blob_preparation;
 mod blob_upload;
 pub(crate) mod commit_plan;

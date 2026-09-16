@@ -222,18 +222,6 @@ impl CloudSyncConnection {
         self.cipher.read().unwrap().is_plaintext()
     }
 
-    fn cipher_suffix(&self) -> &'static str {
-        self.cipher.read().unwrap().suffix()
-    }
-
-    fn open_stored_data(
-        &self,
-        stored: Vec<u8>,
-        aad_context: &[u8],
-    ) -> Result<Vec<u8>, EncryptionError> {
-        self.cipher.read().unwrap().open(stored, aad_context)
-    }
-
     fn seal_stored_data(
         &self,
         plaintext: Vec<u8>,

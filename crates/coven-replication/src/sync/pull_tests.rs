@@ -651,7 +651,6 @@ fn open_blob_test_db_at(
         path,
         store_dir,
         test_synced_tables_with_blob(decl),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "restart-test-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -1546,7 +1545,6 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
             &target_path,
             target_store_dir.clone(),
             test_synced_tables(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "test-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -1848,7 +1846,6 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         &target_path,
         target_store_dir.clone(),
         test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -4790,7 +4787,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
         assert_eq!(
             home.get(&old_key).as_deref(),
             Some(old_bytes.as_slice()),
-            "the replaced blob's object is not overwritten — it is tombstoned and stands until \
+            "the replaced blob's object is not overwritten — it stands until \
          the GC collects it",
         );
 
@@ -5023,7 +5020,7 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
 /// When a peer applies a changeset that DELETEs a blob-bearing row (a gate retract
 /// or a genuine delete), it drops that blob's local copy — both cache folders and the
 /// local store — or it would leak forever once the row is gone. The peer drops only
-/// its own local copy; it never writes a cloud tombstone.
+/// its own local copy; it never deletes the cloud object.
 #[tokio::test]
 async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     let db1_store_dir = crate::sync::test_helpers::test_store_dir();
@@ -7335,11 +7332,7 @@ mod blob_path_traversal {
             .await
             .expect("read the pending short-id source");
         assert_eq!(uploads.len(), 1);
-        assert!(matches!(
-            &uploads[0].operation,
-            coven_database::OutboxOperation::Upload { row, .. }
-                if row.blob().id == "a"
-        ));
+        assert_eq!(uploads[0].upload.row.blob().id, "a");
     }
 
     /// A normal blob id still round-trips: the boundary check rejects only ids that

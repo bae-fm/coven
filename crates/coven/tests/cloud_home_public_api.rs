@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use coven::{
-    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitEnvironment, CloudKitOps,
-    CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope,
-    CloudKitShare, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
-    ConditionalWriteOutcome, CovenHandle, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
-    ObjectSlot, PhysicalObjectLocator, ProviderDeviceBinding, ProviderPrincipalId,
-    ResolvedProviderBinding, StoreProviderBinding, UploadControl,
+    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudKitAcceptedShareRecord,
+    CloudKitAtomicCreateBatch, CloudKitEnvironment, CloudKitOps, CloudKitProviderIdentity,
+    CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudObjectStream,
+    CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome, CovenHandle,
+    ExactCreateOutcome, ExactSlotStorage, ExactUpload, ObjectSlot, PhysicalObjectLocator,
+    ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
+    UploadControl,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -218,24 +218,6 @@ fn object_slot_rejects_empty_components() {
 
 #[async_trait]
 impl CloudHome for ExternalProvider {
-    async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
-        Ok(())
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        _key: &str,
-        _total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        Err(CloudHomeError::Configuration(
-            "multipart unsupported in compile-test provider".to_string(),
-        ))
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        u64::MAX
-    }
-
     async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
         Ok(Vec::new())
     }

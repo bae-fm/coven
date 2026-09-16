@@ -260,7 +260,7 @@ async fn accepted_member_retirement(continuation: RetirementContinuation) {
             crate::sync::test_helpers::copy_payload_files(&fixture.owner_db_store_dir, &directory);
             let database = coven_database::Database::open_synthetic_for_test(
                 &directory.db_path(), directory.clone(), crate::sync::test_helpers::test_synced_tables(),
-                coven_protocol::blob::BLOB_TOMBSTONE_GRACE, coven_protocol::blob::TransferLimits::one_at_a_time(),
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
                 "test-device".into(), std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
             ).expect("restore writer from its durable journal and payloads");

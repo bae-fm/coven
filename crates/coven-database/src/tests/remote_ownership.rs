@@ -252,6 +252,45 @@ fn snapshot_blob_owner_requires_the_exact_candidate() {
     assert!(validate_snapshot_object_owner_records_on(&conn, &expected, &BTreeSet::new()).is_err());
 }
 
+/// The per-root queue read is the one a host renders a release's progress from,
+/// so it has to answer for that root and no other.
+#[tokio::test]
+async fn the_queue_read_for_one_root_reports_only_that_root() {
+    let db = open_outbox_database("queued-uploads-for-root");
+    for (root, blob) in [("release-a", "photo-a"), ("release-b", "photo-b")] {
+        db.enqueue_blob_upload_with_retention_for_test(
+            "photos",
+            root,
+            local_row_blob(blob, "0000000001000-0000-a", b"photo bytes"),
+            PathBuf::from(format!("/source/{blob}")),
+            false,
+            "2026-07-16T10:00:00Z",
+        )
+        .await
+        .expect("enqueue upload");
+    }
+
+    let database = crate::StoreDatabase::new(&db);
+    assert_eq!(
+        database
+            .queued_uploads_for_root("photos", "release-a")
+            .await
+            .expect("read one root's queue")
+            .into_iter()
+            .map(|upload| upload.blob.row_id().to_string())
+            .collect::<Vec<_>>(),
+        vec!["photo-a".to_string()],
+    );
+    assert_eq!(
+        database
+            .queued_uploads()
+            .await
+            .expect("read the whole queue")
+            .len(),
+        2,
+    );
+}
+
 #[tokio::test]
 async fn upload_retry_preserves_prepared_object_handoff() {
     let db = open_outbox_database("prepared-upload-retry");
@@ -314,8 +353,8 @@ async fn upload_retry_preserves_prepared_object_handoff() {
         .expect("read retried upload");
     assert_eq!(entries.len(), 1);
     assert_eq!(
-        entries[0].operation,
-        OutboxOperation::Upload {
+        entries[0].upload,
+        OutboxUpload {
             root_table: "photos".to_string(),
             root_id: "photo".to_string(),
             row: local_row_blob("photo", "0000000001000-0000-a", b"photo bytes"),
@@ -336,11 +375,8 @@ async fn upload_retry_preserves_prepared_object_handoff() {
         .pending_blob_uploads()
         .await
         .expect("read Created upload");
-    let OutboxOperation::Upload { state, .. } = &created[0].operation else {
-        panic!("upload query returned a non-upload operation");
-    };
     assert!(matches!(
-        state,
+        &created[0].upload.state,
         OutboxUploadState::Created {
             authority: coven_protocol::audience_package::PackageAudience::Store,
             ..
@@ -355,67 +391,6 @@ async fn upload_retry_preserves_prepared_object_handoff() {
         projected[0].provider_bytes_total,
         Some(stored.object().stored_size()),
     );
-}
-
-#[tokio::test]
-async fn repeated_exact_delete_resets_retry_state_without_duplication() {
-    let db = open_outbox_database("repeat-delete");
-    let stored = exact_blob_binding("photo", "0000000001000-0000-a", b"photo bytes")
-        .blob()
-        .clone();
-    db.enqueue_blob_delete_for_test(&stored, "2026-07-16T10:00:00Z")
-        .await
-        .expect("enqueue delete");
-    let failed = crate::StoreDatabase::new(&db)
-        .pending_blob_deletes()
-        .await
-        .expect("read pending delete")
-        .pop()
-        .expect("delete entry");
-    crate::StoreDatabase::new(&db)
-        .record_outbox_failure(
-            &failed,
-            crate::OutboxFailure::other("provider unavailable"),
-            "2026-07-16T10:00:30Z",
-        )
-        .await
-        .expect("record delete failure");
-    db.enqueue_blob_delete_for_test(&stored, "2026-07-16T10:01:00Z")
-        .await
-        .expect("repeat exact delete");
-
-    let deletes = crate::StoreDatabase::new(&db)
-        .pending_blob_deletes()
-        .await
-        .expect("read deletes");
-    assert_eq!(deletes.len(), 1);
-    assert_eq!(deletes[0].attempt_count, 0);
-    assert_eq!(deletes[0].last_attempt_at, None);
-    assert_eq!(deletes[0].operation, OutboxOperation::Delete { stored });
-}
-
-#[tokio::test]
-async fn exact_deletes_for_distinct_objects_remain_distinct() {
-    let db = open_outbox_database("distinct-deletes");
-    let first = exact_blob_binding("photo-a", "0000000001000-0000-a", b"photo a")
-        .blob()
-        .clone();
-    let second = exact_blob_binding("photo-b", "0000000001000-0000-a", b"photo b")
-        .blob()
-        .clone();
-    db.enqueue_blob_delete_for_test(&first, "2026-07-16T10:00:00Z")
-        .await
-        .expect("enqueue first delete");
-    db.enqueue_blob_delete_for_test(&second, "2026-07-16T10:01:00Z")
-        .await
-        .expect("enqueue second delete");
-
-    let deletes = crate::StoreDatabase::new(&db)
-        .pending_blob_deletes()
-        .await
-        .expect("read deletes");
-    assert_eq!(deletes.len(), 2);
-    assert_ne!(deletes[0].operation, deletes[1].operation);
 }
 
 #[test]

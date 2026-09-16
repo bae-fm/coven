@@ -77,8 +77,6 @@ pub enum CovenError {
     CandidateResolution(Box<coven_replication::sync::SyncError>),
     #[error("blob declaration failed: {0}")]
     BlobDeclaration(#[from] coven_database::BlobDeclError),
-    #[error("blob_tombstone_grace must be a positive duration")]
-    InvalidBlobTombstoneGrace,
     #[error("browsable cloud storage cannot be used with scoped table {table:?}")]
     BrowsableStorageWithScopedTable { table: String },
     #[error("blob {namespace}/{id} is still referenced by a row after the write")]
@@ -173,7 +171,6 @@ impl Coven {
             synced_tables: None,
             migrations: None,
             coven_migration_policy: None,
-            blob_tombstone_grace: coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             max_concurrent_uploads: NonZeroUsize::MIN,
             max_concurrent_downloads: NonZeroUsize::MIN,
             clock: Arc::new(SystemClock),
@@ -203,7 +200,6 @@ pub struct CovenBuilder {
     synced_tables: Option<Vec<SyncedTable>>,
     migrations: Option<Vec<Migration>>,
     coven_migration_policy: Option<CovenMigrationPolicy>,
-    blob_tombstone_grace: chrono::Duration,
     max_concurrent_uploads: NonZeroUsize,
     max_concurrent_downloads: NonZeroUsize,
     clock: ClockRef,
@@ -233,16 +229,6 @@ impl From<coven_foundation::store_dir::StoreOpenGuardError> for CovenError {
 impl CovenBuilder {
     pub fn synced_tables(mut self, tables: Vec<SyncedTable>) -> Self {
         self.synced_tables = Some(tables);
-        self
-    }
-
-    /// How long a deleted blob is kept after its tombstone is written before the
-    /// tombstone GC erases it: the cross-device convergence window. Defaults to
-    /// [`coven_protocol::blob::BLOB_TOMBSTONE_GRACE`]. Must be positive — a
-    /// zero-or-negative grace is refused at [`open`](Self::open), since it would
-    /// let the GC erase a blob a lagging peer still references.
-    pub fn blob_tombstone_grace(mut self, grace: chrono::Duration) -> Self {
-        self.blob_tombstone_grace = grace;
         self
     }
 
@@ -340,9 +326,6 @@ impl CovenBuilder {
         let coven_migration_policy = self
             .coven_migration_policy
             .ok_or(CovenError::MissingCovenMigrationPolicy)?;
-        if self.blob_tombstone_grace <= chrono::Duration::zero() {
-            return Err(CovenError::InvalidBlobTombstoneGrace);
-        }
         let store_dir = self.store_dir;
         let db_path = store_dir.db_path();
         let provider = self.config.provider();
@@ -355,7 +338,6 @@ impl CovenBuilder {
         let db = Database::open(
             &db_path,
             tables.clone(),
-            self.blob_tombstone_grace,
             transfer_limits,
             config.device_id.clone(),
             self.clock.clone(),
@@ -415,7 +397,6 @@ impl CovenBuilder {
         let db = Database::open_read_only(
             &db_path,
             tables,
-            self.blob_tombstone_grace,
             coven_protocol::blob::TransferLimits {
                 uploads: self.max_concurrent_uploads,
                 downloads: self.max_concurrent_downloads,

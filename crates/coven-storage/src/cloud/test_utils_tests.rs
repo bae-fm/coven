@@ -1,17 +1,15 @@
 use super::*;
 use crate::cloud::{
-    create_exact_bytes, no_progress, BlobBody, CloudHomeJoinInfo, ConditionalWriteOutcome,
-    RevokeOutcome, PROGRESS_CHUNK_SIZE,
+    create_exact_bytes, no_progress, CloudHomeJoinInfo, ConditionalWriteOutcome, RevokeOutcome,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 #[tokio::test]
 async fn write_then_read_roundtrips() {
     let h = InMemoryCloudHome::new();
-    h.write(
-        "foo",
-        BlobBody::from_bytes(b"hello".to_vec()),
+    create_exact_bytes(
+        &h,
+        &h.allocate_slot("foo").await.unwrap(),
+        b"hello",
         &no_progress(),
     )
     .await
@@ -22,51 +20,18 @@ async fn write_then_read_roundtrips() {
 }
 
 #[tokio::test]
-async fn write_reports_progress_in_chunks_reaching_the_total() {
-    let h = InMemoryCloudHome::new();
-    // Two-and-a-bit chunks so progress fires more than once and the final
-    // value equals the total.
-    let len = PROGRESS_CHUNK_SIZE * 2 + 7;
-    let last = Arc::new(AtomicU64::new(0));
-    let ticks = Arc::new(AtomicU64::new(0));
-    let last2 = last.clone();
-    let ticks2 = ticks.clone();
-    let sink: crate::cloud::UploadProgress = Arc::new(move |n: u64| {
-        last2.store(n, Ordering::Relaxed);
-        ticks2.fetch_add(1, Ordering::Relaxed);
-    });
-    h.write("big", BlobBody::from_bytes(vec![0u8; len]), &sink)
-        .await
-        .unwrap();
-    assert_eq!(last.load(Ordering::Relaxed), len as u64);
-    assert_eq!(ticks.load(Ordering::Relaxed), 3);
-}
-
-#[tokio::test]
 async fn read_range_returns_a_slice() {
     let h = InMemoryCloudHome::new();
-    h.write(
-        "k",
-        BlobBody::from_bytes(b"0123456789".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    h.insert_exact_object("k", b"0123456789".to_vec());
     assert_eq!(h.read_range("k", 2, 5).await.unwrap(), b"234");
 }
 
 #[tokio::test]
 async fn list_filters_by_prefix() {
     let h = InMemoryCloudHome::new();
-    h.write("a/x", BlobBody::from_bytes(vec![1]), &no_progress())
-        .await
-        .unwrap();
-    h.write("a/y", BlobBody::from_bytes(vec![2]), &no_progress())
-        .await
-        .unwrap();
-    h.write("b/x", BlobBody::from_bytes(vec![3]), &no_progress())
-        .await
-        .unwrap();
+    h.insert_exact_object("a/x", vec![1]);
+    h.insert_exact_object("a/y", vec![2]);
+    h.insert_exact_object("b/x", vec![3]);
     let mut got = h.list("a/").await.unwrap();
     got.sort();
     assert_eq!(got, vec!["a/x".to_string(), "a/y".to_string()]);
@@ -75,9 +40,7 @@ async fn list_filters_by_prefix() {
 #[tokio::test]
 async fn delete_removes_and_records() {
     let h = InMemoryCloudHome::new();
-    h.write("k", BlobBody::from_bytes(vec![1]), &no_progress())
-        .await
-        .unwrap();
+    h.insert_exact_object("k", vec![1]);
     h.delete("k").await.unwrap();
     assert!(matches!(
         h.read("k").await,
@@ -89,16 +52,25 @@ async fn delete_removes_and_records() {
 #[tokio::test]
 async fn arm_write_failures_fails_writes_after_arming() {
     let h = InMemoryCloudHome::new();
-    // Writes land before arming.
-    h.write("before", BlobBody::from_bytes(vec![1]), &no_progress())
-        .await
-        .unwrap();
+    // Creates land before arming.
+    create_exact_bytes(
+        &h,
+        &h.allocate_slot("before").await.unwrap(),
+        &[1],
+        &no_progress(),
+    )
+    .await
+    .unwrap();
 
     h.arm_write_failures();
-    let err = h
-        .write("after", BlobBody::from_bytes(vec![2]), &no_progress())
-        .await
-        .unwrap_err();
+    let err = create_exact_bytes(
+        &h,
+        &h.allocate_slot("after").await.unwrap(),
+        &[2],
+        &no_progress(),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, CloudHomeError::Transport(_)));
     assert!(err.is_retryable());
     // Nothing was stored for the failed write, and the earlier one survives.
@@ -109,13 +81,7 @@ async fn arm_write_failures_fails_writes_after_arming() {
 #[tokio::test]
 async fn fail_next_range_reads_fails_the_next_n_then_recovers() {
     let h = InMemoryCloudHome::new();
-    h.write(
-        "k",
-        BlobBody::from_bytes(b"0123456789".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    h.insert_exact_object("k", b"0123456789".to_vec());
 
     h.fail_next_range_reads(2);
     assert!(matches!(
@@ -133,9 +99,7 @@ async fn fail_next_range_reads_fails_the_next_n_then_recovers() {
 #[tokio::test]
 async fn remove_drops_a_key_out_of_band() {
     let h = InMemoryCloudHome::new();
-    h.write("k", BlobBody::from_bytes(vec![1]), &no_progress())
-        .await
-        .unwrap();
+    h.insert_exact_object("k", vec![1]);
 
     h.remove("k");
     assert!(matches!(

@@ -64,23 +64,16 @@ keyring").
 
 Encryption, protocol ordering, verification, and retry live above the provider
 implementations. A backend supplies bytes by key plus the provider-shaped
-operations no wrapper can manufacture: multipart uploads, create-once exact
-slots, conditional replacement, and account access. These excerpts show the
-publication boundary; the linked trait definitions include the complete API.
+operations no wrapper can manufacture: create-once exact slots and the
+multipart sessions behind them, conditional replacement, and account access.
+`CloudHome` has no way to overwrite an object that exists: every write coven
+makes is an exact create or a versioned conditional replacement, both of which
+live on `ExactSlotStorage`. These excerpts show the publication boundary; the
+linked trait definitions include the complete API.
 
 ```rust
 pub trait CloudHome: Send + Sync {
     async fn probe(&self) -> Result<(), CloudHomeError> { /* default: no-op list */ }
-
-    // Uploads: one bounded request, or a streaming multipart session.
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError>;
-    async fn open_multipart<'a>(&'a self, key: &str, total_len: u64)
-        -> Result<BoxPartSink<'a>, CloudHomeError>;
-    fn multipart_threshold(&self) -> u64;
-
-    // Provided: picks put_object vs multipart and pumps the parts.
-    async fn write(&self, key: &str, body: BlobBody, progress: &UploadProgress)
-        -> Result<(), CloudHomeError> { /* central driver */ }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError>;
     async fn read_range(&self, key: &str, start: u64, end: u64)
@@ -141,15 +134,12 @@ pub trait ExactCloudHome: CloudHome + ExactSlotStorage {}
   create-only behavior and runs the configured integrity check. Upload-checksum
   mode also sends a deliberately wrong SHA-256 and requires the endpoint to
   reject it.
-- A provider implements two raw upload pieces: `put_object`, one bounded
-  single-request upload, and `open_multipart`, a streaming session that accepts
-  ordered parts. `multipart_threshold` is the cut between them. The provided
-  `write` method is the one coven calls: a central driver that picks the path
-  by size and pumps a sized `BlobBody` through it, reporting cumulative bytes
-  to the `progress` callback for the per-file bar. Small control files (auth
-  keys, head pointers, the snapshot) pass
-  `no_progress`, which
-  discards the reports.
+- `create_at` is the only upload. A provider serves a small object in one
+  bounded request and a large one through its own streaming session, choosing
+  by its own threshold, and pumps a sized `BlobBody` through the shared
+  multipart driver — which reports cumulative bytes to the `progress` callback
+  for the per-file bar. Small control files (auth keys, head pointers, the
+  snapshot) pass `no_progress`, which discards the reports.
 - `read` returns the whole value. `read_range` returns a half-open byte range
   (`start` inclusive, `end` exclusive), which is how coven fetches only the
   encrypted chunks covering a blob byte range.

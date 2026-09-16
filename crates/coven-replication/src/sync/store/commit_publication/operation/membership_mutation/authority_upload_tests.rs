@@ -291,7 +291,6 @@ async fn interrupted_authority_upload(failure: AuthorityUploadFailure) {
         &reopened_directory.db_path(),
         reopened_directory.clone(),
         test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".into(),
         Arc::new(coven_foundation::clock::SystemClock),

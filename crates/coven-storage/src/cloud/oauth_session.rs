@@ -95,10 +95,6 @@ impl OAuthRequest<'_> {
         self.client.put(url).bearer_auth(self.token)
     }
 
-    pub(crate) fn patch(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
-        self.client.patch(url).bearer_auth(self.token)
-    }
-
     pub(crate) fn delete(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
         self.client.delete(url).bearer_auth(self.token)
     }

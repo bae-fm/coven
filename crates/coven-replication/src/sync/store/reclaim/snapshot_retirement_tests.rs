@@ -317,7 +317,6 @@ fn open_retirement_database(
         path,
         directory,
         crate::sync::test_helpers::test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "snapshot-retirement".into(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),

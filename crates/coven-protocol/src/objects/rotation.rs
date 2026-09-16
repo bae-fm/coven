@@ -42,7 +42,7 @@ pub enum RotationPendingState {
 ///
 /// Shared (behind one `Arc`, via `CloudSyncConnection::shared_pending_rotation`)
 /// across every path that seals data for the cloud — changesets, heads, blobs,
-/// tombstones, snapshots — so a rotation this device can't adopt blocks all of
+/// snapshots — so a rotation this device can't adopt blocks all of
 /// them the same way, not just the removal call that discovered it. This is the
 /// structural half of the invariant: this device must never seal under a
 /// generation the store has already superseded.

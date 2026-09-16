@@ -37,6 +37,8 @@ use coven_protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
 use coven_storage::cloud::CloudHome;
 use coven_storage::CloudSyncObjectStorage;
 
+mod pending_upload;
+
 fn exact_cache_path(store_dir: &StoreDir, reference: &RowBlobRef) -> PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
     store_dir
@@ -223,33 +225,45 @@ async fn created_upload_blob(
         .await
         .expect("load exact upload journals")
         .into_iter()
-        .find_map(|entry| match entry.operation {
-            coven_database::OutboxOperation::Upload {
+        .find_map(|entry| match entry.upload {
+            coven_database::OutboxUpload {
                 row,
                 state: coven_database::OutboxUploadState::Created { stored, .. },
                 ..
             } if row.blob().id == blob_id => Some(stored),
-            coven_database::OutboxOperation::Upload { .. }
-            | coven_database::OutboxOperation::Delete { .. } => None,
+            _ => None,
         })
         .expect("blob has a Created exact upload journal")
 }
 
-async fn pending_deletes(db: &Database) -> Vec<String> {
-    coven_database::StoreDatabase::new(db)
-        .pending_blob_deletes()
+/// Open the photo-carrying test database at the store directory's own file, so
+/// a test can close it and open it again over the same durable state. The
+/// synthetic fixtures are in-memory, which cannot model a restart.
+fn restartable_photo_db(store_dir: &StoreDir) -> Database {
+    Database::open_in_store_dir_for_test(
+        &store_dir.db_path(),
+        store_dir.clone(),
+        crate::sync::test_helpers::test_synced_tables_with_blob(photo_decl()),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
+        "test-device".to_string(),
+        Arc::new(SystemClock),
+        coven_database::CovenMigrationPolicy::ApplyPending,
+        &crate::sync::test_helpers::test_migrations(),
+    )
+    .expect("open the restartable test database")
+}
+
+/// Whether a live remote row still binds `stored`. A make_local releases its
+/// cloud object by leaving this false: nothing points at it any more, and
+/// accepted reclaim is what retires it once a snapshot says so.
+async fn row_still_binds(
+    db: &Database,
+    stored: &coven_protocol::blob::locator::StoredBlobRef,
+) -> bool {
+    !coven_database::StoreDatabase::new(db)
+        .stored_blob_is_row_orphaned(stored.clone())
         .await
-        .unwrap()
-        .into_iter()
-        .map(|entry| match entry.operation {
-            coven_database::OutboxOperation::Delete { stored } => {
-                stored.locator().blob_id().to_string()
-            }
-            coven_database::OutboxOperation::Upload { .. } => {
-                panic!("pending delete query returned an upload")
-            }
-        })
-        .collect()
+        .expect("read the blob's live row binding")
 }
 
 async fn assert_scoped_flip_journaled_atomically(
@@ -484,15 +498,14 @@ async fn pending_upload_state(db: &Database, id: &str) -> (PathBuf, bool) {
         .await
         .expect("load pending exact row uploads")
         .into_iter()
-        .filter_map(|entry| match entry.operation {
-            coven_database::OutboxOperation::Upload {
+        .filter_map(|entry| match entry.upload {
+            coven_database::OutboxUpload {
                 row,
                 source_path,
                 retain_pinned,
                 ..
             } if row == expected => Some((source_path, retain_pinned)),
-            coven_database::OutboxOperation::Upload { .. }
-            | coven_database::OutboxOperation::Delete { .. } => None,
+            _ => None,
         });
     let state = matching.next().expect("exact row has a pending upload");
     assert!(
@@ -659,8 +672,14 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
         .expect_err("a completed make_remote has no transition left to cancel");
 
     assert!(
-        pending_deletes(&db).await.is_empty(),
-        "a cancel racing after completion must not tombstone published blobs",
+        row_still_binds(
+            &db,
+            remote
+                .stored()
+                .expect("Remote row keeps exact blob authority")
+        )
+        .await,
+        "a cancel racing after completion must not release published blobs",
     );
     cloud_storage
         .clone()
@@ -674,9 +693,10 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
 }
 
 /// A makes a Remote release Local. B's subtree is DELETEd (gate retract) and the
-/// cloud blob is tombstoned, while A keeps the external file and reads from it.
+/// cloud blob is released to accepted reclaim, while A keeps the external file
+/// and reads from it.
 #[tokio::test]
-async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
+async fn multi_device_make_local_retracts_peer_and_releases_the_cloud_blob() {
     tokio::spawn(async {
         let kp_a = UserKeypair::generate();
         let db_a_store_dir = crate::sync::test_helpers::test_store_dir();
@@ -773,10 +793,9 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
             dest_path,
             "A now reads the blob from the external file",
         );
-        assert_eq!(
-            pending_deletes(&db_a).await,
-            vec!["photoaaa".to_string()],
-            "the cloud blob's delete is enqueued in the same commit as the flip",
+        assert!(
+            !row_still_binds(&db_a, &remote_blob).await,
+            "the flip released the cloud blob in the same commit",
         );
         assert_eq!(
             *recorder.made_local.lock().unwrap(),
@@ -788,15 +807,17 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
             "materialize progress reported once for the single blob",
         );
 
-        // A's retract cycle: the gate flip false emits DELETEs and the tombstone drain
-        // writes the cloud tombstone.
+        // A's retract cycle emits the gate-flip DELETEs. The released blob stays
+        // at the provider: B has not pulled the retract yet, and reclaim deletes
+        // only behind an accepted snapshot that shows nothing owns it.
         Box::pin(storage.run_founder_cycle(None))
             .await
             .expect("run founder cycle");
-        assert!(
-            storage.contains_blob_tombstone(&remote_blob).await.unwrap(),
-            "the cloud blob is tombstoned",
-        );
+        cloud_storage
+            .clone()
+            .verify_blob_object(&remote_blob)
+            .await
+            .expect("the released blob outlives the retract cycle");
 
         // B's next cycle pulls the retract: its subtree disappears.
         Box::pin(peer.run_cycle(None))
@@ -917,10 +938,6 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
             .expect("load exact external blob ownership")
             .is_none(),
         "no external reference is registered",
-    );
-    assert!(
-        pending_deletes(&db).await.is_empty(),
-        "no cloud deletion is enqueued",
     );
     assert_eq!(
         db.scoped_store_state_counts_for_test()
@@ -1272,7 +1289,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
 /// flips the gate only after both objects exist. A peer
 /// pulls the cover eagerly (`CacheEager`) into its cache. make_local: the photo goes
 /// back to its dest (external ref) and the cover back to the local store (NO dest),
-/// both cloud copies tombstoned.
+/// both cloud copies released.
 #[tokio::test]
 async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let kp_a = UserKeypair::generate();
@@ -1435,7 +1452,17 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     );
 
     // make_local: the photo back to its dest (external ref), the cover back to the
-    // local store (no dest), both cloud copies tombstoned.
+    // local store (no dest), both cloud copies released to accepted reclaim.
+    let remote_photo = photo_ref(&db_a, "photoaaa")
+        .await
+        .stored()
+        .cloned()
+        .expect("Remote photo has exact storage authority");
+    let remote_cover = cover_ref(&db_a, "coveraaa")
+        .await
+        .stored()
+        .cloned()
+        .expect("Remote cover has exact storage authority");
     let dest_path = tmp_a.path().join("dest/photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
@@ -1487,12 +1514,10 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
             .is_none(),
         "the host-provided cover registers NO external ref",
     );
-    let mut deletes = pending_deletes(&db_a).await;
-    deletes.sort();
-    assert_eq!(
-        deletes,
-        vec!["coveraaa".to_string(), "photoaaa".to_string(),],
-        "both cloud copies are tombstoned in the make_local commit",
+    assert!(
+        !row_still_binds(&db_a, &remote_photo).await
+            && !row_still_binds(&db_a, &remote_cover).await,
+        "the make_local commit released both cloud copies",
     );
     // The source the user provided is untouched: make_remote uploads a copy and
     // drops the external ref, but never deletes the user's original.
@@ -2348,10 +2373,6 @@ async fn make_local_rejects_already_local_root() {
         stamp_before,
         "the gate stamp is untouched",
     );
-    assert!(
-        pending_deletes(&db).await.is_empty(),
-        "no cloud delete is queued",
-    );
     assert!(!dest_path.exists(), "no file is materialized");
 }
 
@@ -2424,7 +2445,6 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
         "the intent is cleared"
     );
     assert_eq!(pending_uploads(&db).await, 0, "no uploads remain");
-    assert!(pending_deletes(&db).await.is_empty());
     assert!(cloud_storage
         .clone()
         .verify_blob_object(&uploaded)
@@ -2505,12 +2525,12 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
     assert_eq!(entries.len(), 2);
     let mut created = Vec::new();
     for pending in entries {
-        let coven_database::OutboxOperation::Upload {
+        let coven_database::OutboxUpload {
             row,
             source_path,
             state: coven_database::OutboxUploadState::Pending,
             ..
-        } = &pending.operation
+        } = &pending.upload
         else {
             panic!("new make_remote journal is Pending");
         };
@@ -2678,7 +2698,6 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
         "the missing owner is reported",
     );
     assert_eq!(shared_flag(&db, "n1").await, 0, "no intent means no flip");
-    assert!(pending_deletes(&db).await.is_empty());
     assert_eq!(home.exact_delete_count(), deletes_before);
     assert_eq!(pending_uploads(&db).await, 1);
     let created = created_upload_blob(&db, "photoaaa").await;
@@ -2696,7 +2715,7 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
 }
 
 /// Cancelling a make_local before the commit deletes the partial dest copies and
-/// leaves the release Remote with nothing tombstoned.
+/// leaves the release Remote with nothing released.
 #[tokio::test]
 async fn cancel_make_local_before_commit_stays_remote() {
     let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
@@ -2738,14 +2757,13 @@ async fn cancel_make_local_before_commit_stays_remote() {
             .is_none(),
         "no external ref registered"
     );
-    assert!(pending_deletes(&db).await.is_empty(), "nothing tombstoned");
     assert!(!dest_path.exists(), "no partial dest copy left behind");
 }
 
-/// A make_local that can't write a dest file aborts before the commit: the release
-/// stays Remote, the cloud blob is untouched, and no delete is queued.
+/// A make_local that can't write a dest file aborts before the commit: the
+/// release stays Remote and the cloud blob is untouched.
 #[tokio::test]
-async fn make_local_dest_failure_stays_remote_no_tombstones() {
+async fn make_local_dest_failure_stays_remote_and_releases_nothing() {
     let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db);
     let bytes = b"managed-bytes".to_vec();
@@ -2787,7 +2805,6 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
             .is_none(),
         "no external ref"
     );
-    assert!(pending_deletes(&db).await.is_empty(), "no tombstone queued");
     assert!(
         cloud_storage
             .clone()
@@ -2849,7 +2866,6 @@ async fn make_local_commit_failure_removes_materialized_files() {
             .is_none(),
         "no external ownership is registered",
     );
-    assert!(pending_deletes(&db).await.is_empty(), "no delete is queued");
     cloud_storage
         .clone()
         .verify_blob_object(
@@ -2862,13 +2878,13 @@ async fn make_local_commit_failure_removes_materialized_files() {
         .expect("the cloud blob remains intact");
 }
 
-/// A non-UTF-8 destination path aborts make_local before the cloud delete: the path
-/// conversion fails loud (`NonUtf8Dest`) rather than lossily rewriting the dest,
-/// registering a wrong external ref, and tombstoning the cloud copy. The release
-/// stays Remote, nothing is registered, no tombstone is queued, the cloud is intact.
+/// A non-UTF-8 destination path aborts make_local before it releases anything:
+/// the path conversion fails loud (`NonUtf8Dest`) rather than lossily rewriting
+/// the dest, registering a wrong external ref, and releasing the cloud copy. The
+/// release stays Remote, nothing is registered, the cloud is intact.
 #[cfg(unix)]
 #[tokio::test]
-async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
+async fn make_local_non_utf8_dest_stays_remote_and_releases_nothing() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
@@ -2913,7 +2929,6 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
             .is_none(),
         "no external ref registered"
     );
-    assert!(pending_deletes(&db).await.is_empty(), "no tombstone queued");
     assert!(
         cloud_storage
             .clone()
@@ -3023,9 +3038,9 @@ async fn make_remote_crash_before_flip_redrain_converges() {
         .is_none());
 }
 
-/// An aborted make_local (here via cancel) leaves the release Remote; retrying from
-/// scratch converges to Local with the cloud delete enqueued — re-materialize +
-/// re-commit is idempotent.
+/// An aborted make_local (here via cancel) leaves the release Remote; retrying
+/// from scratch converges to Local with the cloud object released —
+/// re-materialize + re-commit is idempotent.
 #[tokio::test]
 async fn make_local_abort_then_retry_converges() {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
@@ -3047,6 +3062,11 @@ async fn make_local_abort_then_retry_converges() {
         .seed_remote_release(&storage, None, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes)
         .await;
 
+    let remote_blob = photo_ref(&db, "photoaaa")
+        .await
+        .stored()
+        .cloned()
+        .expect("Remote photo has exact storage authority");
     let dest_path = tmp.path().join("dest/photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
 
@@ -3075,7 +3095,7 @@ async fn make_local_abort_then_retry_converges() {
     );
 
     // Retry from scratch: converges to Local with the file materialized and the
-    // cloud delete enqueued.
+    // cloud object released to accepted reclaim.
     let (_fresh_tx, fresh) = watch::channel(false);
     owners
         .make_local(
@@ -3091,7 +3111,10 @@ async fn make_local_abort_then_retry_converges() {
         .expect("retry make_local");
     assert_eq!(shared_flag(&db, "n1").await, 0, "converged to Local");
     assert_eq!(std::fs::read(&dest_path).unwrap(), bytes);
-    assert_eq!(pending_deletes(&db).await, vec!["photoaaa".to_string()],);
+    assert!(
+        !row_still_binds(&db, &remote_blob).await,
+        "the converged make_local released the cloud object",
+    );
 }
 
 // ===========================================================================
@@ -3099,8 +3122,8 @@ async fn make_local_abort_then_retry_converges() {
 // ===========================================================================
 
 /// make_remote → make_local → make_remote on one device. The second make_remote
-/// creates a new exact object. The old object's tombstone remains valid and cannot
-/// reclaim the replacement.
+/// creates a new exact object; the released first object stays released and the
+/// replacement stays bound, so no retirement can confuse the two.
 #[tokio::test]
 async fn round_trip_make_remote_make_local_make_remote() {
     let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
@@ -3148,7 +3171,6 @@ async fn round_trip_make_remote_make_local_make_remote() {
         )
         .await
         .expect("make_local");
-    // The retract cycle writes the tombstone.
     storage
         .run_founder_cycle(None)
         .await
@@ -3159,11 +3181,8 @@ async fn round_trip_make_remote_make_local_make_remote() {
         .expect("run founder cycle");
     assert_eq!(shared_flag(&db, "n1").await, 0, "Local after make_local");
     assert!(
-        storage
-            .contains_blob_tombstone(&first_remote)
-            .await
-            .unwrap(),
-        "the make_local tombstoned the cloud blob",
+        !row_still_binds(&db, &first_remote).await,
+        "the make_local released the cloud blob",
     );
 
     // Second make_remote: the external file is uploaded to a new exact object and
@@ -3196,11 +3215,8 @@ async fn round_trip_make_remote_make_local_make_remote() {
         .expect("second Remote photo has exact storage authority");
     assert_ne!(second_remote.object(), first_remote.object());
     assert!(
-        storage
-            .contains_blob_tombstone(&first_remote)
-            .await
-            .unwrap(),
-        "the old exact object's tombstone remains valid",
+        !row_still_binds(&db, &first_remote).await && row_still_binds(&db, &second_remote).await,
+        "the replacement is bound while the object it replaced stays released",
     );
     cloud_storage
         .clone()
@@ -3360,9 +3376,19 @@ async fn a_failed_upload_keeps_its_staged_copy_for_the_resume() {
 /// object's removal. The delete records the unwind in its own transaction and
 /// the drain carries it out, so the object leaves with the root rather than
 /// being stranded under a row nothing can reach.
+///
+/// The database is closed and reopened between the delete and the drain: the
+/// whole of that obligation is a durable row before any of it runs, and the
+/// drain that settles it reads nothing the deleting transaction left in memory.
 #[tokio::test]
 async fn deleting_a_root_mid_upload_takes_its_created_object_back_out() {
-    let (db, storage, cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
+    let lib = crate::sync::test_helpers::test_store_dir();
+    let db = restartable_photo_db(&lib);
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let (storage, cloud_storage) =
+        create_store(&db, lib.clone(), UserKeypair::generate(), home).await;
+    let tmp = tempfile::tempdir().expect("create external blob fixture directory");
+    let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
     let user = tmp.path().join("user");
 
     let _src1 = owners
@@ -3402,6 +3428,22 @@ async fn deleting_a_root_mid_upload_takes_its_created_object_back_out() {
             .expect("inspect make_remote intent"),
         "the deleted root's transition is still there to unwind",
     );
+
+    drop(owners);
+    drop(db);
+    let db = restartable_photo_db(&lib);
+    assert!(
+        db.make_remote_intent_exists_for_test("notes", "n1")
+            .await
+            .expect("inspect make_remote intent")
+            && pending_uploads(&db).await == 2,
+        "the reopened database carries the unwind and both journals",
+    );
+    StoreDatabase::new(&db)
+        .reset_outbox_backoff()
+        .await
+        .expect("a restart re-attempts past the backoff window");
+
     storage
         .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await
@@ -3421,6 +3463,10 @@ async fn deleting_a_root_mid_upload_takes_its_created_object_back_out() {
             .await
             .is_err(),
         "the object left the cloud with the root",
+    );
+    assert!(
+        staged_upload_copies(&lib).is_empty(),
+        "and so did its upload spool",
     );
 }
 

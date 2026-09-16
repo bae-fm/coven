@@ -146,7 +146,6 @@ async fn reopen(
         &directory.db_path(),
         directory.clone(),
         test_helpers::test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         host_device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),

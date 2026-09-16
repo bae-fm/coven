@@ -360,7 +360,6 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             .install(
                 &store_dir,
                 tables,
-                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
                 coven_protocol::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),

@@ -124,7 +124,6 @@ fn open_database(directory: &StoreDir, device_id: &str, context: &str) -> Databa
         &directory.db_path().with_file_name("scenario.db"),
         directory.clone(),
         test_synced_tables_with_blob(photo_decl().with_id_column("blob_id")),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id.into(),
         Arc::new(coven_foundation::clock::SystemClock),

@@ -22,7 +22,6 @@ struct DatabaseContext {
     sync_routing_hash: ObjectHash,
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
-    blob_tombstone_grace: chrono::Duration,
     /// Read by every upload-drain pass and pin call, so a host can change
     /// them while the store is open and the next pass runs under the new
     /// limits.
@@ -63,7 +62,6 @@ impl DatabaseCore {
         sync_routing_hash: ObjectHash,
         gates: Arc<Gates>,
         blob_decls: Arc<BlobDecls>,
-        blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         capture_committed_changes: bool,
     ) -> Self {
@@ -83,7 +81,6 @@ impl DatabaseCore {
                 sync_routing_hash,
                 gates,
                 blob_decls,
-                blob_tombstone_grace,
                 transfer_limits: std::sync::Mutex::new(transfer_limits),
                 store_runtime: crate::store::StoreDatabaseRuntime::new(),
                 ids: Arc::new(coven_foundation::id_provider::UuidProvider),
@@ -463,10 +460,6 @@ impl DatabaseConnection {
             .transfer_limits
             .lock()
             .expect("transfer limits mutex poisoned") = limits;
-    }
-
-    pub(crate) fn store_blob_tombstone_grace(&self) -> chrono::Duration {
-        self.context.blob_tombstone_grace
     }
 
     pub(crate) fn store_has_scoped_graph(&self) -> bool {

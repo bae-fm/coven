@@ -231,7 +231,6 @@ async fn interrupted_founder_publication_resumes_after_database_restart() {
         Database::open(
             &path,
             test_synced_tables(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "founder-resume-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),

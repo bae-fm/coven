@@ -381,7 +381,6 @@ pub async fn restore_from_cloud(
             .install(
                 &store_dir,
                 synced_tables.to_vec(),
-                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
                 transfer_limits,
                 device_id.clone(),
                 clock.clone(),

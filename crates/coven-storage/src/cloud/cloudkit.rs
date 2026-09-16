@@ -13,12 +13,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use coven_foundation::id_provider::{IdRef, UuidProvider};
-
 use super::{
-    combine_cleanup_failure, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
-    ExactSlotStorage, RevokeOutcome,
+    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome, ExactSlotStorage,
+    RevokeOutcome,
 };
 use coven_protocol::objects::ObjectSlot;
 
@@ -28,9 +26,7 @@ const CHUNK_MANIFEST_SUFFIX: &str = ".manifest";
 
 mod chunking;
 use chunking::*;
-use part_sink::CloudKitPartSink;
 mod exact;
-mod part_sink;
 
 /// Synchronous interface for raw CloudKit record operations.
 /// Implemented by a host bridge to its platform CloudKit driver.
@@ -209,7 +205,6 @@ pub enum CloudKitShareAcceptance {
 #[derive(Clone)]
 pub struct CloudKitCloudHome {
     ops: Arc<dyn CloudKitOps>,
-    ids: IdRef,
     scope: CloudKitScope,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
 }
@@ -219,17 +214,8 @@ impl CloudKitCloudHome {
         ops: Arc<dyn CloudKitOps>,
         exact_upload_verification: coven_foundation::config::ExactUploadVerification,
     ) -> Self {
-        Self::new_private_with_ids(ops, Arc::new(UuidProvider), exact_upload_verification)
-    }
-
-    pub(crate) fn new_private_with_ids(
-        ops: Arc<dyn CloudKitOps>,
-        ids: IdRef,
-        exact_upload_verification: coven_foundation::config::ExactUploadVerification,
-    ) -> Self {
         Self {
             ops,
-            ids,
             scope: CloudKitScope::Private,
             exact_upload_verification,
         }
@@ -243,7 +229,6 @@ impl CloudKitCloudHome {
     ) -> Self {
         Self {
             ops,
-            ids: Arc::new(UuidProvider),
             scope: CloudKitScope::Shared {
                 owner_name,
                 zone_name,
@@ -433,41 +418,6 @@ where
 
 #[async_trait]
 impl CloudHome for CloudKitCloudHome {
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
-        let k = key.to_string();
-        blocking(move || ops.write_record(&scope, &k, data)).await?;
-
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
-        let k = key.to_string();
-        blocking(move || delete_chunk_layout(&*ops, &scope, &k)).await
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<super::BoxPartSink<'a>, CloudHomeError> {
-        let total_len = usize::try_from(total_len).map_err(|_| {
-            CloudHomeError::Transport(format!(
-                "CloudKit object {key} is too large for this platform"
-            ))
-        })?;
-        Ok(Box::new(CloudKitPartSink::new(
-            self.ops.clone(),
-            self.scope.clone(),
-            key.to_string(),
-            self.ids.new_id(),
-            total_len,
-        )))
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        CHUNK_SIZE as u64
-    }
-
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         let ops = self.ops.clone();
         let scope = self.scope.clone();

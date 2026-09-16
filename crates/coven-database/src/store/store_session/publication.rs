@@ -298,7 +298,7 @@ pub(super) fn finish_store_write_publication_on(
             let remaining: i64 = tx
                 .query_row(
                     "SELECT COUNT(*) FROM cloud_outbox
-                             WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
+                             WHERE root_table = ?1 AND root_id = ?2",
                     (&root_table, &root_id),
                     |row| row.get(0),
                 )

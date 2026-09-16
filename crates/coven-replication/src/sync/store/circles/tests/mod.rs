@@ -23,7 +23,6 @@ use coven_protocol::store_commit::{
     commit_semantic_prefix, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
     StoreCommitCoord, StreamActivation,
 };
-use coven_storage::cloud::CloudHome;
 use coven_storage::CloudSyncObjectStorage;
 
 /// A Circle-scoped `documents` table whose rows carry a blob.

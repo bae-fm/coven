@@ -521,7 +521,6 @@ async fn register_seeds_from_persisted_high_water() {
         &path,
         store_dir.clone(),
         test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "dev-a".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -538,7 +537,6 @@ async fn register_seeds_from_persisted_high_water() {
         &path,
         store_dir,
         test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         Arc::new(Hlc::new(
             "dev-a".into(),
@@ -842,7 +840,6 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         std::path::Path::new(":memory:"),
         db_store_dir.clone(),
         test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "dev-self".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),

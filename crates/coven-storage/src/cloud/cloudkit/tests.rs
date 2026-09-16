@@ -1,12 +1,32 @@
 use super::chunking::*;
 use super::exact::*;
 use super::*;
-use crate::cloud::{no_progress, BlobBody};
+use crate::cloud::no_progress;
 use crate::cloud::{ExactUpload, UploadControl};
-use coven_foundation::id_provider::SequentialIdProvider;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
+
+/// The tokened chunk layout's key and manifest encodings. Coven writes exact
+/// objects now, so nothing in production produces this layout; the readers that
+/// still have to serve objects already at a provider are tested against records
+/// seeded here.
+fn encode_chunk_manifest(part_count: usize, total_len: usize, upload_id: &str) -> Vec<u8> {
+    let mut encoded = b"coven-cloudkit-chunk-manifest-v1\0".to_vec();
+    encoded.extend_from_slice(part_count.to_string().as_bytes());
+    encoded.push(b'\n');
+    encoded.extend_from_slice(total_len.to_string().as_bytes());
+    encoded.push(b'\n');
+    encoded.extend_from_slice(upload_id.as_bytes());
+    encoded.push(b'\n');
+    encoded
+}
+
+fn chunk_part_key(key: &str, upload_id: &str, index: usize) -> String {
+    format!("{key}.part{index}.{upload_id}")
+}
+
+const SEED_UPLOAD_ID: &str = "0123456789abcdef0123456789abcdef";
 
 fn exact_slot(key: &str) -> ObjectSlot {
     ObjectSlot::logical(key.to_string()).expect("valid exact slot")
@@ -92,21 +112,6 @@ impl MockCloudKitOps {
         self.calls.lock().unwrap().clone()
     }
 
-    fn clear_calls(&self) {
-        self.calls.lock().unwrap().clear();
-    }
-
-    fn fail_delete(&self, key: &str) {
-        self.fail_deletes.lock().unwrap().insert(key.to_string());
-    }
-
-    fn fail_next_delete(&self, key: &str) {
-        self.fail_delete_once
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), 1);
-    }
-
     fn fail_write(&self, key: &str) {
         self.fail_writes.lock().unwrap().insert(key.to_string());
     }
@@ -123,33 +128,11 @@ impl MockCloudKitOps {
         self.return_wrong_commit_keys.store(true, Ordering::SeqCst);
     }
 
-    fn pause_write_after_store(
-        &self,
-        key: &str,
-    ) -> (Arc<std::sync::Barrier>, Arc<std::sync::Barrier>) {
-        let stored = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
-        let previous = self
-            .pause_write_after_store
-            .lock()
-            .unwrap()
-            .replace(PausedWrite {
-                key: key.to_string(),
-                stored: stored.clone(),
-                release: release.clone(),
-            });
-        assert!(previous.is_none(), "a CloudKit write is already paused");
-        (stored, release)
-    }
-
     fn write_chunk_manifest(&self, key: &str, total_len: usize) {
         self.write_record(
             &CloudKitScope::Private,
             &chunk_manifest_key(key),
-            encode_chunk_manifest(ChunkManifest::new(
-                total_len,
-                "0123456789abcdef0123456789abcdef".to_string(),
-            )),
+            encode_chunk_manifest(total_len.div_ceil(CHUNK_SIZE), total_len, SEED_UPLOAD_ID),
         )
         .unwrap();
     }
@@ -157,10 +140,24 @@ impl MockCloudKitOps {
     fn write_chunk_part(&self, key: &str, index: usize, data: Vec<u8>) {
         self.write_record(
             &CloudKitScope::Private,
-            &chunk_part_key(key, "0123456789abcdef0123456789abcdef", index),
+            &chunk_part_key(key, SEED_UPLOAD_ID, index),
             data,
         )
         .unwrap();
+    }
+
+    /// Seed one whole object in the tokened layout: a single record when it
+    /// fits one chunk, otherwise a manifest and its numbered parts.
+    fn seed_object(&self, key: &str, data: &[u8]) {
+        if data.len() <= CHUNK_SIZE {
+            self.write_record(&CloudKitScope::Private, key, data.to_vec())
+                .unwrap();
+            return;
+        }
+        self.write_chunk_manifest(key, data.len());
+        for (index, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
+            self.write_chunk_part(key, index, chunk.to_vec());
+        }
     }
 }
 
@@ -561,9 +558,8 @@ impl CloudKitOps for MockCloudKitOps {
 }
 
 fn make_cloud_home() -> CloudKitCloudHome {
-    CloudKitCloudHome::new_private_with_ids(
+    CloudKitCloudHome::new_private(
         Arc::new(MockCloudKitOps::new()),
-        Arc::new(SequentialIdProvider::new("cloudkit-upload")),
         coven_foundation::config::ExactUploadVerification::MetadataHash,
     )
 }
@@ -571,9 +567,8 @@ fn make_cloud_home() -> CloudKitCloudHome {
 fn make_cloud_home_with_ops() -> (CloudKitCloudHome, Arc<MockCloudKitOps>) {
     let ops = Arc::new(MockCloudKitOps::new());
     (
-        CloudKitCloudHome::new_private_with_ids(
+        CloudKitCloudHome::new_private(
             ops.clone(),
-            Arc::new(SequentialIdProvider::new("cloudkit-upload")),
             coven_foundation::config::ExactUploadVerification::MetadataHash,
         ),
         ops,
@@ -606,230 +601,21 @@ async fn provider_binding_uses_the_bridge_container_zone_and_current_user() {
     );
 }
 
-struct FailingBodyReader {
-    emitted: bool,
-}
-
-#[async_trait]
-impl coven_foundation::local_file::PlaintextChunkReader for FailingBodyReader {
-    type Error = crate::local_file::PlaintextChunkError;
-
-    async fn next_chunk(
-        &mut self,
-        _max: usize,
-    ) -> Result<Vec<u8>, crate::local_file::PlaintextChunkError> {
-        if !self.emitted {
-            self.emitted = true;
-            return Ok(vec![7; CHUNK_SIZE]);
-        }
-        Err(crate::local_file::PlaintextChunkError::Local(
-            coven_foundation::atomic_file::FileError::at(
-                "read injected body",
-                "injected-body",
-                std::io::Error::other("injected body failure"),
-            ),
-        ))
-    }
-}
-
-struct PausedBodyReader {
-    emitted: bool,
-    waiting: Arc<tokio::sync::Notify>,
-    release: Arc<tokio::sync::Notify>,
-}
-
-#[async_trait]
-impl coven_foundation::local_file::PlaintextChunkReader for PausedBodyReader {
-    type Error = crate::local_file::PlaintextChunkError;
-
-    async fn next_chunk(
-        &mut self,
-        _max: usize,
-    ) -> Result<Vec<u8>, crate::local_file::PlaintextChunkError> {
-        if !self.emitted {
-            self.emitted = true;
-            return Ok(vec![7; CHUNK_SIZE]);
-        }
-        self.waiting.notify_one();
-        self.release.notified().await;
-        Ok(vec![8])
-    }
-}
-
-#[tokio::test]
-async fn mutable_body_failure_reports_cleanup_failure_and_drop_retries_cleanup() {
-    let (home, ops) = make_cloud_home_with_ops();
-    let part_key = chunk_part_key("mutable/body-failure", "cloudkit-upload-0", 0);
-    ops.fail_next_delete(&part_key);
-    let reader =
-        crate::local_file::PlaintextReader::from_test_reader(FailingBodyReader { emitted: false });
-    let body = BlobBody::from_test_reader((CHUNK_SIZE + 1) as u64, reader);
-
-    let error = home
-        .write("mutable/body-failure", body, &no_progress())
-        .await
-        .expect_err("body failure must report failed cleanup");
-
-    assert!(
-        matches!(error, CloudHomeError::CleanupFailed { .. }),
-        "{error}"
-    );
-    assert!(
-        error.to_string().contains("injected body failure"),
-        "{error}"
-    );
-    assert!(error.to_string().contains("delete"), "{error}");
-    assert!(!ops
-        .record_exists(&CloudKitScope::Private, &part_key)
-        .expect("inspect canceled part"));
-}
-
-#[tokio::test]
-async fn canceling_mutable_write_removes_every_staged_part() {
-    let (home, ops) = make_cloud_home_with_ops();
-    let waiting = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let reader = crate::local_file::PlaintextReader::from_test_reader(PausedBodyReader {
-        emitted: false,
-        waiting: waiting.clone(),
-        release: release.clone(),
-    });
-    let body = BlobBody::from_test_reader((CHUNK_SIZE + 1) as u64, reader);
-    let write =
-        tokio::spawn(async move { home.write("mutable/cancel", body, &no_progress()).await });
-    waiting.notified().await;
-
-    write.abort();
-    assert!(write.await.expect_err("write task canceled").is_cancelled());
-    release.notify_waiters();
-
-    let part_key = chunk_part_key("mutable/cancel", "cloudkit-upload-0", 0);
-    assert!(!ops
-        .record_exists(&CloudKitScope::Private, &part_key)
-        .expect("inspect canceled part"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancel_after_mutable_manifest_publish_preserves_the_committed_layout() {
-    let (home, ops) = make_cloud_home_with_ops();
-    let key = "mutable/published";
-    let data = vec![9; CHUNK_SIZE + 1];
-    let (stored, release) = ops.pause_write_after_store(&chunk_manifest_key(key));
-    let write_home = home.clone();
-    let write_data = data.clone();
-    let write = tokio::spawn(async move {
-        write_home
-            .write(key, BlobBody::from_bytes(write_data), &no_progress())
-            .await
-    });
-    tokio::task::spawn_blocking(move || stored.wait())
-        .await
-        .expect("wait for manifest publication");
-
-    write.abort();
-    tokio::task::spawn_blocking(move || release.wait())
-        .await
-        .expect("release manifest publication");
-    assert!(write.await.expect_err("write task canceled").is_cancelled());
-
-    assert_eq!(home.read(key).await.expect("read committed layout"), data);
-    assert!(ops
-        .record_exists(&CloudKitScope::Private, &chunk_manifest_key(key))
-        .expect("inspect committed manifest"));
-    assert_eq!(
-        ops.list_records(&CloudKitScope::Private, &format!("{key}.part"))
-            .expect("inspect committed parts")
-            .len(),
-        2
-    );
-}
-
-#[test]
-fn mutable_cancellation_cleanup_failure_does_not_terminate_the_process() {
-    const CHILD: &str = "COVEN_CLOUDKIT_MUTABLE_CANCEL_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        let runtime = tokio::runtime::Runtime::new().expect("build child runtime");
-        runtime.block_on(async {
-            let (home, ops) = make_cloud_home_with_ops();
-            let mut sink = home
-                .open_multipart("mutable/cancel", (CHUNK_SIZE + 1) as u64)
-                .await
-                .expect("open CloudKit multipart upload");
-            sink.send_part(
-                Bytes::from(vec![7; CHUNK_SIZE]),
-                0,
-                false,
-                &crate::cloud::UploadControl::running(crate::cloud::no_progress()),
-            )
-            .await
-            .expect("write first multipart part");
-            ops.fail_delete(&chunk_part_key("mutable/cancel", "cloudkit-upload-0", 0));
-            drop(sink);
-        });
-        std::process::exit(0);
-    }
-
-    let status = std::process::Command::new(
-        std::env::current_exe().expect("locate CloudKit test executable"),
-    )
-    .arg("mutable_cancellation_cleanup_failure_does_not_terminate_the_process")
-    .arg("--nocapture")
-    .env(CHILD, "1")
-    .status()
-    .expect("run CloudKit mutable cancellation subprocess");
-    assert!(status.success(), "cancellation subprocess terminated");
-}
-
-#[tokio::test]
-async fn write_reports_progress_per_chunk_record() {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    let ch = make_cloud_home();
-    // 25 MB spans three records (10 + 10 + 5) so progress fires three
-    // times, the last equalling the total.
-    let total = 25 * 1024 * 1024u64;
-    let data: Vec<u8> = vec![0u8; total as usize];
-    let last = Arc::new(AtomicU64::new(0));
-    let ticks = Arc::new(AtomicU64::new(0));
-    let last2 = last.clone();
-    let ticks2 = ticks.clone();
-    let sink: crate::cloud::UploadProgress = Arc::new(move |n: u64| {
-        last2.store(n, Ordering::Relaxed);
-        ticks2.fetch_add(1, Ordering::Relaxed);
-    });
-    ch.write("chunked.bin", BlobBody::from_bytes(data), &sink)
-        .await
-        .unwrap();
-    assert_eq!(last.load(Ordering::Relaxed), total);
-    assert_eq!(ticks.load(Ordering::Relaxed), 3);
-}
-
 #[tokio::test]
 async fn test_small_file_roundtrip() {
-    let ch = make_cloud_home();
+    let (ch, ops) = make_cloud_home_with_ops();
     let data = b"hello world".to_vec();
-    ch.write(
-        "small.bin",
-        BlobBody::from_bytes(data.clone()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    ops.seed_object("small.bin", &data);
     let read = ch.read("small.bin").await.unwrap();
     assert_eq!(read, data);
 }
 
 #[tokio::test]
 async fn test_large_file_roundtrip() {
-    let ch = make_cloud_home();
+    let (ch, ops) = make_cloud_home_with_ops();
     // 25MB of data -- spans 3 chunks (10 + 10 + 5)
     let data: Vec<u8> = (0..25 * 1024 * 1024).map(|i| (i % 256) as u8).collect();
-    ch.write(
-        "large.bin",
-        BlobBody::from_bytes(data.clone()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    ops.seed_object("large.bin", &data);
     let read = ch.read("large.bin").await.unwrap();
     assert_eq!(read.len(), data.len());
     assert_eq!(read, data);
@@ -837,14 +623,8 @@ async fn test_large_file_roundtrip() {
 
 #[tokio::test]
 async fn test_read_range_single() {
-    let ch = make_cloud_home();
-    ch.write(
-        "range.bin",
-        BlobBody::from_bytes(b"0123456789".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    let (ch, ops) = make_cloud_home_with_ops();
+    ops.seed_object("range.bin", b"0123456789");
     let slice = ch.read_range("range.bin", 3, 7).await.unwrap();
     assert_eq!(slice, b"3456");
 }
@@ -853,13 +633,7 @@ async fn test_read_range_single() {
 async fn read_single_record_does_not_probe_existence() {
     let (ch, ops) = make_cloud_home_with_ops();
     let data = b"hello world".to_vec();
-    ch.write(
-        "single.bin",
-        BlobBody::from_bytes(data.clone()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    ops.seed_object("single.bin", &data);
 
     let read = ch.read("single.bin").await.unwrap();
 
@@ -870,13 +644,7 @@ async fn read_single_record_does_not_probe_existence() {
 #[tokio::test]
 async fn read_range_single_record_does_not_probe_existence() {
     let (ch, ops) = make_cloud_home_with_ops();
-    ch.write(
-        "single-range.bin",
-        BlobBody::from_bytes(b"0123456789".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    ops.seed_object("single-range.bin", b"0123456789");
 
     let read = ch.read_range("single-range.bin", 2, 6).await.unwrap();
 
@@ -912,48 +680,11 @@ async fn list_omits_base_key_whose_manifest_is_absent() {
     // published. `read` cannot assemble them, so `list` must not report them.
     ops.write_chunk_part("files/orphan.bin", 0, vec![1u8; CHUNK_SIZE]);
     ops.write_chunk_part("files/orphan.bin", 1, b"tail".to_vec());
-    ch.write(
-        "files/ok.bin",
-        BlobBody::from_bytes(b"hi".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    ops.seed_object("files/ok.bin", b"hi");
 
     let keys = ch.list("files/").await.unwrap();
 
     assert_eq!(keys, vec!["files/ok.bin".to_string()]);
-}
-
-#[tokio::test]
-async fn multipart_part_failure_leaves_no_orphan_records_or_visibility() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    // 25 MB spans three parts; fail the second part write mid-upload. The
-    // upload id is the first id the sequential provider hands out.
-    ops.fail_write(&chunk_part_key("orphan.bin", "cloudkit-upload-0", 1));
-    let data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
-
-    let err = ch
-        .write("orphan.bin", BlobBody::from_bytes(data), &no_progress())
-        .await
-        .expect_err("injected part write failure must fail the upload");
-    assert!(err.to_string().contains("write"), "unexpected error: {err}");
-
-    assert!(!ch.exists("orphan.bin").await.unwrap());
-    assert!(!ch
-        .list("")
-        .await
-        .unwrap()
-        .contains(&"orphan.bin".to_string()));
-    assert!(
-        ops.list_records(&CloudKitScope::Private, "orphan.bin.part")
-            .unwrap()
-            .is_empty(),
-        "aborted upload must leave no part records"
-    );
-    assert!(!ops
-        .record_exists(&CloudKitScope::Private, &chunk_manifest_key("orphan.bin"))
-        .unwrap());
 }
 
 #[tokio::test]
@@ -981,15 +712,8 @@ async fn read_chunked_record_with_missing_manifest_part_errors() {
 
 #[tokio::test]
 async fn read_range_chunked_rejects_range_past_manifest_length() {
-    let ch = make_cloud_home();
-    let data: Vec<u8> = vec![7u8; 15 * 1024 * 1024];
-    ch.write(
-        "range-limit.bin",
-        BlobBody::from_bytes(data),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    let (ch, ops) = make_cloud_home_with_ops();
+    ops.seed_object("range-limit.bin", &vec![7u8; 15 * 1024 * 1024]);
 
     let err = ch
         .read_range("range-limit.bin", 0, (16 * 1024 * 1024) as u64)
@@ -1022,16 +746,10 @@ async fn read_range_chunked_short_chunk_errors_instead_of_panicking() {
 
 #[tokio::test]
 async fn test_read_range_chunked() {
-    let ch = make_cloud_home();
+    let (ch, ops) = make_cloud_home_with_ops();
     // Create data that spans 2 chunks: 15MB
     let data: Vec<u8> = (0..15 * 1024 * 1024).map(|i| (i % 256) as u8).collect();
-    ch.write(
-        "big.bin",
-        BlobBody::from_bytes(data.clone()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    ops.seed_object("big.bin", &data);
 
     // Read a range that crosses the chunk boundary (last byte of chunk 0, first byte of chunk 1)
     let boundary = CHUNK_SIZE;
@@ -1044,25 +762,9 @@ async fn test_read_range_chunked() {
 
 #[tokio::test]
 async fn test_list_deduplicates_chunks() {
-    let ch = make_cloud_home();
-    // Write a chunked file
-    let data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
-    ch.write(
-        "files/album.flac",
-        BlobBody::from_bytes(data),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
-
-    // Also write a small file
-    ch.write(
-        "files/cover.jpg",
-        BlobBody::from_bytes(b"img".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    let (ch, ops) = make_cloud_home_with_ops();
+    ops.seed_object("files/album.flac", &vec![0u8; 25 * 1024 * 1024]);
+    ops.seed_object("files/cover.jpg", b"img");
 
     let keys = ch.list("files/").await.unwrap();
     assert_eq!(keys.len(), 2);
@@ -1072,11 +774,8 @@ async fn test_list_deduplicates_chunks() {
 
 #[tokio::test]
 async fn test_delete_removes_all_chunks() {
-    let ch = make_cloud_home();
-    let data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
-    ch.write("to-delete.bin", BlobBody::from_bytes(data), &no_progress())
-        .await
-        .unwrap();
+    let (ch, ops) = make_cloud_home_with_ops();
+    ops.seed_object("to-delete.bin", &vec![0u8; 25 * 1024 * 1024]);
 
     assert!(ch.exists("to-delete.bin").await.unwrap());
 
@@ -1085,7 +784,6 @@ async fn test_delete_removes_all_chunks() {
     assert!(!ch.exists("to-delete.bin").await.unwrap());
 
     // Verify the underlying ops store is empty of related keys
-    let ops = &ch.ops;
     let keys = ops
         .list_records(&CloudKitScope::Private, "to-delete.bin")
         .unwrap();
@@ -1093,250 +791,23 @@ async fn test_delete_removes_all_chunks() {
 }
 
 #[tokio::test]
-async fn test_overwrite_chunked_with_single() {
-    let ch = make_cloud_home();
-    // Write large file (chunked)
-    let large_data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
-    ch.write("file.bin", BlobBody::from_bytes(large_data), &no_progress())
-        .await
-        .unwrap();
-
-    // Overwrite with small file (single record)
-    let small_data = b"small".to_vec();
-    ch.write(
-        "file.bin",
-        BlobBody::from_bytes(small_data.clone()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
-
-    let read = ch.read("file.bin").await.unwrap();
-    assert_eq!(read, small_data);
-
-    // Verify no chunk records remain
-    let chunks = ch
-        .ops
-        .list_records(&CloudKitScope::Private, "file.bin.part")
-        .unwrap();
-    assert!(chunks.is_empty());
-}
-
-#[tokio::test]
-async fn put_object_over_single_writes_without_deleting_base_first() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    ch.write(
-        "file.bin",
-        BlobBody::from_bytes(b"old".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
-    ops.clear_calls();
-
-    ch.write(
-        "file.bin",
-        BlobBody::from_bytes(b"new".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
-
-    let calls = ops.calls();
-    assert_eq!(
-        calls.first(),
-        Some(&MockCall::Write("file.bin".to_string()))
-    );
-    assert!(
-        !calls.contains(&MockCall::Delete("file.bin".to_string())),
-        "single-record overwrite must not delete the base record: {calls:?}"
-    );
-    assert_eq!(ch.read("file.bin").await.unwrap(), b"new");
-}
-
-#[tokio::test]
-async fn put_object_over_chunked_publishes_single_before_cleanup() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    let large_data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
-    ch.write("file.bin", BlobBody::from_bytes(large_data), &no_progress())
-        .await
-        .unwrap();
-    ops.clear_calls();
-
-    ch.write(
-        "file.bin",
-        BlobBody::from_bytes(b"new".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
-
-    let calls = ops.calls();
-    assert_eq!(
-        calls.first(),
-        Some(&MockCall::Write("file.bin".to_string()))
-    );
-    assert_eq!(ch.read("file.bin").await.unwrap(), b"new");
-    assert!(ch
-        .ops
-        .list_records(&CloudKitScope::Private, "file.bin.part")
-        .unwrap()
-        .is_empty());
-    assert!(!ch
-        .ops
-        .record_exists(&CloudKitScope::Private, &chunk_manifest_key("file.bin"))
-        .unwrap());
-}
-
-#[tokio::test]
-async fn put_object_cleanup_failure_leaves_new_single_readable() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    let large_data: Vec<u8> = vec![0u8; 15 * 1024 * 1024];
-    ch.write("file.bin", BlobBody::from_bytes(large_data), &no_progress())
-        .await
-        .unwrap();
-    let stale_chunk = ch
-        .ops
-        .list_records(&CloudKitScope::Private, "file.bin.part")
-        .unwrap()
-        .into_iter()
-        .next()
-        .expect("chunked setup writes a chunk");
-    ops.fail_delete(&stale_chunk);
-
-    let err = ch
-        .write(
-            "file.bin",
-            BlobBody::from_bytes(b"new".to_vec()),
-            &no_progress(),
-        )
-        .await
-        .expect_err("stale chunk cleanup failure must fail loud");
-    let msg = err.to_string();
-
-    assert!(msg.contains("delete"), "unexpected error: {msg}");
-    assert_eq!(ch.read("file.bin").await.unwrap(), b"new");
-}
-
-#[tokio::test]
-async fn test_overwrite_single_with_chunked() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    // Write small file
-    ch.write(
-        "file.bin",
-        BlobBody::from_bytes(b"small".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
-    ops.clear_calls();
-
-    // Overwrite with large file (chunked)
-    let large_data: Vec<u8> = vec![1u8; 25 * 1024 * 1024];
-    ch.write(
-        "file.bin",
-        BlobBody::from_bytes(large_data.clone()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
-
-    let read = ch.read("file.bin").await.unwrap();
-    assert_eq!(read, large_data);
-
-    let calls = ops.calls();
-    let manifest_write = calls
-        .iter()
-        .position(|call| *call == MockCall::Write(chunk_manifest_key("file.bin")))
-        .expect("chunked write publishes manifest");
-    let base_delete = calls
-        .iter()
-        .position(|call| *call == MockCall::Delete("file.bin".to_string()))
-        .expect("chunked write removes stale single base");
-    assert!(
-        manifest_write < base_delete,
-        "chunk manifest must publish before stale base cleanup: {calls:?}"
-    );
-
-    // The single-record base is replaced by the chunk layout.
-    assert!(!ch
-        .ops
-        .record_exists(&CloudKitScope::Private, "file.bin")
-        .unwrap());
-    assert!(ch
-        .ops
-        .record_exists(&CloudKitScope::Private, &chunk_manifest_key("file.bin"))
-        .unwrap());
-}
-
-#[tokio::test]
-async fn chunked_over_longer_chunked_uses_new_token_before_stale_cleanup() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    let old_data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
-    ch.write("file.bin", BlobBody::from_bytes(old_data), &no_progress())
-        .await
-        .unwrap();
-    let old_chunks = ops
-        .list_records(&CloudKitScope::Private, "file.bin.part")
-        .unwrap();
-    ops.clear_calls();
-
-    let new_data: Vec<u8> = vec![1u8; 15 * 1024 * 1024];
-    ch.write(
-        "file.bin",
-        BlobBody::from_bytes(new_data.clone()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(ch.read("file.bin").await.unwrap(), new_data);
-    let remaining_chunks = ch
-        .ops
-        .list_records(&CloudKitScope::Private, "file.bin.part")
-        .unwrap();
-    assert_eq!(remaining_chunks.len(), 2);
-    assert!(
-        old_chunks
-            .iter()
-            .all(|old| !remaining_chunks.iter().any(|new| new == old)),
-        "old token chunks must be cleaned after new manifest publishes"
-    );
-}
-
-#[tokio::test]
 async fn test_exists() {
-    let ch = make_cloud_home();
+    let (ch, ops) = make_cloud_home_with_ops();
 
     assert!(!ch.exists("nope.bin").await.unwrap());
 
-    ch.write(
-        "yep.bin",
-        BlobBody::from_bytes(b"data".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    ops.seed_object("yep.bin", b"data");
     assert!(ch.exists("yep.bin").await.unwrap());
 
     // Chunked file
-    let data: Vec<u8> = vec![0u8; 15 * 1024 * 1024];
-    ch.write("chunked.bin", BlobBody::from_bytes(data), &no_progress())
-        .await
-        .unwrap();
+    ops.seed_object("chunked.bin", &vec![0u8; 15 * 1024 * 1024]);
     assert!(ch.exists("chunked.bin").await.unwrap());
 }
 
 #[tokio::test]
 async fn test_read_range_empty_when_end_leq_start() {
-    let ch = make_cloud_home();
-    ch.write(
-        "range.bin",
-        BlobBody::from_bytes(b"0123456789".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    let (ch, ops) = make_cloud_home_with_ops();
+    ops.seed_object("range.bin", b"0123456789");
 
     // end == start returns empty
     let slice = ch.read_range("range.bin", 3, 3).await.unwrap();

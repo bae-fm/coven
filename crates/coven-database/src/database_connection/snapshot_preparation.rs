@@ -378,7 +378,6 @@ impl DatabaseConnection {
         image: crate::SnapshotDatabaseImage,
         install: &VerifiedSnapshotBootstrapInstall,
         synced_tables: Vec<SyncedTable>,
-        blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
         coven_migration_policy: CovenMigrationPolicy,
@@ -392,7 +391,6 @@ impl DatabaseConnection {
             store_dir.clone(),
             crate::connection_io::ConnectionDurability::Full,
             synced_tables,
-            blob_tombstone_grace,
             transfer_limits,
             hlc,
             coven_migration_policy,
@@ -467,7 +465,6 @@ impl DatabaseConnection {
                         store_dir,
                         crate::connection_io::ConnectionDurability::Full,
                         receiver.context.synced_tables.as_ref().clone(),
-                        receiver.context.blob_tombstone_grace,
                         *receiver
                             .context
                             .transfer_limits

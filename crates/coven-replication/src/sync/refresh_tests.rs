@@ -1111,7 +1111,6 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
         &reopened_store_dir.db_path(),
         reopened_store_dir.clone(),
         crate::sync::test_helpers::test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".into(),
         Arc::new(SystemClock),

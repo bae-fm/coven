@@ -680,8 +680,11 @@ async fn every_s3_operation_preserves_bucket_permission_denial() {
     .await;
     let home = standard_test_home("permission-bucket".to_string(), endpoint).await;
 
+    let slot = ObjectSlot::logical("object".to_string()).unwrap();
     let errors = [
-        home.put_object("object", vec![1]).await.expect_err("put"),
+        crate::cloud::create_exact_bytes(&home, &slot, &[1], &crate::cloud::no_progress())
+            .await
+            .expect_err("create"),
         home.read("object").await.expect_err("read"),
         home.list("").await.expect_err("list"),
         home.delete("object").await.expect_err("delete"),
@@ -987,7 +990,7 @@ async fn fake_s3_write_endpoint(
 }
 
 #[tokio::test]
-async fn immutable_append_is_create_only_but_generic_put_remains_mutable() {
+async fn an_exact_append_carries_its_create_only_precondition() {
     let headers = Arc::new(std::sync::Mutex::new(Vec::new()));
     let bucket = "immutable-write-test".to_string();
     let (endpoint, shutdown) = spawn_fake_s3(
@@ -1001,9 +1004,6 @@ async fn immutable_append_is_create_only_but_generic_put_remains_mutable() {
     .await;
     let home = standard_test_home(bucket, endpoint).await;
 
-    home.put_object("mutable", b"first".to_vec())
-        .await
-        .expect("generic mutable put");
     let slot = ObjectSlot::logical("immutable/copy".to_string()).unwrap();
     crate::cloud::create_exact_bytes(&home, &slot, b"second", &crate::cloud::no_progress())
         .await
@@ -1011,7 +1011,7 @@ async fn immutable_append_is_create_only_but_generic_put_remains_mutable() {
 
     assert_eq!(
         *headers.lock().expect("lock headers"),
-        vec![None, Some("*".to_string())]
+        vec![Some("*".to_string())]
     );
     assert_eq!(
         home.exact_upload_verification,
@@ -1403,7 +1403,7 @@ async fn multipart_sink_retains_the_cloud_runtime_through_abort() {
     .await;
     let home = standard_test_home(bucket, endpoint).await;
     let sink = home
-        .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly, None)
+        .open_multipart_sink("immutable/cancelled", None)
         .await
         .unwrap();
 
@@ -1700,7 +1700,7 @@ fn cancellation_abort_failure_does_not_terminate_the_process() {
             .await;
             let home = standard_test_home(bucket, endpoint).await;
             let sink = home
-                .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly, None)
+                .open_multipart_sink("immutable/cancelled", None)
                 .await
                 .unwrap();
             drop(sink);

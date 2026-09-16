@@ -187,7 +187,6 @@ async fn excluded_device_continues_from_a_snapshot_after_a_later_circle_control(
         .install(
             &directory,
             tables(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "restored-host".to_string(),
             Arc::new(coven_foundation::clock::SystemClock),
@@ -389,7 +388,6 @@ async fn restore_later_member(image: AncestorImage) {
         .install(
             &directory,
             tables(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "restored-member".into(),
             Arc::new(coven_foundation::clock::SystemClock),

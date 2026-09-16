@@ -150,7 +150,6 @@ impl PublishedScopedSnapshot {
             .install(
                 &self.store_dir,
                 scoped_snapshot_tables(),
-                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
                 coven_protocol::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -390,7 +389,6 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routing() {
         .install(
             &store_dir,
             target_tables,
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "joining-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),

@@ -20,9 +20,9 @@ use coven_protocol::objects::ObjectSlot;
 use coven_protocol::synced_schema::BlobDecl;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::{
-    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, CloudObjectStream, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
-    RevokeOutcome, UploadControl,
+    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    CloudObjectStream, ExactCreateOutcome, ExactSlotStorage, ExactUpload, RevokeOutcome,
+    UploadControl,
 };
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
@@ -116,22 +116,6 @@ impl InstrumentedHome {
 
 #[async_trait]
 impl CloudHome for InstrumentedHome {
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        self.inner.put_object(key, data).await
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        self.inner.open_multipart(key, total_len).await
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        self.inner.multipart_threshold()
-    }
-
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         self.inner.read(key).await
     }
@@ -360,7 +344,6 @@ impl UploadFixture {
             std::path::Path::new(":memory:"),
             db_store_dir.clone(),
             schema.tables(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             limits,
             "test-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -411,13 +394,7 @@ impl UploadFixture {
             .await
             .expect("read upload journals")
             .into_iter()
-            .find(|entry| {
-                matches!(
-                    &entry.operation,
-                    coven_database::OutboxOperation::Upload { row, .. }
-                        if row.blob().id == blob_id
-                )
-            })
+            .find(|entry| entry.upload.row.blob().id == blob_id)
             .expect("upload journal exists")
     }
 
@@ -542,20 +519,14 @@ impl UploadFixture {
 
 fn is_created(entry: &coven_database::OutboxEntry) -> bool {
     matches!(
-        entry.operation,
-        coven_database::OutboxOperation::Upload {
-            state: coven_database::OutboxUploadState::Created { .. },
-            ..
-        }
+        entry.upload.state,
+        coven_database::OutboxUploadState::Created { .. }
     )
 }
 
 fn created_slot(entry: &coven_database::OutboxEntry) -> &ObjectSlot {
-    match &entry.operation {
-        coven_database::OutboxOperation::Upload {
-            state: coven_database::OutboxUploadState::Created { stored, .. },
-            ..
-        } => stored.object().slot(),
+    match &entry.upload.state {
+        coven_database::OutboxUploadState::Created { stored, .. } => stored.object().slot(),
         _ => panic!("journal is not Created"),
     }
 }
@@ -563,11 +534,8 @@ fn created_slot(entry: &coven_database::OutboxEntry) -> &ObjectSlot {
 fn created_stored(
     entry: &coven_database::OutboxEntry,
 ) -> &coven_protocol::blob::locator::StoredBlobRef {
-    match &entry.operation {
-        coven_database::OutboxOperation::Upload {
-            state: coven_database::OutboxUploadState::Created { stored, .. },
-            ..
-        } => stored,
+    match &entry.upload.state {
+        coven_database::OutboxUploadState::Created { stored, .. } => stored,
         _ => panic!("journal is not Created"),
     }
 }
@@ -1372,10 +1340,7 @@ async fn make_remote_enqueues_blobs_in_the_hosts_order() {
     let queued = fixture.database.pending_blob_uploads().await.unwrap();
     let ids = queued
         .iter()
-        .map(|entry| match &entry.operation {
-            coven_database::OutboxOperation::Upload { row, .. } => row.row_id(),
-            _ => panic!("pending_blob_uploads returned a non-upload"),
-        })
+        .map(|entry| entry.upload.row.row_id())
         .collect::<Vec<_>>();
     assert_eq!(ids, vec!["cover-first", "alphabetic-first"]);
 }

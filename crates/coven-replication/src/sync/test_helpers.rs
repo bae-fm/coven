@@ -260,7 +260,6 @@ impl CrossPrincipalTestDevice {
         .install(
             store_dir,
             synced_tables,
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             device_id,
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -736,7 +735,6 @@ mod test_device {
                 .await?;
                 let installed = prepared.install(
                     joining_database.synced_tables_for_test(),
-                    joining_database.blob_tombstone_grace(),
                     joining_database.transfer_limits(),
                     device_id,
                     clock,
@@ -837,7 +835,6 @@ mod test_device {
             .install(
                 &joining_store_dir,
                 synced_tables,
-                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
                 coven_protocol::blob::TransferLimits::one_at_a_time(),
                 offer.attempt_id.to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -3070,7 +3067,6 @@ fn open_joined_test_store(
     Ok(Database::open(
         &store_dir.db_path(),
         synced_tables,
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id,
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -3171,54 +3167,6 @@ impl TestStore {
     ) -> Result<crate::sync::store::Store, crate::sync::store::StoreInitializationError> {
         self.open_store_with_storage(database, storage, store_dir, &self.signer)
             .await
-    }
-
-    pub fn tombstone_deletions(&self) -> Vec<String> {
-        self.home.deletes_seen()
-    }
-
-    pub fn tombstone_provider_key(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> String {
-        coven_storage::blob_tombstone_key(
-            stored,
-            coven_storage::CloudSyncCipherStateAccess::suffix(self.storage.as_ref()),
-        )
-    }
-
-    pub fn stored_tombstone_bytes(&self, key: &str) -> Option<Vec<u8>> {
-        let stored = self.home.get(key)?;
-        let aad_context = coven_storage::cloud_aad_context(self.storage.store_id(), key);
-        coven_storage::CloudSyncCipherStateAccess::open(self.storage.as_ref(), stored, &aad_context)
-            .ok()
-    }
-
-    pub async fn plant_tombstone_bytes(
-        &self,
-        key: &str,
-        bytes: Vec<u8>,
-    ) -> Result<(), coven_protocol::objects::StorageError> {
-        let aad_context = coven_storage::cloud_aad_context(self.storage.store_id(), key);
-        let stored = coven_storage::CloudSyncCipherStateAccess::seal(
-            self.storage.as_ref(),
-            bytes,
-            &aad_context,
-        );
-        self.storage
-            .write_provider_bytes_for_test(key, stored)
-            .await
-    }
-
-    /// Plants a typed tombstone through the Store's exact cloud layout while
-    /// bypassing the signing drain, so deletion tests can exercise rejected
-    /// signatures and Store identities.
-    pub async fn plant_tombstone(&self, tombstone: &crate::blob::delete::BlobTombstoneJson) {
-        let key = self.tombstone_provider_key(&tombstone.stored);
-        let bytes = serde_json::to_vec(tombstone).expect("serialize tombstone");
-        self.plant_tombstone_bytes(&key, bytes)
-            .await
-            .expect("plant tombstone");
     }
 
     pub fn fail_exact_delete_on_call(&self, call: usize) {
@@ -3776,17 +3724,6 @@ impl TestStore {
             Err(coven_protocol::objects::StorageError::NotFound(_)) => Ok(false),
             Err(error) => Err(error),
         }
-    }
-
-    pub async fn contains_blob_tombstone(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<bool, coven_storage::cloud::CloudHomeError> {
-        let key = coven_storage::blob_tombstone_key(
-            stored,
-            coven_storage::CloudSyncCipherStateAccess::suffix(self.storage.as_ref()),
-        );
-        coven_storage::cloud::CloudHome::exists(self.home.as_ref(), &key).await
     }
 
     pub async fn contains_membership_rollup(
@@ -5130,84 +5067,12 @@ where
         self.inner.set_member_access(state).await
     }
 
-    async fn read_blob_tombstone(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<Option<Vec<u8>>, coven_protocol::objects::StorageError> {
-        let key = coven_storage::blob_tombstone_key(
-            stored,
-            coven_storage::CloudSyncCipherStateAccess::suffix(&*self.inner),
-        );
-        self.interceptor.before_provider_object_read(&key).await?;
-        self.inner.read_blob_tombstone(stored).await
-    }
-
-    async fn write_blob_tombstone(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-        plaintext: Vec<u8>,
-    ) -> Result<(), coven_protocol::objects::StorageError> {
-        let key = coven_storage::blob_tombstone_key(
-            stored,
-            coven_storage::CloudSyncCipherStateAccess::suffix(&*self.inner),
-        );
-        self.interceptor.before_provider_object_write(&key).await?;
-        self.inner.write_blob_tombstone(stored, plaintext).await
-    }
-
-    async fn list_blob_tombstones(
-        &self,
-    ) -> Result<Vec<coven_storage::ListedBlobTombstone>, coven_protocol::objects::StorageError>
-    {
-        self.inner.list_blob_tombstones().await
-    }
-
-    async fn blob_tombstone_exists(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<bool, coven_protocol::objects::StorageError> {
-        let key = coven_storage::blob_tombstone_key(
-            stored,
-            coven_storage::CloudSyncCipherStateAccess::suffix(&*self.inner),
-        );
-        match self.interceptor.before_provider_object_exists(&key).await? {
-            ProviderObjectExistsInterception::Proceed => {
-                self.inner.blob_tombstone_exists(stored).await
-            }
-            ProviderObjectExistsInterception::DeleteAndReportAbsent => {
-                self.inner.delete_blob_tombstone(stored).await?;
-                Ok(false)
-            }
-        }
-    }
-
-    async fn delete_blob_tombstone(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<(), coven_protocol::objects::StorageError> {
-        let key = coven_storage::blob_tombstone_key(
-            stored,
-            coven_storage::CloudSyncCipherStateAccess::suffix(&*self.inner),
-        );
-        self.interceptor.before_provider_object_delete(&key).await?;
-        self.inner.delete_blob_tombstone(stored).await
-    }
-
     async fn read_provider_bytes_for_test(
         &self,
         key: &str,
     ) -> Result<Vec<u8>, coven_protocol::objects::StorageError> {
         self.interceptor.before_provider_object_read(key).await?;
         self.inner.read_provider_bytes_for_test(key).await
-    }
-
-    async fn write_provider_bytes_for_test(
-        &self,
-        key: &str,
-        bytes: Vec<u8>,
-    ) -> Result<(), coven_protocol::objects::StorageError> {
-        self.interceptor.before_provider_object_write(key).await?;
-        self.inner.write_provider_bytes_for_test(key, bytes).await
     }
 
     async fn list_provider_keys_for_test(

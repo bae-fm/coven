@@ -11,12 +11,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 
 use super::{
-    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudObjectStream, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
-    ExactSlotStorage, PartSink,
+    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudObjectStream,
+    CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome, ExactSlotStorage,
 };
 use coven_protocol::objects::ObjectSlot;
 
@@ -250,10 +248,10 @@ impl InMemoryCloudHome {
         self.sort_listings.store(true, Ordering::SeqCst);
     }
 
-    /// Arm every subsequent write (`put_object` and `open_multipart`) to fail
-    /// with a retryable transport error. A test can let a home's setup writes
-    /// land and then arm this before driving the path whose uploads must fail;
-    /// it stays armed for the store's lifetime.
+    /// Arm every subsequent exact create to fail with a retryable transport
+    /// error. A test can let a home's setup writes land and then arm this before
+    /// driving the path whose uploads must fail; it stays armed for the store's
+    /// lifetime.
     pub fn arm_write_failures(&self) {
         self.fail_writes.store(true, Ordering::SeqCst);
     }
@@ -658,40 +656,6 @@ impl InMemoryCloudHome {
         assert!(previous.is_some(), "exact slot exists");
     }
 
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        if self.fail_writes.load(Ordering::SeqCst) {
-            return Err(CloudHomeError::Transport(
-                "InMemoryCloudHome: armed write failure".into(),
-            ));
-        }
-        self.writes.lock().unwrap().insert(key.to_string(), data);
-        Ok(())
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        _total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        // Gate multipart too, so `arm_write_failures` fails a write whatever its
-        // size — `write_blob` routes blobs above `multipart_threshold` here.
-        if self.fail_writes.load(Ordering::SeqCst) {
-            return Err(CloudHomeError::Transport(
-                "InMemoryCloudHome: armed write failure".into(),
-            ));
-        }
-        Ok(Box::new(InMemoryPartSink {
-            writes: self.writes.clone(),
-            key: key.to_string(),
-            buf: Vec::new(),
-        }))
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        // A small threshold so tests exercise the multipart driver path; the part
-        // size matches so a multi-part blob ticks progress several times.
-        super::PROGRESS_CHUNK_SIZE as u64
-    }
     fn validate_exact_slot(slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         slot.validate()?;
         Ok(())
@@ -1015,42 +979,6 @@ impl Default for InMemoryCloudHome {
     }
 }
 
-/// A [`PartSink`] for the in-memory backend: accumulate the streamed parts in
-/// order and store the assembled object on `finish`, so a multipart upload
-/// round-trips exactly like a single `put_object`.
-struct InMemoryPartSink {
-    writes: Arc<Mutex<MemoryObjects>>,
-    key: String,
-    buf: Vec<u8>,
-}
-
-#[async_trait]
-impl PartSink for InMemoryPartSink {
-    fn part_size(&self) -> usize {
-        super::PROGRESS_CHUNK_SIZE
-    }
-
-    async fn send_part(
-        &mut self,
-        part: Bytes,
-        _offset: u64,
-        _is_last: bool,
-        _control: &super::UploadControl,
-    ) -> Result<(), CloudHomeError> {
-        self.buf.extend_from_slice(&part);
-        Ok(())
-    }
-
-    async fn abort(&mut self) -> Result<(), CloudHomeError> {
-        Ok(())
-    }
-
-    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
-        self.writes.lock().unwrap().insert(self.key, self.buf);
-        Ok(())
-    }
-}
-
 #[async_trait]
 impl CloudHome for InMemoryCloudHome {
     async fn probe(&self) -> Result<(), CloudHomeError> {
@@ -1067,22 +995,6 @@ impl CloudHome for InMemoryCloudHome {
             ));
         }
         Ok(())
-    }
-
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        InMemoryCloudHome::put_object(self, key, data).await
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        InMemoryCloudHome::open_multipart(self, key, total_len).await
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        InMemoryCloudHome::multipart_threshold(self)
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {

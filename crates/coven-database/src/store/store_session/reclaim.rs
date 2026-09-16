@@ -766,7 +766,7 @@ impl StoreDatabase {
     }
 
     /// Whether no live row in this device's materialized state binds the blob as a
-    /// remote reference — the same predicate the member-signed tombstone path
+    /// remote reference — the same predicate the accepted-snapshot inventory
     /// applies before deleting a blob body. An unresolved reference is not an
     /// answer: it means a row's locality cannot be decided yet, so it fails rather
     /// than counting as an orphan.

@@ -351,10 +351,13 @@ async fn a_settled_cycle_asks_the_provider_only_for_what_could_be_new() {
         .settled_cycle_requests()
         .await;
 
-    // Five exact authority reads, two versioned reads, one provider
-    // binding and one listing. The retained history adds no requests.
+    // Five exact authority reads, two versioned reads and one provider binding.
+    // The retained history adds no requests, and a settled cycle now lists no
+    // prefix at all: retirement is accepted reclaim's, evaluated from the
+    // accepted snapshot this device already holds rather than by sweeping the
+    // bucket every round.
     assert_eq!(
-        settled, 9,
+        settled, 8,
         "a settled two-device cycle asked the provider for {settled} operations",
     );
 }

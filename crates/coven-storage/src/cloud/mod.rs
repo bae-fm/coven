@@ -1,9 +1,12 @@
 //! CloudHome: low-level cloud storage abstraction.
 //!
-//! Each backend (S3, R2, B2, etc.) implements `CloudHome` -- 8 methods for
-//! raw bytes in/out. No encryption, no path layout knowledge, no sync
-//! semantics. Higher-level concerns live in `CloudSyncConnection` which wraps any
-//! `dyn CloudHome` and applies the path layout and at-rest protection.
+//! Each backend (S3, R2, B2, etc.) implements `CloudHome` -- raw bytes in and
+//! out, with no way to overwrite an object that exists: every write coven makes
+//! is an exact create or a versioned conditional replacement, both of which
+//! belong to [`ExactSlotStorage`]. No encryption, no path layout knowledge, no
+//! sync semantics. Higher-level concerns live in `CloudSyncConnection` which
+//! wraps any `dyn CloudHome` and applies the path layout and at-rest
+//! protection.
 
 // Pure helpers that S3-compatible backends share.
 pub(crate) mod s3_common;
@@ -53,8 +56,6 @@ pub use setup::SetupError;
 
 mod blob_body;
 mod exact_upload;
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use blob_body::PROGRESS_CHUNK_SIZE;
 pub(crate) use blob_body::{combine_cleanup_failure, MultipartUpload};
 pub use blob_body::{no_download_progress, no_preparation_progress, no_progress};
 pub use blob_body::{
@@ -585,23 +586,6 @@ pub trait CloudHome: Send + Sync {
         self.list("__coven_probe__").await.map(drop)
     }
 
-    /// One bounded single-request upload, creating or overwriting `key`. Used only
-    /// for blobs at or below [`multipart_threshold`](CloudHome::multipart_threshold);
-    /// large blobs stream through [`open_multipart`](CloudHome::open_multipart).
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError>;
-
-    /// Open a streaming multipart/resumable upload for `total_len` bytes, returning
-    /// the [`PartSink`] the driver pumps ordered parts into.
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError>;
-
-    /// Blobs at or below this size go via [`put_object`](CloudHome::put_object);
-    /// larger ones stream via [`open_multipart`](CloudHome::open_multipart).
-    fn multipart_threshold(&self) -> u64;
-
     /// The running total of provider operations issued through this home, for
     /// a run's stage timings to report each stage's count beside its wall time.
     ///
@@ -614,27 +598,6 @@ pub trait CloudHome: Send + Sync {
         &self,
     ) -> Option<std::sync::Arc<dyn coven_foundation::stage_timing::ProviderRequests>> {
         None
-    }
-
-    /// Write a sized [`BlobBody`] to `key`. Not overridden — the central
-    /// `write_blob` driver picks single-request vs multipart and pumps the
-    /// parts, reporting cumulative bytes through `progress` for the per-file bar.
-    async fn write(
-        &self,
-        key: &str,
-        body: BlobBody,
-        progress: &UploadProgress,
-    ) -> Result<(), CloudHomeError> {
-        if body.len() <= self.multipart_threshold() {
-            let data = body.collect().await?;
-            let n = data.len() as u64;
-            self.put_object(key, data).await?;
-            progress(n);
-            return Ok(());
-        }
-        let sink = self.open_multipart(key, body.len()).await?;
-        let control = UploadControl::running(progress.clone());
-        MultipartUpload::new(key, body, sink, &control).run().await
     }
 
     /// Read the full contents of a key.

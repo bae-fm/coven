@@ -1,15 +1,13 @@
-//! Blob domain workflows: locality transitions, tombstone lifecycle, retry
-//! policy, and local cleanup. The blob value model — references, locators,
-//! scopes, transfer limits, and the transition observer port — lives in
+//! Blob domain workflows: locality transitions, retry policy, and local
+//! cleanup. The blob value model — references, locators, scopes, transfer
+//! limits, and the transition observer port — lives in
 //! [`coven_protocol::blob`]; upload execution outcomes live here with the
 //! database and filesystem errors they preserve.
 
-pub(crate) mod delete;
 pub(crate) mod progress;
 pub(crate) mod retry;
 pub mod transition;
 
-pub use delete::BlobTombstoneJson;
 pub use transition::{MakeLocalError, MakeRemoteError, MakeRemoteRoot};
 
 #[derive(Debug)]
@@ -139,6 +137,3 @@ mod transition_tests;
 
 #[cfg(test)]
 mod local_store_tests;
-
-#[cfg(test)]
-mod delete_tests;

@@ -11,39 +11,6 @@ use coven_protocol::objects::{
     PreparedExactObject, ProtocolObjectContext, ResolvedProviderBinding, StorageError,
 };
 
-pub const BLOB_TOMBSTONE_PREFIX: &str = "blob_tombstones/";
-
-pub fn blob_tombstone_object_id(
-    stored: &coven_protocol::blob::locator::StoredBlobRef,
-) -> coven_protocol::store_commit::ObjectHash {
-    coven_protocol::remote_object::remote_object_id(stored.object())
-}
-
-pub fn blob_tombstone_key(
-    stored: &coven_protocol::blob::locator::StoredBlobRef,
-    suffix: &str,
-) -> String {
-    format!(
-        "{BLOB_TOMBSTONE_PREFIX}{}{suffix}",
-        blob_tombstone_object_id(stored)
-    )
-}
-
-#[derive(Clone, Debug)]
-pub enum ListedBlobTombstone {
-    Opened {
-        object_id: coven_protocol::store_commit::ObjectHash,
-        plaintext: Vec<u8>,
-    },
-    InvalidKey {
-        provider_key: String,
-    },
-    InvalidBody {
-        provider_key: String,
-        source: std::sync::Arc<coven_keys::encryption::EncryptionError>,
-    },
-}
-
 #[async_trait]
 pub trait CloudSyncObjectStorage: Send + Sync {
     /// Return the cloud home's fixed blob path representation.
@@ -66,38 +33,8 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         state: crate::cloud::CloudAccessState,
     ) -> Result<crate::cloud::CloudAccessOutcome, StorageError>;
 
-    async fn read_blob_tombstone(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<Option<Vec<u8>>, StorageError>;
-
-    async fn write_blob_tombstone(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-        plaintext: Vec<u8>,
-    ) -> Result<(), StorageError>;
-
-    async fn list_blob_tombstones(&self) -> Result<Vec<ListedBlobTombstone>, StorageError>;
-
-    async fn blob_tombstone_exists(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<bool, StorageError>;
-
-    async fn delete_blob_tombstone(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<(), StorageError>;
-
     #[cfg(any(test, feature = "test-utils"))]
     async fn read_provider_bytes_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError>;
-
-    #[cfg(any(test, feature = "test-utils"))]
-    async fn write_provider_bytes_for_test(
-        &self,
-        key: &str,
-        bytes: Vec<u8>,
-    ) -> Result<(), StorageError>;
 
     #[cfg(any(test, feature = "test-utils"))]
     async fn list_provider_keys_for_test(&self, prefix: &str) -> Result<Vec<String>, StorageError>;

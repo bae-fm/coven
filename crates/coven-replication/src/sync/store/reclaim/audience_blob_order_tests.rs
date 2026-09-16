@@ -308,6 +308,84 @@ impl AudienceBlobPackageFixture {
             Err(error) => panic!("read the binding package object: {error}"),
         }
     }
+
+    /// Rewrite one file row's blob content in place. The row keeps its id and
+    /// its audience; the bytes it names change, so the object the old version
+    /// published is orphaned the moment the replacement is accepted — the shape
+    /// a host replacing a cover image produces, with no deletion call anywhere.
+    async fn replace_document_file(&self, file_id: &str, bytes: &[u8], stamp: &str) {
+        let row = file_id.to_string();
+        let stamp = stamp.to_string();
+        let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
+        let hash = coven_protocol::blob::content_hash(bytes);
+        let staging = self
+            .components
+            .host_write_blob_staging(tokio::runtime::Handle::current());
+        coven_database::StoreDatabase::new(&self.db)
+            .run_host_store_write_for_test(
+                Some(coven_keys::encryption::EncryptionService::from_key(
+                    [42; 32],
+                )),
+                Some(Box::new(staging) as Box<dyn coven_database::AudienceBlobMoveStaging>),
+                move |transaction| {
+                    transaction
+                        .execute(
+                            "UPDATE document_files SET size = ?2, hash = ?3, _updated_at = ?4 \
+                             WHERE id = ?1",
+                            rusqlite::params![row, size, hash, stamp],
+                        )
+                        .map(|_| ())
+                        .map_err(coven_database::DbError::from)
+                },
+            )
+            .await
+            .expect("repoint the document file at new bytes");
+        coven_foundation::store_dir::StoreDir::store_local_blob(
+            &self.store_dir,
+            "files",
+            file_id,
+            bytes,
+        )
+        .await
+        .expect("stage the replacement file bytes");
+    }
+
+    /// The exact object the file row currently binds.
+    async fn bound_file_blob(&self, file_id: &str) -> coven_protocol::blob::locator::StoredBlobRef {
+        coven_database::StoreDatabase::new(&self.db)
+            .row_blob_ref("document_files", file_id)
+            .await
+            .expect("read the file row's blob reference")
+            .stored()
+            .cloned()
+            .expect("the published file row binds an exact object")
+    }
+
+    async fn accepted_snapshot_image(
+        &self,
+    ) -> (coven_protocol::store_commit::SnapshotMeta, Vec<u8>) {
+        let snapshot = coven_database::StoreDatabase::new(&self.db)
+            .latest_local_store_snapshot()
+            .await
+            .expect("read the accepted snapshot")
+            .expect("an accepted snapshot exists");
+        let bytes = self
+            .storage
+            .read_protocol_object(
+                &coven_protocol::objects::ProtocolObjectContext::store_encrypted(
+                    self.store.root().store_root_hash,
+                    coven_protocol::objects::ProtocolObjectDomain::StoreSnapshotImage,
+                ),
+                &snapshot.meta.image.object,
+                &coven_protocol::store_commit::snapshot_image_semantic_prefix(
+                    snapshot.reference.object.slot(),
+                    snapshot.meta.image.image_hash,
+                ),
+            )
+            .await
+            .expect("read the accepted snapshot's exact inventory");
+        (snapshot.meta, bytes)
+    }
 }
 
 /// The accepted snapshot carries the blob's binding after the source package
@@ -573,4 +651,220 @@ async fn a_snapshot_preserves_its_blob_after_package_reclaim_until_a_successor_r
         .contains_stored_blob_object(&blob)
         .await
         .expect("read released blob"));
+}
+
+const DOCUMENT: &str = "00000000-0000-4000-8000-0000000000e8";
+const FILE: &str = "00000000-0000-4000-8000-0000000000f8";
+
+/// The combined case: a row's blob is replaced, orphaning its old bytes, while
+/// an accepted snapshot still owns them. Reclaim must keep those bytes until a
+/// successor snapshot's inventory excludes them — and must never touch the
+/// replacement, which a live row binds.
+#[tokio::test]
+async fn a_snapshot_preserves_a_replaced_blob_until_a_successor_excludes_it() {
+    let fixture = AudienceBlobPackageFixture::build("replaced-blob-snapshot-retention").await;
+    fixture.run_cycle().await;
+    fixture
+        .capture_document_with_file(
+            DOCUMENT,
+            FILE,
+            b"the bytes a snapshot owns",
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
+    fixture.run_cycle().await;
+    let (replaced, package) = fixture.published_blob_and_its_package().await;
+    super::tests::publish_current_snapshot(&fixture.device).await;
+    fixture
+        .device
+        .stand_on_accepted_snapshot()
+        .await
+        .expect("retire covered replay inputs");
+    fixture
+        .device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the covered source package");
+    assert!(
+        !fixture.package_is_present(&package).await,
+        "the snapshot replaces its source package"
+    );
+    assert!(fixture
+        .store
+        .contains_stored_blob_object(&replaced)
+        .await
+        .expect("read snapshot payload"));
+
+    // The replacement publishes beside it. No host names the object it orphans.
+    fixture
+        .replace_document_file(
+            FILE,
+            b"the bytes that replaced them",
+            "2026-07-23T00:20:00Z",
+        )
+        .await;
+    fixture.run_cycle().await;
+    let replacement = fixture.bound_file_blob(FILE).await;
+    assert_ne!(replacement.object(), replaced.object());
+
+    fixture
+        .device
+        .reclaim_packages()
+        .await
+        .expect("evaluate a replaced blob the accepted snapshot still owns");
+    assert!(
+        fixture
+            .store
+            .contains_stored_blob_object(&replaced)
+            .await
+            .expect("read retained snapshot payload"),
+        "the accepted snapshot still needs the bytes its inventory owns"
+    );
+
+    super::tests::publish_current_snapshot(&fixture.device).await;
+    fixture
+        .device
+        .stand_on_accepted_snapshot()
+        .await
+        .expect("adopt the snapshot that excludes the replaced blob");
+    let (meta, image) = fixture.accepted_snapshot_image().await;
+    assert!(
+        coven_database::SnapshotDatabaseImage::contains_reclaimable_store_blob(
+            &image, &meta, &replaced,
+        )
+        .expect("read the successor inventory"),
+        "the successor's inventory releases the replaced bytes"
+    );
+    assert!(
+        !coven_database::SnapshotDatabaseImage::contains_reclaimable_store_blob(
+            &image,
+            &meta,
+            &replacement,
+        )
+        .expect("read the successor inventory"),
+        "and holds the bytes a live row binds"
+    );
+
+    fixture
+        .device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the released blob");
+    assert!(!fixture
+        .store
+        .contains_stored_blob_object(&replaced)
+        .await
+        .expect("read released blob"));
+    assert!(
+        fixture
+            .store
+            .contains_stored_blob_object(&replacement)
+            .await
+            .expect("read the replacement"),
+        "the object a live row binds survives"
+    );
+}
+
+/// The shape a host replacing a cover image produces: the row is repointed at
+/// new bytes and nothing is told to delete the old ones. Once the replacement is
+/// accepted and a snapshot covers it, reclaim finds the orphan by itself.
+#[tokio::test]
+async fn a_replaced_blob_is_reclaimed_after_acceptance_with_no_host_call() {
+    let fixture = AudienceBlobPackageFixture::build("replaced-cover-reclaim").await;
+    fixture.run_cycle().await;
+    fixture
+        .capture_document_with_file(DOCUMENT, FILE, b"the first cover", "2026-07-23T00:10:00Z")
+        .await;
+    fixture.run_cycle().await;
+    let (replaced, _) = fixture.published_blob_and_its_package().await;
+
+    fixture
+        .replace_document_file(FILE, b"the cover that replaced it", "2026-07-23T00:20:00Z")
+        .await;
+    fixture.run_cycle().await;
+    let replacement = fixture.bound_file_blob(FILE).await;
+    assert_ne!(replacement.object(), replaced.object());
+
+    super::tests::publish_current_snapshot(&fixture.device).await;
+    fixture
+        .device
+        .stand_on_accepted_snapshot()
+        .await
+        .expect("adopt the snapshot covering the replacement");
+    fixture
+        .device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the replaced cover");
+
+    assert!(
+        !fixture
+            .store
+            .contains_stored_blob_object(&replaced)
+            .await
+            .expect("read the replaced cover"),
+        "the orphaned bytes are deleted without any host naming them"
+    );
+    assert!(
+        fixture
+            .store
+            .contains_stored_blob_object(&replacement)
+            .await
+            .expect("read the current cover"),
+        "the cover a live row binds survives"
+    );
+}
+
+/// Remote deletion belongs to the current Owner alone. A device that is not the
+/// Owner runs the same reclaim over the same released object and reports that it
+/// does not reclaim, having deleted nothing.
+#[tokio::test]
+async fn a_device_that_is_not_the_reclaimer_deletes_nothing() {
+    let fixture = AudienceBlobPackageFixture::build("non-owner-reclaim").await;
+    let peer_store_dir = crate::sync::test_helpers::test_store_dir();
+    let peer_db = crate::sync::test_helpers::open_test_db_schema(
+        peer_store_dir.clone(),
+        scoped_blob_tables(),
+        scoped_blob_migrations(),
+    );
+    let peer_signer = UserKeypair::generate();
+    let peer = Box::pin(fixture.store.admit_and_activate_peer(
+        &fixture.db,
+        fixture.store_dir.clone(),
+        &peer_db,
+        peer_store_dir.clone(),
+        &peer_signer,
+    ))
+    .await
+    .expect("admit and activate a second device");
+
+    fixture
+        .capture_document_with_file(DOCUMENT, FILE, b"the first cover", "2026-07-23T00:10:00Z")
+        .await;
+    fixture.run_cycle().await;
+    let (replaced, _) = fixture.published_blob_and_its_package().await;
+    fixture
+        .replace_document_file(FILE, b"the cover that replaced it", "2026-07-23T00:20:00Z")
+        .await;
+    fixture.run_cycle().await;
+    peer.pull_store().await.expect("the peer pulls the Store");
+
+    let run = peer
+        .reclaim_packages()
+        .await
+        .expect("a non-Owner reclaim reports rather than failing");
+
+    assert_eq!(
+        run.store_packages.coverage,
+        crate::sync::store::StorePackageReclaimCoverage::NotOwner,
+    );
+    assert_eq!((run.packages_deleted, run.physical_copies_deleted), (0, 0));
+    assert!(
+        fixture
+            .store
+            .contains_stored_blob_object(&replaced)
+            .await
+            .expect("read the released blob"),
+        "a device that does not reclaim deletes nothing"
+    );
 }

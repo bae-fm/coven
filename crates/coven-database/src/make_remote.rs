@@ -56,7 +56,7 @@ impl Database {
             .prepare(
                 "SELECT root_table, root_id FROM blob_make_remote_intents
                  UNION
-                 SELECT root_table, root_id FROM cloud_outbox WHERE operation = 'upload'",
+                 SELECT root_table, root_id FROM cloud_outbox",
             )
             .map_err(DbError::from)?;
         let outstanding = statement
@@ -74,27 +74,67 @@ impl Database {
             // A publication caught by the delete gives up its write id with its
             // state: the gate flip it was waiting to activate names a row that
             // is not there to flip.
-            conn.execute(
-                "UPDATE blob_make_remote_intents
-                    SET state = 'cancelling', write_id = NULL
-                  WHERE root_table = ?1 AND root_id = ?2 AND state <> 'cancelling'",
-                (&root_table, &root_id),
-            )
-            .map_err(DbError::from)?;
+            Self::cancel_make_remote_intent_on(conn, &root_table, &root_id)?;
             Self::adopt_cancelling_intent_from_queue_on(conn, &root_table, &root_id)?;
-            // Clear the retry backoff the same way a cancel a person asked for
-            // does. An upload that failed its last attempt is waiting out a
-            // delay before anything looks at it again, and the unwind is not
-            // the thing that should be made to wait: the root is already gone.
-            conn.execute(
-                "UPDATE cloud_outbox
-                    SET attempt_count = 0, last_error = NULL, last_attempt_at = NULL
-                  WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
-                (&root_table, &root_id),
-            )
-            .map_err(DbError::from)?;
         }
         Ok(())
+    }
+
+    /// Put one root's transition into its unwind, whatever state it was in, and
+    /// give up any write id a publication was waiting on.
+    ///
+    /// The unwind is the transition's own ending, not a repair: the drain reads
+    /// `cancelling` and, per journal, deletes the created object, its upload
+    /// spool and its cached copy before removing that journal — and the intent
+    /// with the last one. The retry backoff is cleared for the same reason a
+    /// cancel a person asked for clears it: an upload waiting out a delay after
+    /// a failed attempt is not the thing to keep waiting when the transition is
+    /// already over.
+    pub(crate) fn cancel_make_remote_intent_on(
+        conn: &Connection,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), DbError> {
+        conn.execute(
+            "UPDATE blob_make_remote_intents
+                SET state = 'cancelling', write_id = NULL
+              WHERE root_table = ?1 AND root_id = ?2 AND state <> 'cancelling'",
+            (root_table, root_id),
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "UPDATE cloud_outbox
+                SET attempt_count = 0, last_error = NULL, last_attempt_at = NULL
+              WHERE root_table = ?1 AND root_id = ?2",
+            (root_table, root_id),
+        )
+        .map_err(DbError::from)?;
+        Ok(())
+    }
+
+    /// Release the transition a discarded write was going to activate.
+    ///
+    /// The write that would have flipped the gate is gone, so the objects its
+    /// uploads created have no publication left to reach. The intent returns to
+    /// its unwind and the drain takes them back out; nothing else could, since
+    /// only the provider can delete them.
+    pub(crate) fn cancel_make_remote_publication_on(
+        conn: &Connection,
+        write_id: &WriteId,
+    ) -> Result<(), DbError> {
+        let root = conn
+            .query_row(
+                "SELECT root_table, root_id FROM blob_make_remote_intents
+                 WHERE write_id = ?1 AND state = 'publishing'",
+                [write_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let Some((root_table, root_id)) = root else {
+            return Ok(());
+        };
+        Self::cancel_make_remote_intent_on(conn, &root_table, &root_id)
     }
 
     /// Give a root's queued uploads a cancelling intent built from the queue
@@ -117,10 +157,9 @@ impl Database {
                  (root_table, root_id, root_label, retain_pinned, state, write_id)
              SELECT root_table, root_id, root_label, retain_pinned, 'cancelling', NULL
                FROM cloud_outbox
-              WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2
+              WHERE root_table = ?1 AND root_id = ?2
                 AND id = (SELECT MIN(id) FROM cloud_outbox
-                           WHERE operation = 'upload'
-                             AND root_table = ?1 AND root_id = ?2)
+                           WHERE root_table = ?1 AND root_id = ?2)
              ON CONFLICT(root_table, root_id) DO NOTHING",
             (root_table, root_id),
         )

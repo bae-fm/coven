@@ -69,7 +69,6 @@ mod tests {
         let database = crate::Database::open(
             std::path::Path::new(":memory:"),
             Vec::new(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "clock-flush".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),

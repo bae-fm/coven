@@ -467,25 +467,6 @@ impl Database {
             .await
     }
 
-    pub async fn enqueue_blob_delete_for_test(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-        created_at: &str,
-    ) -> Result<(), DbError> {
-        let stored = stored.clone();
-        let created_at = created_at.to_string();
-        self.test_sql(move |database| database.enqueue_blob_delete(&stored, &created_at))
-            .await
-    }
-
-    pub async fn delete_outbox_attempt_for_test(
-        &self,
-        id: i64,
-    ) -> Result<Option<crate::OutboxAttempt>, DbError> {
-        self.test_sql(move |database| database.delete_outbox_attempt(id))
-            .await
-    }
-
     pub async fn insert_local_blob_row_for_test(
         &self,
         root_id: &str,
@@ -775,14 +756,6 @@ impl Database {
         id: i64,
     ) -> Result<(), DbError> {
         self.test_sql(move |database| database.corrupt_upload_outbox_attempt_time(id))
-            .await
-    }
-
-    pub async fn corrupt_delete_outbox_attempt_time_for_test(
-        &self,
-        id: i64,
-    ) -> Result<(), DbError> {
-        self.test_sql(move |database| database.corrupt_delete_outbox_attempt_time(id))
             .await
     }
 

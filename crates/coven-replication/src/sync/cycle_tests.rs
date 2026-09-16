@@ -196,43 +196,6 @@ async fn run_cycle_in_task(
         .expect("cycle task completes")
 }
 
-#[tokio::test]
-async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
-    let db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-    let keypair = UserKeypair::generate();
-    let storage = cycle_test_store(
-        &db,
-        db_store_dir.clone(),
-        &keypair,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let device = storage
-        .open_into(&db, db_store_dir.clone())
-        .await
-        .expect("open exact test Store");
-    let stored = storage
-        .create_exact_opaque_blob("photos", "maintenance", b"maintenance")
-        .await;
-    db.enqueue_blob_delete_for_test(&stored, T0)
-        .await
-        .expect("queue exact maintenance tombstone");
-    storage.arm_provider_write_failures();
-    let result = device.run_cycle(None).await;
-    let error = result.expect_err("tombstone publication failure fails the cycle");
-    assert!(error.contains("drain queued blob tombstones"), "{error}");
-    assert_eq!(
-        coven_database::StoreDatabase::new(&db)
-            .pending_blob_deletes()
-            .await
-            .unwrap()
-            .len(),
-        1,
-        "failed maintenance remains queued"
-    );
-}
-
 trait CycleTestDatabaseOps {
     async fn local_store_stream_id(&self) -> String;
     async fn latest_store_snapshot_meta(&self) -> Option<SnapshotMeta>;

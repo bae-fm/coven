@@ -38,7 +38,6 @@ async fn recover_captured_blob(case: CapturedWrite) {
             &store_dir.db_path(),
             store_dir.clone(),
             test_synced_tables_with_blob(photo_decl()),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "captured-blob-host".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),

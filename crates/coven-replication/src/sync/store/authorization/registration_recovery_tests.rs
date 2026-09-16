@@ -704,7 +704,6 @@ async fn cold_snapshot_recovery_keeps_covered_and_new_concurrent_tips() {
         .install(
             &restore_dir,
             crate::sync::test_helpers::test_synced_tables(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "restored-device".to_string(),
             Arc::new(coven_foundation::clock::SystemClock),
@@ -719,7 +718,6 @@ async fn cold_snapshot_recovery_keeps_covered_and_new_concurrent_tips() {
     let reopened = coven_database::Database::open(
         &restore_dir.db_path(),
         crate::sync::test_helpers::test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "restored-device".to_string(),
         Arc::new(coven_foundation::clock::SystemClock),

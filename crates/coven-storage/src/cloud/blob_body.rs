@@ -93,13 +93,6 @@ pub type DownloadProgress = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
 /// sealed body retains it for the lifetime of that stream.
 pub type PreparationProgress = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
 
-/// Chunk size the in-memory test backend uses to drive its `UploadProgress`
-/// callback in several ticks. Real providers whose resumable API mandates a
-/// specific alignment (OneDrive 320 KiB multiples, Google Drive 256 KiB
-/// multiples, S3 5 MiB minimum parts) define their own constant.
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) const PROGRESS_CHUNK_SIZE: usize = 4 * 1024 * 1024;
-
 /// A progress sink that discards its reports. For `write` calls whose payload
 /// is a small control file (head pointers, the snapshot) where no per-file
 /// progress bar is driven — only the blob outbox surfaces progress.

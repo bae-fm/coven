@@ -94,7 +94,6 @@ fn blob_test_db(
         &store_dir.db_path(),
         store_dir.clone(),
         test_synced_tables_with_blob(declaration),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         Arc::new(SystemClock),

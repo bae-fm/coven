@@ -18,14 +18,12 @@ use super::oauth_rest::{
     ListPage, OAuthRestHome, PageTokenTracker,
 };
 use super::oauth_session::OAuthSession;
-use super::resumable::RangePutSink;
 use super::{
-    sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome,
-    CloudHomeError, CloudHomeJoinInfo, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
-    RevokeOutcome, UploadControl,
+    sharing, BlobBody, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, ExactCreateOutcome, ExactSlotStorage, ExactUpload, RevokeOutcome,
+    UploadControl,
 };
 use crate::oauth::OAuthConfig;
-use coven_foundation::id_provider::{IdRef, UuidProvider};
 use coven_protocol::objects::{ObjectSlot, PhysicalObjectLocator};
 
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
@@ -86,24 +84,8 @@ fn drive_file_query(
     predicates.join(" and ")
 }
 
-fn drive_app_property_predicate(key: &str, value: &str) -> String {
-    let key = escape_drive_query_value(key);
-    let value = escape_drive_query_value(value);
-    format!("appProperties has {{ key='{key}' and value='{value}' }}")
-}
-
 fn find_file_query(folder_id: &str, encoded_name: &str) -> String {
     drive_file_query(Some(folder_id), DriveNameMatch::Equals, encoded_name, None)
-}
-
-fn find_created_file_query(folder_id: &str, encoded_name: &str, create_token: &str) -> String {
-    let app_property = drive_app_property_predicate(CREATE_TOKEN_PROPERTY, create_token);
-    drive_file_query(
-        Some(folder_id),
-        DriveNameMatch::Equals,
-        encoded_name,
-        Some(&app_property),
-    )
 }
 
 fn list_file_query(folder_id: &str, prefix: &str) -> String {
@@ -130,7 +112,6 @@ pub struct GoogleDriveCloudHome {
     folder_id: String,
     drive_api: String,
     upload_api: String,
-    ids: IdRef,
     session: OAuthSession,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
 }
@@ -147,12 +128,6 @@ struct DriveFileIdentity {
 struct DriveAppendAttempt {
     file_id: String,
     create_token: String,
-}
-
-enum DriveAppendAttemptState {
-    Absent,
-    Owned,
-    Foreign,
 }
 
 enum DriveSlotState {
@@ -177,7 +152,6 @@ impl GoogleDriveCloudHome {
             folder_id,
             drive_api: DRIVE_API.to_string(),
             upload_api: UPLOAD_API.to_string(),
-            ids: std::sync::Arc::new(UuidProvider),
             session,
             exact_upload_verification,
         }
@@ -246,169 +220,6 @@ impl GoogleDriveCloudHome {
         Ok(files)
     }
 
-    async fn create_file_metadata(
-        &self,
-        key: &str,
-        encoded: &str,
-    ) -> Result<DriveFileIdentity, CloudHomeError> {
-        let create_token = self.ids.new_id();
-        let metadata = create_file_metadata_body(encoded, &self.folder_id, &create_token);
-        let resp = self
-            .session
-            .api_call(|oauth| {
-                supports_all_drives(oauth.post(format!("{}/files", self.drive_api)))
-                    .query(&[("fields", "id")])
-                    .header("Content-Type", "application/json; charset=UTF-8")
-                    .body(metadata.clone())
-            })
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(classify_write_error(
-                status,
-                &http::body_text(resp).await,
-                key,
-                "create",
-            ));
-        }
-        let id_error = match resp.text().await {
-            Ok(body) => match parse_create_file_id(&body, key) {
-                Ok(id) => return Ok(DriveFileIdentity { id, create_token }),
-                Err(error) => error,
-            },
-            Err(error) => CloudHomeError::transport(format!("create {key}: read response"), error),
-        };
-        match self.find_created_file_id(encoded, &create_token).await {
-            Ok(Some(file_id)) => match self.delete_created_file(key, &file_id).await {
-                Ok(()) => Err(id_error),
-                Err(delete_error) => Err(CloudHomeError::Transport(format!(
-                    "create {key}: metadata response id failure: {id_error}; rollback delete failed: {delete_error}"
-                ))),
-            },
-            Ok(None) => Err(id_error),
-            Err(lookup_error) => Err(CloudHomeError::Transport(format!(
-                "create {key}: metadata response id failure: {id_error}; rollback lookup failed: {lookup_error}"
-            ))),
-        }
-    }
-
-    async fn create_file_for_key(
-        &self,
-        key: &str,
-        encoded: &str,
-    ) -> Result<String, CloudHomeError> {
-        let created = self.create_file_metadata(key, encoded).await?;
-        self.reconcile_created_file(key, encoded, created).await
-    }
-
-    async fn reconcile_created_file(
-        &self,
-        key: &str,
-        encoded: &str,
-        created: DriveFileIdentity,
-    ) -> Result<String, CloudHomeError> {
-        let files = self.list_file_identities(encoded).await?;
-        if !files.contains(&created) {
-            return Err(CloudHomeError::Transport(format!(
-                "create {key}: created file {} with token {} was not returned by duplicate check",
-                created.id, created.create_token
-            )));
-        }
-        let Some(winner) = select_drive_file(&files) else {
-            return Err(CloudHomeError::Transport(format!(
-                "create {key}: created file {} was not returned by duplicate check",
-                created.id
-            )));
-        };
-        let winner_id = winner.id.clone();
-
-        for file in files {
-            if file.id != winner_id {
-                self.delete_created_file(key, &file.id).await?;
-            }
-        }
-
-        Ok(winner_id)
-    }
-
-    async fn find_created_file_id(
-        &self,
-        encoded_name: &str,
-        create_token: &str,
-    ) -> Result<Option<String>, CloudHomeError> {
-        let query = find_created_file_query(&self.folder_id, encoded_name, create_token);
-        let resp = self
-            .session
-            .api_call(|oauth| {
-                supports_all_drives(oauth.get(format!("{}/files", self.drive_api))).query(&[
-                    ("q", query.as_str()),
-                    ("fields", "files(id)"),
-                    ("pageSize", "1"),
-                    ("includeItemsFromAllDrives", "true"),
-                ])
-            })
-            .await?;
-        let resp = ensure_ok(resp, "list created files", NotFound::Status).await?;
-        let json: serde_json::Value = ok_json(resp, "parse created file list response").await?;
-        Ok(json["files"]
-            .as_array()
-            .and_then(|files| files.first())
-            .and_then(|first| first["id"].as_str())
-            .map(String::from))
-    }
-
-    async fn upload_file_media(
-        &self,
-        key: &str,
-        file_id: &str,
-        body: Bytes,
-        op: &str,
-    ) -> Result<(), CloudHomeError> {
-        let resp = self
-            .session
-            .api_call(|oauth| {
-                supports_all_drives(oauth.patch(format!(
-                    "{}/files/{}?uploadType=media",
-                    self.upload_api, file_id
-                )))
-                .header("Content-Type", "application/octet-stream")
-                .body(body.clone())
-            })
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(classify_write_error(
-                status,
-                &http::body_text(resp).await,
-                key,
-                op,
-            ));
-        }
-        Ok(())
-    }
-
-    async fn create_file_with_media(
-        &self,
-        key: &str,
-        encoded: &str,
-        media_body: Bytes,
-    ) -> Result<(), CloudHomeError> {
-        let file_id = self.create_file_for_key(key, encoded).await?;
-        let upload_error = match self
-            .upload_file_media(key, &file_id, media_body, "create")
-            .await
-        {
-            Ok(()) => return Ok(()),
-            Err(error) => error,
-        };
-        match self.delete_created_file(key, &file_id).await {
-            Ok(()) => Err(upload_error),
-            Err(delete_error) => Err(CloudHomeError::Transport(format!(
-                "create {key}: media upload failed after metadata create: {upload_error}; rollback delete failed: {delete_error}"
-            ))),
-        }
-    }
-
     async fn delete_created_file(&self, key: &str, file_id: &str) -> Result<(), CloudHomeError> {
         let resp = self
             .session
@@ -439,85 +250,6 @@ impl GoogleDriveCloudHome {
             ensure_ok(response, "generate Drive append file id", NotFound::Status).await?;
         let json: serde_json::Value = ok_json(response, "parse generated Drive file id").await?;
         parse_generated_file_id(&json, key)
-    }
-
-    async fn new_append_attempt(&self, key: &str) -> Result<DriveAppendAttempt, CloudHomeError> {
-        let file_id = self.generate_file_id(key).await?;
-        let create_token = self.ids.new_id();
-        if create_token == file_id {
-            return Err(CloudHomeError::Transport(format!(
-                "generate append id {key}: create token equals the provider file id"
-            )));
-        }
-        Ok(DriveAppendAttempt {
-            file_id,
-            create_token,
-        })
-    }
-
-    async fn inspect_append_attempt(
-        &self,
-        key: &str,
-        attempt: &DriveAppendAttempt,
-    ) -> Result<DriveAppendAttemptState, CloudHomeError> {
-        let response = self
-            .session
-            .api_call(|oauth| {
-                supports_all_drives(
-                    oauth.get(format!("{}/files/{}", self.drive_api, attempt.file_id)),
-                )
-                .query(&[("fields", "id,appProperties,trashed")])
-            })
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(DriveAppendAttemptState::Absent);
-        }
-        let response = ensure_ok(response, "inspect failed Drive append", NotFound::Status).await?;
-        let json: serde_json::Value = ok_json(response, "parse failed Drive append").await?;
-        if json["id"].as_str() != Some(attempt.file_id.as_str()) {
-            return Err(CloudHomeError::Transport(format!(
-                "inspect append {key}: exact file response did not identify {}",
-                attempt.file_id
-            )));
-        }
-        Ok(
-            if json["appProperties"][CREATE_TOKEN_PROPERTY].as_str()
-                == Some(attempt.create_token.as_str())
-            {
-                DriveAppendAttemptState::Owned
-            } else {
-                DriveAppendAttemptState::Foreign
-            },
-        )
-    }
-
-    async fn resolve_failed_append(
-        &self,
-        key: &str,
-        attempt: &DriveAppendAttempt,
-        operation: CloudHomeError,
-        may_have_committed: bool,
-    ) -> Result<String, CloudHomeError> {
-        match self.inspect_append_attempt(key, attempt).await {
-            Ok(DriveAppendAttemptState::Absent) => Err(operation),
-            Ok(DriveAppendAttemptState::Foreign) => {
-                Err(CloudHomeError::AlreadyExists(key.to_string()))
-            }
-            Ok(DriveAppendAttemptState::Owned) if may_have_committed => Ok(attempt.file_id.clone()),
-            Ok(DriveAppendAttemptState::Owned) => {
-                match self.delete_created_file(key, &attempt.file_id).await {
-                    Ok(()) => Err(operation),
-                    Err(cleanup) => Err(CloudHomeError::CleanupFailed {
-                        operation: Box::new(operation),
-                        cleanup: Box::new(cleanup),
-                    }),
-                }
-            }
-            Err(verification) => Err(CloudHomeError::CleanupFailed {
-                operation: Box::new(operation),
-                cleanup: Box::new(verification),
-            }),
-        }
     }
 
     fn validate_slot<'a>(&self, slot: &'a ObjectSlot) -> Result<&'a str, CloudHomeError> {
@@ -726,43 +458,6 @@ impl GoogleDriveCloudHome {
         ))
     }
 
-    /// Open a resumable upload session for an existing Drive file and return its
-    /// session URL (the `Location` header Google returns).
-    async fn open_resumable_update_session(
-        &self,
-        key: &str,
-        file_id: &str,
-    ) -> Result<String, CloudHomeError> {
-        let url = format!("{}/files/{}?uploadType=resumable", self.upload_api, file_id);
-        let resp = self
-            .session
-            .api_call(|oauth| {
-                supports_all_drives(oauth.patch(&url))
-                    .header("Content-Type", "application/json; charset=UTF-8")
-                    .body("{}")
-            })
-            .await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(classify_write_error(
-                status,
-                &http::body_text(resp).await,
-                key,
-                "update",
-            ));
-        }
-        resp.headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .map(String::from)
-            .ok_or_else(|| {
-                CloudHomeError::Transport(format!(
-                    "resumable session {key}: no Location header returned"
-                ))
-            })
-    }
-
     async fn open_resumable_create_session(
         &self,
         key: &str,
@@ -821,7 +516,7 @@ impl GoogleDriveCloudHome {
         body: BlobBody,
         control: &super::UploadControl,
     ) -> Result<(), CloudHomeError> {
-        if body.len() <= self.multipart_threshold() {
+        if body.len() <= GDRIVE_SIMPLE_UPLOAD_MAX as u64 {
             return self
                 .create_small_at(slot, body.collect().await?, control)
                 .await;
@@ -916,12 +611,6 @@ impl GoogleDriveCloudHome {
     fn with_endpoints(mut self, drive_api: String, upload_api: String) -> Self {
         self.drive_api = drive_api;
         self.upload_api = upload_api;
-        self
-    }
-
-    #[cfg(test)]
-    fn with_ids(mut self, ids: IdRef) -> Self {
-        self.ids = ids;
         self
     }
 }

@@ -212,7 +212,6 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
                 &path,
                 db_store_dir.clone(),
                 crate::sync::test_helpers::test_synced_tables(),
-                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
                 coven_protocol::blob::TransferLimits::one_at_a_time(),
                 "dev-writer".to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),

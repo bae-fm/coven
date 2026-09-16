@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use coven_foundation::clock::SystemClock;
-use coven_protocol::blob::{TransferLimits, BLOB_TOMBSTONE_GRACE};
+use coven_protocol::blob::TransferLimits;
 use coven_protocol::synced_schema::{RowIdentity, SyncedTable};
 use rusqlite::{Connection, OptionalExtension};
 
@@ -44,7 +44,6 @@ fn open_writer_with_migrations(
     Database::open(
         path,
         vec![notes_table()],
-        BLOB_TOMBSTONE_GRACE,
         TransferLimits::one_at_a_time(),
         "coven-migration-tests".to_string(),
         Arc::new(SystemClock),
@@ -363,7 +362,6 @@ fn read_only_refuses_v0_without_writing() {
     let error = match Database::open_read_only(
         &path,
         vec![notes_table()],
-        BLOB_TOMBSTONE_GRACE,
         TransferLimits::one_at_a_time(),
         "coven-migration-tests".to_string(),
         Arc::new(SystemClock),

@@ -149,36 +149,32 @@ async fn collect_equals_next_part_concatenation() {
     assert_eq!(collected, streamed);
 }
 
-/// A test home recording which upload path each write took and assembling the
-/// streamed parts so a multipart upload round-trips like a single PUT.
-struct RecordingHome {
-    store: Mutex<HashMap<String, Vec<u8>>>,
-    put_calls: AtomicUsize,
-    multipart_calls: AtomicUsize,
-    abort_calls: AtomicUsize,
-    threshold: u64,
-}
-
-impl RecordingHome {
-    fn new(threshold: u64) -> Self {
-        RecordingHome {
-            store: Mutex::new(HashMap::new()),
-            put_calls: AtomicUsize::new(0),
-            multipart_calls: AtomicUsize::new(0),
-            abort_calls: AtomicUsize::new(0),
-            threshold,
-        }
-    }
-}
-
-struct RecordingSink<'a> {
-    home: &'a RecordingHome,
+/// A part sink that records what the multipart driver hands it, so a test can
+/// assert the order, the abort, and the assembled object.
+struct RecordingSink {
+    store: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    abort_calls: Arc<AtomicUsize>,
     key: String,
     buf: Vec<u8>,
 }
 
+impl RecordingSink {
+    fn new(
+        key: &str,
+        store: &Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        abort_calls: &Arc<AtomicUsize>,
+    ) -> Self {
+        RecordingSink {
+            store: Arc::clone(store),
+            abort_calls: Arc::clone(abort_calls),
+            key: key.to_string(),
+            buf: Vec::new(),
+        }
+    }
+}
+
 #[async_trait]
-impl PartSink for RecordingSink<'_> {
+impl PartSink for RecordingSink {
     fn part_size(&self) -> usize {
         4 * 1024 * 1024
     }
@@ -198,83 +194,39 @@ impl PartSink for RecordingSink<'_> {
         Ok(())
     }
     async fn abort(&mut self) -> Result<(), CloudHomeError> {
-        self.home.abort_calls.fetch_add(1, Ordering::SeqCst);
+        self.abort_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
-        self.home.store.lock().unwrap().insert(self.key, self.buf);
+        self.store.lock().unwrap().insert(self.key, self.buf);
         Ok(())
     }
 }
 
-#[async_trait]
-impl CloudHome for RecordingHome {
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        self.put_calls.fetch_add(1, Ordering::SeqCst);
-        self.store.lock().unwrap().insert(key.to_string(), data);
-        Ok(())
-    }
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        _total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        self.multipart_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(RecordingSink {
-            home: self,
-            key: key.to_string(),
-            buf: Vec::new(),
-        }))
-    }
-    fn multipart_threshold(&self) -> u64 {
-        self.threshold
-    }
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        self.store
-            .lock()
-            .unwrap()
-            .get(key)
-            .cloned()
-            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))
-    }
-    async fn read_range(&self, _k: &str, _s: u64, _e: u64) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!()
-    }
-    async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        unimplemented!()
-    }
-    async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
-        unimplemented!()
-    }
-    async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
-        unimplemented!()
-    }
-    async fn set_access(
-        &self,
-        _desired: CloudAccessState,
-    ) -> Result<CloudAccessOutcome, CloudHomeError> {
-        unimplemented!()
-    }
-}
-
-/// A blob above the threshold streams through multipart, round-trips exactly,
-/// and reports monotonic progress reaching the full length.
+/// A large blob streams through the multipart driver, round-trips exactly, and
+/// reports monotonic progress reaching the full length.
 #[tokio::test]
-async fn write_blob_streams_large_blob_with_monotonic_progress() {
-    let home = RecordingHome::new(8 * 1024 * 1024);
+async fn multipart_streams_a_large_blob_with_monotonic_progress() {
+    let store = Arc::new(Mutex::new(HashMap::new()));
+    let abort_calls = Arc::new(AtomicUsize::new(0));
     let data: Vec<u8> = (0..20_000_003u32).map(|i| (i % 251) as u8).collect();
     let ticks = Arc::new(Mutex::new(Vec::<u64>::new()));
     let recorded = Arc::clone(&ticks);
     let progress: UploadProgress = Arc::new(move |n: u64| recorded.lock().unwrap().push(n));
+    let control = UploadControl::running(progress);
 
-    home.write("k", BlobBody::from_bytes(data.clone()), &progress)
-        .await
-        .unwrap();
+    MultipartUpload::new(
+        "k",
+        BlobBody::from_bytes(data.clone()),
+        Box::new(RecordingSink::new("k", &store, &abort_calls)),
+        &control,
+    )
+    .run()
+    .await
+    .unwrap();
 
-    assert_eq!(home.multipart_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(home.put_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        home.read("k").await.unwrap(),
+        store.lock().unwrap().get("k").cloned().unwrap(),
         data,
         "multipart upload round-trips"
     );
@@ -292,37 +244,40 @@ async fn write_blob_streams_large_blob_with_monotonic_progress() {
 }
 
 #[tokio::test]
-async fn write_blob_aborts_when_the_body_ends_before_its_declared_length() {
-    let home = RecordingHome::new(1);
+async fn multipart_aborts_when_the_body_ends_before_its_declared_length() {
+    let store = Arc::new(Mutex::new(HashMap::new()));
+    let abort_calls = Arc::new(AtomicUsize::new(0));
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("short.bin");
     std::fs::write(&path, [7; 4]).unwrap();
     let reader = crate::local_file::open_reader(&path).await.unwrap();
     let body = BlobBody::from_file_with_prefix(5, reader, None, Vec::new());
+    let control = UploadControl::running(no_progress());
 
-    let error = home
-        .write("short", body, &no_progress())
-        .await
-        .expect_err("an incomplete body must not commit");
+    let error = MultipartUpload::new(
+        "short",
+        body,
+        Box::new(RecordingSink::new("short", &store, &abort_calls)),
+        &control,
+    )
+    .run()
+    .await
+    .expect_err("an incomplete body must not commit");
 
     assert!(
         error.to_string().contains("ended after 4 of 5 bytes"),
         "{error}"
     );
-    assert_eq!(home.abort_calls.load(Ordering::SeqCst), 1);
-    assert!(!home.store.lock().unwrap().contains_key("short"));
+    assert_eq!(abort_calls.load(Ordering::SeqCst), 1);
+    assert!(!store.lock().unwrap().contains_key("short"));
 }
 
-struct FailingPartHome {
-    abort_calls: AtomicUsize,
-}
-
-struct FailingPartSink<'a> {
-    home: &'a FailingPartHome,
+struct FailingPartSink {
+    abort_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
-impl PartSink for FailingPartSink<'_> {
+impl PartSink for FailingPartSink {
     fn part_size(&self) -> usize {
         2
     }
@@ -340,7 +295,7 @@ impl PartSink for FailingPartSink<'_> {
     }
 
     async fn abort(&mut self) -> Result<(), CloudHomeError> {
-        self.home.abort_calls.fetch_add(1, Ordering::SeqCst);
+        self.abort_calls.fetch_add(1, Ordering::SeqCst);
         Err(CloudHomeError::Transport(
             "injected abort failure".to_string(),
         ))
@@ -351,73 +306,24 @@ impl PartSink for FailingPartSink<'_> {
     }
 }
 
-#[async_trait]
-impl CloudHome for FailingPartHome {
-    async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
-        panic!("multipart test must not use put_object")
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        _key: &str,
-        _total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        Ok(Box::new(FailingPartSink { home: self }))
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        1
-    }
-
-    async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!()
-    }
-
-    async fn read_range(
-        &self,
-        _key: &str,
-        _start: u64,
-        _end: u64,
-    ) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!()
-    }
-
-    async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        unimplemented!()
-    }
-
-    async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
-        unimplemented!()
-    }
-
-    async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
-        unimplemented!()
-    }
-
-    async fn set_access(
-        &self,
-        _desired: CloudAccessState,
-    ) -> Result<CloudAccessOutcome, CloudHomeError> {
-        unimplemented!()
-    }
-}
-
 #[tokio::test]
-async fn write_blob_aborts_and_preserves_cleanup_failure_when_a_part_fails() {
-    let home = FailingPartHome {
-        abort_calls: AtomicUsize::new(0),
-    };
+async fn multipart_aborts_and_preserves_cleanup_failure_when_a_part_fails() {
+    let abort_calls = Arc::new(AtomicUsize::new(0));
+    let control = UploadControl::running(no_progress());
 
-    let error = home
-        .write(
-            "part-failure",
-            BlobBody::from_bytes(vec![1, 2, 3]),
-            &no_progress(),
-        )
-        .await
-        .expect_err("a failed multipart part must abort its session");
+    let error = MultipartUpload::new(
+        "part-failure",
+        BlobBody::from_bytes(vec![1, 2, 3]),
+        Box::new(FailingPartSink {
+            abort_calls: Arc::clone(&abort_calls),
+        }),
+        &control,
+    )
+    .run()
+    .await
+    .expect_err("a failed multipart part must abort its session");
 
-    assert_eq!(home.abort_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(abort_calls.load(Ordering::SeqCst), 1);
     assert!(matches!(error, CloudHomeError::CleanupFailed { .. }));
     assert!(
         error.to_string().contains("injected part failure"),
@@ -427,23 +333,4 @@ async fn write_blob_aborts_and_preserves_cleanup_failure_when_a_part_fails() {
         error.to_string().contains("injected abort failure"),
         "{error}"
     );
-}
-
-/// A blob at or below the threshold goes through `put_object` as one request.
-#[tokio::test]
-async fn write_blob_uses_put_object_below_threshold() {
-    let home = RecordingHome::new(8 * 1024 * 1024);
-    let data = vec![3u8; 1024];
-    let total = Arc::new(Mutex::new(0u64));
-    let recorded = Arc::clone(&total);
-    let progress: UploadProgress = Arc::new(move |n: u64| *recorded.lock().unwrap() = n);
-
-    home.write("small", BlobBody::from_bytes(data.clone()), &progress)
-        .await
-        .unwrap();
-
-    assert_eq!(home.put_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(home.multipart_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(home.read("small").await.unwrap(), data);
-    assert_eq!(*total.lock().unwrap(), data.len() as u64);
 }

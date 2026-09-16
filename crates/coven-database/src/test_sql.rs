@@ -1294,26 +1294,6 @@ impl DatabaseTestSql<'_> {
         )
     }
 
-    pub(crate) fn enqueue_blob_delete(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-        created_at: &str,
-    ) -> Result<(), DbError> {
-        crate::CloudOutboxRecords::new(self.connection).enqueue_delete(stored, created_at)
-    }
-
-    pub(crate) fn delete_outbox_attempt(&self, id: i64) -> Result<Option<OutboxAttempt>, DbError> {
-        self.connection
-            .query_row(
-                "SELECT attempt_count, last_error, last_attempt_at FROM cloud_outbox
-                 WHERE id = ?1 AND operation = 'delete'",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(DbError::from)
-    }
-
     pub(crate) fn upload_outbox_attempt(
         &self,
         row_id: &str,
@@ -1321,7 +1301,7 @@ impl DatabaseTestSql<'_> {
         self.connection
             .query_row(
                 "SELECT attempt_count, last_error, last_attempt_at
-                 FROM cloud_outbox WHERE operation = 'upload' AND row_id = ?1",
+                 FROM cloud_outbox WHERE row_id = ?1",
                 [row_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -1329,22 +1309,11 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub(crate) fn corrupt_delete_outbox_attempt_time(&self, id: i64) -> Result<(), DbError> {
-        self.connection
-            .execute(
-                "UPDATE cloud_outbox SET last_attempt_at = 'not-a-timestamp', attempt_count = 1
-                 WHERE id = ?1 AND operation = 'delete'",
-                [id],
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-    }
-
     pub(crate) fn corrupt_upload_outbox_attempt_time(&self, id: i64) -> Result<(), DbError> {
         self.connection
             .execute(
                 "UPDATE cloud_outbox SET last_attempt_at = 'not-a-timestamp', attempt_count = 1
-                 WHERE id = ?1 AND operation = 'upload'",
+                 WHERE id = ?1",
                 [id],
             )
             .map(|_| ())
@@ -1681,7 +1650,7 @@ impl DatabaseTestSql<'_> {
         self.connection
             .query_row(
                 "SELECT COUNT(*) FROM cloud_outbox
-                 WHERE operation = 'upload' AND table_name = ?1 AND row_id = ?2
+                 WHERE table_name = ?1 AND row_id = ?2
                    AND column_name = ?3 AND row_stamp = ?4",
                 (table, row_id, column, row_stamp),
                 |row| row.get(0),

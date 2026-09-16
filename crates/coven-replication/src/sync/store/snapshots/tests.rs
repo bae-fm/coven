@@ -14,7 +14,6 @@ fn open(path: &Path, device_id: &str) -> (Database, coven_foundation::store_dir:
         path,
         store_dir.clone(),
         crate::sync::test_helpers::test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),

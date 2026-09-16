@@ -199,8 +199,9 @@ pin request. A user-provided source is the registered external file; a
 host-provided source is coven's local file. Enqueueing performs no upload and
 does not yet assign the final provider object.
 
-The durable `cloud_outbox` contains upload and delete operations. The host observes
-it through coven's APIs rather than mutating it. Each upload progresses through:
+The durable `cloud_outbox` holds uploads and nothing else — retiring a cloud
+object is accepted reclaim's, not a queued operation. The host observes the queue
+through coven's APIs rather than mutating it. Each upload progresses through:
 
 1. **Pending:** the drain derives the locator and protection from the queued row
    and current upload authority, verifies the source while preparing its spool,
@@ -267,56 +268,64 @@ fetched on its first [`read_blob`](/docs/cache#reading-a-blob).
 When the applied changeset **deletes** a blob-bearing row (a
 [gate retract](/docs/local-data) or a genuine delete), coven drops that blob from
 both cache folders on this device. A peer only drops its own local cache here; it
-never writes a cloud tombstone; that belongs to the deleting owner (see
-[Deleting a blob](#deleting-a-blob)).
+never deletes the cloud object, which belongs to accepted reclaim on the Owner
+(see [Retiring a blob](#retiring-a-blob)).
 
 The exact materialized position is the durable boundary. It advances in the same
 SQLite transaction as the package rows only after required blob work succeeds. If
 a download fails, coven leaves that device sequence and commit hash unmaterialized
 and reports `asset_downloads_failed`, so the commit and its blobs retry together.
 
-## Deleting a blob
+## Retiring a blob
 
 A blob is shared cloud state that rows on every device may still reference.
-Deleting it the instant the deletion drains would strand a device that has not yet
-pulled the row removal: it would see a row pointing at nothing. So a delete is not
-immediate. The host requests blob replacement or row removal through
-[`CovenHandle::write`](rustdoc:method:coven::CovenHandle::write), and coven
-enqueues the cloud delete with the row change.
+Deleting it the moment a row stops naming it would strand a device that has not
+pulled the row change yet: it would see a row pointing at nothing. So no host and
+no row change deletes anything in the cloud. A host describes its data —
+replacing a row's blob or deleting the row is an ordinary
+[`CovenHandle::write`](rustdoc:method:coven::CovenHandle::write) — and coven owns
+the retirement.
 
-The next cycle's `drain_tombstones`
-writes a signed **tombstone** (a durable, signed record that the blob was deleted,
-and when) and keeps the blob. The tombstone is signed because the bucket is
-untrusted: the at-rest cipher proves only confidentiality, not authorship, so the
-deletion is signed by its author like every other control object, and a later GC
-verifies the signature and that the author is a current write-capable member
-before acting on it.
+Every accepted blob is indexed by its exact provider object when its publication
+lands, whether or not its row version won. **Accepted reclaim**, the same
+workflow that retires superseded packages and snapshot images, is what deletes
+it. Reclaim runs on the current Owner alone and, for each indexed object, deletes
+only when all of this holds:
 
-The blob is held for the tombstone grace, the convergence window: 7 days by
-default
-([`BLOB_TOMBSTONE_GRACE`](rustdoc:const:coven_protocol::blob::BLOB_TOMBSTONE_GRACE)),
-host-configurable through
-[`CovenBuilder::blob_tombstone_grace`](rustdoc:method:coven::CovenBuilder::blob_tombstone_grace)
-(a zero-or-negative grace is refused at open). A device offline for less than the grace is never
-stranded: it comes back, pulls the row removal, and the blob is still there in the
-meantime. Once the grace passes,
-`gc_tombstones` on any device
-verifies the tombstone, authorizes the author against the membership chain, deletes
-the blob, then deletes the tombstone. An unreferenced-but-not-yet-deleted blob is
-*correct* state during the window, not garbage a later pass repairs.
+- no live row binds it as a remote reference on this device;
+- no retained snapshot, replay baseline, or Circle bootstrap list owns it;
+- the **accepted Store snapshot's own inventory** shows it published by a commit
+  inside that snapshot's history, absent from the snapshot's row bindings, and
+  unretained there too.
 
+The accepted snapshot is the boundary, not a clock. A device that has not caught
+up is protected because the snapshot that releases the object is one the store
+accepted, not because a timer expired — and a blob an accepted snapshot still
+owns survives however long that takes. The deletion itself rides the durable
+reclaim journal: authorize, delete, verify absent, complete, each step
+restartable, and a refusal leaves the operation visible to the host rather than
+silently retried forever.
 
-<svg class="flow" viewBox="0 0 660 118" role="img" aria-label="A deletion writes a signed tombstone; the blob survives a seven-day grace window; then GC verifies the tombstone and deletes both">
+<svg class="flow" viewBox="0 0 660 118" role="img" aria-label="A row change orphans a blob; the accepted snapshot keeps owning it; a successor snapshot excludes it and the Owner reclaims it">
 <line class="arrd" x1="30" y1="66" x2="640" y2="66" marker-end="url(#fam)"/>
 <circle class="glyphf" cx="80" cy="66" r="4"/>
-<text class="lbl s11" x="80" y="44" text-anchor="middle">row deleted</text>
+<text class="lbl s11" x="80" y="44" text-anchor="middle">row replaced or deleted</text>
 <circle class="glyphf" cx="210" cy="66" r="4"/>
-<text class="lbl s11" x="210" y="92" text-anchor="middle">signed tombstone written</text>
+<text class="lbl s11" x="210" y="92" text-anchor="middle">object orphaned, still owned</text>
 <rect class="tx" x="210" y="54" width="290" height="24" rx="6"/>
-<text class="sub" x="355" y="44" text-anchor="middle">grace (default 7 days) · blob still readable by laggards</text>
+<text class="sub" x="355" y="44" text-anchor="middle">accepted snapshot owns it · readable by laggards</text>
 <circle class="glyphf" cx="540" cy="66" r="4"/>
-<text class="lbl s11" x="540" y="92" text-anchor="middle">GC verifies, deletes both</text>
+<text class="lbl s11" x="540" y="92" text-anchor="middle">successor excludes it, Owner deletes</text>
 </svg>
+
+A blob whose upload has **not** been accepted is a different case with a
+different owner. Its object exists at the provider but no accepted history names
+it, so reclaim cannot see it — the `make_remote` journal that created it is what
+takes it back out. A cancelled transition, a deleted root, a row edited under the
+transition, and a discarded publication all put that transition into its unwind,
+and the upload drain deletes each created object, its upload spool, and its
+cached copy before removing the journal. `make_local` refuses a root in that
+state outright, so an unaccepted object is never handed to reclaim.
 
 ## Cloud layout
 
@@ -406,8 +415,8 @@ the readable filename or replace the locator's exact object identity.
 Different locators occupy different version keys, including when two devices
 choose the same readable path. The installed row's stored reference identifies
 which exact object it reads. Replacing a blob cannot overwrite the object named by
-an earlier reference; reclaiming the earlier object is a separate deletion
-operation.
+an earlier reference; the earlier object is retired by
+[accepted reclaim](#retiring-a-blob) once nothing owns it.
 
 ## Where a blob's bytes come from
 

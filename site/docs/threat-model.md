@@ -207,17 +207,15 @@ then publishes the membership removal with its replacement key generation. If
 activation loses its expected head or another step fails, coven restores those
 exact prior objects and access grants and reports the failure.
 
-**A peer's tombstone GC can outrace a re-upload's cancel.** When a blob is
-re-uploaded to a cloud key whose deletion tombstone has already passed its grace
-(seven days), the re-uploader cancels the tombstone — but a *peer* whose database
-has seen the deletion and not yet the re-share judges the blob dead, and its GC
-can reclaim it before the cancel lands. The device-local pending-cancel gate
-cannot cover this: it lives in each device's own database. The grace period is
-the bound — the race needs a tombstone already past it at re-upload time — and
-the failure is loud, never silent: the re-uploader's push refuses to publish a
-row whose blob is missing remotely and retries every cycle. Hosts that write new
-content at new (content-addressed or versioned) blob keys never re-enter a
-tombstoned key and avoid the race entirely.
+**Blob retirement follows the accepted snapshot, not a clock.** A blob no live
+row binds is deleted once the accepted Store snapshot's own inventory shows
+nothing owns it, and only by the current Owner. A device far enough behind that
+it has not pulled the row change is protected by that snapshot, not by a timer:
+the object it still references survives until a snapshot the store accepted
+excludes it. The cost of the boundary is the other direction — an orphaned blob
+can outlive its row for as long as the store goes without publishing a snapshot
+that releases it. The failure is loud either way: a push that would publish a row
+whose blob is missing remotely refuses and retries every cycle.
 
 **Withholding and local-state tampering are out of scope**, for the reasons in
 [the provider](#the-storage-provider-itself) and

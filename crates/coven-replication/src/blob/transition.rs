@@ -23,9 +23,11 @@
 //!   (read from cache/cloud → write the local copy → verify): a **user-provided**
 //!   blob to its `dest` path (path required) registered as an external ref, a
 //!   **host-provided** blob to coven's local store (no path). Then it takes the
-//!   single commit `{flip the gate false + register the external refs + enqueue the
-//!   cloud deletes}`. The gate retract removes the subtree from peers; the tombstone
-//!   drain reclaims the cloud blobs after the grace.
+//!   single commit `{flip the gate false + register the external refs + release
+//!   the cloud objects}`. The gate retract removes the subtree from peers;
+//!   accepted reclaim retires the released objects once an accepted snapshot
+//!   shows nothing owns them. A root whose make_remote has not been accepted is
+//!   refused: its objects are still the upload journal's to retire.
 //!
 //! Both transitions operate on every exact blob-bearing row under the root and
 //! branch on provenance only to choose its Local filesystem home.
@@ -105,6 +107,12 @@ pub enum MakeLocalError {
     AlreadyLocal(String, String),
     #[error("root {0:?}/{1:?} has no resolvable Local/Remote state (row absent or gate NULL)")]
     UnresolvedLocality(String, String),
+    /// The root is mid-make_remote: its blobs are in the cloud but the Store
+    /// write that publishes them has not been accepted, so those objects are
+    /// still the upload journal's to retire. Bringing the root Local here would
+    /// release them to an owner that does not have them yet.
+    #[error("root {0:?}/{1:?} has an unfinished make_remote, so its cloud objects are not accepted history yet")]
+    TransitionInProgress(String, String),
     #[error("no destination path supplied for user-provided blob {0:?}")]
     MissingDest(String),
     #[error("destination path for user-provided blob {blob_id:?} is not valid UTF-8: {path}")]
@@ -520,6 +528,18 @@ impl LocalBlobTransitions {
             }
         }
 
+        if self
+            .database
+            .make_remote_intent_state(root_table, root_id)
+            .await?
+            .is_some()
+        {
+            return Err(MakeLocalError::TransitionInProgress(
+                root_table.to_string(),
+                root_id.to_string(),
+            ));
+        }
+
         let references = self
             .database
             .row_blob_refs_for_root(root_table, root_id)
@@ -644,7 +664,7 @@ impl ConnectedBlobTransitions {
         // filesystem that rejects non-UTF-8 names, the write would fail first and that
         // check would never be reached). An external ref persists the path as a string, so
         // a non-UTF-8 path cannot be registered; fail loud rather than lossily rewrite it
-        // and tombstone the cloud copy.
+        // and release the cloud copy.
         for (blob_id, path) in dest {
             if path.to_str().is_none() {
                 return Err(MakeLocalError::NonUtf8Dest {
@@ -672,10 +692,12 @@ impl ConnectedBlobTransitions {
             return Err(materialization.abort(error).await);
         }
 
-        // The single atomic commit: flip false + register external refs (user-provided
-        // only) + enqueue the cloud deletes, together. The destructive cloud delete is
-        // durable inside this commit, so a crash right after can never leave the root
-        // Local with the cloud blobs un-tombstoned.
+        // The single atomic commit: flip false + register external refs
+        // (user-provided only), together. Nothing destructive happens in the
+        // cloud here — the flip is what releases the objects, and accepted
+        // reclaim retires them from the accepted inventory afterwards, so a
+        // crash right after leaves a root that is Local with released objects
+        // rather than a half-done deletion.
         materialization.commit().await?;
 
         if let Some(obs) = self.observer.as_deref() {

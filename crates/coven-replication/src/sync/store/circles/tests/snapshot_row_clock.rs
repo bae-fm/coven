@@ -25,7 +25,6 @@ async fn device_join_clock_follows_rows_restored_only_from_a_circle_snapshot() {
         std::path::Path::new(":memory:"),
         source_dir.clone(),
         tables.clone(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "snapshot-row-clock-owner".to_string(),
         clock.clone(),
@@ -171,7 +170,6 @@ async fn device_join_clock_follows_rows_restored_only_from_a_circle_snapshot() {
     let installed = prepared
         .install(
             tables,
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             device_id,
             clock,

@@ -284,7 +284,6 @@ async fn assert_pending_handoff_retention(with_orphan_blob: bool) {
     let installed = prepared
         .install(
             test_synced_tables_with_blob(declaration.clone()),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             device_id,
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -313,7 +312,6 @@ async fn assert_pending_handoff_retention(with_orphan_blob: bool) {
         coven_database::Database::open(
             &joining_directory.db_path(),
             test_synced_tables_with_blob(declaration),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             completed.registration.device_id.to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -423,7 +421,6 @@ async fn registration_authority_survives(interruption: RegistrationInterruption)
         &directory.db_path(),
         directory.clone(),
         test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         host_device_id.clone(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -688,7 +685,6 @@ async fn registration_authority_survives(interruption: RegistrationInterruption)
             &directory.db_path(),
             directory.clone(),
             test_synced_tables(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             host_device_id,
             std::sync::Arc::new(coven_foundation::clock::SystemClock),

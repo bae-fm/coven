@@ -18,11 +18,11 @@ impl<'connection> CloudOutboxRecords<'connection> {
     ) -> Result<Option<OutboxEntry>, DbError> {
         self.connection
             .query_row(
-                "SELECT id, operation, row_ref, stored_ref, source_path, retain_pinned,
-                        upload_state, attempt_count, last_attempt_at, root_table, root_id
-                 FROM cloud_outbox
-                 WHERE operation = 'upload' AND table_name = ?1 AND row_id = ?2
-                   AND column_name = ?3 AND row_stamp = ?4",
+                &format!(
+                    "SELECT {OUTBOX_ENTRY_COLUMNS} FROM cloud_outbox
+                     WHERE table_name = ?1 AND row_id = ?2
+                       AND column_name = ?3 AND row_stamp = ?4"
+                ),
                 rusqlite::params![table, row_id, column, row_stamp],
                 row_to_outbox_entry,
             )
@@ -44,13 +44,10 @@ impl<'connection> CloudOutboxRecords<'connection> {
         else {
             return Ok(false);
         };
-        let OutboxOperation::Upload {
-            row,
-            state: OutboxUploadState::Created {
-                authority, stored, ..
-            },
-            ..
-        } = &entry.operation
+        let OutboxUpload { row, state, .. } = &entry.upload;
+        let OutboxUploadState::Created {
+            authority, stored, ..
+        } = state
         else {
             return Err(DbError::Message(format!(
                 "activated blob binding {}/{}/{} at {} has an upload that is not Created",
@@ -89,11 +86,7 @@ impl<'connection> CloudOutboxRecords<'connection> {
         let Some(entry) = self.upload_entry_for_identity(table, row_id, column, row_stamp)? else {
             return Ok(None);
         };
-        let OutboxOperation::Upload { row, state, .. } = entry.operation else {
-            return Err(DbError::Message(
-                "upload identity query returned a non-upload operation".to_string(),
-            ));
-        };
+        let OutboxUpload { row, state, .. } = entry.upload;
         if row.table() != table
             || row.row_id() != row_id
             || row.column() != column
@@ -129,6 +122,31 @@ impl<'connection> CloudOutboxRecords<'connection> {
                 }
             })
             .collect()
+    }
+
+    /// How many upload journals this root holds, counted on the queue rather
+    /// than through its current rows. A journal whose row version is gone is
+    /// invisible to [`upload_entries_for_root`] but still owes the cloud an
+    /// object, so the transition finalizer compares both.
+    pub(crate) fn upload_entry_count_for_root(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<usize, DbError> {
+        let count: i64 = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM cloud_outbox
+                 WHERE root_table = ?1 AND root_id = ?2",
+                (root_table, root_id),
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        usize::try_from(count).map_err(|_| {
+            DbError::Message(format!(
+                "queued upload count {count} for {root_table:?}/{root_id:?} is out of range"
+            ))
+        })
     }
 
     pub fn upload_entries_for_root(
@@ -179,10 +197,10 @@ impl<'connection> CloudOutboxRecords<'connection> {
         self.connection
             .execute(
                 "INSERT INTO cloud_outbox
-                 (operation, table_name, row_id, column_name, row_stamp, root_table, root_id,
+                 (table_name, row_id, column_name, row_stamp, root_table, root_id,
                   root_label, row_ref, upload_state, source_path, retain_pinned, created_at)
-                 VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                 ON CONFLICT(operation, table_name, row_id, column_name, row_stamp) DO UPDATE SET
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(table_name, row_id, column_name, row_stamp) DO UPDATE SET
                    root_table = excluded.root_table,
                    root_id = excluded.root_id,
                    root_label = excluded.root_label,
@@ -225,45 +243,22 @@ impl<'connection> CloudOutboxRecords<'connection> {
             })
     }
 
-    pub fn enqueue_delete(&self, stored: &StoredBlobRef, created_at: &str) -> Result<(), DbError> {
-        let encoded = serde_json::to_string(stored)
-            .map_err(|error| DbError::context("serialize stored blob ref", error))?;
-        crate::with_coven_sql_authority(|| {
-            self.connection
-                .execute(
-                    "INSERT INTO cloud_outbox (operation, stored_ref, created_at)
-                     VALUES ('delete', ?1, ?2)
-                     ON CONFLICT(stored_ref) DO UPDATE SET
-                       created_at = excluded.created_at,
-                       attempt_count = 0,
-                       last_error = NULL,
-                       last_attempt_at = NULL",
-                    (encoded, created_at),
-                )
-                .map(|_| ())
-                .map_err(DbError::from)
-        })
-    }
-
     pub fn remove_entry(&self, entry: &OutboxEntry) -> Result<(), DbError> {
-        let identity = outbox_identity(&entry.operation)?;
-        let removed = match identity {
-            OutboxIdentity::Upload {
-                table,
-                row_id,
-                column,
-                row_stamp,
-            } => self.connection.execute(
-                "DELETE FROM cloud_outbox WHERE id = ?1 AND operation = 'upload'
+        let identity = outbox_identity(&entry.upload);
+        let removed = self
+            .connection
+            .execute(
+                "DELETE FROM cloud_outbox WHERE id = ?1
                  AND table_name = ?2 AND row_id = ?3 AND column_name = ?4 AND row_stamp = ?5",
-                rusqlite::params![entry.id, table, row_id, column, row_stamp],
-            ),
-            OutboxIdentity::Stored { operation, stored } => self.connection.execute(
-                "DELETE FROM cloud_outbox WHERE id = ?1 AND operation = ?2 AND stored_ref = ?3",
-                rusqlite::params![entry.id, operation, stored],
-            ),
-        }
-        .map_err(DbError::from)?;
+                rusqlite::params![
+                    entry.id,
+                    identity.table,
+                    identity.row_id,
+                    identity.column,
+                    identity.row_stamp
+                ],
+            )
+            .map_err(DbError::from)?;
         if removed != 1 {
             return Err(DbError::Message(
                 "cloud outbox entry changed before exact dequeue".to_string(),
@@ -273,16 +268,11 @@ impl<'connection> CloudOutboxRecords<'connection> {
     }
 
     pub fn finish_cancelled_upload(&self, entry: &OutboxEntry) -> Result<bool, DbError> {
-        let OutboxOperation::Upload {
+        let OutboxUpload {
             root_table,
             root_id,
             ..
-        } = &entry.operation
-        else {
-            return Err(DbError::Message(
-                "make_remote cleanup requires an upload entry".to_string(),
-            ));
-        };
+        } = &entry.upload;
         if !matches!(
             Database::make_remote_intent_state(self.connection, root_table, root_id)?,
             Some(MakeRemoteIntentState::Cancelling)
@@ -292,16 +282,7 @@ impl<'connection> CloudOutboxRecords<'connection> {
             )));
         }
         self.remove_entry(entry)?;
-        let remaining: i64 = self
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM cloud_outbox
-                 WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
-                (root_table, root_id),
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
-        if remaining != 0 {
+        if self.upload_entry_count_for_root(root_table, root_id)? != 0 {
             return Ok(false);
         }
         let removed = self
@@ -321,35 +302,28 @@ impl<'connection> CloudOutboxRecords<'connection> {
     }
 }
 
-pub enum OutboxIdentity {
-    Upload {
-        table: String,
-        row_id: String,
-        column: String,
-        row_stamp: String,
-    },
-    Stored {
-        operation: &'static str,
-        stored: String,
-    },
+/// The exact row version one queue row uploads, which is what every update to
+/// that row compares against before it changes anything.
+pub struct OutboxIdentity {
+    pub table: String,
+    pub row_id: String,
+    pub column: String,
+    pub row_stamp: String,
 }
 
-pub fn outbox_identity(operation: &OutboxOperation) -> Result<OutboxIdentity, DbError> {
-    match operation {
-        OutboxOperation::Upload { row, .. } => Ok(OutboxIdentity::Upload {
-            table: row.table().to_string(),
-            row_id: row.row_id().to_string(),
-            column: row.column().to_string(),
-            row_stamp: row.row_stamp().to_string(),
-        }),
-        OutboxOperation::Delete { stored } => Ok(OutboxIdentity::Stored {
-            operation: "delete",
-            stored: serde_json::to_string(stored).map_err(|error| {
-                DbError::context("serialize stored blob outbox identity", error)
-            })?,
-        }),
+pub fn outbox_identity(upload: &OutboxUpload) -> OutboxIdentity {
+    OutboxIdentity {
+        table: upload.row.table().to_string(),
+        row_id: upload.row.row_id().to_string(),
+        column: upload.row.column().to_string(),
+        row_stamp: upload.row.row_stamp().to_string(),
     }
 }
+
+/// The queue row's columns in the order [`row_to_outbox_entry`] reads them.
+pub(crate) const OUTBOX_ENTRY_COLUMNS: &str =
+    "id, row_ref, source_path, retain_pinned, upload_state,
+     attempt_count, last_attempt_at, root_table, root_id";
 
 pub fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
     fn invalid(
@@ -363,70 +337,50 @@ pub fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEn
         )
     }
 
-    let tag: String = row.get(1)?;
-    let operation = match tag.as_str() {
-        "upload" => {
-            let encoded: String = row.get(2)?;
-            let reference: RowBlobRef =
-                serde_json::from_str(&encoded).map_err(|error| invalid(2, error))?;
-            let source_path: String = row.get(4)?;
-            let state_json: String = row.get(6)?;
-            let state: OutboxUploadState =
-                serde_json::from_str(&state_json).map_err(|error| invalid(6, error))?;
-            if let OutboxUploadState::Prepared {
-                authority, stored, ..
-            }
-            | OutboxUploadState::Created {
-                authority, stored, ..
-            } = &state
-            {
-                let locator = stored.locator();
-                if !coven_protocol::blob::locator_describes_row(
-                    locator,
-                    reference.blob(),
-                    reference.plaintext_size(),
-                    reference.plaintext_hash(),
-                ) {
-                    return Err(invalid(
-                        6,
-                        std::io::Error::other("prepared upload differs from its exact row version"),
-                    ));
-                }
-                if locator.audience() != authority.remote_audience() {
-                    return Err(invalid(
-                        6,
-                        std::io::Error::other(
-                            "upload package authority differs from its stored locator",
-                        ),
-                    ));
-                }
-            }
-            OutboxOperation::Upload {
-                root_table: row.get(9)?,
-                root_id: row.get(10)?,
-                row: reference,
-                source_path: PathBuf::from(source_path),
-                retain_pinned: row.get(5)?,
-                state,
-            }
-        }
-        "delete" => {
-            let encoded: String = row.get(3)?;
-            let stored: StoredBlobRef =
-                serde_json::from_str(&encoded).map_err(|error| invalid(3, error))?;
-            OutboxOperation::Delete { stored }
-        }
-        _ => {
+    let encoded: String = row.get(1)?;
+    let reference: RowBlobRef =
+        serde_json::from_str(&encoded).map_err(|error| invalid(1, error))?;
+    let source_path: String = row.get(2)?;
+    let state_json: String = row.get(4)?;
+    let state: OutboxUploadState =
+        serde_json::from_str(&state_json).map_err(|error| invalid(4, error))?;
+    if let OutboxUploadState::Prepared {
+        authority, stored, ..
+    }
+    | OutboxUploadState::Created {
+        authority, stored, ..
+    } = &state
+    {
+        let locator = stored.locator();
+        if !coven_protocol::blob::locator_describes_row(
+            locator,
+            reference.blob(),
+            reference.plaintext_size(),
+            reference.plaintext_hash(),
+        ) {
             return Err(invalid(
-                1,
-                std::io::Error::other(format!("invalid cloud outbox operation {tag:?}")),
+                4,
+                std::io::Error::other("prepared upload differs from its exact row version"),
             ));
         }
-    };
+        if locator.audience() != authority.remote_audience() {
+            return Err(invalid(
+                4,
+                std::io::Error::other("upload package authority differs from its stored locator"),
+            ));
+        }
+    }
     Ok(OutboxEntry {
         id: row.get(0)?,
-        attempt_count: row.get(7)?,
-        last_attempt_at: row.get(8)?,
-        operation,
+        attempt_count: row.get(5)?,
+        last_attempt_at: row.get(6)?,
+        upload: OutboxUpload {
+            root_table: row.get(7)?,
+            root_id: row.get(8)?,
+            row: reference,
+            source_path: PathBuf::from(source_path),
+            retain_pinned: row.get(3)?,
+            state,
+        },
     })
 }

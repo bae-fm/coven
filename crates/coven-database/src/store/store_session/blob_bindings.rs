@@ -32,13 +32,6 @@ impl StoreSession<'_> {
         Ok(references)
     }
 
-    fn stored_blob_reference_state(
-        &self,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<crate::StoredBlobReferenceState, DbError> {
-        Database::stored_blob_reference_state_on(self.conn, self.gates, self.synced_tables, stored)
-    }
-
     fn row_blob_ref(
         &self,
         table_name: &str,
@@ -107,14 +100,6 @@ impl StoreDatabase {
         &self,
     ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, DbError> {
         self.call_store(|session| session.eager_row_blob_refs())
-            .await
-    }
-
-    pub async fn stored_blob_reference_state(
-        &self,
-        stored: coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<crate::StoredBlobReferenceState, DbError> {
-        self.call_store(move |session| session.stored_blob_reference_state(&stored))
             .await
     }
 

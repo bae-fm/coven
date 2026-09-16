@@ -12,7 +12,6 @@ async fn captured_routing_rows_do_not_hide_invalid_host_identity_or_escape_rollb
     let database = Database::open(
         &directory.db_path(),
         vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience")],
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "captured-identity".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),

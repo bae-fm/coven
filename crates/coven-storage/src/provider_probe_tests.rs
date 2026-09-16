@@ -135,33 +135,8 @@ impl ExactSlotStorage for ProbeHome {
 
 #[async_trait]
 impl CloudHome for ProbeHome {
-    fn multipart_threshold(&self) -> u64 {
-        self.inner.multipart_threshold()
-    }
-
     async fn probe(&self) -> Result<(), CloudHomeError> {
         self.inner.as_ref().probe().await
-    }
-
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        self.inner.as_ref().put_object(key, data).await
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        self.inner.as_ref().open_multipart(key, total_len).await
-    }
-
-    async fn write(
-        &self,
-        key: &str,
-        body: BlobBody,
-        progress: &UploadProgress,
-    ) -> Result<(), CloudHomeError> {
-        self.inner.as_ref().write(key, body, progress).await
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {

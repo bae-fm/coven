@@ -339,7 +339,6 @@ fn open_snapshot_retry_database(
         path,
         store_dir,
         crate::sync::test_helpers::test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "snapshot-retry-owner".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),

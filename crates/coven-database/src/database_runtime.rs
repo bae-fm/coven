@@ -135,10 +135,6 @@ impl Database {
         self.connection.set_store_transfer_limits(limits)
     }
 
-    pub(crate) fn store_blob_tombstone_grace(&self) -> chrono::Duration {
-        self.connection.store_blob_tombstone_grace()
-    }
-
     pub(crate) fn store_has_scoped_graph(&self) -> bool {
         self.connection.store_has_scoped_graph()
     }
@@ -278,7 +274,6 @@ impl Database {
     pub fn open(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
-        blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
@@ -289,7 +284,6 @@ impl Database {
         Self::open_with_hlc_and_coven_metadata(
             path,
             synced_tables,
-            blob_tombstone_grace,
             transfer_limits,
             Arc::new(hlc),
             coven_migration_policy,
@@ -302,7 +296,6 @@ impl Database {
         path: &Path,
         install: &VerifiedSnapshotBootstrapInstall,
         synced_tables: Vec<SyncedTable>,
-        blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
@@ -321,7 +314,6 @@ impl Database {
         Self::open_with_hlc_and_coven_metadata(
             path,
             synced_tables,
-            blob_tombstone_grace,
             transfer_limits,
             Arc::new(hlc),
             coven_migration_policy,
@@ -340,7 +332,6 @@ impl Database {
         image: SnapshotDatabaseImage,
         install: &VerifiedSnapshotBootstrapInstall,
         synced_tables: Vec<SyncedTable>,
-        blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
@@ -352,7 +343,6 @@ impl Database {
             image,
             install,
             synced_tables,
-            blob_tombstone_grace,
             transfer_limits,
             Arc::new(hlc),
             coven_migration_policy,
@@ -363,7 +353,6 @@ impl Database {
     fn open_with_hlc_and_coven_metadata(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
-        blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
         coven_migration_policy: CovenMigrationPolicy,
@@ -376,7 +365,6 @@ impl Database {
             store_dir,
             crate::connection_io::ConnectionDurability::Full,
             synced_tables,
-            blob_tombstone_grace,
             transfer_limits,
             hlc,
             coven_migration_policy,
@@ -390,7 +378,6 @@ impl Database {
         store_dir: coven_foundation::store_dir::StoreDir,
         connection_durability: crate::connection_io::ConnectionDurability,
         synced_tables: Vec<SyncedTable>,
-        blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
         coven_migration_policy: CovenMigrationPolicy,
@@ -402,7 +389,6 @@ impl Database {
             store_dir,
             connection_durability,
             synced_tables,
-            blob_tombstone_grace,
             transfer_limits,
             hlc,
             coven_migration_policy,
@@ -418,7 +404,6 @@ impl Database {
         path: &Path,
         store_dir: coven_foundation::store_dir::StoreDir,
         synced_tables: Vec<SyncedTable>,
-        blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
@@ -430,7 +415,6 @@ impl Database {
             path,
             store_dir,
             synced_tables,
-            blob_tombstone_grace,
             transfer_limits,
             Arc::new(hlc),
             coven_migration_policy,
@@ -443,7 +427,6 @@ impl Database {
         path: &Path,
         store_dir: coven_foundation::store_dir::StoreDir,
         synced_tables: Vec<SyncedTable>,
-        blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
         coven_migration_policy: CovenMigrationPolicy,
@@ -454,7 +437,6 @@ impl Database {
             store_dir,
             crate::connection_io::ConnectionDurability::Disabled,
             synced_tables,
-            blob_tombstone_grace,
             transfer_limits,
             hlc,
             coven_migration_policy,
@@ -481,7 +463,6 @@ impl Database {
     pub fn open_read_only(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
-        blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
@@ -493,7 +474,6 @@ impl Database {
             path,
             store_dir,
             synced_tables,
-            blob_tombstone_grace,
             transfer_limits,
             Arc::new(hlc),
             migrations,
@@ -532,7 +512,6 @@ impl Database {
     pub fn open_with_hlc(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
-        blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
         coven_migration_policy: CovenMigrationPolicy,
@@ -541,7 +520,6 @@ impl Database {
         Self::open_with_hlc_and_coven_metadata(
             path,
             synced_tables,
-            blob_tombstone_grace,
             transfer_limits,
             hlc,
             coven_migration_policy,

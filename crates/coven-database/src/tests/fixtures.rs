@@ -1,5 +1,5 @@
 use crate::*;
-use coven_protocol::blob::{Provenance, BLOB_TOMBSTONE_GRACE};
+use coven_protocol::blob::Provenance;
 use coven_protocol::store_commit::{commit_semantic_prefix, StreamActivationId};
 
 pub(crate) fn reclaim_test_object(path: &str) -> ExactObjectRef {
@@ -150,7 +150,6 @@ pub(crate) fn open_outbox_database(device_id: &str) -> Database {
     Database::open(
         Path::new(":memory:"),
         Vec::new(),
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),

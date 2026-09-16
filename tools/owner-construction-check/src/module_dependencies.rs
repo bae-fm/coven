@@ -62,7 +62,7 @@ pub(crate) enum Region {
     /// Cloud providers, local file storage, and the OAuth flow they use.
     Storage,
     /// Replication: the sync loop, Store authority spine, verified history,
-    /// and the blob locality/tombstone machinery its cycles execute.
+    /// and the blob locality machinery its cycles execute.
     Replication,
     /// Domain workflows over replication: joining, restore.
     Domain,

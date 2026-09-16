@@ -470,12 +470,11 @@ pub(super) fn retained_blob_spool_has_claim_on(
     )? {
         return Ok(true);
     }
-    for encoded in crate::query_mapped_rows(
-        conn,
-        "SELECT upload_state FROM cloud_outbox WHERE operation = 'upload'",
-        [],
-        |row| row.get::<_, String>(0),
-    )? {
+    for encoded in
+        crate::query_mapped_rows(conn, "SELECT upload_state FROM cloud_outbox", [], |row| {
+            row.get::<_, String>(0)
+        })?
+    {
         let state: super::blob_outbox::OutboxUploadState = serde_json::from_str(&encoded)
             .map_err(|error| DbError::context("outbox blob spool owner", error))?;
         match state {

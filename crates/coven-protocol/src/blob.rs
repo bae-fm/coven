@@ -79,17 +79,20 @@
 //! - [`coven_foundation::store_dir::StoreDir`] — coven's own copy of a **host-provided Local**
 //!   blob, in `storage/local/<namespace>/<id>`. Never evicted; the budget sweep
 //!   never walks it.
-//! - `blob::upload` — the cloud-write half: drain the durable upload queue, sealing
+//! - `blob::upload` — the cloud write: drain the durable upload queue, sealing
 //!   each blob under its scope and writing it to the cloud with coalesced progress,
 //!   so a local-only blob becomes uploaded. The sync cycle calls the drain
 //!   each round before it pushes.
-//! - `blob::delete` — the cloud-delete half: turn a queued deletion into a signed
-//!   cloud tombstone, hold the blob for a convergence grace so a lagging peer
-//!   isn't stranded, then GC the blob once the grace has passed. The sync cycle
-//!   drains tombstones and runs the GC each round after it pulls.
+//!
+//! Nothing here deletes a cloud blob. A row that stops naming one leaves an
+//! orphan, and accepted reclaim — the workflow that already retires superseded
+//! packages and snapshot images — deletes it once the accepted Store snapshot's
+//! inventory shows nothing owns it, on the current Owner alone. An object an
+//! upload created before its Store write was accepted is the make_remote
+//! journal's instead: its unwind takes it back out.
 //!
 //! The types below ([`BlobRef`], [`BlobScope`], [`Provenance`],
-//! [`CacheFill`], [`BlobTransitionObserver`]) are the vocabulary both halves and
+//! [`CacheFill`], [`BlobTransitionObserver`]) are the vocabulary the engine and
 //! the host speak. Which rows carry blobs is not a runtime callback but a per-table
 //! declaration ([`crate::synced_schema::BlobDecl`]) coven resolves into a
 //! the database's `BlobDecls` each cycle to derive the blob set itself.
@@ -196,10 +199,6 @@ impl TransferLimits {
 // The local-files store's tests: store/read round-trip, a host-provided Local blob
 // surviving a budget sweep (the sweep never walks `local/`), and drop. These
 // drive a real temp directory through `StoreDir`.
-// The delete half's tests: tombstone signing, the drain that writes tombstones,
-// the graced GC that reclaims exact immutable objects, and the delete-outbox row
-// shape. Driven against `InMemoryCloudHome` and
-// `TestStore`. See `blob::delete`.
 
 /// Which key encrypts a blob, as a host names it on a [`BlobRef`].
 ///
@@ -731,8 +730,12 @@ pub trait BlobTransitionObserver: Send + Sync {
 
     /// coven completed a make_local of `(root_table, root_id)`: every blob is back
     /// to a local file (a user file for user-provided, the local store for
-    /// host-provided), the gate is flipped false (the subtree retracts from peers),
-    /// and the cloud blobs are queued for tombstoning. The default is a no-op.
+    /// host-provided), and the gate is flipped false, which retracts the subtree
+    /// from peers and releases the cloud objects the rows were holding. Releasing
+    /// them is not deleting them: accepted reclaim retires each one on the current
+    /// Owner once an accepted Store snapshot shows nothing owns it, so a peer that
+    /// has not pulled the retract can still read the bytes meanwhile. The default
+    /// is a no-op.
     async fn on_root_made_local(&self, root_table: &str, root_id: &str) {
         let _ = (root_table, root_id);
     }
@@ -751,20 +754,6 @@ pub trait BlobTransitionObserver: Send + Sync {
         let _ = (root_table, root_id, blob_id, done, total);
     }
 }
-
-/// The default convergence window a host gets if it configures none: how long a
-/// deleted blob is kept after its tombstone is written, before a GC pass
-/// reclaims it. The host overrides it on the coven builder; the writer's
-/// tombstone collection evaluates whatever grace it is handed against the
-/// tombstone's `deleted_at`.
-///
-/// A device offline for less than the grace is never stranded by a deletion —
-/// when it reconnects it pulls the removal of the row that referenced the blob,
-/// and the blob is still present until then. The window is human-scale (days,
-/// not the sub-second commit window the snapshot sweep's grace covers) because
-/// the device it protects is a person's offline laptop or phone, not a
-/// concurrent writer mid-publish.
-pub const BLOB_TOMBSTONE_GRACE: chrono::Duration = chrono::Duration::days(7);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

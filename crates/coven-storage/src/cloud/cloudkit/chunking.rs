@@ -37,23 +37,8 @@ impl ChunkManifest {
     }
 }
 
-pub(crate) fn encode_chunk_manifest(manifest: ChunkManifest) -> Vec<u8> {
-    let mut encoded = CHUNK_MANIFEST_MAGIC.to_vec();
-    encoded.extend_from_slice(manifest.part_count.to_string().as_bytes());
-    encoded.push(b'\n');
-    encoded.extend_from_slice(manifest.total_len.to_string().as_bytes());
-    encoded.push(b'\n');
-    encoded.extend_from_slice(manifest.upload_id.as_bytes());
-    encoded.push(b'\n');
-    encoded
-}
-
 pub(crate) fn chunk_manifest_key(key: &str) -> String {
     format!("{key}{CHUNK_MANIFEST_SUFFIX}")
-}
-
-pub(crate) fn chunk_part_key(key: &str, upload_id: &str, index: usize) -> String {
-    format!("{key}.part{index}.{upload_id}")
 }
 
 pub(crate) fn decode_chunk_manifest(data: &[u8]) -> Result<ChunkManifest, CloudHomeError> {
@@ -350,26 +335,6 @@ pub(crate) fn delete_chunk_layout(
         }
     }
 
-    Ok(())
-}
-
-pub(crate) fn delete_stale_chunk_records(
-    ops: &dyn CloudKitOps,
-    scope: &CloudKitScope,
-    key: &str,
-    upload_id: &str,
-) -> Result<(), CloudHomeError> {
-    let chunk_prefix = format!("{key}.part");
-    let chunks = ops.list_records(scope, &chunk_prefix)?;
-    for chunk_key in chunks {
-        if parse_chunk_key(&chunk_key, upload_id)?.is_some() {
-            continue;
-        }
-        match ops.delete_record(scope, &chunk_key) {
-            Ok(()) | Err(CloudHomeError::NotFound(_)) => {}
-            Err(e) => return Err(e),
-        }
-    }
     Ok(())
 }
 

@@ -211,7 +211,6 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
         ("store_publication_entries", "entry_ref".to_string()),
         ("cloud_outbox", "row_ref".to_string()),
         ("cloud_outbox", "upload_state".to_string()),
-        ("cloud_outbox", "stored_ref".to_string()),
         ("store_writes", "status".to_string()),
         ("store_writes", "affected_rows".to_string()),
         ("store_writes", "base".to_string()),

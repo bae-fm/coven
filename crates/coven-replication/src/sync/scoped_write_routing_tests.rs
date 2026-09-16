@@ -9,7 +9,6 @@ use coven_database::Migration;
 use coven_database::StoreDatabase;
 use coven_database::*;
 use coven_keys::encryption::EncryptionService;
-use coven_protocol::blob::BLOB_TOMBSTONE_GRACE;
 use coven_protocol::synced_schema::SyncedTable;
 use coven_protocol::write::WriteStatus;
 use std::path::Path;
@@ -42,7 +41,6 @@ async fn capture_scoped_write_then_reopen(
         &path,
         db_store_dir.clone(),
         tables.clone(),
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -102,7 +100,6 @@ async fn capture_scoped_write_then_reopen(
         &path,
         db_store_dir,
         tables,
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -286,7 +283,6 @@ async fn a_capture_touching_no_tracked_table_journals_no_write() {
         &path,
         db_store_dir.clone(),
         tables,
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "untracked-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -497,7 +493,6 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
         Path::new(":memory:"),
         db_store_dir.clone(),
         tables.clone(),
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "circle-only-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -609,7 +604,6 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         Path::new(":memory:"),
         db_store_dir.clone(),
         tables.clone(),
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "move-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -735,7 +729,6 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         Path::new(":memory:"),
         db_store_dir.clone(),
         tables.clone(),
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "foreign-key-move-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),

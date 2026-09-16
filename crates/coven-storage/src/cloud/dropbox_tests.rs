@@ -555,7 +555,6 @@ async fn abort_closes_the_upload_session_at_the_confirmed_offset() {
         home: &home,
         session_id: "session-a".to_string(),
         key: "blob-a".to_string(),
-        completion: DropboxSessionCompletion::Overwrite,
         confirmed_offset: 17,
         settled: false,
     };

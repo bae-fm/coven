@@ -16,8 +16,8 @@ use super::oauth_rest::{
 };
 use super::oauth_session::OAuthSession;
 use super::{
-    combine_cleanup_failure, sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject,
+    combine_cleanup_failure, sharing, BlobBody, CloudAccessOutcome, CloudAccessState, CloudHome,
+    CloudHomeError, CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject,
     ConditionalWriteOutcome, ExactSlotStorage, RevokeOutcome,
 };
 use crate::oauth::OAuthConfig;
@@ -46,11 +46,6 @@ pub struct OneDriveCloudHome {
     graph_api: String,
     session: OAuthSession,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
-}
-
-enum UploadSessionCompletion {
-    Automatic,
-    DeferredPersonal,
 }
 
 impl OneDriveCloudHome {
@@ -106,16 +101,18 @@ impl OneDriveCloudHome {
         )
     }
 
+    /// Open a deferred upload session: the parts land in the session and a
+    /// separate commit names the item, which is what lets creation refuse an
+    /// occupied name and replacement carry its `If-Match`.
     async fn create_upload_session(
         &self,
         key: &str,
         conflict_behavior: &str,
-        completion: UploadSessionCompletion,
     ) -> Result<String, CloudHomeError> {
         let session_url = format!("{}/createUploadSession", self.item_path_url(key));
         let body = serde_json::json!({
             "item": { "@microsoft.graph.conflictBehavior": conflict_behavior },
-            "deferCommit": matches!(completion, UploadSessionCompletion::DeferredPersonal),
+            "deferCommit": true,
         });
         let response = self
             .session
@@ -337,13 +334,7 @@ impl OneDriveCloudHome {
     ) -> Result<(), CloudHomeError> {
         slot.require_logical_key_for("OneDrive")?;
         let full_logical_key = slot.logical_key();
-        let upload_url = self
-            .create_upload_session(
-                full_logical_key,
-                "fail",
-                UploadSessionCompletion::DeferredPersonal,
-            )
-            .await?;
+        let upload_url = self.create_upload_session(full_logical_key, "fail").await?;
         let key = full_logical_key.to_string();
         let classify =
             Box::new(move |status, response: &str| classify_write_error(status, response, &key));
@@ -485,10 +476,6 @@ fn classify_write_error(status: reqwest::StatusCode, body: &str, key: &str) -> C
     CloudHomeError::Transport(format!("write {key} (HTTP {status}): {body}"))
 }
 
-/// Files at or below this size go up as a single PUT; larger files use a resumable
-/// session. Microsoft Graph caps a simple PUT at 250 MiB.
-const ONEDRIVE_SIMPLE_PUT_MAX: usize = 4 * 1024 * 1024;
-
 /// Resumable-session part size. Graph requires every part except the last to be a
 /// multiple of 320 KiB; 7.5 MiB (24 × 320 KiB) keeps the request count low.
 const ONEDRIVE_CHUNK_SIZE: usize = 24 * 320 * 1024;
@@ -562,56 +549,6 @@ impl OAuthRestHome for OneDriveCloudHome {
 
 #[async_trait]
 impl CloudHome for OneDriveCloudHome {
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        let body = Bytes::from(data);
-        let url = format!("{}/content", self.item_path_url(key));
-        let resp = self
-            .session
-            .api_call(|oauth| {
-                oauth
-                    .put(&url)
-                    .header("Content-Type", "application/octet-stream")
-                    .body(body.clone())
-            })
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(classify_write_error(
-                status,
-                &http::body_text(resp).await,
-                key,
-            ));
-        }
-        Ok(())
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        let upload_url = self
-            .create_upload_session(key, "replace", UploadSessionCompletion::Automatic)
-            .await?;
-        let key_owned = key.to_string();
-        let classify =
-            Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned));
-        // OneDrive returns 202 Accepted for every non-final part.
-        Ok(Box::new(self.session.range_put_sink(
-            upload_url,
-            202,
-            total_len,
-            ONEDRIVE_CHUNK_SIZE,
-            key.to_string(),
-            classify,
-            onedrive_upload_cancellation_succeeded,
-        )))
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        ONEDRIVE_SIMPLE_PUT_MAX as u64
-    }
-
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         rest_read(self, key).await
     }
@@ -838,9 +775,7 @@ impl ExactSlotStorage for OneDriveCloudHome {
     ) -> Result<ConditionalWriteOutcome, CloudHomeError> {
         slot.require_logical_key_for("OneDrive")?;
         let key = slot.logical_key();
-        let upload_url = self
-            .create_upload_session(key, "replace", UploadSessionCompletion::DeferredPersonal)
-            .await?;
+        let upload_url = self.create_upload_session(key, "replace").await?;
         let total = bytes.len() as u64;
         let key_owned = key.to_string();
         let classify =

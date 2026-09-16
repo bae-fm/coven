@@ -427,7 +427,6 @@ async fn snapshot_missing_accepted_blob_preserves_publication_for_retry_after_re
             &path,
             directory.clone(),
             crate::sync::test_helpers::test_synced_tables_with_blob(photo_declaration()),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "snapshot-retry-owner".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),

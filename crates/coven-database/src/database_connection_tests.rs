@@ -1,11 +1,9 @@
 use super::*;
-use coven_protocol::blob::BLOB_TOMBSTONE_GRACE;
 
 fn open_image_database(path: &Path) -> Database {
     Database::open(
         path,
         Vec::new(),
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "image-replacement".to_string(),
         Arc::new(coven_foundation::clock::SystemClock),
@@ -146,7 +144,6 @@ fn open_synced_image_database(schema: &'static str) -> Database {
             coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("shared")],
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "image-schema".to_string(),
         Arc::new(coven_foundation::clock::SystemClock),
@@ -230,7 +227,6 @@ async fn slow_db_call_does_not_block_the_executor() {
     let db = Database::open(
         Path::new(":memory:"),
         Vec::new(),
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "liveness".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -276,7 +272,6 @@ async fn dropping_last_handle_in_async_context_does_not_stall_but_job_still_land
     let db = Database::open(
         &db_path,
         Vec::new(),
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "drop-async".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),

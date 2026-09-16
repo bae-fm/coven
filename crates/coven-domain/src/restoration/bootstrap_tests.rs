@@ -254,7 +254,6 @@ impl OwnerRecoveryRestoreFixture {
         let restored = Database::open(
             &store_dir.db_path(),
             tables,
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -400,7 +399,6 @@ async fn a_recovered_owner_device_runs_its_first_sync_cycle() {
         let database = Database::open(
             &store_dir.db_path(),
             tables,
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -481,7 +479,6 @@ async fn a_repeated_owner_recovery_restore_resumes_the_device_s_published_stream
                 let database = Database::open(
                     &store_dir.db_path(),
                     tables,
-                    coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
                     coven_protocol::blob::TransferLimits::one_at_a_time(),
                     config.device_id.clone(),
                     std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -791,7 +788,6 @@ async fn a_restored_continuation_extends_the_accepted_snapshot() {
         let db_b = Database::open(
             &lib_b.db_path(),
             tables.clone(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -982,7 +978,6 @@ async fn restore_discovers_a_snapshot_published_after_the_code_was_exported() {
         let db_b = Database::open(
             &lib_b.db_path(),
             tables.clone(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -1378,7 +1373,6 @@ async fn restore_bootstrap_defers_eager_blob_files_until_open() {
         let restored = Database::open(
             &lib_b.db_path(),
             tables,
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id,
             std::sync::Arc::new(coven_foundation::clock::SystemClock),

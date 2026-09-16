@@ -1,7 +1,6 @@
 //! When a queued `cloud_outbox` entry is due for another attempt. One policy
-//! serves both drains — uploads ([`crate::blob::upload`]) and delete tombstones
-//! ([`crate::blob::delete`]) — so a row's retry schedule does not depend on which
-//! operation it carries.
+//! covers every queued upload, so a row's retry schedule does not depend on how
+//! far its transfer had got.
 
 use coven_database::DbError;
 use coven_database::OutboxEntry;

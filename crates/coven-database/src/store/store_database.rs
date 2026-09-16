@@ -200,10 +200,6 @@ impl StoreDatabase {
         self.database.set_store_transfer_limits(limits)
     }
 
-    pub fn blob_tombstone_grace(&self) -> chrono::Duration {
-        self.database.store_blob_tombstone_grace()
-    }
-
     pub fn has_scoped_graph(&self) -> bool {
         self.database.store_has_scoped_graph()
     }
@@ -530,7 +526,7 @@ impl coven_foundation::id_provider::IdProvider for StoreDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coven_protocol::blob::{TransferLimits, BLOB_TOMBSTONE_GRACE};
+    use coven_protocol::blob::TransferLimits;
     use std::{collections::BTreeSet, sync::Arc};
 
     #[tokio::test]
@@ -588,7 +584,6 @@ mod tests {
             Database::open(
                 &path,
                 Vec::new(),
-                BLOB_TOMBSTONE_GRACE,
                 TransferLimits::one_at_a_time(),
                 "writer".to_string(),
                 Arc::new(coven_foundation::clock::SystemClock),
@@ -613,7 +608,6 @@ mod tests {
             Database::open_read_only(
                 &path,
                 Vec::new(),
-                BLOB_TOMBSTONE_GRACE,
                 TransferLimits::one_at_a_time(),
                 "writer".to_string(),
                 Arc::new(coven_foundation::clock::SystemClock),

@@ -182,36 +182,11 @@ impl CloudHome for CountingCloudHome {
         self.counted().probe().await
     }
 
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        self.counted().put_object(key, data).await
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        self.counted().open_multipart(key, total_len).await
-    }
-
     /// A getter, not a request.
-    fn multipart_threshold(&self) -> u64 {
-        self.inner.multipart_threshold()
-    }
-
     /// Answered here rather than forwarded: this is the counter, so this is
     /// what a run reporting counts is looking for.
     fn provider_requests(&self) -> Option<Arc<dyn ProviderRequests>> {
         Some(Arc::new(self.count.clone()))
-    }
-
-    async fn write(
-        &self,
-        key: &str,
-        body: BlobBody,
-        progress: &UploadProgress,
-    ) -> Result<(), CloudHomeError> {
-        self.counted().write(key, body, progress).await
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {

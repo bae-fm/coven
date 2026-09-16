@@ -117,7 +117,6 @@ async fn publication_refuses_a_blob_whose_candidate_ownership_was_retired() {
         std::path::Path::new(":memory:"),
         peer_dir.clone(),
         FixtureSchema::RowBlobs.tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "snapshot-peer".into(),
         Arc::new(coven_foundation::clock::SystemClock),

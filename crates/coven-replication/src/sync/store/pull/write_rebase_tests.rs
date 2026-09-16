@@ -148,7 +148,6 @@ impl RebaseFixture {
             path,
             store_dir,
             tables,
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "rebase-source".to_string(),
             Arc::new(coven_foundation::clock::SystemClock),

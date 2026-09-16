@@ -40,17 +40,6 @@ pub(crate) fn select_drive_file(files: &[DriveFileIdentity]) -> Option<&DriveFil
     })
 }
 
-pub(crate) fn parse_create_file_id(body: &str, key: &str) -> Result<String, CloudHomeError> {
-    let json: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| CloudHomeError::transport(format!("create {key}: parse response"), e))?;
-    match json.get("id").and_then(|id| id.as_str()) {
-        Some(id) if !id.is_empty() => Ok(id.to_string()),
-        _ => Err(CloudHomeError::Transport(format!(
-            "create {key}: response missing id"
-        ))),
-    }
-}
-
 pub(crate) fn parse_generated_file_id(
     response: &serde_json::Value,
     key: &str,
@@ -68,70 +57,6 @@ pub(crate) fn parse_generated_file_id(
     }
 }
 
-pub(crate) fn create_file_metadata_body(
-    encoded_name: &str,
-    folder_id: &str,
-    create_token: &str,
-) -> String {
-    let mut app_properties = serde_json::Map::new();
-    app_properties.insert(
-        CREATE_TOKEN_PROPERTY.to_string(),
-        serde_json::Value::String(create_token.to_string()),
-    );
-    serde_json::json!({
-        "name": encoded_name,
-        "parents": [folder_id],
-        "appProperties": app_properties,
-    })
-    .to_string()
-}
-
-/// A Drive resumable sink. New objects use a resumable-create session, which
-/// keeps the file absent until the final part commits; `finish` then resolves
-/// concurrent same-name creates by the create token. Existing objects use a
-/// resumable-update session and require no post-commit reconciliation.
-pub(crate) struct DriveMultipartSink<'a> {
-    home: &'a GoogleDriveCloudHome,
-    inner: RangePutSink,
-    key: String,
-    encoded: String,
-    created: Option<DriveFileIdentity>,
-}
-
-#[async_trait]
-impl crate::cloud::PartSink for DriveMultipartSink<'_> {
-    fn part_size(&self) -> usize {
-        self.inner.part_size()
-    }
-
-    async fn send_part(
-        &mut self,
-        part: Bytes,
-        offset: u64,
-        is_last: bool,
-        control: &crate::cloud::UploadControl,
-    ) -> Result<(), CloudHomeError> {
-        self.inner.send_part(part, offset, is_last, control).await
-    }
-
-    async fn abort(&mut self) -> Result<(), CloudHomeError> {
-        self.inner.abort().await
-    }
-
-    async fn finish(mut self: Box<Self>) -> Result<(), CloudHomeError> {
-        Box::new(self.inner).finish().await?;
-        if let Some(created) = self.created.take() {
-            self.home
-                .reconcile_created_file(&self.key, &self.encoded, created)
-                .await?;
-        }
-        Ok(())
-    }
-}
-
-/// First `error.errors[].reason` in a Google API error body (the shape Drive,
-/// Sheets, and other googleapis.com endpoints share), or `None` if the body isn't
-/// that JSON.
 pub(crate) fn parse_google_api_error_reason(body: &str) -> Option<String> {
     http::error_reason(body, |v| {
         v.get("error")?
@@ -267,84 +192,6 @@ impl OAuthRestHome for GoogleDriveCloudHome {
 
 #[async_trait]
 impl CloudHome for GoogleDriveCloudHome {
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        let media_body = Bytes::from(data);
-        let encoded = encode_key(key);
-        if let Some(file_id) = self.find_file_id(&encoded).await? {
-            self.upload_file_media(key, &file_id, media_body, "update")
-                .await?;
-        } else {
-            self.create_file_with_media(key, &encoded, media_body)
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        let encoded = encode_key(key);
-        let (session_url, created, op) = match self.find_file_id(&encoded).await? {
-            Some(file_id) => (
-                self.open_resumable_update_session(key, &file_id).await?,
-                None,
-                "update",
-            ),
-            None => {
-                let attempt = self.new_append_attempt(key).await?;
-                let session_url = match self.open_resumable_create_session(key, &attempt).await {
-                    Ok(session_url) => session_url,
-                    Err(operation) => {
-                        return match self
-                            .resolve_failed_append(key, &attempt, operation, false)
-                            .await
-                        {
-                            Err(error) => Err(error),
-                            Ok(file_id) => Err(CloudHomeError::Transport(format!(
-                            "open mutable Drive upload {key}: uncommitted session resolved as {}",
-                            file_id
-                        ))),
-                        }
-                    }
-                };
-                (
-                    session_url,
-                    Some(DriveFileIdentity {
-                        id: attempt.file_id,
-                        create_token: attempt.create_token,
-                    }),
-                    "create",
-                )
-            }
-        };
-        let key_owned = key.to_string();
-        let classify =
-            Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned, op));
-        // Drive returns 308 Resume Incomplete for every non-final part.
-        let inner = self.session.range_put_sink(
-            session_url,
-            308,
-            total_len,
-            GDRIVE_CHUNK_SIZE,
-            key.to_string(),
-            classify,
-            drive_upload_cancellation_succeeded,
-        );
-        Ok(Box::new(DriveMultipartSink {
-            home: self,
-            inner,
-            key: key.to_string(),
-            encoded,
-            created,
-        }))
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        GDRIVE_SIMPLE_UPLOAD_MAX as u64
-    }
-
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         rest_read(self, key).await
     }

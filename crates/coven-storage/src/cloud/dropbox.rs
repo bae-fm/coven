@@ -21,9 +21,9 @@ use super::oauth_rest::{
 };
 use super::oauth_session::OAuthSession;
 use super::{
-    combine_cleanup_failure, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome,
-    CloudHomeError, CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject,
-    ConditionalWriteOutcome, ExactSlotStorage, RevokeOutcome,
+    combine_cleanup_failure, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
+    ExactSlotStorage, RevokeOutcome,
 };
 use crate::oauth::OAuthConfig;
 use coven_protocol::objects::ObjectSlot;
@@ -669,10 +669,11 @@ fn dropbox_revoke_error_is_already_absent(body: &str) -> bool {
         .is_some_and(|summary| summary.starts_with("member_error/not_a_member"))
 }
 
-/// A [`PartSink`](super::PartSink) over a Dropbox upload session: `append_v2` adds
-/// each non-final part at its byte offset; the final part is committed to the
-/// destination path via `upload_session/finish` (overwrite mode). The session was
-/// opened by `open_multipart`; `finish` is a no-op (the last part committed).
+/// A [`PartSink`](super::PartSink) over a Dropbox upload session: `append_v2`
+/// adds each non-final part at its byte offset; the final part is committed to
+/// the destination path via `upload_session/finish` in `add` mode, so a path
+/// another writer already filled loses rather than being overwritten. `finish`
+/// is a no-op (the last part committed).
 ///
 /// Parts go through `api_call_no_transient_retry`: a successful `append_v2`
 /// advances the session's expected offset, so a blind re-send after a lost
@@ -682,15 +683,8 @@ struct DropboxSessionSink<'a> {
     home: &'a DropboxCloudHome,
     session_id: String,
     key: String,
-    completion: DropboxSessionCompletion,
     confirmed_offset: u64,
     settled: bool,
-}
-
-#[derive(Clone, Copy)]
-enum DropboxSessionCompletion {
-    Overwrite,
-    CreateOnly,
 }
 
 #[async_trait]
@@ -712,17 +706,13 @@ impl super::PartSink for DropboxSessionSink<'_> {
         let resp = if is_last {
             // The final part commits the file at the destination path.
             let path = DropboxCloudHome::namespace_path(&self.key);
-            let mode = match self.completion {
-                DropboxSessionCompletion::Overwrite => serde_json::json!({ ".tag": "overwrite" }),
-                DropboxSessionCompletion::CreateOnly => serde_json::json!({ ".tag": "add" }),
-            };
             let arg = dropbox_api_arg(&serde_json::json!({
                 "cursor": { "session_id": self.session_id, "offset": offset },
                 "commit": {
                     "path": path,
-                    "mode": mode,
+                    "mode": { ".tag": "add" },
                     "autorename": false,
-                    "strict_conflict": matches!(self.completion, DropboxSessionCompletion::CreateOnly),
+                    "strict_conflict": true,
                     "mute": true,
                 },
             }));
@@ -783,9 +773,7 @@ impl super::PartSink for DropboxSessionSink<'_> {
         })?;
         if is_last {
             self.settled = true;
-            if matches!(self.completion, DropboxSessionCompletion::CreateOnly) {
-                self.home.validate_create_response(&self.key, resp).await?;
-            }
+            self.home.validate_create_response(&self.key, resp).await?;
         }
         Ok(())
     }
@@ -1012,59 +1000,6 @@ impl OAuthRestHome for DropboxCloudHome {
 
 #[async_trait]
 impl CloudHome for DropboxCloudHome {
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        let namespace_id = self.get_or_create_shared_folder_id().await?;
-        let path_root = Self::path_root_header(&namespace_id);
-        let body = Bytes::from(data);
-        let api_arg = dropbox_api_arg(&serde_json::json!({
-            "path": Self::namespace_path(key),
-            "mode": { ".tag": "overwrite" },
-            "autorename": false,
-            "mute": true,
-        }));
-        let resp = self
-            .session
-            .api_call(|oauth| {
-                Self::scoped_request(
-                    oauth.post(format!("{}/files/upload", self.content_base)),
-                    &path_root,
-                )
-                .header("Dropbox-API-Arg", &api_arg)
-                .header("Content-Type", "application/octet-stream")
-                .body(body.clone())
-            })
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(classify_write_error(
-                status,
-                &http::body_text(resp).await,
-                key,
-            ));
-        }
-        Ok(())
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        _total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        let session_id = self.start_upload_session(key).await?;
-        Ok(Box::new(DropboxSessionSink {
-            home: self,
-            session_id,
-            key: key.to_string(),
-            completion: DropboxSessionCompletion::Overwrite,
-            confirmed_offset: 0,
-            settled: false,
-        }))
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        DROPBOX_SIMPLE_UPLOAD_MAX as u64
-    }
-
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         rest_read(self, key).await
     }
@@ -1287,7 +1222,7 @@ impl ExactSlotStorage for DropboxCloudHome {
         let body = upload.body().await?;
         slot.require_logical_key_for("Dropbox")?;
         let key = slot.logical_key();
-        if body.len() <= self.multipart_threshold() {
+        if body.len() <= DROPBOX_SIMPLE_UPLOAD_MAX as u64 {
             let operation = self.append_small(key, body.collect().await?, control).await;
             return super::exact_upload::settle_exact_create(operation, |observed| {
                 self.verify_exact_upload(upload, observed)
@@ -1300,7 +1235,6 @@ impl ExactSlotStorage for DropboxCloudHome {
             home: self,
             session_id,
             key: key.to_string(),
-            completion: DropboxSessionCompletion::CreateOnly,
             confirmed_offset: 0,
             settled: false,
         };

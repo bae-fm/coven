@@ -302,11 +302,6 @@ pub(super) const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "initialize",
     ),
     (
-        "crates/coven-replication/src/blob/delete_tests.rs",
-        "TombstoneCollector",
-        "load",
-    ),
-    (
         "crates/coven-replication/src/blob/upload_tests.rs",
         "UploadFixture",
         "with_home",

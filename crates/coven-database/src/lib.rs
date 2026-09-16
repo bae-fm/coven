@@ -278,7 +278,7 @@ pub use store::{
     DurableStoreReclaimAuthorization, DurableStoreReclaimOperation, HostWriteBlobTransaction,
     HostWriteError, HostWriteOperation, IncomingTimestampPolicy, InstalledReplayBaseline,
     LocalBlobCleanup, MakeRemoteAdmission, MaterializedLocalBlob, ObservedStorePublication,
-    OutboxEntry, OutboxFailure, OutboxFailureKind, OutboxOperation, OutboxUploadState,
+    OutboxEntry, OutboxFailure, OutboxFailureKind, OutboxUpload, OutboxUploadState,
     OwnStreamAuthorship, OwnedVerifiedMergeMaterialization, PreparedCircleObjects,
     ReclaimedStorePackage, RetainedAudiencePackage, RetainedMergeHistoryCheckpoint,
     RetainedMergeMaterializationKey, RetainedPackageApplication, RetainedReplayAuthority,
@@ -293,8 +293,7 @@ pub use store::{
 pub use store::{resolve_and_apply_changeset, ApplyResult};
 pub use store::{BlobFileFailure, BlobFileFailures, SqlContext, SqlReadContext, WriteBatch};
 pub use store::{
-    CloudOutboxSnapshot, MakeRemoteProgress, QueuedDelete, QueuedMakeRemote, QueuedUpload,
-    QueuedUploadPhase,
+    CloudOutboxSnapshot, MakeRemoteProgress, QueuedMakeRemote, QueuedUpload, QueuedUploadPhase,
 };
 pub use store_authority_records::DurableFounderMembershipJournal;
 pub(crate) use store_authority_records::{
@@ -336,12 +335,11 @@ thread_local! {
     ///
     /// The host-SQL authorizer denies statements that access Coven's reserved
     /// tables, but Coven's own entry points are documented to run inside the
-    /// host's write closure (`register_external_blob`, `enqueue_blob_delete`,
-    /// `clear_external_blob` all bind to the row version the same write
-    /// produced). Those operations announce themselves through this depth so
-    /// the authorizer can tell "Coven writing its own bookkeeping" apart from
-    /// "host SQL reaching into it" — the statement text is identical; the
-    /// caller is not. Thread-local is sound because a write closure and every
+    /// host's write closure (`register_external_blob` and `clear_external_blob`
+    /// both bind to the row version the same write produced). Those operations
+    /// announce themselves through this depth so the authorizer can tell "Coven
+    /// writing its own bookkeeping" apart from "host SQL reaching into it" — the
+    /// statement text is identical; the caller is not. Thread-local is sound because a write closure and every
     /// statement it executes run synchronously on one thread.
     static COVEN_SQL_AUTHORITY_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static HOST_SQL_WRITE_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

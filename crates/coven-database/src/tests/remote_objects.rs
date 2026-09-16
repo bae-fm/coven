@@ -1,7 +1,6 @@
 use crate::remote_object_records::merge_prepared_remote_object;
 
 use crate::*;
-use coven_protocol::blob::BLOB_TOMBSTONE_GRACE;
 use coven_protocol::store_commit::commit_semantic_prefix;
 
 use super::fixtures::*;
@@ -15,7 +14,6 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         Path::new(":memory:"),
         store_dir.clone(),
         Vec::new(),
-        BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         std::sync::Arc::new(
             coven_protocol::hlc::Hlc::try_new(

@@ -799,7 +799,6 @@ impl DeviceJoinClient {
                 snapshot.install(
                     &store_dir,
                     self.synced_tables.clone(),
-                    coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
                     self.transfer_limits,
                     device_id,
                     self.clock.clone(),
@@ -885,7 +884,6 @@ impl DeviceJoinClient {
         let db = Database::open(
             &db_path,
             self.synced_tables.clone(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             self.transfer_limits,
             device_id.clone(),
             self.clock.clone(),
@@ -1039,7 +1037,6 @@ impl DeviceJoinClient {
             .stage("install snapshot", async {
                 prepared.install(
                     self.synced_tables.clone(),
-                    coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
                     self.transfer_limits,
                     device_id.clone(),
                     self.clock.clone(),

@@ -8,7 +8,6 @@ fn open_preparation(path: std::path::PathBuf) -> DatabaseConnection {
         store_dir.clone(),
         crate::connection_io::ConnectionDurability::Full,
         Vec::new(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         Arc::new(
             Hlc::try_new(

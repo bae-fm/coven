@@ -13,7 +13,6 @@ impl Database {
         path: &std::path::Path,
         store_dir: coven_foundation::store_dir::StoreDir,
         tables: Vec<SyncedTable>,
-        grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
@@ -23,7 +22,6 @@ impl Database {
             path,
             store_dir,
             tables,
-            grace,
             transfer_limits,
             device_id,
             clock,
@@ -36,7 +34,6 @@ impl Database {
         path: &std::path::Path,
         store_dir: coven_foundation::store_dir::StoreDir,
         tables: Vec<SyncedTable>,
-        grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: std::sync::Arc<coven_protocol::hlc::Hlc>,
         migrations: &[Migration],
@@ -45,7 +42,6 @@ impl Database {
             path,
             store_dir,
             tables,
-            grace,
             transfer_limits,
             hlc,
             CovenMigrationPolicy::ApplyPending,
@@ -238,7 +234,6 @@ pub fn read_test_db_with_download_limit(
     open_synthetic_database(
         store_dir,
         tables,
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         limits,
         std::sync::Arc::new(
             coven_protocol::hlc::Hlc::try_new(
@@ -336,18 +331,6 @@ pub fn test_store_dir() -> coven_foundation::store_dir::StoreDir {
     store_dir
 }
 
-pub fn open_test_db_with_tombstone_grace(
-    store_dir: coven_foundation::store_dir::StoreDir,
-    grace: chrono::Duration,
-) -> Database {
-    open_test_db_schema_with_store_dir_and_tombstone_grace(
-        store_dir,
-        test_synced_tables(),
-        test_migrations(),
-        grace,
-    )
-}
-
 /// Like [`open_test_db`] but with an explicit synced set and migration ladder, for
 /// tests that exercise a different schema (gate tests).
 pub fn open_test_db_schema(
@@ -355,19 +338,13 @@ pub fn open_test_db_schema(
     tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
 ) -> Database {
-    open_test_db_schema_with_store_dir_and_tombstone_grace(
-        store_dir,
-        tables,
-        migrations,
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
-    )
+    open_test_db_schema_with_store_dir(store_dir, tables, migrations)
 }
 
-fn open_test_db_schema_with_store_dir_and_tombstone_grace(
+fn open_test_db_schema_with_store_dir(
     store_dir: coven_foundation::store_dir::StoreDir,
     tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
-    grace: chrono::Duration,
 ) -> Database {
     let hlc = std::sync::Arc::new(
         coven_protocol::hlc::Hlc::try_new(
@@ -379,7 +356,6 @@ fn open_test_db_schema_with_store_dir_and_tombstone_grace(
     open_synthetic_database(
         store_dir,
         tables,
-        grace,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         hlc,
         migrations,
@@ -389,7 +365,6 @@ fn open_test_db_schema_with_store_dir_and_tombstone_grace(
 fn open_synthetic_database(
     store_dir: coven_foundation::store_dir::StoreDir,
     tables: Vec<SyncedTable>,
-    grace: chrono::Duration,
     transfer_limits: coven_protocol::blob::TransferLimits,
     hlc: std::sync::Arc<coven_protocol::hlc::Hlc>,
     migrations: Vec<Migration>,
@@ -398,7 +373,6 @@ fn open_synthetic_database(
         std::path::Path::new(":memory:"),
         store_dir.clone(),
         tables,
-        grace,
         transfer_limits,
         hlc,
         CovenMigrationPolicy::ApplyPending,
@@ -429,7 +403,6 @@ pub fn open_test_db_with_hlc(
     open_synthetic_database(
         store_dir,
         test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         hlc,
         migrations,

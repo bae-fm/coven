@@ -961,10 +961,13 @@ impl CovenHandle {
     /// Make `(root_table, root_id)` Local (Remote → Local): bring each blob back to
     /// a local file durability-first — a user-provided blob to the path named in
     /// `dest` (blob id → destination path), a host-provided blob to coven's local
-    /// store (no dest) — then flip the gate false, register the external refs, and
-    /// enqueue the cloud deletes in one atomic commit. `cancel` aborts before the
-    /// commit (the root stays Remote). Errors with [`MakeLocalError::SyncNotReady`]
-    /// when no provider is connected.
+    /// store (no dest) — then flip the gate false and register the external refs
+    /// in one atomic commit. That flip releases the cloud objects; accepted
+    /// reclaim retires them once an accepted snapshot shows nothing owns them.
+    /// `cancel` aborts before the commit (the root stays Remote). Errors with
+    /// [`MakeLocalError::SyncNotReady`] when no provider is connected, and with
+    /// [`MakeLocalError::TransitionInProgress`] when the root's make-remote has
+    /// not been accepted — those objects are still the upload queue's to retire.
     pub async fn make_local(
         &self,
         root_table: &str,
@@ -1048,16 +1051,6 @@ impl CovenHandle {
         row_id: &str,
     ) -> Result<Option<crate::ExternalBlob>, crate::DbError> {
         self.blobs.external_blob(table, row_id).await
-    }
-
-    /// Every cloud tombstone the durable queue is holding, oldest first.
-    ///
-    /// A tombstone is queued by
-    /// [`SqlContext::enqueue_blob_delete`](crate::SqlContext::enqueue_blob_delete)
-    /// and stays until a sync cycle carries the removal out, so this reports
-    /// removals still owed to the cloud across restarts.
-    pub async fn queued_deletes(&self) -> Result<Vec<crate::QueuedDelete>, crate::DbError> {
-        self.blobs.queued_deletes().await
     }
 
     /// How far the make-remote for one gated root has got, or `None` when that

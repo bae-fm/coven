@@ -223,10 +223,12 @@ impl S3CloudHome {
         apply_prefix(self.key_prefix.as_deref(), key)
     }
 
+    /// Open a create-only multipart upload. Completion carries `If-None-Match: *`
+    /// so a slot another writer already filled loses rather than being
+    /// overwritten.
     async fn open_multipart_sink(
         &self,
         key: &str,
-        completion: MultipartCompletion,
         exact_sha256: Option<String>,
     ) -> Result<Box<S3PartSink>, CloudHomeError> {
         let full = self.full_key(key);
@@ -267,7 +269,6 @@ impl S3CloudHome {
             upload_id,
             completed: Vec::new(),
             next_part_number: 1,
-            completion,
             exact_sha256,
         };
         Ok(Box::new(S3PartSink {
@@ -443,16 +444,14 @@ impl S3CloudHome {
         exact_sha256: Option<String>,
         control: &UploadControl,
     ) -> Result<(), CloudHomeError> {
-        if body.len() <= self.multipart_threshold() {
+        if body.len() <= MULTIPART_THRESHOLD as u64 {
             let data = body.collect().await?;
             return self
                 .put_create_only_raw(key, data, exact_sha256, control.clone())
                 .await
                 .map_err(S3CreateOnlyPutError::into_cloud_error);
         }
-        let sink = self
-            .open_multipart_sink(key, MultipartCompletion::CreateOnly, exact_sha256)
-            .await?;
+        let sink = self.open_multipart_sink(key, exact_sha256).await?;
         MultipartUpload::new(key, body, sink, control).run().await
     }
 
@@ -776,12 +775,6 @@ pub(crate) async fn open_cloud_home(
 /// The owner task holds the multipart state and waits for every S3 request. On
 /// normal completion or failure the caller joins it; cancellation closes the
 /// command channel and the owner waits for abort without blocking `Drop`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MultipartCompletion {
-    Mutable,
-    CreateOnly,
-}
-
 struct S3PartSink {
     commands: Option<tokio::sync::mpsc::Sender<S3MultipartCommand>>,
     owner: Option<tokio::task::JoinHandle<Result<(), CloudHomeError>>>,
@@ -807,7 +800,6 @@ struct S3MultipartOwner {
     upload_id: String,
     completed: Vec<aws_sdk_s3::types::CompletedPart>,
     next_part_number: i32,
-    completion: MultipartCompletion,
     exact_sha256: Option<String>,
 }
 
@@ -909,10 +901,7 @@ impl S3MultipartOwner {
             .key(&self.key)
             .upload_id(&self.upload_id)
             .multipart_upload(completed_upload);
-        let mut request = match self.completion {
-            MultipartCompletion::Mutable => request,
-            MultipartCompletion::CreateOnly => request.if_none_match("*"),
-        };
+        let mut request = request.if_none_match("*");
         if let Some(checksum) = self.exact_sha256.as_ref() {
             request = request
                 .checksum_sha256(checksum)
@@ -920,12 +909,10 @@ impl S3MultipartOwner {
         }
         let operation = request.send().await.map(|_| ()).map_err(|error| {
             use aws_sdk_s3::error::ProvideErrorMetadata;
-            if self.completion == MultipartCompletion::CreateOnly
-                && matches!(
-                    error.code(),
-                    Some("PreconditionFailed" | "ConditionalRequestConflict")
-                )
-            {
+            if matches!(
+                error.code(),
+                Some("PreconditionFailed" | "ConditionalRequestConflict")
+            ) {
                 CloudHomeError::AlreadyExists(self.logical_key.clone())
             } else {
                 s3_operation_error(format!("complete multipart {}", self.key), error)
@@ -1183,40 +1170,6 @@ fn put_object_error(
 impl CloudHome for S3CloudHome {
     async fn probe(&self) -> Result<(), CloudHomeError> {
         self.probe_exact_slots().await
-    }
-
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        let full = self.full_key(key);
-        let key = key.to_string();
-        let client = self.client.clone();
-        let bucket = self.bucket.clone();
-        self.runtime
-            .run_cloud(move || async move {
-                client
-                    .put_object()
-                    .bucket(&bucket)
-                    .key(&full)
-                    .body(data.into())
-                    .send()
-                    .await
-                    .map_err(|e| put_object_error(&key, e))?;
-                Ok(())
-            })
-            .await
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        _total_len: u64,
-    ) -> Result<super::BoxPartSink<'a>, CloudHomeError> {
-        Ok(self
-            .open_multipart_sink(key, MultipartCompletion::Mutable, None)
-            .await?)
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        MULTIPART_THRESHOLD as u64
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {

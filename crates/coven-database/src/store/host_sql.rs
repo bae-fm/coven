@@ -1,5 +1,5 @@
 use crate::Gates;
-use crate::{CloudOutboxRecords, Database, DbError, ExternalBlobRecords, PreparedExternalBlob};
+use crate::{Database, DbError, ExternalBlobRecords, PreparedExternalBlob};
 use coven_protocol::blob::Provenance;
 
 use coven_protocol::hlc::UpdatedAtStamper;
@@ -320,23 +320,6 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
         crate::with_coven_sql_authority(|| {
             let table = self.blob_table(reference.table())?;
             Database::validate_row_blob_ref_on(self.transaction, self.gates, table, reference)
-        })
-    }
-
-    pub fn enqueue_blob_delete(
-        &self,
-        blob: &coven_protocol::blob::RowBlobRef,
-    ) -> Result<(), DbError> {
-        crate::observe_host_sql_write();
-        let stored = blob.stored().ok_or_else(|| {
-            DbError::Message(format!(
-                "blob {:?} in {:?} has no cloud object to remove",
-                blob.blob().id,
-                blob.blob().namespace
-            ))
-        })?;
-        crate::with_coven_sql_authority(|| {
-            CloudOutboxRecords::new(self.transaction).enqueue_delete(stored, &self.stamp())
         })
     }
 

@@ -209,7 +209,6 @@ async fn restore_store_snapshot<'a>(
         .install(
             &target.store_dir,
             circle_routing_tables(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             device_id.to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -464,7 +463,6 @@ async fn restore_releases_the_destination_when_the_circle_install_fails() {
         .install(
             &target.store_dir,
             circle_routing_tables(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "crash-restore-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -514,7 +512,6 @@ async fn a_cold_restore_dropped_mid_way_removes_its_database_and_payloads() {
     let mut install = Box::pin(bootstrap.install(
         &target.store_dir,
         circle_routing_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         "abandoned-restore-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -644,7 +641,6 @@ async fn a_cold_restore_leaves_unrelated_spool_files_alone() {
         .install(
             &target.store_dir,
             circle_routing_tables(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "reuse-restore-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),

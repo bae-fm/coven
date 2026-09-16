@@ -531,6 +531,12 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
                     crate::remote_object_records::delete_remote_object_on(tx, object_id)?;
                 }
             }
+            // A make_remote publication this write was carrying loses its
+            // activation with the write. Its uploads already created cloud
+            // objects, and the drain is the only thing that can take them back
+            // out, so the transition returns to its unwind here rather than
+            // sitting in `publishing` behind a write that will never land.
+            Database::cancel_make_remote_publication_on(tx, write_id)?;
             tx.execute(
                 "UPDATE store_writes SET prepared = NULL WHERE write_id = ?1",
                 [write_id.as_str()],

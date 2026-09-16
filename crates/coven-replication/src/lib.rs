@@ -1,5 +1,5 @@
 //! Replication: the sync loop, the Store authority spine over a store's
-//! history, and the blob locality and tombstone machinery its cycles execute.
+//! history, and the blob locality machinery its cycles execute.
 //!
 //! Two subsystems sit at the root, and they name each other. [`sync`] runs
 //! cycles: it pulls the remote history, verifies it, publishes this device's

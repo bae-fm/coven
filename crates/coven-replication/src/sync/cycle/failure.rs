@@ -91,10 +91,6 @@ pub(crate) enum SyncCycleCause {
     #[error("{0}")]
     DeviceJoin(#[from] crate::sync::store::DeviceJoinError),
     #[error("{0}")]
-    TombstoneDrain(#[from] crate::blob::delete::TombstoneDrainError),
-    #[error("{0}")]
-    TombstoneGc(#[from] crate::sync::store::commit_publication::operation::TombstoneGcError),
-    #[error("{0}")]
     UploadFailures(#[from] crate::blob::UploadFailures),
     #[error("{0}")]
     WriterAuthorization(

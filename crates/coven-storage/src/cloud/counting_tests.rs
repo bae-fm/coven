@@ -2,7 +2,7 @@
 
 use super::counting::CountingCloudHome;
 use super::test_utils::InMemoryCloudHome;
-use super::{BlobBody, CloudHome, ExactCloudHome, UploadProgress};
+use super::{create_exact_bytes, CloudHome, ExactCloudHome, UploadProgress};
 use coven_foundation::stage_timing::{ProviderRequests, StageTimings};
 use std::sync::Arc;
 
@@ -38,11 +38,16 @@ fn counts(timings: &StageTimings) -> String {
 #[tokio::test]
 async fn a_join_choreography_reports_its_operations_by_stage() {
     let (home, requests) = counting_home();
-    home.put_object("root", b"root".to_vec()).await.unwrap();
-    home.put_object("founder", b"founder".to_vec())
-        .await
-        .unwrap();
-    home.put_object("snapshot", vec![0_u8; 64]).await.unwrap();
+    for (key, bytes) in [
+        ("root", b"root".to_vec()),
+        ("founder", b"founder".to_vec()),
+        ("snapshot", vec![0_u8; 64]),
+    ] {
+        let slot = home.allocate_slot(key).await.unwrap();
+        create_exact_bytes(home.as_ref(), &slot, &bytes, &no_progress())
+            .await
+            .unwrap();
+    }
     let mut timings = StageTimings::counting("device join", Some(requests));
 
     // Pin the Store root: one read of the root, one of the founder behind it.
@@ -99,26 +104,6 @@ async fn the_run_total_exceeds_its_stages_by_what_they_did_not_name() {
 
     assert_eq!(counts(&timings), "pin the Store root 1req");
     assert_eq!(requests.issued(), 2, "the stray read is still the home's");
-}
-
-/// A getter is not a request. `multipart_threshold` decides how a write will be
-/// shaped and touches no provider, so counting it would inflate every upload
-/// stage by one and make the budget unreadable.
-#[tokio::test]
-async fn asking_the_home_about_itself_costs_nothing() {
-    let (home, requests) = counting_home();
-
-    assert!(home.multipart_threshold() > 0);
-    assert_eq!(requests.issued(), 0, "a getter is not a request");
-
-    home.write("blob", BlobBody::from_bytes(vec![0_u8; 8]), &no_progress())
-        .await
-        .unwrap();
-    assert_eq!(
-        requests.issued(),
-        1,
-        "one write is one operation however the provider shapes it underneath",
-    );
 }
 
 /// The slot side of the home counts too. Both traits cross the same provider

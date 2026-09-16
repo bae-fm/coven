@@ -324,12 +324,6 @@ impl StoreBlobs {
         self.database.external_blob(table, row_id).await
     }
 
-    pub(crate) async fn queued_deletes(
-        &self,
-    ) -> Result<Vec<crate::QueuedDelete>, coven_database::DbError> {
-        self.database.queued_deletes().await
-    }
-
     pub(crate) async fn make_remote_progress(
         &self,
         root_table: &str,

@@ -714,7 +714,6 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     "make_local root {root_table:?}/{root_id:?} changed while its blobs were materialized"
                 )));
             }
-            let cloud_outbox = CloudOutboxRecords::new(transaction);
             let external_blobs = ExternalBlobRecords::new(transaction);
             for (local, materialized) in local_rows.iter().zip(&materialized) {
                 if local.table() != materialized.remote.table()
@@ -737,7 +736,17 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 if let Some(path) = &materialized.destination {
                     external_blobs.register(local, path)?;
                 }
-                cloud_outbox.enqueue_delete(&materialized.stored, &stamp)?;
+                // The row is Local now and its cloud object is released. What
+                // retires it is accepted reclaim, which discovers orphans out of
+                // the accepted blob inventory once a snapshot shows nothing owns
+                // them — so the only thing owed here is the proof that this
+                // object is in that inventory. A root whose make_remote has not
+                // been accepted is refused before any of this runs; the check
+                // stays because that refusal is a different layer.
+                crate::blob_records::require_accepted_stored_blob_on(
+                    transaction,
+                    &materialized.stored,
+                )?;
             }
             Ok(())
         })

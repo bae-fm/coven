@@ -156,7 +156,6 @@ async fn assert_device_join_publication_hold(prerequisite: bool) {
         Database::open_read_only(
             &joining_directory.db_path(),
             tables,
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             attempt.to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),

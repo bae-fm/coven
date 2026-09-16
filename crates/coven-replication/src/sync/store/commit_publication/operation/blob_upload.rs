@@ -8,7 +8,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use tracing::warn;
 
 use coven_database::DbError;
-use coven_database::{OutboxEntry, OutboxOperation, OutboxUploadState};
+use coven_database::{OutboxEntry, OutboxUpload, OutboxUploadState};
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use coven_protocol::blob::{BlobTransitionObserver, RowBlobRef};
@@ -107,14 +107,11 @@ impl AuthorizedBlobUploadLane<'_> {
         let mut head_root = None;
         let mut pending = Vec::new();
         for entry in uploads {
-            let OutboxOperation::Upload {
+            let OutboxUpload {
                 root_table,
                 root_id,
                 ..
-            } = &entry.operation
-            else {
-                unreachable!("pending_blob_uploads returns only Upload rows");
-            };
+            } = &entry.upload;
             let root = (root_table.clone(), root_id.clone());
             let publishing = if let Some(publishing) = publishing_by_root.get(&root) {
                 *publishing
@@ -423,18 +420,14 @@ enum EntryOutcome {
 
 impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, 'authority> {
     async fn run(mut self) -> EntryOutcome {
-        let OutboxOperation::Upload {
+        let OutboxUpload {
             root_table,
             root_id,
             row,
             source_path,
             retain_pinned,
             state,
-            ..
-        } = self.entry.operation.clone()
-        else {
-            unreachable!("pending_blob_uploads returns only Upload rows");
-        };
+        } = self.entry.upload.clone();
         match self
             .writer
             .blob_upload_intent_state(&root_table, &root_id)
@@ -554,13 +547,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             }
         };
 
-        if matches!(
-            &self.entry.operation,
-            OutboxOperation::Upload {
-                state: OutboxUploadState::Prepared { .. },
-                ..
-            }
-        ) {
+        if matches!(&self.entry.upload.state, OutboxUploadState::Prepared { .. }) {
             if let Some(observer) = self.observer {
                 observer.on_blob_upload_started(&row).await;
             }
@@ -810,28 +797,23 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
     }
 
     fn set_state(&mut self, next: OutboxUploadState) {
-        let OutboxOperation::Upload { state, .. } = &mut self.entry.operation else {
-            unreachable!("upload state can only be set on an upload entry");
-        };
-        *state = next;
+        self.entry.upload.state = next;
     }
 
     fn label(&self) -> String {
-        match &self.entry.operation {
-            OutboxOperation::Upload { row, state, .. } => match state {
-                OutboxUploadState::Pending => format!(
-                    "{}/{}/{}@{}",
-                    row.table(),
-                    row.row_id(),
-                    row.column(),
-                    row.row_stamp()
-                ),
-                OutboxUploadState::Prepared { stored, .. }
-                | OutboxUploadState::Created { stored, .. } => {
-                    stored.object().slot().logical_key().to_string()
-                }
-            },
-            OutboxOperation::Delete { stored } => stored.object().slot().logical_key().to_string(),
+        let OutboxUpload { row, state, .. } = &self.entry.upload;
+        match state {
+            OutboxUploadState::Pending => format!(
+                "{}/{}/{}@{}",
+                row.table(),
+                row.row_id(),
+                row.column(),
+                row.row_stamp()
+            ),
+            OutboxUploadState::Prepared { stored, .. }
+            | OutboxUploadState::Created { stored, .. } => {
+                stored.object().slot().logical_key().to_string()
+            }
         }
     }
 }

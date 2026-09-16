@@ -54,9 +54,9 @@ pub struct SyncCycleResult {
     /// waiting the idle interval.
     pub resume_drain_promptly: bool,
     /// Set when an exact local rotation operation or a committed peer rotation
-    /// still blocks sealing. While set, this cycle sealed no changeset, blob,
-    /// tombstone, or snapshot. The state identifies whether the blocker is a
-    /// candidate, a local committed removal, a peer commit, or both.
+    /// still blocks sealing. While set, this cycle sealed no changeset, blob, or
+    /// snapshot. The state identifies whether the blocker is a candidate, a
+    /// local committed removal, a peer commit, or both.
     pub rotation_pending: Option<RotationPending>,
 }
 
@@ -226,12 +226,11 @@ impl AuthorizedSyncCycle<'_, '_> {
         // once, right after the refresh that is the one place this cycle could adopt
         // a rotation, and used below to skip every write that would otherwise seal
         // new data under a generation the store has already superseded: the blob
-        // upload drain, Store write preparation, the tombstone
-        // write drain, both changeset-push paths, and the snapshot. Pull, local writes,
-        // and delete-only tombstone GC are unaffected — the gate
-        // is on sealing for the cloud, not on using the store. An unadoptable
-        // rotation is marked pending by the refresh and pauses exactly this set; it
-        // never aborts the cycle.
+        // upload drain, Store write preparation, both changeset-push paths, and the
+        // snapshot. Pull and local writes are unaffected — the gate is on sealing
+        // for the cloud, not on using the store. An unadoptable rotation is marked
+        // pending by the refresh and pauses exactly this set; it never aborts the
+        // cycle.
         let rotation_pending = self
             .pending_rotation
             .check(self.cipher.current_generation())
@@ -242,33 +241,6 @@ impl AuthorizedSyncCycle<'_, '_> {
                 live_generation = pending.live_generation,
                 "sync paused: store-key rotation work is incomplete; sealing nothing new for the cloud"
             );
-        }
-
-        if rotation_pending.is_none() {
-            let drained = timings
-                .stage(
-                    "drain tombstones",
-                    self.authorization.drain_tombstones(self.clock),
-                )
-                .await
-                .map_err(|error| {
-                    SyncCycleFailure::operation("drain queued blob tombstones", error)
-                })?;
-            if drained > 0 {
-                info!(count = drained, "Drained blob tombstones");
-            }
-        }
-        let reclaimed = timings
-            .stage(
-                "collect tombstones",
-                self.authorization.gc_tombstones(self.clock),
-            )
-            .await
-            .map_err(|error| {
-                SyncCycleFailure::operation("garbage-collect blob tombstones", error)
-            })?;
-        if reclaimed > 0 {
-            info!(count = reclaimed, "Reclaimed tombstoned blobs");
         }
 
         let local_seq = timings

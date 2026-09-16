@@ -25,7 +25,6 @@ impl CircleSnapshotFixture {
                 coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .scoped_by("audience")],
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             local_device_id.to_string(),
             Arc::new(coven_foundation::clock::SystemClock),

@@ -393,7 +393,7 @@ async fn staged_admission_with_guard(
             crate::sync::test_helpers::copy_payload_files(&fixture.owner_db_store_dir, &directory);
             let reopened = coven_database::Database::open_synthetic_for_test(
                 &directory.db_path(), directory.clone(), crate::sync::test_helpers::test_synced_tables(),
-                coven_protocol::blob::BLOB_TOMBSTONE_GRACE, coven_protocol::blob::TransferLimits::one_at_a_time(),
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
                 "test-device".into(), std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
             ).expect("reopen the retained admission from its database and payload files");

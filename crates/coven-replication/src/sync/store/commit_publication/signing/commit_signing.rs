@@ -264,19 +264,6 @@ impl LocalStoreWriter {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn drain_tombstones(
-        &self,
-        database: &coven_database::StoreDatabase,
-        storage: &dyn coven_storage::CloudSyncObjectStorage,
-        store_id: &str,
-        clock: &dyn coven_foundation::clock::Clock,
-    ) -> Result<usize, crate::blob::delete::TombstoneDrainError> {
-        crate::blob::delete::TombstoneDrain::new(database, storage, store_id, &self.identity, clock)
-            .drain()
-            .await
-    }
-
     pub(crate) fn sign_operation_batch(
         &self,
         write_id: coven_protocol::write::WriteId,

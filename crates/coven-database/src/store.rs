@@ -64,11 +64,10 @@ fn cache_budget_state_key(namespace: &str) -> String {
 }
 
 pub use blob_outbox::{
-    CloudOutboxSnapshot, MakeRemoteProgress, QueuedDelete, QueuedMakeRemote, QueuedUpload,
-    QueuedUploadPhase,
+    CloudOutboxSnapshot, MakeRemoteProgress, QueuedMakeRemote, QueuedUpload, QueuedUploadPhase,
 };
 pub use blob_outbox::{
-    OutboxEntry, OutboxFailure, OutboxFailureKind, OutboxOperation, OutboxUploadState,
+    OutboxEntry, OutboxFailure, OutboxFailureKind, OutboxUpload, OutboxUploadState,
 };
 pub use blob_transitions::{
     BlobTransitionRoot, MakeRemoteAdmission, MaterializedLocalBlob, PostUpload,

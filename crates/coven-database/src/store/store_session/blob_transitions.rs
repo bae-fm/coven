@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::{CloudOutboxRecords, MakeRemoteIntentState};
-use crate::{OutboxEntry, OutboxOperation, OutboxUploadState};
+use crate::{OutboxEntry, OutboxUpload, OutboxUploadState};
 use coven_protocol::blob::RowBlobRef;
 
 pub enum PostUpload {
@@ -226,28 +226,36 @@ impl StoreSession<'_> {
             &root_table,
             &root_id,
         )?;
-        let entries = CloudOutboxRecords::new(connection).upload_entries_for_root(
+        let outbox = CloudOutboxRecords::new(connection);
+        let entries = outbox.upload_entries_for_root(
             self.gates,
             self.synced_tables,
             &root_table,
             &root_id,
         )?;
-        if rows.len() != entries.len() {
-            return Err(DbError::Message(format!(
-                "make_remote root {root_table:?}/{root_id:?} has {} blob rows but {} exact upload journals",
-                rows.len(),
-                entries.len()
-            )));
+        // The transition publishes exactly the row versions it journaled. Once
+        // the root's blob rows are no longer that set — one replaced, removed or
+        // added under it — those uploads have nothing left to publish them, and
+        // the objects they created would be stranded in the cloud with no owner.
+        // So the transition ends the only way it still can: the intent enters
+        // its unwind and the drain takes each created object back out.
+        let journaled_row_is_current = rows.iter().any(|current| {
+            current.table() == row.table()
+                && current.row_id() == row.row_id()
+                && current.column() == row.column()
+                && current.row_stamp() == row.row_stamp()
+        });
+        if !journaled_row_is_current
+            || rows.len() != entries.len()
+            || outbox.upload_entry_count_for_root(&root_table, &root_id)? != rows.len()
+        {
+            Database::cancel_make_remote_intent_on(connection, &root_table, &root_id)?;
+            return Ok(PostUpload::Cancelled);
         }
-        if !entries.iter().all(|candidate| {
-            matches!(
-                candidate.operation,
-                OutboxOperation::Upload {
-                    state: OutboxUploadState::Created { .. },
-                    ..
-                }
-            )
-        }) {
+        if !entries
+            .iter()
+            .all(|candidate| matches!(candidate.upload.state, OutboxUploadState::Created { .. }))
+        {
             return Ok(PostUpload::Waiting);
         }
         if !entries.iter().any(|candidate| candidate == &entry) {
@@ -326,26 +334,7 @@ impl StoreSession<'_> {
         let transaction = self.conn.unchecked_transaction()?;
         match Database::make_remote_intent_state(&transaction, root_table, root_id)? {
             Some(MakeRemoteIntentState::Uploading) => {
-                let updated = transaction
-                    .execute(
-                        "UPDATE blob_make_remote_intents SET state = 'cancelling'
-                         WHERE root_table = ?1 AND root_id = ?2 AND state = 'uploading'",
-                        (root_table, root_id),
-                    )
-                    .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(format!(
-                        "make_remote intent {root_table:?}/{root_id:?} cannot enter cancellation"
-                    )));
-                }
-                transaction
-                    .execute(
-                        "UPDATE cloud_outbox
-                         SET attempt_count = 0, last_error = NULL, last_attempt_at = NULL
-                         WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
-                        (root_table, root_id),
-                    )
-                    .map_err(DbError::from)?;
+                Database::cancel_make_remote_intent_on(&transaction, root_table, root_id)?;
             }
             Some(MakeRemoteIntentState::Cancelling) => {}
             Some(MakeRemoteIntentState::Publishing(write_id)) => {
@@ -448,18 +437,13 @@ impl StoreDatabase {
         stamp: String,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<PostUpload, DbError> {
-        let OutboxOperation::Upload {
+        let OutboxUpload {
             root_table,
             root_id,
             row,
             state,
             ..
-        } = &entry.operation
-        else {
-            return Err(DbError::Message(
-                "make_remote finalizer received a non-upload outbox entry".to_string(),
-            ));
-        };
+        } = &entry.upload;
         if !matches!(state, OutboxUploadState::Created { .. }) {
             return Err(DbError::Message(
                 "make_remote finalizer requires a Created exact upload".to_string(),

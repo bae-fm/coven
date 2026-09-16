@@ -14,7 +14,6 @@ fn open_clock_database(
         path,
         directory,
         test_synced_tables(),
-        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         hlc.clone(),
         &test_migrations(),

@@ -52,9 +52,8 @@ pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
 pub use coven_database::prepare_external_blob;
 pub use coven_database::{
     BlobFileFailure, BlobFileFailures, CloudOutboxSnapshot, DbError, ExternalBlob,
-    MakeRemoteProgress, OutboxFailure, OutboxFailureKind, PreparedExternalBlob, QueuedDelete,
-    QueuedMakeRemote, QueuedUpload, QueuedUploadPhase, SqlContext, SqlReadContext,
-    StuckReclaimOperation, WriteBatch,
+    MakeRemoteProgress, OutboxFailure, OutboxFailureKind, PreparedExternalBlob, QueuedMakeRemote,
+    QueuedUpload, QueuedUploadPhase, SqlContext, SqlReadContext, StuckReclaimOperation, WriteBatch,
 };
 pub use coven_database::{CovenMigrationError, CovenMigrationPolicy};
 pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};
