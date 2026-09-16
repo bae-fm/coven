@@ -43,15 +43,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
     }
 
-    /// Every provider-administrator grant this device itself holds.
-    fn provider_admin_grants(
-        &self,
-    ) -> std::collections::BTreeMap<ProviderAdminGrantId, ProviderAdminGrantRecord> {
-        self.local_writer.provider_administrator_grants(
-            self.membership.resolved().provider_admin.combined_state(),
-        )
-    }
-
     fn join_history(&mut self) -> DeviceJoinHistory<'_, 'storage> {
         self.writer.join_history()
     }
@@ -248,14 +239,14 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .active_owner_grant(&owner_pubkey)
             .ok_or(DeviceJoinError::OwnerAuthorityRequired)?;
         // The device that offers the join is the device that will admit it, so
-        // the offer names a provider-administrator grant this device holds. A
-        // device holding none cannot grant the joiner storage access and so
-        // cannot make the offer at all.
-        let provider_admin = self
-            .provider_admin_grants()
-            .into_values()
-            .next()
-            .ok_or(DeviceJoinError::ProviderAdministratorRequired)?;
+        // only this Store's provider administrator can make the offer: a device
+        // that is not the administrator cannot grant the joiner storage access.
+        if !self
+            .local_writer
+            .is_provider_administrator(&self.membership)
+        {
+            return Err(DeviceJoinError::ProviderAdministratorRequired);
+        }
         let root = self.root.clone();
         let binding = self.storage.provider_binding().await?;
         let attempt_id = self.database.new_device_join_attempt_id();
@@ -268,7 +259,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             root,
             binding.store,
             owner_grant,
-            provider_admin,
         )?;
         self.database
             .begin_device_join(DeviceJoinJournalRecord::owner_offered(offer.clone()))
@@ -289,16 +279,20 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
     }
 
-    /// The record for a grant this device holds. A grant held by some other
-    /// device is not something this device can admit under: one party answers
-    /// the access request, prepares the grant and signs the approval.
-    fn resolve_provider_admin(
-        &self,
-        grant_id: &ProviderAdminGrantId,
-    ) -> Result<ProviderAdminGrantRecord, DeviceJoinError> {
-        self.provider_admin_grants()
-            .remove(grant_id)
-            .ok_or(DeviceJoinError::ProviderAdministratorRequired)
+    /// The offer names the device that will admit the join: one party answers
+    /// the access request, creates the provider authority and signs the
+    /// approval, and that party is this Store's provider administrator.
+    /// Administration held by some other device is not something this device
+    /// can admit under.
+    fn require_local_administration(&self, offer: &DeviceJoinOffer) -> Result<(), DeviceJoinError> {
+        if self.membership.provider_administrator() != &offer.owner_registration
+            || !self
+                .local_writer
+                .is_authored_by_registration(&offer.owner_registration)
+        {
+            return Err(DeviceJoinError::ProviderAdministratorRequired);
+        }
+        Ok(())
     }
 
     async fn validate_registration_request(
@@ -316,10 +310,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
-        let provider_admin = self.resolve_provider_admin(&offer.provider_admin.grant_id)?;
-        if provider_admin != *offer.provider_admin {
-            return Err(DeviceJoinError::ProviderAdministratorRequired);
-        }
+        self.require_local_administration(&offer)?;
         self.verify_device_admission_approval(request.approval())?;
         if !self.local_writer.is_current_owner(&self.membership) {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
@@ -583,13 +574,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     &readiness.proof.initial_ack,
                     &ack,
                 )?;
-                let provider_admin = self.resolve_provider_admin(&offer.provider_admin.grant_id)?;
-                if &provider_admin != offer.provider_admin.as_ref() {
-                    return Err(DeviceJoinError::ProviderAdministratorRequired);
-                }
+                self.require_local_administration(offer.as_ref())?;
                 let administrator = self
                     .join_history()
-                    .load_registration(&provider_admin.administrator)
+                    .load_registration(&offer.owner_registration)
                     .await?
                     .value;
                 let response_slot = match request.response() {

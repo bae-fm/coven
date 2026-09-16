@@ -16,20 +16,6 @@ pub(crate) fn predecessor_verifies_owner(
         && predecessor.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
 }
 
-pub(super) fn predecessor_provider_admin_state(
-    predecessor: &MembershipChain,
-) -> &provider::ProviderAdminState {
-    predecessor.resolved().provider_admin.combined_state()
-}
-
-pub(super) fn predecessor_verifies_provider_administrator_grant(
-    predecessor: &MembershipChain,
-    grant_id: &provider::ProviderAdminGrantId,
-    executor: &StoreDeviceRegistrationRef,
-) -> bool {
-    predecessor_provider_admin_state(predecessor).authorizes(grant_id, executor)
-}
-
 /// What a search of a commit's predecessor history found.
 ///
 /// An installed baseline is what separates the first two answers. A device that

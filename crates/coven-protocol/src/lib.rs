@@ -54,9 +54,8 @@ pub use circle::{
 pub use membership::{MemberInfo, MemberRole, MembershipCoord};
 pub use provider::{
     CloudKitAcceptedShare, CrossPrincipalProbeReceipt, ExactSlotProbeReceipt,
-    ProviderAccessLocator, ProviderAccessWithdrawal, ProviderAdminChange, ProviderAdminGrantId,
-    ProviderAdminGrantRecord, ProviderAdminMembershipChange, ProviderAdminState,
-    ProviderCapabilityProof, ProviderProbeId,
+    ProviderAccessLocator, ProviderAccessWithdrawal, ProviderAdminGrantId, ProviderCapabilityProof,
+    ProviderProbeId,
 };
 pub use store_commit::{
     CommitFrontier, DeviceJoinAttemptId, ObjectHash, StoreBatchCommitRef, StoreCommitCoord,

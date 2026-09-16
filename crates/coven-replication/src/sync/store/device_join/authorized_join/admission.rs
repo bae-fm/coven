@@ -61,22 +61,13 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         request: DeviceProviderAccessRequest,
         access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
     ) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
-        let provider_admin = self.resolve_provider_admin(&request.offer.provider_admin.grant_id)?;
-        if provider_admin != *request.offer.provider_admin {
-            return Err(DeviceJoinError::OfferMismatch);
-        }
+        self.require_local_administration(&request.offer)?;
         let owner = self
             .join_history()
             .load_registration(&request.offer.owner_registration)
             .await?
             .value;
         request.verify(&owner)?;
-        if !self
-            .local_writer
-            .is_authored_by_registration(&provider_admin.administrator)
-        {
-            return Err(DeviceJoinError::ProviderAdministratorRequired);
-        }
         let database = self.database.clone();
         let journal = self.journal(request.offer.attempt_id);
         let current = journal.current().await?;
@@ -91,7 +82,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }
             _ => current,
         };
-        if provider_admin.provider == request.peer_provider {
+        if request.offer.administrator_binding == request.peer_provider {
             return match &*durable.progress {
                 DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ApprovalPrepared(approval)) => {
                     Ok(approval.clone())
@@ -188,11 +179,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         bootstrap: ProvisionalDeviceBootstrap,
     ) -> Result<ProviderReadyDeviceBootstrap, DeviceJoinError> {
         let offer = &bootstrap.request.approval().request.offer;
-        if &self.resolve_provider_admin(&offer.provider_admin.grant_id)?
-            != offer.provider_admin.as_ref()
-        {
-            return Err(DeviceJoinError::OfferMismatch);
-        }
+        self.require_local_administration(offer)?;
         let owner = self
             .join_history()
             .load_registration(&offer.owner_registration)
@@ -303,10 +290,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let offer = &bootstrap.bootstrap.request.approval().request.offer;
-        let provider_admin = self.resolve_provider_admin(&offer.provider_admin.grant_id)?;
-        if &provider_admin != offer.provider_admin.as_ref() {
-            return Err(DeviceJoinError::ProviderAdministratorRequired);
-        }
+        self.require_local_administration(offer)?;
         let receipt = match (
             &bootstrap.bootstrap.request.approval().admission,
             &bootstrap.bootstrap.request.response(),

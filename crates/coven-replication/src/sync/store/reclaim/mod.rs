@@ -318,12 +318,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             Ok(claim) => {
                 let snapshot = claim.reference();
                 let plan = self.writer.prepare_plan().await?;
-                let resolved = plan.membership().resolved();
-                if plan.owner_grant().is_some()
-                    && plan
-                        .effective_provider_admin_grant(resolved.provider_admin.combined_state())
-                        .is_some()
-                {
+                if plan.owner_grant().is_some() && plan.is_provider_administrator() {
                     artifacts_deleted = self.retire_snapshot_artifacts(&claim, &plan).await?;
                 } else {
                     tracing::debug!(

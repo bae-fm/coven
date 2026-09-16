@@ -983,7 +983,7 @@ impl<'attempt> AttemptTransport<'attempt> {
                         self.approve_access_request(&request, policy),
                     )
                     .await?;
-                    if request.offer.provider_admin.provider == request.peer_provider {
+                    if request.offer.administrator_binding == request.peer_provider {
                         on_progress(AdmittingDeviceJoinProgress::RegisteringDevice);
                         let join = self
                             .step(

@@ -18,8 +18,7 @@ pub(super) fn validate_membership_retirement_barriers(
             StoreAuthorityChange::Founder { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin => continue,
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => continue,
         };
         if retired != &barriers.keys().cloned().collect::<BTreeSet<_>>() {
             let barrier_grants = barriers.keys().cloned().collect::<BTreeSet<_>>();
@@ -89,8 +88,7 @@ pub(super) fn validate_membership_sealed_keys(
             StoreAuthorityChange::Founder { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin => continue,
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => continue,
         };
         let causal_generation = membership_causal_generation(entries, &entry.dependencies);
         if causal_generation.checked_add(1) != Some(rotation_generation)
@@ -137,8 +135,7 @@ pub(super) fn membership_causal_generation(
             | StoreAuthorityChange::SetMember { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin => None,
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => None,
         })
         .max()
         .unwrap_or(coven_keys::encryption::INITIAL_KEY_GENERATION)
@@ -152,47 +149,6 @@ pub(super) fn reduce_store_membership(
         CausalGrantStatus::Resolved(reduced) => Ok(reduced),
         CausalGrantStatus::Conflict(_) => Err(MembershipError::Conflict),
     }
-}
-
-pub(super) fn validate_provider_admin_controls(
-    entries: &[MembershipEntry],
-) -> Result<(), MembershipError> {
-    for (index, entry) in entries.iter().enumerate() {
-        let Some(crate::provider::ProviderAdminMembershipChange { owner_barriers, .. }) =
-            &entry.provider_admin
-        else {
-            continue;
-        };
-        let included = causal_grants::history_closure(entries, &entry.dependencies);
-        let causal_past = entries
-            .iter()
-            .filter(|candidate| included.contains(&candidate.coord()))
-            .cloned()
-            .collect::<Vec<_>>();
-        let reduced = reduce_store_membership(&causal_past)?;
-        let expected = reduced
-            .grants
-            .iter()
-            .filter(|(_, state)| {
-                state
-                    .active()
-                    .is_some_and(|record| record.assignment.is_owner())
-            })
-            .map(|(grant_id, _)| {
-                let observed_streams = entry
-                    .dependencies
-                    .iter()
-                    .filter(|coord| coord.author_owner_grant == *grant_id)
-                    .cloned()
-                    .collect();
-                (grant_id.clone(), OwnerStreamBarrier { observed_streams })
-            })
-            .collect::<BTreeMap<_, _>>();
-        if *owner_barriers != expected {
-            return Err(MembershipError::InvalidProviderAdminChange(index));
-        }
-    }
-    Ok(())
 }
 
 pub(super) fn normalize_store_membership(
@@ -268,8 +224,7 @@ pub(super) fn normalize_store_membership(
                         })
                         .collect(),
                 },
-                StoreAuthorityChange::ProviderAdmin
-                | StoreAuthorityChange::DeviceRegistrationActivation { .. }
+                StoreAuthorityChange::DeviceRegistrationActivation { .. }
                 | StoreAuthorityChange::DeviceExclusionProposal { .. }
                 | StoreAuthorityChange::DeviceExclusionOutcome { .. } => CausalChange::Control,
             };
@@ -285,7 +240,7 @@ pub(super) fn normalize_store_membership(
 
 pub(super) fn resolved_store_membership(
     reduced: &causal_grants::ReducedGrants<MembershipCoord, StoreAssignment>,
-    provider_admin: crate::provider::ProviderAdminResolution,
+    provider_administrator: StoreDeviceRegistrationRef,
     entries: &[MembershipEntry],
 ) -> Result<ResolvedStoreMembership, MembershipError> {
     let grants = reduced
@@ -295,10 +250,10 @@ pub(super) fn resolved_store_membership(
             Ok((grant.clone(), map_store_grant_state(grant, state, entries)?))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let state_hash = store_membership_state_hash(&grants, &provider_admin);
+    let state_hash = store_membership_state_hash(&grants, &provider_administrator);
     Ok(ResolvedStoreMembership {
         grants,
-        provider_admin,
+        provider_administrator,
         state_hash,
     })
 }
@@ -349,8 +304,7 @@ pub(super) fn membership_retirement_barrier(
         StoreAuthorityChange::Founder { .. }
         | StoreAuthorityChange::DeviceRegistrationActivation { .. }
         | StoreAuthorityChange::DeviceExclusionProposal { .. }
-        | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-        | StoreAuthorityChange::ProviderAdmin => return None,
+        | StoreAuthorityChange::DeviceExclusionOutcome { .. } => return None,
     };
     barriers.get(grant).cloned()
 }
@@ -360,7 +314,7 @@ pub(super) fn store_membership_state_hash(
         MembershipGrantId,
         GrantState<MembershipGrantRecord, MembershipGrantRetirement>,
     >,
-    provider_admin: &crate::provider::ProviderAdminResolution,
+    provider_administrator: &StoreDeviceRegistrationRef,
 ) -> ObjectHash {
     #[derive(Serialize)]
     struct State<'a> {
@@ -369,13 +323,13 @@ pub(super) fn store_membership_state_hash(
             MembershipGrantId,
             GrantState<MembershipGrantRecord, MembershipGrantRetirement>,
         >,
-        provider_admin: &'a crate::provider::ProviderAdminResolution,
+        provider_administrator: &'a StoreDeviceRegistrationRef,
     }
     ObjectHash::digest(
         &serde_json::to_vec(&State {
             domain: "coven.store-membership-state.v2",
             grants,
-            provider_admin,
+            provider_administrator,
         })
         .expect("Store membership state serialization cannot fail"),
     )

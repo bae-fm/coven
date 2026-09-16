@@ -80,7 +80,6 @@ pub struct CrossPrincipalChallengeContext {
     pub root: StoreRootRef,
     pub attempt_id: DeviceJoinAttemptId,
     pub access_request_hash: ObjectHash,
-    pub provider_admin_grant: ProviderAdminGrantId,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub member_pubkey: String,
     pub administrator_binding: ProviderDeviceBinding,

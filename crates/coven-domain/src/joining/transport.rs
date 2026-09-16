@@ -520,7 +520,7 @@ impl DeviceJoinClient {
                 }
                 Some(DeviceJoinStatus::AwaitingProviderAdmission { request }) => {
                     let same_principal =
-                        request.offer.provider_admin.provider == request.peer_provider;
+                        request.offer.administrator_binding == request.peer_provider;
                     publish_once(
                         transport,
                         &mut published,

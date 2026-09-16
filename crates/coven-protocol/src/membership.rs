@@ -169,7 +169,6 @@ pub enum StoreAuthorityChange {
     DeviceExclusionOutcome {
         outcome: super::store_commit::StoreDeviceExclusionOutcomeRef,
     },
-    ProviderAdmin,
 }
 
 impl StoreAuthorityChange {
@@ -180,8 +179,7 @@ impl StoreAuthorityChange {
             Self::RemoveMember { .. }
             | Self::DeviceRegistrationActivation { .. }
             | Self::DeviceExclusionProposal { .. }
-            | Self::DeviceExclusionOutcome { .. }
-            | Self::ProviderAdmin => None,
+            | Self::DeviceExclusionOutcome { .. } => None,
         }
     }
 }
@@ -263,12 +261,6 @@ impl CausalAssignment for StoreAssignment {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
-pub struct OwnerStreamBarrier {
-    pub observed_streams: Vec<MembershipCoord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(deny_unknown_fields)]
 pub struct StoreGrantStreamBarrier {
     pub observed_streams: Vec<MembershipCoord>,
 }
@@ -320,8 +312,6 @@ pub struct MembershipEntryBody {
     pub dependencies: Vec<MembershipCoord>,
     pub created_at: String,
     pub change: StoreAuthorityChange,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_admin: Option<super::provider::ProviderAdminMembershipChange>,
 }
 
 impl SignedBody for MembershipEntryBody {
@@ -565,16 +555,12 @@ pub enum MembershipError {
     PrunedAuthorStream,
     #[error("membership author stream exhausted its sequence space")]
     SequenceExhausted,
-    #[error("provider administrator control entry {0} is invalid")]
-    InvalidProviderAdminChange(usize),
     #[error("membership graph contains conflicting authority")]
     Conflict,
     #[error("membership entry {coord:?} was prepared against different accepted authority")]
     PublicationPredecessorChanged { coord: Box<MembershipCoord> },
     #[error("membership is missing its exact signed heads")]
     MissingExactHeads,
-    #[error("provider administrator history is invalid: {0}")]
-    ProviderAdmin(#[from] super::provider::ProviderAdminReducerError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -599,7 +585,9 @@ pub struct MembershipGrantRetirement {
 pub struct ResolvedStoreMembership {
     pub grants:
         BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
-    pub provider_admin: super::provider::ProviderAdminResolution,
+    /// The registration that administers provider access at this state: the
+    /// Store root's own administrator.
+    pub provider_administrator: StoreDeviceRegistrationRef,
     pub state_hash: ObjectHash,
 }
 
@@ -622,52 +610,29 @@ pub struct MembershipChain {
     included: BTreeSet<MembershipCoord>,
     resolved: ResolvedStoreMembership,
     head_refs: Vec<MembershipHeadRef>,
-    provider_admin_genesis: super::provider::ProviderAdminState,
+    /// The Store root's provider administrator: the founder registration the
+    /// signed root descriptor binds its founder grant to.
+    root_administrator: StoreDeviceRegistrationRef,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-fn test_provider_admin_genesis(
+fn test_root_administrator(
     entries: &[MembershipEntry],
-) -> Result<super::provider::ProviderAdminState, MembershipError> {
+) -> Result<StoreDeviceRegistrationRef, MembershipError> {
     let founder = entries
         .iter()
-        .find_map(|entry| match &entry.change {
-            StoreAuthorityChange::Founder { provider_admin, .. } => Some((entry, provider_admin)),
-            _ => None,
-        })
+        .find(|entry| matches!(entry.change, StoreAuthorityChange::Founder { .. }))
         .ok_or(MembershipError::InvalidFounder)?;
-    let root_bytes = founder.0.store_id.as_bytes();
-    let root = StoreRootRef {
-        store_root_id: ObjectHash::digest(
-            format!("{} test root id", founder.0.store_id).as_bytes(),
-        ),
-        store_root_hash: ObjectHash::digest(root_bytes),
-        object: ExactObjectRef::new(
-            crate::objects::ObjectSlot::logical(format!(
-                "store-v1/test/{}/root.json",
-                founder.0.store_id
-            ))
-            .expect("valid test root slot"),
-            root_bytes.len() as u64,
-            ObjectHash::digest(root_bytes),
-        ),
-    };
-    let registration: StoreDeviceRegistrationRef =
-        serde_json::from_value(serde_json::json!({
-            "device_id": ObjectHash::digest(format!("{} founder device", founder.0.store_id).as_bytes()),
-            "registration_hash": ObjectHash::digest(format!("{} founder registration", founder.0.store_id).as_bytes()),
-            "object": {
-                "slot": {"logical_key": format!("store-v1/test/{}/registration.json", founder.0.store_id), "physical": {"kind": "logical_key"}},
-                "stored_size": 1,
-                "stored_hash": ObjectHash::digest(format!("{} founder registration object", founder.0.store_id).as_bytes()),
-            }
-        }))
-        .expect("valid test founder registration reference");
-    Ok(super::provider::ProviderAdminState::founder_from_root(
-        root,
-        registration,
-        founder.1,
-    ))
+    serde_json::from_value(serde_json::json!({
+        "device_id": ObjectHash::digest(format!("{} founder device", founder.store_id).as_bytes()),
+        "registration_hash": ObjectHash::digest(format!("{} founder registration", founder.store_id).as_bytes()),
+        "object": {
+            "slot": {"logical_key": format!("store-v1/test/{}/registration.json", founder.store_id), "physical": {"kind": "logical_key"}},
+            "stored_size": 1,
+            "stored_hash": ObjectHash::digest(format!("{} founder registration object", founder.store_id).as_bytes()),
+        }
+    }))
+    .map_err(|_| MembershipError::InvalidFounder)
 }
 
 impl MembershipChain {}

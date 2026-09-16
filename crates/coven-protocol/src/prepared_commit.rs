@@ -222,7 +222,10 @@ impl PreparedStoreOperationCommit {
         match &publication.entry.change {
             super::membership::StoreAuthorityChange::RemoveMember { .. }
             | super::membership::StoreAuthorityChange::SetMember { .. } => {}
-            _ => {
+            super::membership::StoreAuthorityChange::Founder { .. }
+            | super::membership::StoreAuthorityChange::DeviceRegistrationActivation { .. }
+            | super::membership::StoreAuthorityChange::DeviceExclusionProposal { .. }
+            | super::membership::StoreAuthorityChange::DeviceExclusionOutcome { .. } => {
                 return Err(PreparedCommitError::Invariant(
                     "Merge membership mutation graph contains another change".to_string(),
                 ));

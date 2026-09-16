@@ -67,7 +67,6 @@ fn proposing_control(
             change: StoreAuthorityChange::DeviceExclusionProposal {
                 proposal: proposal.clone(),
             },
-            provider_admin: None,
         },
         &fixture.signer,
     );

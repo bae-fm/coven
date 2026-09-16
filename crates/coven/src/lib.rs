@@ -119,8 +119,8 @@ pub use coven_protocol::{
     CircleOperationId, CircleOperationInfo, CircleOperationKind, CircleOperationState, CircleRole,
     CircleState, CommitFrontier, CrossPrincipalProbeReceipt, DeviceJoinAttemptId,
     ExactSlotProbeReceipt, MemberInfo, MemberRole, ObjectHash, ProviderAccessLocator,
-    ProviderAccessWithdrawal, ProviderAdminGrantId, ProviderAdminGrantRecord,
-    ProviderCapabilityProof, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceId,
+    ProviderAccessWithdrawal, ProviderAdminGrantId, ProviderCapabilityProof, StoreBatchCommitRef,
+    StoreCommitCoord, StoreDeviceId,
 };
 pub use coven_protocol::{
     AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,

@@ -216,15 +216,10 @@ impl AcceptedDeviceAuthority {
                 "accepted authority contains multiple Founders".into(),
             ));
         }
-        let provider_admin = coven_protocol::provider::ProviderAdminState::founder_from_root(
-            root.reference().clone(),
-            founder_head.body.author_registration.clone(),
-            &root.protocol().descriptor.founder_provider_admin,
-        );
-        let mut preceding = MembershipChain::from_entries_with_coords_and_heads_and_provider_admin(
+        let mut preceding = MembershipChain::from_entries_with_coords_and_heads(
             vec![(founder_ref.coord.clone(), founder_entry.clone())],
             vec![(founder_ref.clone(), founder_head.clone())],
-            provider_admin,
+            founder_head.body.author_registration.clone(),
         )?;
         let mut publications = BTreeMap::new();
         for (reference, head, entry) in nodes.values().copied() {

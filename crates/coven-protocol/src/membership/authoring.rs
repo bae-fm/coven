@@ -29,7 +29,6 @@ impl MembershipChain {
                 dependencies: self.effective_frontier(),
                 created_at,
                 change,
-                provider_admin: None,
             },
             signer,
         );

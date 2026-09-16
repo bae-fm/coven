@@ -487,7 +487,6 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                 }
             }
             let entry_values = graph.entries.values().cloned().collect::<Vec<_>>();
-            self.validate_provider_admin_records(&entry_values).await?;
             graph::validate_owner_grant_records(self.verified_root(), &entry_values)?;
             Ok(graph)
         })
@@ -510,13 +509,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                 &founder_registration.value,
                 founder_registration.object,
             );
-        let provider_admin = coven_protocol::provider::ProviderAdminState::founder_from_root(
-            root.clone(),
-            founder_registration_ref,
-            &root_value.descriptor.founder_provider_admin,
-        );
         let graph = Box::pin(self.load_exact_membership_graph(exact_heads)).await?;
-        let chain = graph::exact_membership_chain_from_graph(&root, graph, provider_admin)?;
+        let chain =
+            graph::exact_membership_chain_from_graph(&root, graph, founder_registration_ref)?;
         if !chain.is_founded_by(&owner_pubkey) {
             return Err(AnchoredChainError::FounderMismatch {
                 founder: chain.founder_pubkey().map(str::to_string),
@@ -524,63 +519,6 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             });
         }
         Ok(chain)
-    }
-
-    async fn load_registration(
-        &self,
-        reference: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-    ) -> Result<
-        coven_protocol::objects::VerifiedObject<
-            coven_protocol::store_commit::StoreDeviceRegistration,
-        >,
-        StoreObjectError,
-    > {
-        match self {
-            Self::History { history } => history.commit_verifier.load_registration(reference).await,
-            Self::VerifiedPrefix {
-                commit_verifier, ..
-            }
-            | Self::AcceptedHeads {
-                commit_verifier, ..
-            } => commit_verifier.load_registration(reference).await,
-        }
-    }
-
-    async fn validate_provider_admin_records(
-        &self,
-        entries: &[MembershipEntry],
-    ) -> Result<(), AnchoredChainError> {
-        for entry in entries {
-            let Some(coven_protocol::provider::ProviderAdminMembershipChange {
-                change:
-                    coven_protocol::provider::ProviderAdminChange::Set {
-                        administrator,
-                        provider,
-                        capability,
-                        ..
-                    },
-                ..
-            }) = &entry.provider_admin
-            else {
-                continue;
-            };
-            let registration = self
-                .load_registration(administrator)
-                .await
-                .map_err(map_membership_object_error)?;
-            if registration.value.store_root != *self.root()
-                || registration.value.provider != *provider
-            {
-                return Err(AnchoredChainError::LoadFailed(
-                    "provider administrator grant does not match its exact device registration"
-                        .to_string(),
-                ));
-            }
-            capability
-                .verify(&self.verified_root().descriptor.provider, provider)
-                .map_err(AnchoredChainError::from)?;
-        }
-        Ok(())
     }
 
     async fn load_founder_registration(

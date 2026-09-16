@@ -298,16 +298,16 @@ pub(super) fn project_membership_cut_to_store_prefix(
 pub(super) fn exact_membership_chain_from_graph(
     root: &StoreRootRef,
     graph: LoadedExactMembershipGraph,
-    provider_admin: coven_protocol::provider::ProviderAdminState,
+    root_administrator: coven_protocol::store_commit::StoreDeviceRegistrationRef,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let chain = MembershipChain::from_entries_with_coords_and_heads_and_provider_admin(
+    let chain = MembershipChain::from_entries_with_coords_and_heads(
         graph
             .entries
             .iter()
             .map(|(coord, entry)| (coord.clone(), entry.clone()))
             .collect(),
         graph.heads.clone(),
-        provider_admin,
+        root_administrator,
     )
     .map_err(AnchoredChainError::from)?;
     graph.validate_stream_anchors(root, &chain)?;
@@ -348,7 +348,6 @@ pub(super) fn validate_owner_grant_records(
             }
             StoreAuthorityChange::SetMember { .. }
             | StoreAuthorityChange::RemoveMember { .. }
-            | StoreAuthorityChange::ProviderAdmin
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
             | StoreAuthorityChange::DeviceExclusionOutcome { .. } => {}

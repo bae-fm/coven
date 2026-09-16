@@ -369,7 +369,6 @@ async fn exercise_cross_principal_probe(scenario: ProbeScenario) {
         root,
         attempt_id: DeviceJoinAttemptId::from_hash(ObjectHash::digest(b"probe attempt")),
         access_request_hash: ObjectHash::digest(b"probe access"),
-        provider_admin_grant: ProviderAdminGrantId(ObjectHash::digest(b"probe admin grant")),
         owner_registration: registration,
         member_pubkey: coven_keys::keys::public_key_hex(&peer),
         administrator_binding: administrator_binding.device.clone(),

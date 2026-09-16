@@ -1,11 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
-use crate::membership::{MembershipCoord, MembershipEntry, MembershipGrantId, OwnerStreamBarrier};
 use crate::objects::ObjectSlot;
 use crate::objects::{ExactObjectRef, ProviderDeviceBinding, StorageError, StoreProviderBinding};
 use crate::store_commit::{
@@ -89,37 +87,6 @@ pub async fn advance_exact(
     journal.advance(durable, next.clone()).await?;
     *durable = next;
     Ok(())
-}
-
-mod ordered_owner_barriers {
-    use super::*;
-
-    pub(super) fn serialize<S>(
-        map: &BTreeMap<MembershipGrantId, OwnerStreamBarrier>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        map.iter().collect::<Vec<_>>().serialize(serializer)
-    }
-
-    pub(super) fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<BTreeMap<MembershipGrantId, OwnerStreamBarrier>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let entries = Vec::<(MembershipGrantId, OwnerStreamBarrier)>::deserialize(deserializer)?;
-        let count = entries.len();
-        let map = entries.into_iter().collect::<BTreeMap<_, _>>();
-        if map.len() != count {
-            return Err(serde::de::Error::custom(
-                "provider administrator owner barriers contain a duplicate grant",
-            ));
-        }
-        Ok(map)
-    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]

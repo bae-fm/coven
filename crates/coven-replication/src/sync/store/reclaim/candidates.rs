@@ -110,7 +110,6 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         operation: DurableStoreReclaimOperation,
     ) -> Result<(), StoreReclaimError> {
         let database = self.database.clone();
-        let membership = self.membership.clone();
         let DurableStoreReclaimOperation::AbsentVerified {
             authorization,
             target,
@@ -132,15 +131,11 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         }
 
         let plan = self.writer.prepare_plan().await?;
-        let resolved = membership.resolved();
-        let provider_admin = resolved.provider_admin.combined_state().clone();
-        let provider_admin_grant = plan
-            .effective_provider_admin_grant(&provider_admin)
-            .ok_or_else(|| {
-                StoreReclaimError::Authorization(
-                    "local Store device is not an effective provider administrator".to_string(),
-                )
-            })?;
+        if !plan.is_provider_administrator() {
+            return Err(StoreReclaimError::Authorization(
+                "local Store device is not the provider administrator".to_string(),
+            ));
+        }
         let candidate = self
             .writer
             .prepare_candidate(
@@ -148,7 +143,6 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ReclaimCompletion(
                     ReclaimCompletion {
                         authorization: authorization.clone(),
-                        provider_admin_grant,
                     },
                 ),
             )

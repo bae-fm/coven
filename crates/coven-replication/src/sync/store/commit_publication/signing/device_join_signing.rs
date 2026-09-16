@@ -8,7 +8,6 @@ impl LocalStoreWriter {
         root: coven_protocol::store_commit::StoreRootRef,
         provider: coven_protocol::objects::StoreProviderBinding,
         owner_grant: coven_protocol::membership::MembershipGrantId,
-        provider_admin: coven_protocol::provider::ProviderAdminGrantRecord,
     ) -> Result<
         coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
         crate::sync::store::device_join::DeviceJoinError,
@@ -20,7 +19,6 @@ impl LocalStoreWriter {
             provider,
             self.registration.reference().clone(),
             owner_grant,
-            provider_admin,
             self.registration.value(),
             &self.device_signer,
         )

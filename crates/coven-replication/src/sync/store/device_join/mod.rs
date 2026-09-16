@@ -15,7 +15,7 @@ use coven_keys::keys::UserKeypair;
 use coven_protocol::objects::{ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding};
 use coven_protocol::provider::{
     CrossPrincipalProbeChallenge, CrossPrincipalProbeResponse,
-    DeviceJoinChallengePublicationAuthorization, ProviderAdminGrantId, ProviderAdminGrantRecord,
+    DeviceJoinChallengePublicationAuthorization,
 };
 use coven_protocol::store_commit::{
     DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceReadinessProof, ObjectHash,

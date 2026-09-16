@@ -41,12 +41,7 @@ impl AuthorizedReclaim<'_, '_> {
                 "snapshot retirement aliases current accepted authority".into(),
             ));
         }
-        let resolved = plan.membership().resolved();
-        if plan.owner_grant().is_none()
-            || plan
-                .effective_provider_admin_grant(resolved.provider_admin.combined_state())
-                .is_none()
-        {
+        if plan.owner_grant().is_none() || !plan.is_provider_administrator() {
             return Err(StoreReclaimError::Authorization(
                 "snapshot retirement requires an Owner with provider administration authority"
                     .into(),

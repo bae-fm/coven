@@ -63,12 +63,11 @@ async fn journal_unactivated_absence(
     operation
 }
 
-/// Author, journal and publish the completion that closes `absence` under
-/// `provider_admin_grant`, returning what the publication made of it.
+/// Author, journal and publish the completion that closes `absence`,
+/// returning what the publication made of it.
 async fn publish_completion(
     fixture: &ReclaimJourneyFixture,
     absence: DurableStoreReclaimOperation,
-    provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId,
 ) -> Result<(), StoreReclaimError> {
     let database = coven_database::StoreDatabase::new(&fixture.db);
     let mut writer = fixture
@@ -86,7 +85,6 @@ async fn publish_completion(
             crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ReclaimCompletion(
                 ReclaimCompletion {
                     authorization: absence.authorization().clone(),
-                    provider_admin_grant,
                 },
             ),
         )
@@ -100,30 +98,6 @@ async fn publish_completion(
     writer.reclaim().drive_candidate(journalled).await
 }
 
-/// The completion asserts which provider-administrator grant its executor
-/// deleted under, and the predecessor has to agree the commit's author holds
-/// that grant. A completion naming a grant its author does not hold is refused.
-#[tokio::test]
-async fn a_completion_commit_from_a_non_administrator_is_refused() {
-    let fixture = ReclaimJourneyFixture::build("reclaim-completion-unheld-grant").await;
-    let absence = journal_unactivated_absence(&fixture).await;
-    let error = publish_completion(
-        &fixture,
-        absence,
-        coven_protocol::provider::ProviderAdminGrantId(ObjectHash::digest(
-            b"a provider-admin grant no member holds",
-        )),
-    )
-    .await
-    .expect_err("a completion under an unheld grant is refused");
-    assert!(
-        format!("{error:?}").contains(
-            "reclaim completion author is not the effective provider administrator at its exact predecessor"
-        ),
-        "{error:?}",
-    );
-}
-
 /// A completion closes an authorization the predecessor history accepted. One
 /// naming an authorization that history never carried is refused, so a
 /// completion cannot retire an obligation that was never taken on.
@@ -131,19 +105,9 @@ async fn a_completion_commit_from_a_non_administrator_is_refused() {
 async fn a_completion_commit_for_an_unknown_authorization_is_refused() {
     let fixture = ReclaimJourneyFixture::build("reclaim-completion-unknown-authorization").await;
     let absence = journal_unactivated_absence(&fixture).await;
-    let error = publish_completion(
-        &fixture,
-        absence,
-        fixture
-            .device
-            .protocol_root()
-            .descriptor
-            .founder_provider_admin
-            .grant_id
-            .clone(),
-    )
-    .await
-    .expect_err("a completion for an unknown authorization is refused");
+    let error = publish_completion(&fixture, absence)
+        .await
+        .expect_err("a completion for an unknown authorization is refused");
     assert!(
         format!("{error:?}")
             .contains("reclaim completion authorization is absent from predecessor history"),

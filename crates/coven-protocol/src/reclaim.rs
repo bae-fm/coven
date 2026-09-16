@@ -740,14 +740,14 @@ impl ReclaimAuthorization {
 }
 
 /// A reclaim's completion, asserted by the executor inside its own Store
-/// commit: the authorization it closes and the provider-administrator grant
-/// the executor deleted under. The executor registration, Store root and
-/// membership state are the signed commit envelope's.
+/// commit: the authorization it closes. The executor registration, Store root
+/// and membership state are the signed commit envelope's, and the executor
+/// registration is what the verifier holds to the provider administrator its
+/// predecessor resolves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReclaimCompletion {
     pub authorization: ReclaimAuthorizationRef,
-    pub provider_admin_grant: crate::provider::ProviderAdminGrantId,
 }
 
 pub fn reclaim_evidence_semantic_prefix(evidence_hash: ObjectHash) -> String {

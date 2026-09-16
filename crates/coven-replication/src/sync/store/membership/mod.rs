@@ -101,8 +101,6 @@ pub enum AnchoredChainError {
     Membership(#[from] coven_protocol::membership::MembershipError),
     #[error("membership Store publication: {0}")]
     StoreProtocol(#[from] coven_protocol::store_commit::StoreProtocolError),
-    #[error("membership provider probe: {0}")]
-    ProviderProbe(#[from] coven_protocol::provider::ProviderProbeError),
     #[error("membership floor failed validation: {0}")]
     InvalidFloor(#[from] coven_protocol::membership::MembershipFloorError),
     #[error("membership Store pull: {0}")]

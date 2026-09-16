@@ -4,7 +4,7 @@ use crate::membership::MembershipGrantId;
 use crate::objects::{ObjectSlot, PreparedExactObject};
 use crate::provider::{
     CrossPrincipalProbeChallenge, CrossPrincipalProbeReceipt, CrossPrincipalProbeResponse,
-    DeviceJoinChallengePublicationAuthorization, ProviderAccessLocator, ProviderAdminGrantRecord,
+    DeviceJoinChallengePublicationAuthorization, ProviderAccessLocator,
 };
 use crate::store_commit::{Signed, SignedBody};
 use crate::{ProviderDeviceBinding, StoreProviderBinding};
@@ -55,9 +55,14 @@ pub struct DeviceJoinOfferBody {
     pub member_pubkey: String,
     pub store_root: StoreRootRef,
     pub provider: StoreProviderBinding,
+    /// The offering device: the Owner device that is also this Store's
+    /// provider administrator.
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
-    pub provider_admin: Box<ProviderAdminGrantRecord>,
+    /// That device's own provider principal. This is what separates a
+    /// same-principal admission from a cross-principal one before any
+    /// registration has been read.
+    pub administrator_binding: ProviderDeviceBinding,
 }
 
 impl SignedBody for DeviceJoinOfferBody {
@@ -68,23 +73,13 @@ pub type DeviceJoinOffer = Signed<DeviceJoinOfferBody>;
 
 impl DeviceJoinOfferBody {
     fn validate_shape(&self) -> Result<(), DeviceJoinExchangeError> {
-        if self.member_pubkey.is_empty()
-            || self.provider_admin.administrator != self.owner_registration
-        {
+        if self.member_pubkey.is_empty() {
             return Err(DeviceJoinExchangeError::OfferMismatch);
         }
         self.provider.validate()?;
-        self.provider_admin
-            .provider
+        self.administrator_binding
             .validate_for(&self.provider)
             .map_err(DeviceJoinExchangeError::Storage)?;
-        if let crate::provider::ProviderAdminGrantOrigin::Founder { root } =
-            &self.provider_admin.created_at
-        {
-            if root != &self.store_root {
-                return Err(DeviceJoinExchangeError::OfferMismatch);
-            }
-        }
         Ok(())
     }
 }
@@ -98,7 +93,6 @@ impl DeviceJoinOffer {
         provider: StoreProviderBinding,
         owner_registration: StoreDeviceRegistrationRef,
         owner_grant: MembershipGrantId,
-        provider_admin: ProviderAdminGrantRecord,
         owner: &StoreDeviceRegistration,
         owner_device_signer: &UserKeypair,
     ) -> Result<Self, DeviceJoinExchangeError> {
@@ -113,7 +107,7 @@ impl DeviceJoinOffer {
             provider,
             owner_registration,
             owner_grant,
-            provider_admin: Box::new(provider_admin),
+            administrator_binding: owner.provider.clone(),
         };
         body.validate_shape()?;
         Ok(Signed::sign(body, owner_device_signer))
@@ -122,6 +116,9 @@ impl DeviceJoinOffer {
     pub fn verify(&self, owner: &StoreDeviceRegistration) -> Result<(), DeviceJoinExchangeError> {
         self.body().validate_shape()?;
         self.owner_registration.verify_registration(owner)?;
+        if self.administrator_binding != owner.provider {
+            return Err(DeviceJoinExchangeError::OfferMismatch);
+        }
         self.verify_by(&owner.device_signing_pubkey)
             .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
@@ -184,10 +181,9 @@ impl DeviceProviderAccessRequest {
             root: self.offer.store_root.clone(),
             attempt_id: self.offer.attempt_id,
             access_request_hash: self.request_hash(),
-            provider_admin_grant: self.offer.provider_admin.grant_id.clone(),
             owner_registration: self.offer.owner_registration.clone(),
             member_pubkey: self.offer.member_pubkey.clone(),
-            administrator_binding: self.offer.provider_admin.provider.clone(),
+            administrator_binding: self.offer.administrator_binding.clone(),
             peer_binding: self.peer_provider.clone(),
         }
     }
@@ -262,7 +258,7 @@ impl DeviceProviderAdmissionApprovalBody {
         {
             return Err(DeviceJoinExchangeError::ApprovalMismatch);
         }
-        let same_principal = offer.provider_admin.provider == self.request.peer_provider;
+        let same_principal = offer.administrator_binding == self.request.peer_provider;
         match &self.admission {
             DeviceProviderAdmission::SamePrincipal if same_principal => {}
             DeviceProviderAdmission::CrossPrincipal { locator, .. } if !same_principal => {

@@ -293,7 +293,7 @@ fn merge_active_grant_lookup_returns_only_the_exact_live_record() {
     });
     assert_ne!(
         resolved.state_hash,
-        store_membership_state_hash(&altered, &resolved.provider_admin)
+        store_membership_state_hash(&altered, &resolved.provider_administrator)
     );
 
     let mut reuse = chain
@@ -761,7 +761,7 @@ fn concurrent_member_assignments_are_rejected_as_conflicting_authority() {
         .collect();
 
     assert!(matches!(
-        MembershipChain::from_entries_with_coords_and_heads(
+        MembershipChain::from_test_entries_with_coords_and_heads(
             entries
                 .into_iter()
                 .map(|entry| (entry.coord(), entry))
@@ -829,7 +829,7 @@ fn concurrent_cross_revocation_is_rejected_as_conflicting_authority() {
     ];
 
     assert!(matches!(
-        MembershipChain::from_entries_with_coords_and_heads(
+        MembershipChain::from_test_entries_with_coords_and_heads(
             entries
                 .into_iter()
                 .map(|entry| (entry.coord(), entry))
@@ -1254,4 +1254,14 @@ fn created_at_is_signed_but_never_orders_entries() {
     let mut tampered = entry.clone();
     tampered.body_mut().created_at = "other".to_string();
     assert!(!verify_membership_entry(&tampered));
+}
+
+#[test]
+fn provider_administration_resolves_to_the_root_administrator_without_a_transfer() {
+    let owner = key();
+    let chain = founded("store", &owner);
+    let root_administrator =
+        test_root_administrator(chain.entries()).expect("test root administrator");
+
+    assert_eq!(chain.provider_administrator(), &root_administrator);
 }

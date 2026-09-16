@@ -85,7 +85,6 @@ pub fn founder_entry_for_creation(
                 membership,
                 provider_admin,
             },
-            provider_admin: None,
         },
         owner,
     )

@@ -10,6 +10,12 @@ pub struct ActivatedSealedKey {
 }
 
 impl MembershipChain {
+    /// The registration that administers provider access: the Store root's own
+    /// administrator. Every consumer that reads the administrator reads this.
+    pub fn provider_administrator(&self) -> &StoreDeviceRegistrationRef {
+        &self.resolved.provider_administrator
+    }
+
     /// Membership changes consume the resolved grant and key authority they
     /// were prepared against. Unrelated device controls do not change that
     /// authority, but an accepted grant change requires a new candidate.
@@ -18,9 +24,7 @@ impl MembershipChain {
         entry: &MembershipEntry,
     ) -> Result<(), MembershipError> {
         match &entry.change {
-            StoreAuthorityChange::SetMember { .. }
-            | StoreAuthorityChange::RemoveMember { .. }
-            | StoreAuthorityChange::ProviderAdmin => {}
+            StoreAuthorityChange::SetMember { .. } | StoreAuthorityChange::RemoveMember { .. } => {}
             StoreAuthorityChange::Founder { .. } => return Err(MembershipError::InvalidFounder),
             StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
@@ -35,12 +39,8 @@ impl MembershipChain {
             .cloned()
             .collect::<Vec<_>>();
         let reduced = reduce_store_membership(&causal_past)?;
-        let provider = crate::provider::ProviderAdminState::reduce_merge(
-            &self.provider_admin_genesis,
-            &causal_past,
-            &reduced.included,
-        )?;
-        let prepared = resolved_store_membership(&reduced, provider, &causal_past)?;
+        let prepared =
+            resolved_store_membership(&reduced, self.root_administrator.clone(), &causal_past)?;
         if prepared.state_hash != current.state_hash {
             return Err(MembershipError::PublicationPredecessorChanged {
                 coord: Box::new(entry.coord()),
@@ -154,8 +154,7 @@ impl MembershipChain {
                 | StoreAuthorityChange::SetMember { .. }
                 | StoreAuthorityChange::DeviceRegistrationActivation { .. }
                 | StoreAuthorityChange::DeviceExclusionProposal { .. }
-                | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-                | StoreAuthorityChange::ProviderAdmin => None,
+                | StoreAuthorityChange::DeviceExclusionOutcome { .. } => None,
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -223,8 +222,7 @@ impl MembershipChain {
             StoreAuthorityChange::Founder { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin => None,
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => None,
         }
     }
 

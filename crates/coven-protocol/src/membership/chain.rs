@@ -2,10 +2,10 @@ use super::entry::store_membership_anchor_stream;
 use super::*;
 
 impl MembershipChain {
-    pub fn from_entries_with_coords_and_heads_and_provider_admin(
+    pub fn from_entries_with_coords_and_heads(
         entries: Vec<(MembershipCoord, MembershipEntry)>,
         heads: Vec<(MembershipHeadRef, AuthorHead)>,
-        provider_admin: crate::provider::ProviderAdminState,
+        root_administrator: StoreDeviceRegistrationRef,
     ) -> Result<Self, MembershipError> {
         let expected_store = entries
             .first()
@@ -24,14 +24,14 @@ impl MembershipChain {
         Self::from_entries_with_coords_and_head_refs(
             entries,
             heads.into_iter().map(|(reference, _)| reference).collect(),
-            provider_admin,
+            root_administrator,
         )
     }
 
     fn from_entries_with_coords_and_head_refs(
         entries: Vec<(MembershipCoord, MembershipEntry)>,
         head_refs: Vec<MembershipHeadRef>,
-        provider_admin_genesis: crate::provider::ProviderAdminState,
+        root_administrator: StoreDeviceRegistrationRef,
     ) -> Result<Self, MembershipError> {
         if entries.is_empty() {
             return Err(MembershipError::EmptyChain);
@@ -40,14 +40,14 @@ impl MembershipChain {
             Self::validate_entry_authenticity(index, entry)?;
         }
         let (coords, entries): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-        let (included, resolved) = Self::reduce(&entries, &coords, &provider_admin_genesis)?;
+        let (included, resolved) = Self::reduce(&entries, &coords, &root_administrator)?;
         Ok(Self {
             entries,
             coords,
             included,
             resolved,
             head_refs,
-            provider_admin_genesis,
+            root_administrator,
         })
     }
 
@@ -227,8 +227,7 @@ impl MembershipChain {
             | StoreAuthorityChange::RemoveMember { .. }
             | StoreAuthorityChange::DeviceRegistrationActivation { .. }
             | StoreAuthorityChange::DeviceExclusionProposal { .. }
-            | StoreAuthorityChange::DeviceExclusionOutcome { .. }
-            | StoreAuthorityChange::ProviderAdmin => None,
+            | StoreAuthorityChange::DeviceExclusionOutcome { .. } => None,
         })
     }
 
@@ -248,7 +247,7 @@ impl MembershipChain {
         Self::validate_entry_authenticity(self.entries.len(), &entry)?;
         self.entries.push(entry);
         self.coords.push(coord);
-        match Self::reduce(&self.entries, &self.coords, &self.provider_admin_genesis) {
+        match Self::reduce(&self.entries, &self.coords, &self.root_administrator) {
             Ok((included, resolved)) => {
                 self.included = included;
                 self.resolved = resolved;
@@ -429,7 +428,7 @@ impl MembershipChain {
     fn reduce(
         entries: &[MembershipEntry],
         coords: &[MembershipCoord],
-        provider_admin_genesis: &crate::provider::ProviderAdminState,
+        root_administrator: &StoreDeviceRegistrationRef,
     ) -> Result<(BTreeSet<MembershipCoord>, ResolvedStoreMembership), MembershipError> {
         let expected_store = entries
             .first()
@@ -516,36 +515,11 @@ impl MembershipChain {
                     retirement_device_state,
                     ..
                 } => (retirement_barriers, retirement_device_state),
-                StoreAuthorityChange::ProviderAdmin => {
-                    let Some(crate::provider::ProviderAdminMembershipChange {
-                        owner_barriers, ..
-                    }) = &entry.provider_admin
-                    else {
-                        return Err(MembershipError::InvalidProviderAdminChange(index));
-                    };
-                    if owner_barriers.values().any(|barrier| {
-                        !barrier
-                            .observed_streams
-                            .windows(2)
-                            .all(|pair| pair[0].stream_key() < pair[1].stream_key())
-                    }) {
-                        return Err(MembershipError::InvalidProviderAdminChange(index));
-                    }
-                    continue;
-                }
                 StoreAuthorityChange::DeviceRegistrationActivation { .. }
                 | StoreAuthorityChange::DeviceExclusionProposal { .. }
-                | StoreAuthorityChange::DeviceExclusionOutcome { .. } => {
-                    if entry.provider_admin.is_some() {
-                        return Err(MembershipError::InvalidProviderAdminChange(index));
-                    }
-                    continue;
-                }
-                StoreAuthorityChange::Founder { .. } => continue,
+                | StoreAuthorityChange::DeviceExclusionOutcome { .. }
+                | StoreAuthorityChange::Founder { .. } => continue,
             };
-            if entry.provider_admin.is_some() {
-                return Err(MembershipError::InvalidProviderAdminChange(index));
-            }
             let owner_recoveries = barriers
                 .values()
                 .filter_map(|barrier| match barrier {
@@ -598,38 +572,31 @@ impl MembershipChain {
         if founder.author_pubkey != **owner_pubkey
             || founder.author_owner_grant != **owner_grant_id
             || founder.stream_id != derive_founder_stream_id(&founder.store_id, owner_pubkey)
-            || founder.provider_admin.is_some()
         {
             return Err(MembershipError::InvalidFounder);
         }
 
-        validate_provider_admin_controls(entries)?;
         validate_membership_retirement_barriers(entries)?;
         validate_membership_sealed_keys(entries)?;
         let reduced = reduce_store_membership(entries)?;
-        let provider_admin = crate::provider::ProviderAdminState::reduce_merge(
-            provider_admin_genesis,
-            entries,
-            &reduced.included,
-        )?;
-        let resolved = resolved_store_membership(&reduced, provider_admin, entries)?;
+        let resolved = resolved_store_membership(&reduced, root_administrator.clone(), entries)?;
         Ok((reduced.included, resolved))
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn from_entries(entries: Vec<MembershipEntry>) -> Result<Self, MembershipError> {
-        let provider_admin = test_provider_admin_genesis(&entries)?;
-        Self::from_entries_with_coords_and_provider_admin(
+        let root_administrator = test_root_administrator(&entries)?;
+        Self::from_entries_with_coords_and_administrator(
             entries
                 .into_iter()
                 .map(|entry| (entry.coord(), entry))
                 .collect(),
-            provider_admin,
+            root_administrator,
         )
     }
 
     #[cfg(test)]
-    pub(crate) fn from_entries_with_coords_and_heads(
+    pub(crate) fn from_test_entries_with_coords_and_heads(
         entries: Vec<(MembershipCoord, MembershipEntry)>,
         heads: Vec<(MembershipHeadRef, AuthorHead)>,
     ) -> Result<Self, MembershipError> {
@@ -637,16 +604,16 @@ impl MembershipChain {
             .iter()
             .map(|(_, entry)| entry.clone())
             .collect::<Vec<_>>();
-        let provider_admin = test_provider_admin_genesis(&values)?;
-        Self::from_entries_with_coords_and_heads_and_provider_admin(entries, heads, provider_admin)
+        let root_administrator = test_root_administrator(&values)?;
+        Self::from_entries_with_coords_and_heads(entries, heads, root_administrator)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn from_entries_with_coords_and_provider_admin(
+    pub(crate) fn from_entries_with_coords_and_administrator(
         entries: Vec<(MembershipCoord, MembershipEntry)>,
-        provider_admin: crate::provider::ProviderAdminState,
+        root_administrator: StoreDeviceRegistrationRef,
     ) -> Result<Self, MembershipError> {
-        Self::from_entries_with_coords_and_head_refs(entries, Vec::new(), provider_admin)
+        Self::from_entries_with_coords_and_head_refs(entries, Vec::new(), root_administrator)
     }
 
     /// Raw signed coverage: the greatest loaded coordinate in every stream,

@@ -380,15 +380,9 @@ impl<'storage> JoiningStore<'storage> {
             )
             .await?
             .value;
-        let administrator = timings
-            .stage(
-                "read registrations",
-                self.history
-                    .device_join()
-                    .load_registration(&offer.provider_admin.administrator),
-            )
-            .await?
-            .value;
+        // The offering device is the administrator: one registration answers
+        // both, so the joiner reads it once.
+        let administrator = attempt_owner.clone();
         let (_bootstrap_cut, bootstrap_plan) = timings
             .stage(
                 "verify history",

@@ -317,13 +317,9 @@ impl<'a> MergeHistoryVerifier<'a> {
             }?;
         }
         if let Some(completion) = commit.reclaim_completion() {
-            if !predecessor_verifies_provider_administrator_grant(
-                predecessor,
-                &completion.provider_admin_grant,
-                &commit.author_registration,
-            ) {
+            if predecessor.provider_administrator() != &commit.author_registration {
                 return Err(RegistrationLoadError::Invalid(
-                    "reclaim completion author is not the effective provider administrator at its exact predecessor"
+                    "reclaim completion author is not the provider administrator at its exact predecessor"
                         .to_string(),
                 ));
             }

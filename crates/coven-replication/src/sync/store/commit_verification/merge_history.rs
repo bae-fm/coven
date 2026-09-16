@@ -24,7 +24,7 @@ use coven_protocol::store_commit::{
     SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef,
     StoreDeviceExclusionProposal, StoreSnapshotRef, VerifiedDeviceExclusionOutcome,
 };
-use coven_protocol::{membership as protocol_membership, provider, store_commit};
+use coven_protocol::{membership as protocol_membership, store_commit};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::sync::store::device_join;
@@ -35,7 +35,6 @@ mod loaders;
 mod membership_control;
 mod nonactivation;
 mod predecessor;
-use predecessor::predecessor_verifies_provider_administrator_grant;
 mod promotion;
 mod publication;
 mod rollup;

@@ -171,32 +171,12 @@ impl LocalStoreWriter {
         membership.is_owner_now(&self.registration.value().author_pubkey)
     }
 
-    pub(crate) fn provider_administrator_grants(
+    /// Whether this device is the Store's provider administrator at `membership`.
+    pub(crate) fn is_provider_administrator(
         &self,
-        state: &coven_protocol::provider::ProviderAdminState,
-    ) -> std::collections::BTreeMap<
-        coven_protocol::provider::ProviderAdminGrantId,
-        coven_protocol::provider::ProviderAdminGrantRecord,
-    > {
-        state
-            .records()
-            .iter()
-            .filter(|(grant_id, record)| {
-                record.administrator == *self.registration.reference()
-                    && state.authorizes(grant_id, &record.administrator)
-            })
-            .map(|(grant_id, record)| (grant_id.clone(), record.clone()))
-            .collect()
-    }
-
-    pub(super) fn effective_provider_admin_grant(
-        &self,
-        state: &coven_protocol::provider::ProviderAdminState,
-    ) -> Option<coven_protocol::provider::ProviderAdminGrantId> {
-        state
-            .active()
-            .into_iter()
-            .find(|grant| state.authorizes(grant, self.registration.reference()))
+        membership: &coven_protocol::membership::MembershipChain,
+    ) -> bool {
+        membership.provider_administrator() == self.registration.reference()
     }
 
     pub(crate) fn candidate_family_id(

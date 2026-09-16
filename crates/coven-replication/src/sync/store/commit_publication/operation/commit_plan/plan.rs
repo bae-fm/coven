@@ -279,11 +279,10 @@ impl StoreOperationCommitPlan {
         self.owner_grant.as_ref()
     }
 
-    pub(crate) fn effective_provider_admin_grant(
-        &self,
-        state: &coven_protocol::provider::ProviderAdminState,
-    ) -> Option<coven_protocol::provider::ProviderAdminGrantId> {
-        self.writer.effective_provider_admin_grant(state)
+    /// Whether this device is the Store's provider administrator at the
+    /// membership this plan was prepared against.
+    pub(crate) fn is_provider_administrator(&self) -> bool {
+        self.writer.is_provider_administrator(&self.membership)
     }
 
     pub(crate) fn sign_reclaim_evidence(
