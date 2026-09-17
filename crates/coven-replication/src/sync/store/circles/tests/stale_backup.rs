@@ -229,21 +229,33 @@ async fn a_stale_backup_cannot_fill_a_circle_position_the_live_history_filled() 
         "the refusal leaves no fork behind"
     );
 
-    // What the refusal leaves behind is the operation it refused: still
-    // journaled, still holding the Store publication reservation, and now
-    // unpublishable because its own Store coordinate is taken. Settling it is a
-    // separate matter from the position guarantee, and this pins the state
-    // rather than asserting authoring simply resumes.
-    let resumed = fixture
+    // The refusal released the Store publication reservation it held, so the
+    // device is not stuck behind a publication that can never happen: its next
+    // command publishes. (This Circle's own next command is a separate matter —
+    // the refused operation is still its one in-flight operation.)
+    fixture
         .store
         .bind_device_in(&db, fixture.dir.clone(), &fixture.signer)
         .await
         .expect("bind the rolled-back device")
-        .rename_circle("0000000004000-0000-owner", fixture.circle_id, "Gamma")
+        .create_circle("0000000004000-0000-owner", "Allotment")
         .await
-        .expect_err("the refused operation still owns publication");
+        .expect("the device publishes again once the refusal releases its reservation");
+
+    // And the refused operation is still there to report, blocked with why.
+    let blocked = StoreDatabase::new(&db)
+        .blocked_circle_operations()
+        .await
+        .expect("read the blocked Circle operations")
+        .into_iter()
+        .next()
+        .expect("the refused operation stays journaled and blocked");
     assert!(
-        format!("{resumed}").contains("another local Store operation owns publication"),
-        "{resumed:?}"
+        matches!(
+            &blocked,
+            coven_protocol::circle::CircleOperationBlock::PublicationRefused { reason }
+                if reason.contains("Store commit coordinate is installed with another exact commit")
+        ),
+        "{blocked:?}"
     );
 }

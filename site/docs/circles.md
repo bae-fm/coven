@@ -225,6 +225,11 @@ operation id, its Circle, its
   [`AuthorityLost`](rustdoc:enum:coven::CircleOperationBlock) means the author's
   exact store grant no longer has current write authority; the initiator calls
   `circles.retry_operation(op_id).await?` once authority is restored.
+  `PublicationRefused { reason }` means verification refused this candidate and
+  no retry of it can be accepted — a device authoring from state it has already
+  moved past reaches this. The refusal releases the Store publication
+  reservation the operation held, so the device's other work publishes; the
+  operation stays here, with its reason, until the initiator discards it.
 - `Discarding` — Coven accepted a verified permanent-nonactivation proof and is
   exact-deleting the candidate's exclusive objects before clearing the durable
   operation.

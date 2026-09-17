@@ -370,6 +370,11 @@ pub enum CircleOperationBlock {
     AuthorityLost {
         grant_id: crate::membership::MembershipGrantId,
     },
+    /// Verification refused this candidate, and no retry of it can be
+    /// accepted. The operation stays journaled and reportable; its Store
+    /// publication reservation was released with this block, so the device can
+    /// run its next command.
+    PublicationRefused { reason: String },
 }
 
 impl std::fmt::Display for CircleOperationBlock {
@@ -379,6 +384,9 @@ impl std::fmt::Display for CircleOperationBlock {
                 formatter,
                 "author grant {grant_id} no longer has current Store write authority"
             ),
+            Self::PublicationRefused { reason } => {
+                write!(formatter, "publication was refused: {reason}")
+            }
         }
     }
 }

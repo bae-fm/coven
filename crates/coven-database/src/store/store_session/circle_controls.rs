@@ -220,6 +220,27 @@ impl StoreSession<'_> {
             .collect()
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    fn blocked_circle_operations(
+        &mut self,
+    ) -> Result<Vec<coven_protocol::circle::CircleOperationBlock>, DbError> {
+        let conn = self.conn;
+        Ok(circle_operation_ids_in_phase_on(conn, |progress| {
+            matches!(progress, CircleOperationProgress::Blocked { .. })
+        })?
+        .iter()
+        .filter_map(|operation_id| {
+            load_circle_operation_on(conn, operation_id)
+                .ok()
+                .flatten()
+                .and_then(|journal| match journal.state() {
+                    coven_protocol::circle::CircleOperationState::Blocked { block } => Some(block),
+                    _ => None,
+                })
+        })
+        .collect())
+    }
+
     fn complete_circle_operation_upload_step(
         &mut self,
         operation_id: String,
@@ -352,6 +373,34 @@ impl StoreSession<'_> {
         })?;
         journal.block(block).map_err(DbError::from)?;
         update_circle_operation_phase_on(&tx, &journal)?;
+        tx.commit().map_err(DbError::from)
+    }
+
+    /// Record a publication refusal and release the Store publication
+    /// reservation the refused operation holds, in one transaction.
+    ///
+    /// The candidate can never be accepted, so holding the reservation would
+    /// block every later command on this device for a publication that will
+    /// never happen. The operation itself stays journaled and reportable.
+    fn refuse_circle_publication(
+        &mut self,
+        operation_id: String,
+        block: coven_protocol::circle::CircleOperationBlock,
+    ) -> Result<(), DbError> {
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let mut journal = load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
+            DbError::Message(format!("circle operation {operation_id} is absent"))
+        })?;
+        journal.block(block).map_err(DbError::from)?;
+        update_circle_operation_phase_on(&tx, &journal)?;
+        let owner = ActiveStorePublicationOwner::CircleOperation(journal.operation_id.clone());
+        if let Some(active) =
+            super::active_store_publication::load_active_store_publication_on(&tx)?
+        {
+            if active.owner() == &owner {
+                super::active_store_publication::clear_active_store_publication_on(&tx, &active)?;
+            }
+        }
         tx.commit().map_err(DbError::from)
     }
 
@@ -636,6 +685,15 @@ impl StoreDatabase {
             .await
     }
 
+    /// Every operation a refusal has blocked, with the block that stopped it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn blocked_circle_operations(
+        &self,
+    ) -> Result<Vec<coven_protocol::circle::CircleOperationBlock>, DbError> {
+        self.call_store(|session| session.blocked_circle_operations())
+            .await
+    }
+
     pub async fn waiting_circle_operations(&self) -> Result<Vec<CircleOperationJournal>, DbError> {
         self.call_store(|session| session.waiting_circle_operations())
             .await
@@ -697,6 +755,18 @@ impl StoreDatabase {
         journal: CircleOperationJournal,
     ) -> Result<(), DbError> {
         self.call_store(move |session| session.substitute_circle_operation_for_test(journal))
+            .await
+    }
+
+    /// Record a publication refusal, releasing the reservation the refused
+    /// operation holds so the next command can run.
+    pub async fn refuse_circle_publication(
+        &self,
+        operation_id: &CircleOperationId,
+        block: coven_protocol::circle::CircleOperationBlock,
+    ) -> Result<(), DbError> {
+        let operation_id = operation_id.as_str().to_string();
+        self.call_store(move |session| session.refuse_circle_publication(operation_id, block))
             .await
     }
 

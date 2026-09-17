@@ -331,20 +331,30 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             &creation.control.bytes,
         )
         .await?;
-        let verified = self
+        let verified = match self
             .local_writer
             .load_circle_activations(
                 &mut self.writer.circle_history(),
                 &verified_commit,
                 routing_key,
             )
-            .await?;
+            .await
+        {
+            Ok(verified) => verified,
+            Err(error) => return Err(self.refuse_publication(operation_id, error).await),
+        };
         let expected =
             expected_local_circle_activation(&creation, reference, &author.author_pubkey)?;
         if verified.circles() != std::slice::from_ref(&expected) {
-            return Err(CircleOperationError::InvalidState(
-                "stored verified Circle activation differs from its durable journal".to_string(),
-            ));
+            return Err(self
+                .refuse_publication(
+                    operation_id,
+                    CircleOperationError::InvalidState(
+                        "stored verified Circle activation differs from its durable journal"
+                            .to_string(),
+                    ),
+                )
+                .await);
         }
         {
             // Publishing the commit and advancing the shared Store position belong
@@ -370,11 +380,19 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 &commit_bytes,
             )
             .await?;
-            let accepted_transition = self
+            let accepted_transition = match self
                 .writer
                 .publish_store_commit_publication(&verified_commit)
-                .await?
-                .require_published()?;
+                .await
+                .map_err(CircleOperationError::from)
+                .and_then(|outcome| {
+                    outcome
+                        .require_published()
+                        .map_err(CircleOperationError::from)
+                }) {
+                Ok(accepted) => accepted,
+                Err(error) => return Err(self.refuse_publication(operation_id, error).await),
+            };
             let materialization = self
                 .database
                 .activate_circle_operation(
@@ -391,6 +409,37 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             }
         }
         Ok(())
+    }
+
+    /// Record a refusal that no retry of this candidate can get past, and
+    /// release the Store publication reservation it holds so the device's next
+    /// command can run. The refused operation stays journaled and reportable as
+    /// `Blocked`.
+    ///
+    /// A retryable transport failure passes through untouched: its candidate is
+    /// still the one that will be published, and the reservation is what the
+    /// resume composes from.
+    async fn refuse_publication(
+        &self,
+        operation_id: &CircleOperationId,
+        error: CircleOperationError,
+    ) -> CircleOperationError {
+        if crate::sync::error::error_chain_contains_transport(&error)
+            || matches!(error, CircleOperationError::Blocked { .. })
+        {
+            return error;
+        }
+        let block = coven_protocol::circle::CircleOperationBlock::PublicationRefused {
+            reason: error.to_string(),
+        };
+        match self
+            .database
+            .refuse_circle_publication(operation_id, block)
+            .await
+        {
+            Ok(()) => error,
+            Err(release) => CircleOperationError::from(release),
+        }
     }
 
     fn current_merge_authority(
