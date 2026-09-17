@@ -72,6 +72,7 @@ pub(crate) fn load_published_circle_snapshot_on(
 
 pub(crate) fn load_outbound_circle_snapshot_on(
     conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     authority: &ReferencedStoreDeviceRegistration,
     circle_id: CircleId,
 ) -> Result<Option<DurableCircleSnapshotPublication>, DbError> {
@@ -115,8 +116,12 @@ pub(crate) fn load_outbound_circle_snapshot_on(
                 "outbound Circle snapshot differs from its local author or Circle".to_string(),
             ));
         }
-        let image =
-            crate::snapshot_objects::load_snapshot_image_on(conn, &meta.bootstrap.image, "Circle")?;
+        let image = crate::snapshot_objects::load_snapshot_image_on(
+            conn,
+            store_dir,
+            &meta.bootstrap.image,
+            "Circle",
+        )?;
         Ok(DurableCircleSnapshotPublication {
             reference,
             meta: ExactProtocolObject {

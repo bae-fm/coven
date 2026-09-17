@@ -29,8 +29,11 @@ pub(crate) fn migrate_retained_replay_schema_on(
         return Ok(());
     };
     let mut image = Connection::open_in_memory().map_err(DbError::from)?;
-    crate::connection_io::deserialize_database_image_into(&mut image, &baseline.image_bytes(conn)?)
-        .map_err(|error| DbError::context("open retained replay database image", error))?;
+    crate::connection_io::deserialize_database_image_into(
+        &mut image,
+        &baseline.image_bytes(conn, store_dir)?,
+    )
+    .map_err(|error| DbError::context("open retained replay database image", error))?;
     let routing = crate::database_open::load_coven_metadata(&image)?;
     let coven_schema_is_current = crate::database_open::initialized_coven_schema_is_current(
         &image,
@@ -271,7 +274,7 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         ReplayTableDisposition::Preserve,
     ),
     ("outbound_store_snapshot", ReplayTableDisposition::Preserve),
-    ("payload_chunks", ReplayTableDisposition::Preserve),
+    ("payload_cleanup", ReplayTableDisposition::Preserve),
     ("payload_owners", ReplayTableDisposition::Preserve),
     ("payload_storage", ReplayTableDisposition::Preserve),
     ("protocol_state", ReplayTableDisposition::Preserve),
@@ -409,9 +412,17 @@ impl RetainedReplayBaseline {
 
     /// The verified bytes of the baseline image. Replays open a private,
     /// writable connection from these bytes inside the replay capability.
-    pub(super) fn image_bytes(&self, conn: &Connection) -> Result<Vec<u8>, DbError> {
-        crate::payload_store::read_verified_payload_blocking(conn, self.image_payload_hash)
-            .map_err(|error| DbError::context("read retained replay image", error))
+    pub(super) fn image_bytes(
+        &self,
+        conn: &Connection,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+    ) -> Result<Vec<u8>, DbError> {
+        crate::payload_store::read_verified_payload_blocking(
+            conn,
+            store_dir,
+            self.image_payload_hash,
+        )
+        .map_err(|error| DbError::context("read retained replay image", error))
     }
 
     pub(crate) fn validate_image(
@@ -420,8 +431,11 @@ impl RetainedReplayBaseline {
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<(), DbError> {
         let mut image = Connection::open_in_memory().map_err(DbError::from)?;
-        crate::connection_io::deserialize_database_image_into(&mut image, &self.image_bytes(conn)?)
-            .map_err(|error| DbError::context("open retained replay database image", error))?;
+        crate::connection_io::deserialize_database_image_into(
+            &mut image,
+            &self.image_bytes(conn, store_dir)?,
+        )
+        .map_err(|error| DbError::context("open retained replay database image", error))?;
         self.validate_open_image(&image, store_dir)
     }
 
@@ -430,16 +444,6 @@ impl RetainedReplayBaseline {
         image: &Connection,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<(), DbError> {
-        // A baseline image is the device's own rewind point, not a second copy
-        // of its payload store. Every payload its rows name is read out of the
-        // live catalog, so an image carrying payload rows would only nest the
-        // image it replaces inside the image replacing it, once per capture.
-        let carried = crate::payload_store::payload_rows_in_image(image)?;
-        if !carried.is_empty() {
-            return Err(DbError::Message(format!(
-                "retained replay image carries payload rows: {carried:?}"
-            )));
-        }
         match &self.authority {
             RetainedReplayAuthority::Genesis(_) => {
                 self.validate_image_metadata(image)?;

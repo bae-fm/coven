@@ -3,45 +3,37 @@ use super::*;
 pub struct HostWriteBlobTransaction<'transaction, 'connection> {
     store: StoreTransaction<'transaction, 'connection>,
     verified_authority: &'transaction mut VerifiedStoreAuthority,
+    created_payload_files: &'transaction std::cell::RefCell<Vec<PathBuf>>,
 }
 
 impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connection> {
     pub(super) fn new(
         store: StoreTransaction<'transaction, 'connection>,
         verified_authority: &'transaction mut VerifiedStoreAuthority,
+        created_payload_files: &'transaction std::cell::RefCell<Vec<PathBuf>>,
     ) -> Self {
         Self {
             store,
             verified_authority,
+            created_payload_files,
         }
     }
 
     /// Retain the verified plaintext source in the same transaction as its
-    /// captured write.
-    ///
-    /// The fact already names the plaintext, so the payload is written under
-    /// that identity while the source is read, and a source that differs from
-    /// what the fact declares fails the write rather than being stored under
-    /// the address of something else.
+    /// captured write. Files created before SQL commit join capture rollback.
     pub fn retain_source_plaintext(
         &mut self,
         fact: &StoreWriteBlobFact,
         source: &std::path::Path,
     ) -> Result<(), DbError> {
-        let size = PayloadStore::new(self.store.transaction)
-            .write_file(fact.plaintext_hash, source)
-            .map_err(|error| {
-                DbError::context(
-                    format!(
-                        "retain captured blob {}/{}/{} source",
-                        fact.table, fact.row_id, fact.column
-                    ),
-                    error,
-                )
-            })?;
-        if size != fact.plaintext_size {
+        let (hash, size) = PayloadStore::new(self.store.transaction, self.store.store_dir)
+            .file_writer(source)?
+            .commit(super::payload_store::CreatedPayloadFiles::tracked(
+                self.created_payload_files,
+            ))?;
+        if hash != fact.plaintext_hash || size != fact.plaintext_size {
             return Err(DbError::Message(format!(
-                "captured blob {}/{}/{} source differs from its declared plaintext length",
+                "captured blob {}/{}/{} source differs from its declared plaintext",
                 fact.table, fact.row_id, fact.column,
             )));
         }
@@ -109,6 +101,51 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
     }
 }
 
+/// Remove payload spool files an unfinished operation created, newest first.
+/// Reports every file it could not remove rather than any one of them.
+pub(crate) fn remove_created_payload_files(
+    directory: &coven_foundation::store_dir::StoreDir,
+    files: Vec<PathBuf>,
+) -> Result<(), crate::StagedBlobRollbackFailures> {
+    let mut failures = Vec::new();
+    for path in files.into_iter().rev() {
+        let cleanup = std::fs::remove_file(&path)
+            .map_err(|source| {
+                coven_foundation::atomic_file::FileError::at(
+                    "remove captured payload",
+                    &path,
+                    source,
+                )
+            })
+            .and_then(|()| directory.sync_parent_dir_blocking(&path));
+        if let Err(error) = cleanup {
+            failures.push(crate::StagedBlobRollbackFailure {
+                path,
+                reason: error.into(),
+            });
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::StagedBlobRollbackFailures(failures))
+    }
+}
+
+pub(super) fn rollback_captured_payload_files(
+    directory: &coven_foundation::store_dir::StoreDir,
+    files: Vec<PathBuf>,
+    operation: DbError,
+) -> DbError {
+    match remove_created_payload_files(directory, files) {
+        Ok(()) => operation,
+        Err(rollback) => DbError::AudienceBlobRollbackFailed {
+            operation: Box::new(operation),
+            rollback,
+        },
+    }
+}
+
 impl StoreSession<'_> {
     fn stage_captured_blob_source(
         &self,
@@ -132,8 +169,8 @@ impl StoreSession<'_> {
                         error,
                     )
                 })?;
-            let size =
-                PayloadStore::new(self.conn).copy_verified(fact.plaintext_hash, &mut output)?;
+            let size = PayloadStore::new(self.conn, self.store_dir)
+                .copy_verified(fact.plaintext_hash, &mut output)?;
             if size != fact.plaintext_size {
                 return Err(DbError::Message(
                     "captured blob payload size differs from its fact".into(),

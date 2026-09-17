@@ -35,7 +35,7 @@ pub enum CircleJournalError {
 /// to upload its object graph, and nothing that changes while it does.
 ///
 /// The objects themselves are named, not carried. Their stored bytes live in
-/// the payload store under each reference's stored hash, written before the row
+/// the payload spool under each reference's stored hash, written before the row
 /// that names them, so this value stays KB-scale however large the graph is —
 /// and the upload progress that does change per step lives in
 /// `circle_operation_uploads`, not here.
@@ -270,7 +270,7 @@ impl CircleOperationJournal {
     /// stored bytes of its objects.
     ///
     /// The bytes come from the caller because this value holds only references
-    /// to them: the durable copy is in the payload store, and the caller that
+    /// to them: the durable copy is in the payload spool, and the caller that
     /// has just written or read it supplies what it read.
     pub fn closed_remote_objects(
         &self,

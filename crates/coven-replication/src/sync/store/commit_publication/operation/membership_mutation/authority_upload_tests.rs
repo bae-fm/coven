@@ -1,7 +1,8 @@
 use super::{decode_membership_mutation, MembershipMutationPlan};
 use crate::sync::test_helpers::{
-    open_test_db, test_cloud_home, test_migrations, test_store_dir, test_synced_tables,
-    InterceptedStorage, ProtocolRead, StorageInterceptor, TestCustody, TestStore,
+    copy_payload_files, open_test_db, test_cloud_home, test_migrations, test_store_dir,
+    test_synced_tables, InterceptedStorage, ProtocolRead, StorageInterceptor, TestCustody,
+    TestStore,
 };
 use coven_database::{Database, StoreDatabase};
 use coven_keys::encryption::EncryptionService;
@@ -285,6 +286,7 @@ async fn interrupted_authority_upload(failure: AuthorityUploadFailure) {
         .vacuum_into_for_test(reopened_directory.db_path().to_string_lossy().into_owned())
         .await
         .unwrap();
+    copy_payload_files(&directory, &reopened_directory);
     let reopened = Database::open_synthetic_for_test(
         &reopened_directory.db_path(),
         reopened_directory.clone(),

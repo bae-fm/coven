@@ -173,7 +173,10 @@ async fn merge_preparation_fails_when_a_partition_payload_is_missing() {
         Err(error) => error,
         Ok(_) => panic!("missing partition payload must fail preparation"),
     };
-    assert!(error.to_string().contains("catalog records"), "{error}");
+    assert!(
+        error.to_string().contains("absent from the spool"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

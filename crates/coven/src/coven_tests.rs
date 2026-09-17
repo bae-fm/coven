@@ -1438,12 +1438,9 @@ async fn journal_failure_rolls_back_new_move_payloads_and_preserves_existing_own
             )
             .await
             .expect("connect the exact test Store without a background publisher");
+        let payload_path = fixture.dir.payload_spool_path(hash);
         assert!(
-            !fixture
-                .handle
-                .has_payload_for_test(hash)
-                .await
-                .expect("check the captured source payload"),
+            !payload_path.exists(),
             "the source has not been captured for a move"
         );
         let before_audience = if reuse_existing_payload {
@@ -1457,25 +1454,15 @@ async fn journal_failure_rolls_back_new_move_payloads_and_preserves_existing_own
                 .await
                 .expect("publish the first move while retaining its replay inputs");
             assert!(
-                fixture
-                    .handle
-                    .has_payload_for_test(hash)
-                    .await
-                    .expect("check the captured source payload"),
-                "the first move retains the source bytes"
+                payload_path.is_file(),
+                "the first move retains file-backed bytes"
             );
             Some(fixture.destination_circle.to_string())
         } else {
             None
         };
         let before_payload = if reuse_existing_payload {
-            Some(
-                fixture
-                    .handle
-                    .payload_for_test(hash)
-                    .await
-                    .expect("read the first move's retained payload"),
-            )
+            Some(std::fs::read(&payload_path).expect("read the first move's retained payload"))
         } else {
             None
         };
@@ -1506,20 +1493,12 @@ async fn journal_failure_rolls_back_new_move_payloads_and_preserves_existing_own
         );
         match before_payload {
             Some(before) => assert_eq!(
-                fixture
-                    .handle
-                    .payload_for_test(hash)
-                    .await
-                    .expect("the prior owner's payload survives rollback"),
+                std::fs::read(&payload_path).expect("the prior owner's payload survives rollback"),
                 before,
             ),
             None => assert!(
-                !fixture
-                    .handle
-                    .has_payload_for_test(hash)
-                    .await
-                    .expect("check the rolled-back payload"),
-                "rollback removes the payload installed by this attempt",
+                !payload_path.exists(),
+                "rollback removes the file-backed payload installed by this attempt",
             ),
         }
         assert_eq!(
@@ -1545,12 +1524,8 @@ async fn journal_failure_rolls_back_new_move_payloads_and_preserves_existing_own
             .await
             .expect("retry the rejected move");
         assert!(
-            fixture
-                .handle
-                .has_payload_for_test(hash)
-                .await
-                .expect("check the retried capture"),
-            "the retry captures the source payload"
+            payload_path.is_file(),
+            "the retry captures a file-backed payload"
         );
         fixture
             .handle
@@ -1689,13 +1664,10 @@ async fn audience_move_publishes_from_captured_payload_after_source_disappears()
         blob_facts.blobs[0].audience_move,
         Some(coven_database::StoreWriteBlobMoveMaterialization::Payload),
     );
+    let payload_path = fixture.dir.payload_spool_path(hash);
     assert!(
-        fixture
-            .handle
-            .has_payload_for_test(hash)
-            .await
-            .expect("check the captured source payload"),
-        "the source payload is durable before the SQL write returns",
+        payload_path.is_file(),
+        "the file-backed source payload is durable before the SQL write returns",
     );
 
     ExactSlotStorage::delete_at(fixture.home.as_ref(), &fixture.source_object)
@@ -1707,11 +1679,7 @@ async fn audience_move_publishes_from_captured_payload_after_source_disappears()
         .await
         .expect("publish the move from its captured source payload");
     assert!(
-        fixture
-            .handle
-            .has_payload_for_test(hash)
-            .await
-            .expect("check the retained source payload"),
+        payload_path.is_file(),
         "the published write retains its source payload for replay until it is folded",
     );
     assert!(

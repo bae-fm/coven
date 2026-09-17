@@ -2,6 +2,7 @@ use super::*;
 
 pub(crate) fn load_outbound_store_snapshot_on(
     conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
 ) -> Result<Option<DurableSnapshotPublication>, DbError> {
     conn.query_row(
@@ -59,15 +60,20 @@ pub(crate) fn load_outbound_store_snapshot_on(
         publication
             .validate_snapshot_shape(&meta, &reference)
             .map_err(|error| DbError::context("outbound Store snapshot publication", error))?;
-        let image = crate::snapshot_objects::load_snapshot_image_on(conn, &meta.image, "Store")?;
+        let image =
+            crate::snapshot_objects::load_snapshot_image_on(conn, store_dir, &meta.image, "Store")?;
         let rollup_reference = &meta.membership_rollup;
-        let rollup_bytes =
-            crate::payload_store::read_payload_blocking(conn, rollup_reference.rollup_hash)
-                .map_err(|error| DbError::context("outbound membership rollup", error))?;
+        let rollup_bytes = crate::payload_store::read_payload_blocking(
+            conn,
+            store_dir,
+            rollup_reference.rollup_hash,
+        )
+        .map_err(|error| DbError::context("outbound membership rollup", error))?;
         let rollup_prepared = PreparedExactObject::new(
             rollup_reference.object.clone(),
             crate::payload_store::read_payload_blocking(
                 conn,
+                store_dir,
                 rollup_reference.object.stored_hash(),
             )
             .map_err(|error| DbError::context("outbound prepared membership rollup", error))?,

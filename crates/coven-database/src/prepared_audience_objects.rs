@@ -17,9 +17,10 @@ pub struct PreparedAudiencePackage {
 
 impl PreparedAudiencePackage {
     /// The prepared package one remote object names, read back from the payload
-    /// the record's identity addresses.
+    /// spool the record's identity files it under.
     pub(crate) fn from_remote(
         conn: &rusqlite::Connection,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         remote: RemoteObjectRecord,
     ) -> Result<Self, DbError> {
         remote
@@ -57,8 +58,10 @@ impl PreparedAudiencePackage {
         let stored_hash = remote.stored_payload().ok_or_else(|| {
             DbError::Message("prepared package remote object uploads no ciphertext".to_string())
         })?;
-        let read =
-            |hash| crate::payload_store::read_payload_blocking(conn, hash).map_err(DbError::from);
+        let read = |hash| {
+            crate::payload_store::read_payload_blocking(conn, store_dir, hash)
+                .map_err(DbError::from)
+        };
         let semantic_bytes = read(semantic_hash)?;
         let stored_bytes = read(stored_hash)?;
         Self::new(remote_object_id, semantic_bytes, stored_bytes, object)

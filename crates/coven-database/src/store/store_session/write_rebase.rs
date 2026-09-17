@@ -195,7 +195,8 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
             ));
         }
         let proof = self.snapshot_candidate_nonactivation(snapshot, &commit)?;
-        let blobs = crate::load_prepared_audience_objects_on(tx, write_id)?.blobs;
+        let blobs =
+            crate::load_prepared_audience_objects_on(tx, self.store.store_dir, write_id)?.blobs;
         let mut publications = vec![active.attempt()?.reference()?];
         if let Some(prior) = active.superseded_entry() {
             publications.push(prior.clone());

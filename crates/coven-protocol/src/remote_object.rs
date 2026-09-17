@@ -113,7 +113,7 @@ pub struct SharedObjectRecord {
 ///
 /// A stored blob's row rides inside published snapshot and bootstrap images,
 /// where a restoring device holds the row but none of the writing device's
-/// payload store, so it carries its locator in the row. Every other domain is
+/// payload spool, so it carries its locator in the row. Every other domain is
 /// read only on the device that wrote it and names its payloads in the spool:
 /// the plaintext under the identity's semantic hash, the ciphertext under the
 /// exact object's stored hash. Neither hash is repeated here — the identity
@@ -148,7 +148,7 @@ impl RemoteObjectPayloads {
 
 /// One closed remote object and the payload bytes its row will name.
 ///
-/// A record holds references into the payload store, so a record on its own is
+/// A record holds references into the payload spool, so a record on its own is
 /// not yet something a row can name — the files have to be there first. This
 /// carries both from the moment the record is closed to the transaction that
 /// installs the files and writes the row, and the map is keyed by exactly the

@@ -133,7 +133,12 @@ impl StoreSession<'_> {
             }
         }
         for remote in &remote_objects {
-            persist_exact_remote_object_on(&tx, remote, "membership candidate object")?;
+            persist_exact_remote_object_on(
+                &tx,
+                self.store_dir,
+                remote,
+                "membership candidate object",
+            )?;
         }
         tx.execute(
             "INSERT INTO outbound_membership_mutation \
@@ -268,7 +273,7 @@ impl StoreSession<'_> {
             &original.reference.object,
             &original.commit.to_bytes(),
         )?;
-        persist_exact_remote_object_on(&tx, &remote, "membership abandonment")?;
+        persist_exact_remote_object_on(&tx, self.store_dir, &remote, "membership abandonment")?;
         super::active_store_publication::update_active_store_publication_on(
             &tx,
             &expected,
@@ -361,7 +366,12 @@ impl StoreSession<'_> {
             ));
         }
         for remote in &remote_objects {
-            persist_exact_remote_object_on(&tx, remote, "replacement membership candidate object")?;
+            persist_exact_remote_object_on(
+                &tx,
+                self.store_dir,
+                remote,
+                "replacement membership candidate object",
+            )?;
         }
         if tx.execute(
             "UPDATE outbound_membership_mutation SET intent_hash = ?1, plan_bytes = ?2, progress_bytes = ?3 \

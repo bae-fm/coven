@@ -1523,6 +1523,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     db.vacuum_into_for_test(copied_path.to_string_lossy().into_owned())
         .await
         .expect("copy pre-close Circle database");
+    crate::sync::test_helpers::copy_payload_files(
+        &db_store_dir,
+        &coven_foundation::store_dir::StoreDir::new_ephemeral(candidate_base_temp.path()),
+    );
 
     let controls = coven_database::StoreDatabase::new(&db)
         .closing_circle_controls()

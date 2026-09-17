@@ -1377,22 +1377,6 @@ impl CovenHandle {
         self.rows.store_write_journal_counts_for_test().await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn has_payload_for_test(
-        &self,
-        hash: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<bool, coven_database::DbError> {
-        self.rows.has_payload_for_test(hash).await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn payload_for_test(
-        &self,
-        hash: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<Vec<u8>, coven_database::DbError> {
-        self.rows.payload_for_test(hash).await
-    }
-
     /// Count cleanup obligations for one blob in integration tests.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn cleanup_intent_count_for_test(

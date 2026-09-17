@@ -276,10 +276,10 @@ impl Database {
                     "CREATE TEMP TRIGGER corrupt_owner_anchor_replay_image
                      AFTER INSERT ON retained_replay_baselines
                      BEGIN
-                         UPDATE payload_chunks
-                         SET bytes = CAST(X'00' || substr(bytes, 2) AS BLOB)
+                         UPDATE payload_storage
+                         SET compressed_bytes = X'00', compressed_size = 1
                          WHERE payload_hash = NEW.image_payload_hash
-                           AND ordinal = 0;
+                           AND storage = 'inline';
                      END",
                 )
                 .map_err(DbError::from)

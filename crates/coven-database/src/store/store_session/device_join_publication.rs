@@ -65,7 +65,12 @@ impl StoreSession<'_> {
             .remote_objects(previous.attempt_id)
             .map_err(|error| DbError::context("prepare device join remote graph", error))?
         {
-            persist_exact_remote_object_on(&transaction, &remote, "device join candidate object")?;
+            persist_exact_remote_object_on(
+                &transaction,
+                self.store_dir,
+                &remote,
+                "device join candidate object",
+            )?;
         }
         let next_value = serde_json::to_string(&next)
             .map_err(|error| DbError::context("serialize prepared device join", error))?;

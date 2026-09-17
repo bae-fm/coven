@@ -77,47 +77,16 @@ impl DatabaseImageTest {
         Ok(())
     }
 
-    /// The payload rows this image carries, by table and count.
-    ///
-    /// A serialized image that travels carries the rows that name payloads and
-    /// never the payloads themselves, so the only shape this may report is an
-    /// empty one.
-    pub fn carried_payload_rows(&self) -> Result<Vec<(&'static str, i64)>, DbError> {
-        crate::payload_store::payload_rows_in_image(&self.connection)
-    }
-
-    /// The content hash of the retained replay baseline image this database
-    /// stands on, if it has one.
-    pub fn replay_baseline_image_hash(&self) -> Result<Option<String>, DbError> {
-        use rusqlite::OptionalExtension as _;
-        self.connection
-            .query_row(
-                "SELECT image_payload_hash FROM retained_replay_baselines WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(DbError::from)
-    }
-
-    /// How many payloads this database holds, and how many bytes their chunks
-    /// take up.
-    pub fn payload_totals(&self) -> Result<(i64, i64), DbError> {
-        self.connection
-            .query_row(
-                "SELECT (SELECT COUNT(*) FROM payload_storage),
-                        (SELECT COALESCE(SUM(length(bytes)), 0) FROM payload_chunks)",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(DbError::from)
-    }
-
-    pub fn payload(&self, encoded_hash: String) -> Result<Vec<u8>, DbError> {
+    pub fn payload(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+        encoded_hash: String,
+    ) -> Result<Vec<u8>, DbError> {
         let hash = encoded_hash
             .parse()
             .map_err(|error| DbError::context("parse image payload hash", error))?;
-        crate::payload_store::read_payload_blocking(&self.connection, hash).map_err(DbError::from)
+        crate::payload_store::read_payload_blocking(&self.connection, store_dir, hash)
+            .map_err(DbError::from)
     }
 
     pub fn scoped_routing_id(&self, table: &str, row_id: &str) -> String {

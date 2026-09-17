@@ -147,40 +147,29 @@ impl RestoreTarget {
     }
 }
 
-/// Every file a store directory holds, by path, so a test can say exactly what
-/// an attempt added or left alone.
-fn store_files(
+/// The payload spool files a store directory holds, by path and content, so a
+/// test can say exactly which files an attempt added or left alone.
+fn payload_spool_files(
     store_dir: &coven_foundation::store_dir::StoreDir,
-) -> std::collections::BTreeSet<std::path::PathBuf> {
-    fn walk(
-        directory: &std::path::Path,
-        found: &mut std::collections::BTreeSet<std::path::PathBuf>,
-    ) {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            return;
-        };
-        for entry in entries {
-            let path = entry.expect("read store directory entry").path();
-            if path.is_dir() {
-                walk(&path, found);
-            } else {
-                found.insert(path);
-            }
-        }
-    }
-    let mut found = std::collections::BTreeSet::new();
-    walk(store_dir.as_ref(), &mut found);
-    found
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let spool = store_dir.payload_spool_dir();
+    let Ok(entries) = std::fs::read_dir(&spool) else {
+        return std::collections::BTreeMap::new();
+    };
+    entries
+        .map(|entry| {
+            let path = entry.expect("read payload spool entry").path();
+            let bytes = std::fs::read(&path).expect("read payload spool file");
+            (path, bytes)
+        })
+        .collect()
 }
 
-/// Asserts that a failed restore left the destination exactly as it found it.
-///
-/// The payloads a restore installs are rows inside the database it installs
-/// them into, so "no database, no SQLite sidecars" is the whole statement: there
-/// is nothing else beside it for an abandoned attempt to leave behind.
+/// Asserts that a failed restore left the destination exactly as it found it:
+/// no database, no SQLite sidecars, and no payload file it wrote.
 fn assert_restore_left_nothing(
     target: &RestoreTarget,
-    before: &std::collections::BTreeSet<std::path::PathBuf>,
+    before: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
 ) {
     for suffix in ["", "-wal", "-shm"] {
         let path = std::path::PathBuf::from(format!("{}{suffix}", target.database_path.display()));
@@ -191,9 +180,9 @@ fn assert_restore_left_nothing(
         );
     }
     assert_eq!(
-        store_files(&target.store_dir),
+        payload_spool_files(&target.store_dir),
         *before,
-        "a failed restore changed the destination store directory"
+        "a failed restore changed the destination payload spool"
     );
 }
 
@@ -475,7 +464,7 @@ async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
 
     // The Store snapshot itself verifies; only the Circle image is sabotaged.
     let target = RestoreTarget::new();
-    let before = store_files(&target.store_dir);
+    let before = payload_spool_files(&target.store_dir);
     let outcome = restore_store_snapshot(
         &store,
         &db,
@@ -519,7 +508,7 @@ async fn restore_releases_the_destination_when_the_circle_install_fails() {
     // release the whole destination: no database, not even the Store image on
     // its own, and none of the payload files either install created.
     let target = RestoreTarget::new();
-    let before = store_files(&target.store_dir);
+    let before = payload_spool_files(&target.store_dir);
     let outcome = store
         .prepare_snapshot_bootstrap(
             &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
@@ -568,7 +557,7 @@ async fn a_cold_restore_dropped_mid_way_removes_its_database_and_payloads() {
     } = base;
 
     let target = RestoreTarget::new();
-    let before = store_files(&target.store_dir);
+    let before = payload_spool_files(&target.store_dir);
     let bootstrap = store
         .prepare_snapshot_bootstrap(
             &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
@@ -605,9 +594,9 @@ async fn a_cold_restore_dropped_mid_way_removes_its_database_and_payloads() {
         "the Store install committed before the restore was abandoned"
     );
     assert_ne!(
-        store_files(&target.store_dir),
+        payload_spool_files(&target.store_dir),
         before,
-        "the Store install wrote its database before the restore was abandoned"
+        "the Store install wrote payload files before the restore was abandoned"
     );
 
     drop(install);
@@ -654,62 +643,8 @@ async fn a_finished_cold_restore_seeds_its_clock_with_recipient_rows() {
     );
 }
 
-/// Restoring a recipient's Circle images re-takes the replay baseline over the
-/// live database it just installed into. That database holds the payloads the
-/// Store install put there, including the image of the baseline being replaced,
-/// so the refresh is the capture most at risk of nesting one image inside the
-/// next — and it must carry none of them.
 #[tokio::test]
-async fn a_circle_restoration_refresh_carries_no_payload_rows_into_its_baseline() {
-    let base =
-        ActiveMemberCircleSnapshot::build("snapshot-restore-nesting", CircleFixtureMode::Live)
-            .await;
-    let ActiveMemberCircleSnapshot {
-        db,
-        store,
-        member,
-        membership,
-        ..
-    } = base;
-
-    let target = RestoreTarget::new();
-    let _restored = restore_store_snapshot(
-        &store,
-        &db,
-        &membership,
-        &member,
-        &target,
-        "nesting-restore-device",
-    )
-    .await
-    .expect("restore the member's Circle content");
-
-    let rows = coven_database::DatabaseImageTest::open(&target.database_path)
-        .expect("open the restored database");
-    let image_hash = rows
-        .replay_baseline_image_hash()
-        .expect("read the restored replay baseline")
-        .expect("the restore installed a replay baseline");
-    let (payloads, _) = rows
-        .payload_totals()
-        .expect("count the restored device's payloads");
-    assert!(payloads > 0, "the restore installed payloads to carry");
-
-    let image = coven_database::DatabaseImageTest::from_bytes(
-        &rows.payload(image_hash).expect("read the baseline image"),
-    )
-    .expect("open the baseline image");
-    assert_eq!(
-        image
-            .carried_payload_rows()
-            .expect("count the image's payload rows"),
-        Vec::new(),
-        "the refreshed baseline image carries payload rows",
-    );
-}
-
-#[tokio::test]
-async fn a_failed_cold_restore_leaves_an_occupied_store_directory_alone() {
+async fn a_cold_restore_leaves_unrelated_spool_files_alone() {
     let base =
         ActiveMemberCircleSnapshot::build("snapshot-restore-reuse", CircleFixtureMode::Live).await;
     let ActiveMemberCircleSnapshot {
@@ -721,13 +656,36 @@ async fn a_failed_cold_restore_leaves_an_occupied_store_directory_alone() {
         ..
     } = base;
 
-    // A destination directory that is not empty: whatever else lives beside a
-    // restore belongs to whoever put it there, and a failed attempt owns only
-    // the database it was installing.
+    // One finished restore, to learn what a restore of this snapshot puts in a
+    // destination's payload spool.
+    let installed = RestoreTarget::new();
+    let _restored = restore_store_snapshot(
+        &store,
+        &db,
+        &membership,
+        &member,
+        &installed,
+        "spool-source-device",
+    )
+    .await
+    .expect("restore the member's Circle content");
+    let payloads = payload_spool_files(&installed.store_dir);
+    assert!(!payloads.is_empty(), "a restore writes payload spool files");
+
+    // A second destination whose spool already holds payload files of exactly
+    // that shape. They belong to whoever put them there; the failing attempt
+    // below owns only what it writes itself.
     let target = RestoreTarget::new();
-    let neighbour = target.store_dir.as_ref().join("someone-elses-file");
-    std::fs::write(&neighbour, b"not this restore's").expect("seed the destination directory");
-    let before = store_files(&target.store_dir);
+    let spool = target.store_dir.payload_spool_dir();
+    std::fs::create_dir_all(&spool).expect("create the destination payload spool");
+    let before = payloads
+        .into_iter()
+        .map(|(source, bytes)| {
+            let path = spool.join(source.file_name().expect("payload file name"));
+            std::fs::write(&path, &bytes).expect("seed the destination payload spool");
+            (path, bytes)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
 
     let outcome = store
         .prepare_snapshot_bootstrap(

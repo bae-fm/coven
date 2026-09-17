@@ -602,7 +602,7 @@ impl PreparedSyncComponents {
         master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
     ) -> Result<Self, InitSyncError> {
         #[cfg(any(test, feature = "test-utils"))]
-        database.assert_owns_store_directory_for_test(&store_dir);
+        database.assert_owns_payload_directory_for_test(&store_dir);
         let storage = storage.into();
         if !storage.uses_identity(&identity) {
             return Err(InitSyncError::StorageIdentityMismatch);
@@ -1367,7 +1367,7 @@ impl SyncComponents {
     where
         S: CloudSyncCycleConnection + 'static,
     {
-        database.assert_owns_store_directory_for_test(&store_dir);
+        database.assert_owns_payload_directory_for_test(&store_dir);
         let storage: std::sync::Arc<dyn CloudSyncCycleConnection> = storage;
         let store_storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
             storage.clone();

@@ -206,6 +206,7 @@ impl StoreTransaction<'_, '_> {
                 )?;
                 crate::persist_exact_remote_object_on(
                     self.transaction,
+                    self.store_dir,
                     &closed,
                     "received snapshot blob inventory",
                 )?;

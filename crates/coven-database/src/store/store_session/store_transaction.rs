@@ -25,12 +25,32 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         Self {
             transaction,
             store_dir,
+            created_payload_files: super::payload_store::CreatedPayloadFiles::untracked(),
         }
     }
 
-    /// This transaction's rows and payloads.
+    /// Report every spool file this transaction's payload installations create
+    /// to `created_files`, so the owner of an unfinished database can remove
+    /// them whether the transaction commits or rolls back.
+    pub(super) fn capturing_created_payload_files(
+        transaction: &'store rusqlite::Transaction<'connection>,
+        store_dir: &'store StoreDir,
+        created_files: super::payload_store::CreatedPayloadFiles<'store>,
+    ) -> Self {
+        Self {
+            transaction,
+            store_dir,
+            created_payload_files: created_files,
+        }
+    }
+
+    /// This transaction's rows and payloads, carrying its payload capture.
     pub(crate) fn records(self) -> StoreRecords<'store> {
-        StoreRecords::new(self.transaction, self.store_dir)
+        StoreRecords::capturing_created_payload_files(
+            self.transaction,
+            self.store_dir,
+            self.created_payload_files,
+        )
     }
 
     pub(super) fn require_accepted_membership(
@@ -192,6 +212,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
     ) -> Result<(), DbError> {
         super::owner_promotion::advance_owner_promotion_journal_on(
             self.transaction,
+            self.store_dir,
             journal_key,
             target_key,
             previous_value,

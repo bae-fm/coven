@@ -22,13 +22,13 @@ fn recorded_edit_conflict_survives_operation_context_and_cleanup_errors() {
     };
     let error = DbError::context(
         "replace unpublished suffix",
-        DbError::ChangeCaptureFailed {
+        DbError::PayloadCleanupFailed {
             operation: Box::new(DbError::from(conflict.clone())),
-            capture: Box::new(DbError::Message("change capture failed".into())),
+            cleanup: Box::new(DbError::Message("payload cleanup failed".into())),
         },
     );
     assert_eq!(error.write_rebase_conflict(), Some(&conflict));
-    assert!(error.to_string().contains("change capture failed"));
+    assert!(error.to_string().contains("payload cleanup failed"));
     assert!(DbError::Message("transport failure".into())
         .write_rebase_conflict()
         .is_none());

@@ -3,6 +3,13 @@ use crate::store::store_session::StoreRecords;
 use coven_protocol::store_commit::StoreBatchCommitRef;
 
 impl StoreDatabase {
+    /// The payloads still owed a deletion. Empty once every obligation this
+    /// store committed has been discharged.
+    pub async fn owed_payload_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
+        self.call_store(|session| session.owed_payload_cleanup())
+            .await
+    }
+
     pub async fn store_write_payload_claims_for_test(
         &self,
         write_id: &coven_protocol::write::WriteId,
@@ -83,7 +90,7 @@ impl StoreDatabase {
                 session.conn,
                 session.store_dir,
             ))?;
-            let original = baseline.image_bytes(session.conn)?;
+            let original = baseline.image_bytes(session.conn, session.store_dir)?;
             for (sql, expected) in [
                 (
                     "UPDATE snapshot_coverage SET seq = seq + 1",
@@ -110,73 +117,6 @@ impl StoreDatabase {
         .await
     }
 
-    /// A baseline image carries the rows that name payloads and never the
-    /// payloads themselves: a device resolves those names in its own catalog.
-    /// Plant each payload table into the stored image in turn and the baseline
-    /// refuses it — without that refusal an image would carry the image it
-    /// replaces, once per capture.
-    pub async fn assert_replay_baseline_rejects_carried_payload_rows_for_test(
-        &self,
-    ) -> Result<(), DbError> {
-        self.call_store(|session| {
-            let baseline = crate::StoreDatabase::load_replay_baseline_on(StoreRecords::new(
-                session.conn,
-                session.store_dir,
-            ))?;
-            let original = baseline.image_bytes(session.conn)?;
-            let planted = ObjectHash::digest(b"a payload no image may carry").to_string();
-            let catalog = "INSERT INTO payload_storage
-                 (payload_hash, payload_size, compressed_size, chunk_count)
-                 VALUES (?1, 1, 1, 1)";
-            for (table, plant) in [
-                ("payload_storage", Vec::new()),
-                (
-                    "payload_chunks",
-                    vec![
-                        "INSERT INTO payload_chunks (payload_hash, ordinal, bytes)
-                          VALUES (?1, 0, X'00')",
-                    ],
-                ),
-                (
-                    "payload_owners",
-                    vec![
-                        "INSERT INTO payload_owners (payload_hash, owner_key)
-                          VALUES (?1, 'planted')",
-                    ],
-                ),
-            ] {
-                let mut image = Connection::open_in_memory()?;
-                crate::connection_io::deserialize_database_image_into(&mut image, &original)?;
-                assert_eq!(
-                    image.execute(catalog, [&planted])?,
-                    1,
-                    "plant the catalog row {table} needs"
-                );
-                for statement in plant {
-                    assert_eq!(image.execute(statement, [&planted])?, 1, "plant {table}");
-                }
-                let bytes = crate::connection_io::serialize_database_image(&image)?;
-                let mut altered = baseline.clone();
-                altered.image_payload_hash = session.install_payload_for_test(&bytes)?;
-
-                let error = altered
-                    .validate_image(session.conn, session.store_dir)
-                    .expect_err("an image carrying payload rows is not a baseline");
-
-                let DbError::Message(message) = &error else {
-                    panic!("carried payload rows are refused by name: {error}");
-                };
-                assert!(
-                    message.starts_with("retained replay image carries payload rows"),
-                    "{message}"
-                );
-                assert!(message.contains(table), "{message} does not name {table}");
-            }
-            Ok(())
-        })
-        .await
-    }
-
     /// The retention rule keeps the Store commit every inherited Circle entry
     /// names as its introduction, so a restored device can still prove where
     /// that entry entered accepted history. Drop that commit's retained
@@ -192,7 +132,7 @@ impl StoreDatabase {
                 session.conn,
                 session.store_dir,
             ))?;
-            let original = baseline.image_bytes(session.conn)?;
+            let original = baseline.image_bytes(session.conn, session.store_dir)?;
             let encoded = serde_json::to_string(&introduction)?;
             let mut image = Connection::open_in_memory()?;
             crate::connection_io::deserialize_database_image_into(&mut image, &original)?;
@@ -266,6 +206,10 @@ impl StoreDatabase {
 }
 
 impl StoreSession<'_> {
+    fn owed_payload_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
+        payload_cleanup_hashes_on(self.conn)
+    }
+
     fn payload_owner_claims(&self, owner_key: &str) -> Result<Vec<ObjectHash>, DbError> {
         Ok(payload_owner_claims_on(self.conn, owner_key)?
             .into_iter()
@@ -274,8 +218,8 @@ impl StoreSession<'_> {
 
     fn install_payload_for_test(&self, bytes: &[u8]) -> Result<ObjectHash, DbError> {
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let hash = PayloadStore::new(&transaction)
-            .install(bytes)
+        let hash = PayloadStore::new(&transaction, self.store_dir)
+            .install(bytes, CreatedPayloadFiles::untracked())
             .map_err(DbError::from)?;
         transaction.commit().map_err(DbError::from)?;
         Ok(hash)
@@ -288,43 +232,91 @@ impl StoreSession<'_> {
     }
 
     fn has_payload_for_test(&self, hash: ObjectHash) -> Result<bool, DbError> {
-        Ok(PayloadStore::new(self.conn)
+        Ok(PayloadStore::new(self.conn, self.store_dir)
             .stored(hash)
             .map_err(DbError::from)?
             .is_some())
     }
 
-    /// Replace one payload's stored bytes with a compression of `bytes`,
-    /// leaving its address alone: a reader that trusts the address without
-    /// checking the content it gets back is what this catches.
     fn corrupt_payload_for_test(&self, hash: ObjectHash, bytes: &[u8]) -> Result<(), DbError> {
-        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        PayloadStore::new(&transaction)
-            .replace_content_for_test(hash, bytes)
-            .map_err(DbError::from)?;
-        transaction.commit().map_err(DbError::from)
-    }
-
-    /// Take one payload's bytes away while leaving the rows that name it, so a
-    /// reader meets storage its catalog row promised and cannot produce.
-    fn remove_payload_bytes_for_test(&self, hash: ObjectHash) -> Result<(), DbError> {
-        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        if PayloadStore::new(&transaction)
+        let compressed = compress_payload(hash, bytes).map_err(DbError::from)?;
+        match PayloadStore::new(self.conn, self.store_dir)
             .stored(hash)
             .map_err(DbError::from)?
-            .is_none()
         {
-            return Err(DbError::Message(format!(
-                "cannot remove absent test payload {hash}"
-            )));
+            Some(StoredPayload::Inline { .. }) => {
+                self.conn
+                    .execute(
+                        "UPDATE payload_storage
+                         SET payload_size = ?2, compressed_bytes = ?3, compressed_size = ?4
+                         WHERE payload_hash = ?1",
+                        rusqlite::params![
+                            hash.to_string(),
+                            bytes.len() as i64,
+                            &compressed,
+                            compressed.len() as i64
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+            }
+            Some(StoredPayload::File { .. }) => {
+                std::fs::write(self.store_dir.payload_spool_path(hash), &compressed)
+                    .map_err(|error| DbError::context("corrupt test payload file", error))?;
+                self.conn
+                    .execute(
+                        "UPDATE payload_storage
+                         SET payload_size = ?2, compressed_size = ?3
+                         WHERE payload_hash = ?1",
+                        rusqlite::params![
+                            hash.to_string(),
+                            bytes.len() as i64,
+                            compressed.len() as i64
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+            }
+            None => {
+                return Err(DbError::Message(format!(
+                    "cannot corrupt absent test payload {hash}"
+                )));
+            }
         }
-        transaction
-            .execute(
-                "DELETE FROM payload_chunks WHERE payload_hash = ?1",
-                [hash.to_string()],
-            )
-            .map_err(DbError::from)?;
-        transaction.commit().map_err(DbError::from)
+        Ok(())
+    }
+
+    fn remove_payload_bytes_for_test(&self, hash: ObjectHash) -> Result<(), DbError> {
+        match PayloadStore::new(self.conn, self.store_dir)
+            .stored(hash)
+            .map_err(DbError::from)?
+        {
+            Some(StoredPayload::Inline { compressed, .. }) => {
+                self.conn
+                    .execute(
+                        "UPDATE payload_storage
+                         SET storage = 'file', compressed_bytes = NULL, compressed_size = ?2
+                         WHERE payload_hash = ?1",
+                        rusqlite::params![hash.to_string(), compressed.len() as i64],
+                    )
+                    .map_err(DbError::from)?;
+                match std::fs::remove_file(self.store_dir.payload_spool_path(hash)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(DbError::context("remove test payload file", error));
+                    }
+                }
+            }
+            Some(StoredPayload::File { .. }) => {
+                std::fs::remove_file(self.store_dir.payload_spool_path(hash))
+                    .map_err(|error| DbError::context("remove test payload file", error))?;
+            }
+            None => {
+                return Err(DbError::Message(format!(
+                    "cannot remove absent test payload {hash}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn replace_replay_baseline_device_state_for_test(
@@ -338,7 +330,7 @@ impl StoreSession<'_> {
         let mut image = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
         crate::connection_io::deserialize_database_image_into(
             &mut image,
-            &baseline.image_bytes(self.conn)?,
+            &baseline.image_bytes(self.conn, self.store_dir)?,
         )
         .map_err(|error| DbError::context("open test replay image", error))?;
         let reference = serde_json::to_string(&reference)
@@ -373,7 +365,7 @@ impl StoreSession<'_> {
         let mut image = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
         crate::connection_io::deserialize_database_image_into(
             &mut image,
-            &baseline.image_bytes(self.conn)?,
+            &baseline.image_bytes(self.conn, self.store_dir)?,
         )
         .map_err(|error| DbError::context("open retained replay database image", error))?;
         crate::coven_schema::downgrade_coven_schema_to_v0_for_test(&image, include_routing)?;
@@ -406,6 +398,7 @@ impl StoreSession<'_> {
             &std::collections::BTreeSet::from([image_hash, authority_hash]),
         )?;
         transaction.commit().map_err(DbError::from)?;
+        pay_owed_payload_deletions_on(self.conn, self.store_dir)?;
         Ok(image_hash)
     }
 }
@@ -420,54 +413,5 @@ impl crate::CreatedSnapshot {
         crate::connection_io::deserialize_database_image_into(&mut image, &bytes)
             .map_err(|error| DbError::context("open captured test snapshot", error))?;
         crate::store::store_device_state::load_store_device_snapshot_on(&image, reference)
-    }
-}
-
-impl PayloadStore<'_> {
-    /// Store a compression of `bytes` under `hash`, whatever `bytes` hashes to.
-    ///
-    /// Only a test can put a payload and its address out of step; the writer
-    /// refuses to, which is the property the tests reading this back check.
-    fn replace_content_for_test(
-        self,
-        hash: ObjectHash,
-        bytes: &[u8],
-    ) -> Result<(), PayloadStoreError> {
-        if self.stored(hash)?.is_none() {
-            return Err(PayloadStoreError::Storage {
-                hash,
-                error: "no catalog row to replace".to_string(),
-            });
-        }
-        self.conn
-            .execute(
-                "DELETE FROM payload_chunks WHERE payload_hash = ?1",
-                [hash.to_string()],
-            )
-            .map_err(|source| PayloadStoreError::Database { hash, source })?;
-        let mut encoder =
-            lz4_flex::frame::FrameEncoder::new(PayloadChunkSink::new(self.conn, hash));
-        encoder
-            .write_all(bytes)
-            .map_err(|source| PayloadStoreError::CompressionIo { hash, source })?;
-        let (compressed_size, chunk_count) = encoder
-            .finish()
-            .map_err(|source| PayloadStoreError::CompressionFrame { hash, source })?
-            .finish()
-            .map_err(|source| PayloadStoreError::CompressionIo { hash, source })?;
-        self.conn
-            .execute(
-                "UPDATE payload_storage
-                 SET payload_size = ?2, compressed_size = ?3, chunk_count = ?4
-                 WHERE payload_hash = ?1",
-                rusqlite::params![
-                    hash.to_string(),
-                    bytes.len() as i64,
-                    compressed_size as i64,
-                    chunk_count as i64
-                ],
-            )
-            .map(drop)
-            .map_err(|source| PayloadStoreError::Database { hash, source })
     }
 }

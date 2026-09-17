@@ -104,31 +104,6 @@ impl PreparedRetainedReplayBaseline {
     }
 }
 
-/// Serialize `conn` as a retained replay baseline image.
-///
-/// A baseline image carries the rows that name payloads but never the payloads
-/// themselves: a device reads payloads out of its own catalog, and an image
-/// carrying its own enclosing payload history would nest every predecessor
-/// image inside its successor. The clearing happens in a throwaway copy because
-/// the source here is the live database.
-pub(super) fn replay_baseline_image_of(conn: &rusqlite::Connection) -> Result<Vec<u8>, DbError> {
-    let source = crate::connection_io::serialize_database_image(conn)?;
-    let mut image = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
-    crate::connection_io::deserialize_database_image_into(&mut image, &source)
-        .map_err(|error| DbError::context("open retained replay baseline copy", error))?;
-    without_payload_rows(&mut image)
-}
-
-/// Clear `image`'s payload rows and hand back the bytes it then serializes to.
-/// The vacuum keeps the pages the cleared rows used out of the image.
-fn without_payload_rows(image: &mut rusqlite::Connection) -> Result<Vec<u8>, DbError> {
-    let transaction = image.unchecked_transaction().map_err(DbError::from)?;
-    crate::payload_store::clear_payload_tables_on(&transaction)?;
-    transaction.commit().map_err(DbError::from)?;
-    image.execute_batch("VACUUM").map_err(DbError::from)?;
-    crate::connection_io::serialize_database_image(image)
-}
-
 fn retained_replay_blob_leases(
     image: &rusqlite::Connection,
     blob_decls: &crate::BlobDecls,
@@ -588,9 +563,8 @@ impl StoreRecords<'_> {
         crate::connection_io::deserialize_database_image_into(&mut image, image_bytes)
             .map_err(|error| DbError::context("open replacement replay database image", error))?;
         let local_blob_leases = retained_replay_blob_leases(&image, blob_decls)?;
-        let replacement = without_payload_rows(&mut image)?;
         let image_payload_hash = self
-            .install_payload(&replacement)
+            .install_payload(image_bytes)
             .map_err(|error| DbError::context("install migrated retained replay image", error))?;
         let authority_hash = coven_protocol::store_commit::ObjectHash::digest(
             &baseline.canonical_authority_bytes()?,
@@ -678,7 +652,7 @@ impl StoreRecords<'_> {
         let mut timings =
             coven_foundation::stage_timing::StageTimings::start("Retained replay baseline capture");
         let image_bytes = timings.mark("serialize the image", || {
-            replay_baseline_image_of(self.conn)
+            crate::connection_io::serialize_database_image(self.conn)
         })?;
         let prepared = PreparedRetainedReplayBaseline::new(
             schema_version,
@@ -847,7 +821,7 @@ impl StoreTransaction<'_, '_> {
             baseline.coverage(),
         )?;
         let projection = crate::store::ReplayProjection::from_image(
-            &baseline.image_bytes(self.transaction)?,
+            &baseline.image_bytes(self.transaction, self.store_dir)?,
             self.store_dir.clone(),
             baseline,
             covered,

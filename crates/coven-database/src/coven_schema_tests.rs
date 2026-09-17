@@ -92,7 +92,7 @@ fn bookkeeping_blob_columns_are_the_explicit_payload_allowlist() {
         ("outbound_membership_mutation", "progress_bytes".to_string()),
         ("outbound_store_snapshot", "meta_bytes".to_string()),
         ("published_store_snapshot", "meta_bytes".to_string()),
-        ("payload_chunks", "bytes".to_string()),
+        ("payload_storage", "compressed_bytes".to_string()),
         ("outbound_circle_snapshot", "meta_bytes".to_string()),
         ("published_circle_snapshot", "meta_bytes".to_string()),
         ("outbound_store_acks", "ack_bytes".to_string()),
@@ -124,7 +124,7 @@ fn bookkeeping_blob_columns_are_the_explicit_payload_allowlist() {
 
     assert_eq!(
         actual, expected,
-        "bookkeeping BLOB columns changed; keep large payloads in the payload store and update plans/payload-storage.md only for an intentional KB-class artifact"
+        "bookkeeping BLOB columns changed; keep large payloads in the payload spool and update plans/payload-spool.md only for an intentional KB-class artifact"
     );
 }
 
@@ -282,7 +282,7 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         actual, classified,
-        "bookkeeping JSON columns changed; classify the new column and keep large payloads in the payload store as required by plans/payload-storage.md"
+        "bookkeeping JSON columns changed; classify the new column and keep large payloads in the payload spool as required by plans/payload-spool.md"
     );
 }
 

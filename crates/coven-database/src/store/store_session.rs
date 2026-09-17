@@ -70,16 +70,16 @@ pub(crate) mod verified_store_authority;
 pub(crate) mod write_lifecycle;
 mod write_rebase;
 
-/// One Store transaction and the blob directory beside it.
+/// One Store transaction and its matching row-and-payload capability.
 ///
-/// Payload bytes, their claims and the rows naming them are all written by this
-/// transaction. The directory is the host blobs' home, which record mutations
-/// still resolve paths in; keeping both borrows together prevents a mutation
-/// from using another Store's directory.
+/// Payloads land before the row naming them commits, while ownership claims
+/// land in this transaction. Keeping both borrows together prevents a record
+/// mutation from using another Store's payload directory.
 #[derive(Clone, Copy)]
 pub(crate) struct StoreTransaction<'store, 'connection> {
     transaction: &'store rusqlite::Transaction<'connection>,
     store_dir: &'store coven_foundation::store_dir::StoreDir,
+    created_payload_files: payload_store::CreatedPayloadFiles<'store>,
 }
 
 /// One Store SQL transaction and the authority facts staged beside it.
@@ -131,13 +131,10 @@ pub(crate) fn install_verified_snapshot_bootstrap_on(
     schema_version: u32,
     routing_hash: coven_protocol::store_commit::ObjectHash,
     synced_tables: &[coven_protocol::synced_schema::SyncedTable],
+    created_payload_files: payload_store::CreatedPayloadFiles<'_>,
 ) -> Result<(), DbError> {
-    StoreTransaction::new(transaction, store_dir).install_verified_snapshot_bootstrap(
-        install,
-        schema_version,
-        routing_hash,
-        synced_tables,
-    )
+    StoreTransaction::capturing_created_payload_files(transaction, store_dir, created_payload_files)
+        .install_verified_snapshot_bootstrap(install, schema_version, routing_hash, synced_tables)
 }
 
 #[cfg(any(test, feature = "test-utils"))]

@@ -257,7 +257,12 @@ impl StoreSession<'_> {
             }
         }
         for remote in &remotes {
-            persist_exact_remote_object_on(&tx, remote, "Store-device exclusion candidate object")?;
+            persist_exact_remote_object_on(
+                &tx,
+                self.store_dir,
+                remote,
+                "Store-device exclusion candidate object",
+            )?;
         }
         insert_store_device_exclusion_on(&tx, &operation, true)?;
         tx.commit().map_err(DbError::from)?;

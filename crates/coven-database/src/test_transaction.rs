@@ -59,12 +59,14 @@ impl DatabaseTestTransaction<'_, '_> {
 
     pub(crate) fn persist_prepared_audience_objects(
         &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         write_id: &coven_protocol::write::WriteId,
         packages: &[crate::PreparedAudiencePackage],
         blobs: &[crate::PreparedAudienceBlob],
     ) -> Result<(), DbError> {
         crate::store::persist_prepared_audience_objects_on(
             self.transaction,
+            store_dir,
             write_id,
             packages,
             blobs,

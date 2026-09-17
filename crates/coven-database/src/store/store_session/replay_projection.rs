@@ -414,9 +414,7 @@ impl ReplayProjection {
     /// the image for an audience. A published snapshot is stripped down to what
     /// its recipients may read; a baseline is this device's own rewind point and
     /// keeps the protocol state, root authority, and registrations that a replay
-    /// starts from — the very rows the published projection drops. The one thing
-    /// both drop is the payload catalog, for the same reason: a device reads
-    /// payloads out of its own.
+    /// starts from — the very rows the published projection drops.
     pub(super) fn capture_replay_baseline(
         &self,
         root: &coven_protocol::store_commit::StoreRootRef,
@@ -441,18 +439,7 @@ impl ReplayProjection {
         records.retain_snapshot_replay_inputs(&mut authority, root, cut)?;
         records.retain_snapshot_device_states(&mut authority, root, cut.clone().into_refs())?;
         records.rewrite_snapshot_coverage(cut, snapshot_hash)?;
-        // The projection inherited the payload catalog of the image it was
-        // built from. A baseline image carries the rows that name payloads, not
-        // the payloads themselves — the device reading it has its own catalog —
-        // so they go before the bytes are taken.
-        crate::payload_store::clear_payload_tables_on(&transaction)?;
         transaction.commit().map_err(DbError::from)?;
-        // The image is the serialized file, so its free pages ship with it, and
-        // the payloads a replay installed into this projection are the largest
-        // thing this capture just freed.
-        self.connection
-            .execute_batch("VACUUM")
-            .map_err(DbError::from)?;
         crate::connection_io::serialize_database_image(&self.connection)
     }
 

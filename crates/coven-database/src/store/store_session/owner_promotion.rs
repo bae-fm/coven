@@ -70,6 +70,7 @@ impl StoreSession<'_> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         advance_owner_promotion_journal_on(
             &tx,
+            self.store_dir,
             journal_key,
             target_key,
             previous_value,
@@ -271,6 +272,7 @@ impl StoreDatabase {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn advance_owner_promotion_journal_on(
     tx: &rusqlite::Transaction<'_>,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     journal_key: String,
     target_key: String,
     previous_value: String,
@@ -387,7 +389,7 @@ pub(super) fn advance_owner_promotion_journal_on(
                 "Owner-promotion journal repeats a remote object".to_string(),
             ));
         }
-        persist_exact_remote_object_on(tx, remote, "Owner-promotion candidate object")?;
+        persist_exact_remote_object_on(tx, store_dir, remote, "Owner-promotion candidate object")?;
     }
     if let (
         OwnerPromotionJournalState::RequestAccepted {

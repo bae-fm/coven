@@ -218,22 +218,6 @@ impl StoreRows {
         self.writes.store_write_journal_counts_for_test().await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn has_payload_for_test(
-        &self,
-        hash: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<bool, coven_database::DbError> {
-        self.writes.has_payload_for_test(hash).await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn payload_for_test(
-        &self,
-        hash: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<Vec<u8>, coven_database::DbError> {
-        self.writes.payload_for_test(hash).await
-    }
-
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn cleanup_intent_count_for_test(
         &self,

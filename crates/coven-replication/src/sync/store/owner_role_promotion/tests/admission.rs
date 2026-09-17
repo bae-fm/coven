@@ -390,6 +390,7 @@ async fn staged_admission_with_guard(
             }
             let directory = crate::sync::test_helpers::test_store_dir();
             fixture.owner_db.vacuum_into_for_test(directory.db_path().to_string_lossy().into_owned()).await.unwrap();
+            crate::sync::test_helpers::copy_payload_files(&fixture.owner_db_store_dir, &directory);
             let reopened = coven_database::Database::open_synthetic_for_test(
                 &directory.db_path(), directory.clone(), crate::sync::test_helpers::test_synced_tables(),
                 coven_protocol::blob::TransferLimits::one_at_a_time(),
