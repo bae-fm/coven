@@ -65,7 +65,6 @@ struct TransportFixture {
         Option<coven_replication::sync::test_helpers::TestDropboxAccessAdministrator>,
     _app: tempfile::TempDir,
     _snapshot: tempfile::TempDir,
-    _owner_store_tmp: tempfile::TempDir,
 }
 
 /// The Dropbox namespace a cross-principal fixture's store lives in.
@@ -108,7 +107,7 @@ impl TransportFixture {
     ) -> (Self, Option<String>) {
         coven_keys::keys::test_keyring::install();
         let owner = UserKeypair::generate();
-        let (owner_store_tmp, owner_db_store_dir) = temp_store_dir();
+        let owner_db_store_dir = test_store_dir();
         let owner_db = open_test_db(owner_db_store_dir.clone());
         let owner_database = coven_database::StoreDatabase::from_database(owner_db.clone());
         let create_store_db = owner_db.clone();
@@ -234,7 +233,6 @@ impl TransportFixture {
                 access_administrator,
                 _app: app,
                 _snapshot: snapshot_dir,
-                _owner_store_tmp: owner_store_tmp,
             },
             second_member_pubkey,
         )

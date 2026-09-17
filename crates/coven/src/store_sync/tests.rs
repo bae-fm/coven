@@ -322,7 +322,7 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
 #[tokio::test]
 async fn connect_rejects_an_opaque_home_without_a_master_key() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let mut config = Config::with_defaults(
         "sync-opaque-no-encryption".to_string(),
         "test-device".to_string(),
@@ -366,7 +366,7 @@ async fn connect_rejects_an_opaque_home_without_a_master_key() {
 #[tokio::test]
 async fn new_opaque_home_commits_its_key_and_credentials_with_the_connection() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "atomic-new-cloud-home";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -421,7 +421,7 @@ async fn new_opaque_home_commits_its_key_and_credentials_with_the_connection() {
 #[tokio::test]
 async fn browsable_home_setup_never_accesses_master_key_custody() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "atomic-browsable-cloud-home";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -467,7 +467,7 @@ async fn browsable_home_setup_never_accesses_master_key_custody() {
 #[tokio::test]
 async fn authorized_oauth_tokens_remain_absent_when_connection_preparation_fails() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "atomic-oauth-connection-failure";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -517,7 +517,7 @@ async fn authorized_oauth_tokens_remain_absent_when_connection_preparation_fails
 #[tokio::test]
 async fn credential_commit_failure_restores_the_previous_credentials_and_master_key() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "atomic-cloud-home-credential-failure";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -597,7 +597,7 @@ async fn credential_commit_failure_restores_the_previous_credentials_and_master_
 #[tokio::test]
 async fn credential_commit_failure_preserves_the_active_connection() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "atomic-cloud-home-active-connection";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -667,7 +667,7 @@ async fn credential_commit_failure_preserves_the_active_connection() {
 
 #[tokio::test]
 async fn capability_admission_refuses_before_stopping_the_active_loop() {
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let mut initial_config = Config::with_defaults(
         "immutable-admission-before-stop".to_string(),
         "test-device".to_string(),
@@ -725,7 +725,7 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
 
 #[tokio::test]
 async fn probe_applies_exact_slot_admission_before_opening_the_provider() {
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let mut config = Config::with_defaults(
         "probe-exact-slot-admission".to_string(),
         "test-device".to_string(),
@@ -758,7 +758,7 @@ async fn probe_applies_exact_slot_admission_before_opening_the_provider() {
 #[tokio::test]
 async fn test_home_replacement_stops_the_previous_loop() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let mut config = Config::with_defaults(
         "sync-restart".to_string(),
         "test-device".to_string(),
@@ -788,7 +788,7 @@ async fn test_home_replacement_stops_the_previous_loop() {
 #[tokio::test]
 async fn failed_restart_preserves_the_active_connection() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let mut initial_config = Config::with_defaults(
         "sync-failed-restart".to_string(),
         "test-device".to_string(),
@@ -831,7 +831,7 @@ async fn failed_restart_preserves_the_active_connection() {
 #[tokio::test]
 async fn connect_rejects_a_missing_device_identity() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "sync-no-device-identity".to_string();
     let keys = StoreKeys::bind(store_id.clone());
     keys.set_cloud_home_credentials(&coven_keys::keys::CloudHomeCredentials::S3 {
@@ -869,7 +869,7 @@ async fn connect_rejects_a_missing_device_identity() {
 #[tokio::test]
 async fn foreign_founder_installs_no_connection() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "sync-foreign-browsable-founder";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -942,7 +942,7 @@ async fn foreign_founder_installs_no_connection() {
 #[test]
 fn cipher_resolution_reads_current_custody_each_time() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "sync-resolve-cipher-fresh";
     let store_keys = StoreKeys::bind(store_id.to_string());
     let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);

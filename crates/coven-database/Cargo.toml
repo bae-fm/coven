@@ -43,7 +43,7 @@ coven-protocol = { workspace = true, features = ["test-utils"] }
 [features]
 # The synthetic store, schema fixtures, and tamper helpers the layers above
 # build their database tests from.
-test-utils = ["coven-protocol/test-utils", "rusqlite/backup"]
+test-utils = ["coven-foundation/test-utils", "coven-protocol/test-utils", "rusqlite/backup"]
 
 [lints]
 workspace = true

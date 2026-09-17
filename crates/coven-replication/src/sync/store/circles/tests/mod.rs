@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::commands::{CircleCancelEpochCloseRequest, CircleOperationRequest};
 use super::*;
 use crate::sync::test_helpers::{
-    temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore, TestStoreParts,
+    test_migrations, test_store_dir, test_synced_tables, TestCustody, TestStore, TestStoreParts,
 };
 use coven_database::StoreDatabase;
 use coven_database::{Database, DbError};

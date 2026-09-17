@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::sync::test_helpers::{temp_store_dir, test_migrations, test_synced_tables};
+use crate::sync::test_helpers::{test_migrations, test_store_dir, test_synced_tables};
 use coven_database::Database;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
@@ -107,7 +107,7 @@ async fn interrupted_store_creation_keeps_durable_founder_objects_for_retry() {
         ));
         let db_store_dir = crate::sync::test_helpers::test_store_dir();
         let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-        let (_store_dir_temp, store_dir) = temp_store_dir();
+        let store_dir = test_store_dir();
         let timestamp = "0000000000001-0000-founder";
         let staged = FounderStoreCreation::begin(
             store_database(&db),
@@ -181,7 +181,7 @@ async fn failed_store_creation_retries_with_its_durable_founder_timestamp() {
     ));
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-    let (_store_dir_temp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     home.fail_exact_create_before_call(1);
 
     let first = crate::sync::store::Store::create(
@@ -240,7 +240,7 @@ async fn interrupted_founder_publication_resumes_after_database_restart() {
         .expect("open founder resume database")
     };
     let db = open();
-    let (_store_dir_temp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let timestamp = "0000000000001-0000-founder";
     let staged = FounderStoreCreation::begin(
         store_database(&db),
@@ -381,7 +381,7 @@ async fn founder_publication_preserves_a_different_object_in_the_reserved_slot()
     ));
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-    let (_store_dir_temp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let timestamp = "0000000000001-0000-founder";
     let staged = FounderStoreCreation::begin(
         store_database(&db),
@@ -439,7 +439,7 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
     ));
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-    let (_store_dir_temp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
 
     crate::sync::store::Store::create(
         store_database(&db),

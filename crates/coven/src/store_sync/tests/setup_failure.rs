@@ -20,7 +20,7 @@ impl coven_replication::sync::sync_loop::SyncLoopRuntimeFactory for FailingSyncL
 #[tokio::test]
 async fn provider_probe_failure_leaves_no_store_creation_attempt_or_credentials() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "probe-before-store-creation";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -84,7 +84,7 @@ async fn provider_probe_failure_leaves_no_store_creation_attempt_or_credentials(
 #[tokio::test]
 async fn sync_runtime_failure_precedes_key_credentials_and_store_publication() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "atomic-cloud-home-runtime-failure";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -155,7 +155,7 @@ async fn sync_runtime_failure_precedes_key_credentials_and_store_publication() {
 #[tokio::test]
 async fn store_initialization_failure_rolls_back_committed_key_and_credentials() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "atomic-cloud-home-initialization-failure";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -225,7 +225,7 @@ async fn store_initialization_failure_rolls_back_committed_key_and_credentials()
 #[tokio::test]
 async fn replacement_initialization_failure_preserves_the_active_connection() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "atomic-cloud-home-replacement-initialization-failure";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -302,7 +302,7 @@ async fn another_store_at_the_same_cloud_location_is_reported_as_occupied() {
         secret_key: "shared-secret".to_string(),
     };
 
-    let (_first_tmp, first_store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let first_store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let first_config = Config::with_defaults(
         "occupied-location-first".to_string(),
         "first-device".to_string(),
@@ -321,7 +321,7 @@ async fn another_store_at_the_same_cloud_location_is_reported_as_occupied() {
         .await
         .expect("the empty cloud location accepts the first Store");
 
-    let (_second_tmp, second_store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let second_store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let second_config = Config::with_defaults(
         "occupied-location-second".to_string(),
         "second-device".to_string(),
@@ -376,7 +376,7 @@ async fn real_s3_prefix_accepts_one_store_and_reports_the_second_as_occupied() {
     let home = live.home();
     let cloud_home = live.config();
 
-    let (_first_tmp, first_store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let first_store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let first_config = Config::with_defaults(
         "real-s3-location-first".to_string(),
         "first-device".to_string(),
@@ -395,7 +395,7 @@ async fn real_s3_prefix_accepts_one_store_and_reports_the_second_as_occupied() {
         .await
         .expect("empty prefix accepts the first Store");
 
-    let (_second_tmp, second_store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let second_store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let second_config = Config::with_defaults(
         "real-s3-location-second".to_string(),
         "second-device".to_string(),

@@ -17,7 +17,7 @@ fn losing_column_merge_keeps_the_exact_winning_stamp() {
     tx.rollback().unwrap();
     conn.execute_batch("UPDATE notes SET title = 'peer', _updated_at = '0000000002000-0000-owner'")
         .unwrap();
-    let (_temp, dir) = coven_foundation::store_dir::temp_store_dir();
+    let dir = crate::synthetic_store::test_store_dir();
     let applied = resolve_and_apply_changeset(
         &conn,
         &dir,
@@ -59,7 +59,7 @@ fn losing_column_merge_without_surviving_values_does_not_run_an_update_trigger()
     drop(session);
     tx.rollback().unwrap();
     conn.execute_batch("UPDATE notes SET body = 'peer', _updated_at = '0000000003000-0000-peer'; CREATE TABLE updates (id INTEGER); CREATE TRIGGER record_update AFTER UPDATE ON notes BEGIN INSERT INTO updates VALUES (1); END;").unwrap();
-    let (_temp, dir) = coven_foundation::store_dir::temp_store_dir();
+    let dir = crate::synthetic_store::test_store_dir();
     let applied = resolve_and_apply_changeset(
         &conn,
         &dir,
@@ -106,7 +106,7 @@ fn losing_column_merge_preserves_winning_columns_and_sqlite_value_types() {
         drop(session);
         tx.rollback().unwrap();
         conn.execute_batch("UPDATE notes SET conflicting = 'peer', untouched = 'peer only', _updated_at = '0000000003000-0000-peer'").unwrap();
-        let (_temp, dir) = coven_foundation::store_dir::temp_store_dir();
+        let dir = crate::synthetic_store::test_store_dir();
         let applied = resolve_and_apply_changeset(
             &conn,
             &dir,
@@ -153,7 +153,7 @@ fn losing_column_merge_rejects_combined_constraint_and_rolls_back_other_rows() {
     tx.rollback().unwrap();
     conn.execute_batch("UPDATE notes SET body = 'longer', _updated_at = '0000000003000-0000-peer'")
         .unwrap();
-    let (_temp, dir) = coven_foundation::store_dir::temp_store_dir();
+    let dir = crate::synthetic_store::test_store_dir();
     let applied = resolve_and_apply_changeset(
         &conn,
         &dir,
@@ -220,7 +220,7 @@ fn losing_column_merge_applies_unique_swaps_as_one_changeset() {
             "UPDATE notes SET body = 'peer body', _updated_at = '0000000003000-0000-peer' WHERE id = ?1",
             [peer_row],
         ).unwrap();
-        let (_temp, dir) = coven_foundation::store_dir::temp_store_dir();
+        let dir = crate::synthetic_store::test_store_dir();
         let result = resolve_and_apply_changeset(
             &conn,
             &dir,
@@ -344,7 +344,7 @@ fn assert_blob_content_merges_as_one_value(publication_order: [usize; 2], same_c
         drop(session);
         tx.rollback().expect("restore common base");
     }
-    let (_temp, dir) = coven_foundation::store_dir::temp_store_dir();
+    let dir = crate::synthetic_store::test_store_dir();
     for index in publication_order {
         let applied = resolve_and_apply_changeset(&conn, &dir, &changesets[index], &tables, 4000)
             .expect("apply shared blob edit");

@@ -129,12 +129,6 @@ mod tests {
     use super::*;
     use crate::encryption::EncryptionService;
 
-    fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new_ephemeral(tmp.path());
-        (tmp, dir)
-    }
-
     // =========================================================================
     // Keyring preset
     // =========================================================================
@@ -218,14 +212,14 @@ mod tests {
 
     #[test]
     fn in_memory_preset_never_writes_under_the_store_dir() {
-        let (tmp, _dir) = temp_store_dir();
+        let store_dir = StoreDir::temp_for_test();
         let custody = InMemoryCustody::new(MasterKeyring::generate());
         custody
             .persist(&MasterKeyring::generate())
             .expect("persist");
         custody.forget().expect("forget");
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+        let entries: Vec<_> = std::fs::read_dir(&store_dir)
             .expect("read store dir")
             .collect();
         assert!(
@@ -240,7 +234,7 @@ mod tests {
 
     #[test]
     fn passphrase_preset_establish_then_unlock_round_trips() {
-        let (_tmp, dir) = temp_store_dir();
+        let dir = StoreDir::temp_for_test();
         let custody = PassphraseCustody::<MasterKeyring>::new(
             Passphrase::new("correct horse battery staple".to_string()),
             &dir,
@@ -259,7 +253,7 @@ mod tests {
 
     #[test]
     fn passphrase_preset_wrong_passphrase_is_err_not_none() {
-        let (_tmp, dir) = temp_store_dir();
+        let dir = StoreDir::temp_for_test();
         let writer = PassphraseCustody::<MasterKeyring>::new(
             Passphrase::new("right passphrase".to_string()),
             &dir,
@@ -283,7 +277,7 @@ mod tests {
 
     #[test]
     fn passphrase_preset_missing_file_is_none() {
-        let (_tmp, dir) = temp_store_dir();
+        let dir = StoreDir::temp_for_test();
         let custody =
             PassphraseCustody::<MasterKeyring>::new(Passphrase::new("unused".to_string()), &dir);
         assert!(custody.unlock().expect("unlock with no file").is_none());
@@ -310,7 +304,7 @@ mod tests {
 
     #[test]
     fn passphrase_preset_envelope_fixture_v1_unlocks() {
-        let (_tmp, dir) = temp_store_dir();
+        let dir = StoreDir::temp_for_test();
         std::fs::write(dir.join("master.keyring"), V1_FIXTURE_ENVELOPE_JSON)
             .expect("write fixture envelope");
 

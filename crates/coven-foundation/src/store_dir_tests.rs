@@ -260,3 +260,28 @@ fn orphan_sweep_clears_stale_write_temps_but_keeps_fresh_ones() {
         );
     }
 }
+
+/// A test store directory belongs to the handles that hold it: the tree stays
+/// while any clone is alive — the clone a database keeps, the one a
+/// close-and-reopen carries across — and goes with the last one, so a test
+/// leaves nothing in the temp directory behind it.
+#[test]
+fn a_temp_store_directory_lives_exactly_as_long_as_its_handles() {
+    let store_dir = StoreDir::temp_for_test();
+    let path = store_dir.to_path_buf();
+    assert!(path.is_dir(), "the fixture creates its directory");
+
+    let held = store_dir.clone();
+    std::fs::write(path.join("payload"), b"written by the test").expect("write under the store");
+    drop(store_dir);
+    assert!(
+        path.join("payload").is_file(),
+        "a clone still holds the tree, so its files stay readable",
+    );
+
+    drop(held);
+    assert!(
+        !path.exists(),
+        "the last handle takes the tree and everything written under it",
+    );
+}

@@ -149,8 +149,8 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     let key_fingerprint = cloud_storage
         .store_blob_key_fingerprint()
         .expect("load Store blob key fingerprint");
-    let (temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let source = temp.path().join("source");
+    let store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = store_dir.join("source");
     let plaintext = b"spool owned by another pending write";
     coven_foundation::local_file::AtomicStagedFile::write_for_test(&source, plaintext)
         .await

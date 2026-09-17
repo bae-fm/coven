@@ -12,7 +12,6 @@ enum ScopedSnapshotImage {
 struct PublishedScopedSnapshot {
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     membership: coven_protocol::membership::MembershipChain,
-    _store_dir_temp: tempfile::TempDir,
     store_dir: coven_foundation::store_dir::StoreDir,
 }
 
@@ -122,11 +121,10 @@ impl PublishedScopedSnapshot {
             .await
             .expect("publish scoped snapshot acknowledgement");
 
-        let (store_dir_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        let store_dir = crate::sync::test_helpers::test_store_dir();
         Self {
             store,
             membership,
-            _store_dir_temp: store_dir_temp,
             store_dir,
         }
     }

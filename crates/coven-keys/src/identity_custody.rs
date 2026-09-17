@@ -110,12 +110,6 @@ mod tests {
     use super::*;
     use crate::keys::test_keyring;
 
-    fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new_ephemeral(tmp.path());
-        (tmp, dir)
-    }
-
     // =========================================================================
     // Keyring preset
     // =========================================================================
@@ -211,7 +205,7 @@ mod tests {
 
     #[test]
     fn passphrase_preset_establish_then_unlock_round_trips() {
-        let (_tmp, dir) = temp_store_dir();
+        let dir = StoreDir::temp_for_test();
         let custody = PassphraseCustody::<UserKeypair>::new(
             Passphrase::new("correct horse battery staple".to_string()),
             &dir,
@@ -230,7 +224,7 @@ mod tests {
 
     #[test]
     fn passphrase_preset_wrong_passphrase_is_err_not_none() {
-        let (_tmp, dir) = temp_store_dir();
+        let dir = StoreDir::temp_for_test();
         let writer = PassphraseCustody::<UserKeypair>::new(
             Passphrase::new("right passphrase".to_string()),
             &dir,
@@ -255,7 +249,7 @@ mod tests {
     /// store's own state.
     #[test]
     fn passphrase_preset_lives_inside_the_store_directory() {
-        let (_tmp, dir) = temp_store_dir();
+        let dir = StoreDir::temp_for_test();
         let custody =
             PassphraseCustody::<UserKeypair>::new(Passphrase::new("unused".to_string()), &dir);
         custody.persist(&UserKeypair::generate()).expect("persist");
@@ -285,7 +279,7 @@ mod tests {
 
     #[test]
     fn passphrase_preset_envelope_fixture_v1_unlocks() {
-        let (_tmp, dir) = temp_store_dir();
+        let dir = StoreDir::temp_for_test();
         std::fs::write(dir.join("identity.envelope"), V1_FIXTURE_ENVELOPE_JSON)
             .expect("write fixture envelope");
 

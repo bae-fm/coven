@@ -42,7 +42,7 @@ impl MasterKeyCustody for FailingForgetMasterKeyCustody {
 #[tokio::test]
 async fn credentialless_provider_setup_removes_previous_provider_credentials() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "atomic-credentialless-cloud-home";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -84,7 +84,7 @@ async fn credentialless_provider_setup_removes_previous_provider_credentials() {
 #[tokio::test]
 async fn disconnect_cloud_home_forgets_credentials_and_drops_the_connection() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "disconnect-cloud-home-custody";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -132,7 +132,7 @@ async fn disconnect_cloud_home_forgets_credentials_and_drops_the_connection() {
 #[tokio::test]
 async fn forgetting_the_master_key_disconnects_before_returning_locked() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "forget-master-key-custody";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -174,7 +174,7 @@ async fn forgetting_the_master_key_disconnects_before_returning_locked() {
 #[tokio::test]
 async fn failed_credential_removal_preserves_the_cloud_connection() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "failed-disconnect-cloud-home-custody";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -213,7 +213,7 @@ async fn failed_credential_removal_preserves_the_cloud_connection() {
 #[tokio::test]
 async fn failed_master_key_removal_preserves_the_cloud_connection() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "failed-forget-master-key-custody";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -253,7 +253,7 @@ async fn failed_master_key_removal_preserves_the_cloud_connection() {
 #[tokio::test]
 async fn unlocking_connects_before_committing_the_imported_master_key() {
     test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let store_id = "unlock-cloud-home-custody";
     let mut initial_config = Config::with_defaults(
         store_id.to_string(),

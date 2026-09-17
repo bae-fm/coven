@@ -395,7 +395,7 @@ async fn upload_retry_preserves_prepared_object_handoff() {
 
 #[test]
 fn blob_bindings_follow_surviving_content_at_the_merged_row_stamp() {
-    let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
+    let store_dir = crate::synthetic_store::test_store_dir();
     let mut conn = Connection::open_in_memory().expect("open");
     apply_coven_schema(&conn).expect("apply coven schema");
     conn.execute_batch(
@@ -538,7 +538,7 @@ fn stale_store_blob_binding_does_not_attach_to_another_circle_row() {
 }
 
 fn assert_stale_binding_respects_row_audience(audience: coven_protocol::circle::Audience) {
-    let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
+    let store_dir = crate::synthetic_store::test_store_dir();
     let mut conn = Connection::open_in_memory().expect("open audience binding database");
     apply_coven_schema(&conn).expect("apply coven schema");
     conn.execute_batch(
@@ -633,7 +633,7 @@ fn assert_stale_binding_respects_row_audience(audience: coven_protocol::circle::
 
 #[test]
 fn mismatched_blob_values_roll_back_locator_installation_with_rows() {
-    let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
+    let store_dir = crate::synthetic_store::test_store_dir();
     let mut conn = Connection::open_in_memory().expect("open");
     apply_coven_schema(&conn).expect("apply coven schema");
     conn.execute_batch(

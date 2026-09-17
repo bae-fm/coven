@@ -29,7 +29,7 @@ use coven_protocol::blob::{CacheFill, Provenance};
 use coven_protocol::membership::MembershipFloor;
 use coven_protocol::synced_schema::BlobDecl;
 use coven_replication::sync::test_helpers::{
-    open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
+    open_test_db, open_test_db_with_blob, pubkey_hex, test_migrations, test_store_dir,
     test_synced_tables, test_synced_tables_with_blob, TestDevice, TestStore,
 };
 use coven_storage::cloud::cloudkit::{

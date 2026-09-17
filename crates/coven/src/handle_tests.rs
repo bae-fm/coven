@@ -7,7 +7,7 @@ use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{test_keyring, StoreKeys};
 use coven_protocol::blob::{CacheFill, Provenance};
 use coven_replication::sync::test_helpers::{
-    temp_store_dir, test_migrations, test_synced_tables_with_blob, TestStore,
+    test_migrations, test_store_dir, test_synced_tables_with_blob, TestStore,
 };
 use coven_storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
@@ -207,7 +207,7 @@ impl HostBlobTestOps for CovenHandle {
 
 #[tokio::test]
 async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = host_blob_test_db("images", &store_dir);
     let mut config = Config::with_defaults(
         "lib-setup-error".to_string(),
@@ -552,7 +552,7 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
         .run_until(async {
             test_keyring::install();
 
-            let (_tmp, store_dir) = temp_store_dir();
+            let store_dir = test_store_dir();
             // `note_photos` carries a blob in the `images` namespace so the read path can
             // resolve a planted row up to its gated `notes` root (the gate that decides
             // Local vs Remote).
@@ -691,7 +691,7 @@ async fn caller_driven_connect_leaves_the_only_drain_to_the_caller() {
         .run_until(async {
             test_keyring::install();
 
-            let (_tmp, store_dir) = temp_store_dir();
+            let store_dir = test_store_dir();
             let db = host_blob_test_db("images", &store_dir);
 
             let mut config = Config::with_defaults(
@@ -843,7 +843,7 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
                 std::num::NonZeroU64::new(1 << 16).expect("nonzero window"),
             );
 
-            let (_tmp, store_dir) = temp_store_dir();
+            let store_dir = test_store_dir();
             let db = host_blob_test_db("images", &store_dir);
 
             let mut config = Config::with_defaults(
@@ -961,7 +961,7 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
 async fn connected_sync_reuses_connection_storage_for_loop() {
     test_keyring::install();
 
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = host_blob_test_db("images", &store_dir);
 
     let mut config = Config::with_defaults(
@@ -1008,7 +1008,7 @@ async fn cloudkit_setup_commits_the_generated_key_with_the_connection() {
     test_keyring::install();
 
     let store_id = "lib-atomic-cloudkit-setup";
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = read_test_db(store_dir.clone(), "images");
     let store_keys = test_store_keys(store_id);
     let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
@@ -1043,7 +1043,7 @@ async fn importing_a_master_key_during_cloud_setup_cannot_report_a_lost_write() 
     test_keyring::install();
 
     let store_id = "lib-import-during-cloud-setup";
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = read_test_db(store_dir.clone(), "images");
     let store_keys = test_store_keys(store_id);
     let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
@@ -1109,7 +1109,7 @@ async fn read_only_handle_resolves_an_encrypted_cipher_through_custody() {
             test_keyring::install();
 
             let store_id = "ro-encrypted-custody-test";
-            let (_tmp, store_dir) = temp_store_dir();
+            let store_dir = test_store_dir();
             let db = host_blob_test_db("images", &store_dir);
 
             let mut config = Config::with_defaults(
@@ -1198,7 +1198,7 @@ async fn read_only_handle_resolves_an_encrypted_cipher_through_custody() {
 
 #[tokio::test]
 async fn sync_not_configured_is_typed() {
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = read_test_db(store_dir.clone(), "images");
     let handle = test_handle("lib-no-sync", store_dir, db);
 
@@ -1217,7 +1217,7 @@ async fn cloud_home_setup_seals_cloud_traffic_with_its_committed_key() {
         .run_until(async {
             test_keyring::install();
 
-            let (_tmp, store_dir) = temp_store_dir();
+            let store_dir = test_store_dir();
             let db = host_blob_test_db("images", &store_dir);
             let store_id = "lib-init-master-key-seals-traffic";
 
@@ -1321,7 +1321,7 @@ async fn cloud_home_setup_seals_cloud_traffic_with_its_committed_key() {
 
 #[tokio::test]
 async fn import_master_key_rejects_raw_hex() {
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = read_test_db(store_dir.clone(), "images");
     let handle = test_handle("lib-import-master-key", store_dir, db);
 
@@ -1331,7 +1331,7 @@ async fn import_master_key_rejects_raw_hex() {
 
 #[tokio::test]
 async fn import_master_key_accepts_the_current_serialized_keyring() {
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = read_test_db(store_dir.clone(), "images");
     let handle = test_handle("lib-import-master-key", store_dir, db);
 
@@ -1394,7 +1394,7 @@ fn test_handle_with_real_identity(
 #[tokio::test]
 async fn initialize_identity_refuses_a_second_call() {
     test_keyring::install();
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = read_test_db(store_dir.clone(), "images");
     let handle = test_handle_with_real_identity("lib-init-identity-twice", store_dir, db);
 
@@ -1418,8 +1418,8 @@ async fn initialize_identity_refuses_a_second_call() {
 #[tokio::test]
 async fn creating_two_stores_yields_two_different_identities() {
     test_keyring::install();
-    let (_tmp_a, store_dir_a) = temp_store_dir();
-    let (_tmp_b, store_dir_b) = temp_store_dir();
+    let store_dir_a = test_store_dir();
+    let store_dir_b = test_store_dir();
     let db_a = read_test_db(store_dir_a.clone(), "images");
     let handle_a = test_handle_with_real_identity("lib-two-stores-identity-a", store_dir_a, db_a);
     let db_b = read_test_db(store_dir_b.clone(), "images");
@@ -1448,7 +1448,7 @@ async fn creating_two_stores_yields_two_different_identities() {
 #[tokio::test]
 async fn host_secret_round_trips_through_the_handle() {
     test_keyring::install();
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = read_test_db(store_dir.clone(), "images");
     let handle = test_handle("lib-host-secret-round-trip", store_dir, db);
 
@@ -1488,7 +1488,7 @@ async fn host_secret_round_trips_through_the_handle() {
 #[tokio::test]
 async fn seal_and_open_app_data_round_trip_through_the_handle() {
     test_keyring::install();
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = read_test_db(store_dir.clone(), "images");
     let store_id = "lib-app-data-round-trip";
     let handle = test_handle_with_custody(
@@ -1530,7 +1530,7 @@ async fn seal_and_open_app_data_round_trip_through_the_handle() {
 #[tokio::test]
 async fn open_app_data_round_trips_through_the_read_handle() {
     test_keyring::install();
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = read_test_db(store_dir.clone(), "images");
     let store_id = "lib-app-data-read-handle";
 
@@ -1588,7 +1588,7 @@ async fn open_app_data_round_trips_through_the_read_handle() {
 #[tokio::test]
 async fn app_data_is_locked_when_no_master_key_is_established() {
     test_keyring::install();
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let db = read_test_db(store_dir.clone(), "images");
     let store_id = "lib-app-data-locked";
     let handle = test_handle_with_custody(
@@ -1625,7 +1625,7 @@ async fn plaintext_membership_operations_are_typed() {
                 await_test_orchestration(tokio::spawn(async {
                     test_keyring::install();
 
-                    let (_tmp, store_dir) = temp_store_dir();
+                    let store_dir = test_store_dir();
                     let db = read_test_db(store_dir.clone(), "images");
                     let handle = test_handle("lib-plaintext-membership", store_dir, db);
                     handle
@@ -1668,7 +1668,7 @@ async fn create_circle_returns_after_merge_activation_is_materialized() {
     await_test_orchestration(tokio::spawn(async {
         test_keyring::install();
 
-        let (_tmp, store_dir) = temp_store_dir();
+        let store_dir = test_store_dir();
         let db = read_test_db(store_dir.clone(), "images");
         let keyring = coven_keys::encryption::MasterKeyring::generate();
         let handle = test_handle_with_custody(
@@ -1755,7 +1755,7 @@ async fn circles_namespace_round_trips_across_states() {
     await_test_orchestration(tokio::spawn(async {
         test_keyring::install();
 
-        let (_tmp, store_dir) = temp_store_dir();
+        let store_dir = test_store_dir();
         let db = read_test_db(store_dir.clone(), "images");
         let keyring = coven_keys::encryption::MasterKeyring::generate();
         let handle = test_handle_with_custody(
@@ -1812,7 +1812,7 @@ async fn circle_write_commands_dispatch_through_their_command_arms() {
     await_test_orchestration(tokio::spawn(async {
         test_keyring::install();
 
-        let (_tmp, store_dir) = temp_store_dir();
+        let store_dir = test_store_dir();
         let db = read_test_db(store_dir.clone(), "images");
         let keyring = coven_keys::encryption::MasterKeyring::generate();
         let handle = test_handle_with_custody(
@@ -1912,7 +1912,7 @@ async fn reconnect_sync_stops_the_previous_loop() {
             tokio::task::spawn_local(async {
                 test_keyring::install();
 
-                let (_tmp, store_dir) = temp_store_dir();
+                let store_dir = test_store_dir();
                 let db = read_test_db(store_dir.clone(), "images");
                 let mut config = Config::with_defaults(
                     "lib-reconnect-loop".to_string(),
@@ -1973,7 +1973,7 @@ async fn stopped_installed_loop_blocks_blob_transitions() {
             tokio::task::spawn_local(async {
                 test_keyring::install();
 
-                let (_tmp, store_dir) = temp_store_dir();
+                let store_dir = test_store_dir();
                 let db = read_test_db(store_dir.clone(), "images");
                 let mut config = Config::with_defaults(
                     "lib-stopped-loop-readiness".to_string(),
@@ -2044,7 +2044,7 @@ async fn encrypted_session_keeps_its_binding_after_config_changes() {
             tokio::task::spawn_local(async {
                 test_keyring::install();
 
-                let (_tmp, store_dir) = temp_store_dir();
+                let store_dir = test_store_dir();
                 let db = host_blob_test_db("images", &store_dir);
 
                 let config = Config::with_defaults(
@@ -2164,8 +2164,8 @@ async fn encrypted_session_keeps_its_binding_after_config_changes() {
         .await;
 }
 
-fn status_test_handle(store_id: &str) -> (tempfile::TempDir, CovenHandle) {
-    let (tmp, store_dir) = temp_store_dir();
+fn status_test_handle(store_id: &str) -> CovenHandle {
+    let store_dir = test_store_dir();
     let db = read_test_db(store_dir.clone(), "images");
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -2177,7 +2177,7 @@ fn status_test_handle(store_id: &str) -> (tempfile::TempDir, CovenHandle) {
         let config = config.clone();
         Arc::new(move || config.clone())
     };
-    let handle = CovenHandle::new(
+    CovenHandle::new(
         db.clone(),
         coven_database::store::StoreReads::open(&store_dir.db_path()).expect("open test read pool"),
         store_dir.clone(),
@@ -2191,8 +2191,7 @@ fn status_test_handle(store_id: &str) -> (tempfile::TempDir, CovenHandle) {
         None,
         StoreOpenGuard::acquire_for_test(&store_dir),
         coven_storage::BlobChunking::DEFAULT,
-    );
-    (tmp, handle)
+    )
 }
 
 #[tokio::test]
@@ -2203,7 +2202,7 @@ async fn sync_now_interrupts_the_startup_delay() {
             tokio::task::spawn_local(async {
                 test_keyring::install();
 
-                let (_tmp, handle) = status_test_handle("lib-sync-now-startup");
+                let handle = status_test_handle("lib-sync-now-startup");
                 let home = Arc::new(InMemoryCloudHome::new());
                 handle
                     .connect_sync_with_test_home(home.clone(), CloudCipher::Plaintext)
@@ -2236,7 +2235,7 @@ async fn subscribed_host_sees_offline_checking_publishing_then_synchronized() {
             tokio::task::spawn_local(async {
                 test_keyring::install();
 
-                let (_tmp, handle) = status_test_handle("lib-status-syncing");
+                let handle = status_test_handle("lib-status-syncing");
                 let mut rx = handle.subscribe_sync_status();
                 assert_eq!(format!("{:?}", *rx.borrow()), "Offline");
 
@@ -2292,7 +2291,7 @@ async fn transport_failure_after_reachability_probe_returns_to_offline() {
             tokio::task::spawn_local(async {
                 test_keyring::install();
 
-                let (_tmp, handle) = status_test_handle("lib-status-cycle-transport");
+                let handle = status_test_handle("lib-status-cycle-transport");
                 let mut rx = handle.subscribe_sync_status();
                 let home = InMemoryCloudHome::new();
                 handle
@@ -2343,7 +2342,7 @@ async fn subscription_survives_a_reconnect() {
             tokio::task::spawn_local(async {
                 test_keyring::install();
 
-                let (_tmp, handle) = status_test_handle("lib-status-reconnect");
+                let handle = status_test_handle("lib-status-reconnect");
 
                 // Subscribe before any provider is connected — valid because the channel
                 // is handle-owned.
@@ -2393,7 +2392,7 @@ async fn disconnect_sync_drops_the_connection_not_just_the_loop() {
             tokio::task::spawn_local(async {
                 test_keyring::install();
 
-                let (_tmp, store_dir) = temp_store_dir();
+                let store_dir = test_store_dir();
                 let db = read_test_db(store_dir.clone(), "images");
                 let handle = test_handle("lib-disconnect-drops-connection", store_dir, db);
 

@@ -1,5 +1,4 @@
 use super::*;
-use coven_foundation::store_dir::temp_store_dir;
 
 fn payload(byte: u8, len: usize) -> Vec<u8> {
     vec![byte; len]
@@ -17,13 +16,13 @@ fn incompressible_payload(seed: u64, len: usize) -> Vec<u8> {
         .collect()
 }
 
-fn payload_store() -> (tempfile::TempDir, StoreDir, Connection) {
-    let (directory, store_dir) = temp_store_dir();
+fn payload_store() -> (StoreDir, Connection) {
+    let store_dir = crate::synthetic_store::test_store_dir();
     let conn = Connection::open_in_memory().expect("open payload database");
     conn.pragma_update(None, "foreign_keys", "ON")
         .expect("enable payload foreign keys");
     crate::apply_coven_schema(&conn).expect("apply payload schema");
-    (directory, store_dir, conn)
+    (store_dir, conn)
 }
 
 fn storage_row(conn: &Connection, hash: ObjectHash) -> (String, i64, Option<Vec<u8>>, i64) {
@@ -49,7 +48,7 @@ fn install(conn: &Connection, store_dir: &StoreDir, bytes: &[u8]) -> ObjectHash 
 
 #[test]
 fn protocol_sized_payloads_live_inline_in_the_database() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let bytes = payload(2, 16 * 1024);
     let hash = install(&conn, &store_dir, &bytes);
     let (storage, payload_size, compressed, compressed_size) = storage_row(&conn, hash);
@@ -70,7 +69,7 @@ fn protocol_sized_payloads_live_inline_in_the_database() {
 
 #[test]
 fn payload_storage_compresses_bytes_without_changing_their_content_address() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let bytes = payload(12, 16 * 1024);
     let hash = install(&conn, &store_dir, &bytes);
     let (_, _, stored_bytes, _) = storage_row(&conn, hash);
@@ -87,7 +86,7 @@ fn payload_storage_compresses_bytes_without_changing_their_content_address() {
 
 #[test]
 fn compressed_size_selects_inline_storage() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let bytes = payload(13, INLINE_PAYLOAD_LIMIT * 4);
     let hash = install(&conn, &store_dir, &bytes);
 
@@ -103,7 +102,7 @@ fn compressed_size_selects_inline_storage() {
 
 #[test]
 fn payload_installation_requires_an_owning_transaction() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let bytes = b"unowned payload";
     let hash = ObjectHash::digest(bytes);
 
@@ -120,7 +119,7 @@ fn payload_installation_requires_an_owning_transaction() {
 
 #[test]
 fn compressed_payloads_over_the_inline_limit_live_in_the_file_spool() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let inline = payload(3, INLINE_PAYLOAD_LIMIT * 4);
     let file = incompressible_payload(4, INLINE_PAYLOAD_LIMIT * 2);
     let inline_hash = install(&conn, &store_dir, &inline);
@@ -152,7 +151,7 @@ fn compressed_payloads_over_the_inline_limit_live_in_the_file_spool() {
 
 #[test]
 fn payload_installation_reports_only_the_spool_files_it_creates() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let bytes = incompressible_payload(23, INLINE_PAYLOAD_LIMIT * 2);
     let path = store_dir.payload_spool_path(ObjectHash::digest(&bytes));
 
@@ -224,7 +223,7 @@ fn reinstalling_a_file_payload_reuses_and_repairs_its_exact_path() {
 
 #[test]
 fn conflicting_file_metadata_fails_without_replacing_the_file() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let bytes = incompressible_payload(17, INLINE_PAYLOAD_LIMIT * 2);
     let hash = install(&conn, &store_dir, &bytes);
     let path = store_dir.payload_spool_path(hash);
@@ -253,7 +252,7 @@ fn conflicting_file_metadata_fails_without_replacing_the_file() {
 
 #[test]
 fn verified_reads_reject_changed_inline_and_file_payloads() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let store = PayloadStore::new(&conn, &store_dir);
     let inline_hash = install(&conn, &store_dir, b"inline payload");
     let file_hash = install(
@@ -284,7 +283,7 @@ fn verified_reads_reject_changed_inline_and_file_payloads() {
 
 #[test]
 fn verified_reads_hash_the_decompressed_payload() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let expected = b"expected logical payload";
     let replacement = b"different logical bytes";
     let hash = install(&conn, &store_dir, expected);
@@ -311,7 +310,7 @@ fn verified_reads_hash_the_decompressed_payload() {
 
 #[test]
 fn decompression_is_bounded_by_the_catalog_payload_size() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let bytes = payload(16, 4096);
     let hash = install(&conn, &store_dir, &bytes);
     conn.execute(
@@ -333,7 +332,7 @@ fn decompression_is_bounded_by_the_catalog_payload_size() {
 
 #[test]
 fn streamed_protocol_payloads_finish_inline() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let bytes = payload(7, 4096);
     let transaction = conn
         .unchecked_transaction()
@@ -367,7 +366,7 @@ fn streamed_protocol_payloads_finish_inline() {
 
 #[test]
 fn streamed_placement_uses_the_finished_compressed_size() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     let inline = payload(14, INLINE_PAYLOAD_LIMIT * 4);
     let file = incompressible_payload(15, INLINE_PAYLOAD_LIMIT * 2);
 
@@ -400,7 +399,7 @@ fn streamed_placement_uses_the_finished_compressed_size() {
 
 #[test]
 fn reinstall_accepts_the_same_payload_from_different_compression_chunks() {
-    let (_directory, store_dir, conn) = payload_store();
+    let (store_dir, conn) = payload_store();
     for bytes in [
         payload(18, INLINE_PAYLOAD_LIMIT * 4),
         incompressible_payload(19, INLINE_PAYLOAD_LIMIT * 2),
@@ -446,7 +445,7 @@ fn reinstall_accepts_the_same_payload_from_different_compression_chunks() {
 
 #[test]
 fn an_owner_cannot_claim_bytes_that_were_never_installed() {
-    let (_directory, _store_dir, conn) = payload_store();
+    let (_store_dir, conn) = payload_store();
     let absent = ObjectHash::digest(b"absent payload");
 
     let error = set_payload_owner_claims_on(&conn, "missing-owner", &BTreeSet::from([absent]))
@@ -461,7 +460,7 @@ fn last_claim_cleanup_removes_inline_and_file_storage() {
         payload(8, 64),
         incompressible_payload(9, INLINE_PAYLOAD_LIMIT * 2),
     ] {
-        let (_directory, store_dir, mut conn) = payload_store();
+        let (store_dir, mut conn) = payload_store();
         let hash = install(&conn, &store_dir, &bytes);
         let tx = conn.transaction().expect("begin claim");
         set_payload_owner_claims_on(&tx, "owner", &BTreeSet::from([hash])).expect("claim payload");
@@ -489,7 +488,7 @@ fn last_claim_cleanup_removes_inline_and_file_storage() {
 
 #[test]
 fn a_second_owner_keeps_shared_payload_storage() {
-    let (_directory, store_dir, mut conn) = payload_store();
+    let (store_dir, mut conn) = payload_store();
     let bytes = payload(10, 128);
     let hash = install(&conn, &store_dir, &bytes);
     let tx = conn.transaction().expect("begin claims");
@@ -515,7 +514,7 @@ fn a_second_owner_keeps_shared_payload_storage() {
 
 #[test]
 fn a_file_deletion_retry_finishes_after_the_file_is_already_absent() {
-    let (_directory, store_dir, mut conn) = payload_store();
+    let (store_dir, mut conn) = payload_store();
     let hash = install(
         &conn,
         &store_dir,

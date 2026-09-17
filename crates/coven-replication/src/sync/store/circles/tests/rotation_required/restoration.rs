@@ -890,7 +890,7 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .expect("publish post-close Circle content");
 
     // Author the dominating standalone Circle snapshot under the successor epoch.
-    let (_standalone_temp, standalone_dir) = temp_store_dir();
+    let standalone_dir = test_store_dir();
     let standalone = store
         .push_circle_snapshots(
             &db,

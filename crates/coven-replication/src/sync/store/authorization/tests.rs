@@ -1,5 +1,5 @@
 use super::*;
-use crate::sync::test_helpers::{temp_store_dir, TestStore};
+use crate::sync::test_helpers::{test_store_dir, TestStore};
 
 #[tokio::test]
 async fn loaded_store_authorization_retains_its_verified_root() {
@@ -16,7 +16,7 @@ async fn loaded_store_authorization_retains_its_verified_root() {
     )
     .await
     .expect("create Store");
-    let (_store_dir_temp, store_dir) = temp_store_dir();
+    let store_dir = test_store_dir();
     let store = Store::load(
         coven_database::StoreDatabase::new(&db),
         storage,

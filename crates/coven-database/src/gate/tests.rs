@@ -31,7 +31,7 @@ impl ConnectionTestSql for Connection {
     }
 
     fn apply_test_changeset(&self, bytes: &[u8], tables: &[SyncedTable]) {
-        let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
+        let store_dir = crate::synthetic_store::test_store_dir();
         resolve_and_apply_changeset(
             self,
             &store_dir,

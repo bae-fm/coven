@@ -50,20 +50,21 @@ impl Database {
     }
 }
 
+/// The store directory a test database's payload files live under. An
+/// in-memory database has no parent path, so it gets a temporary directory of
+/// its own, removed with the fixture; a file-backed one shares the directory
+/// its caller already owns.
 pub fn store_dir_for_test_database(
     path: &std::path::Path,
 ) -> coven_foundation::store_dir::StoreDir {
-    let store_dir = if path == std::path::Path::new(":memory:") {
-        coven_foundation::store_dir::StoreDir::new_ephemeral(
-            std::env::temp_dir().join(format!("coven-test-store-{}", uuid::Uuid::new_v4())),
-        )
-    } else {
-        coven_foundation::store_dir::StoreDir::new(
-            path.parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| std::path::Path::new(".")),
-        )
-    };
+    if path == std::path::Path::new(":memory:") {
+        return coven_foundation::store_dir::StoreDir::temp_for_test();
+    }
+    let store_dir = coven_foundation::store_dir::StoreDir::new(
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    );
     store_dir
         .ensure_created()
         .expect("create test database payload directory");
@@ -320,15 +321,13 @@ pub fn open_test_db(store_dir: coven_foundation::store_dir::StoreDir) -> Databas
     open_test_db_schema(store_dir, test_synced_tables(), test_migrations())
 }
 
-/// Construct an isolated Store directory for a test composition root.
+/// An isolated Store directory for a test composition root, owned by the test
+/// that asks for it: the directory and everything written under it go when the
+/// last handle to the returned [`StoreDir`] drops.
+///
+/// [`StoreDir`]: coven_foundation::store_dir::StoreDir
 pub fn test_store_dir() -> coven_foundation::store_dir::StoreDir {
-    let store_dir = coven_foundation::store_dir::StoreDir::new_ephemeral(
-        std::env::temp_dir().join(format!("coven-test-store-{}", uuid::Uuid::new_v4())),
-    );
-    store_dir
-        .ensure_created()
-        .expect("create isolated test Store directory");
-    store_dir
+    coven_foundation::store_dir::StoreDir::temp_for_test()
 }
 
 /// Like [`open_test_db`] but with an explicit synced set and migration ladder, for

@@ -16,6 +16,8 @@ mod routing;
 mod schema_initialization;
 #[path = "tests/scoped_audience_capture.rs"]
 mod scoped_audience_capture;
+#[path = "tests/test_store_dir.rs"]
+mod test_store_dir;
 
 #[test]
 fn mapped_queries_reuse_their_prepared_statement() {

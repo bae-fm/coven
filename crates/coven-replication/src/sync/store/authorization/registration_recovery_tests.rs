@@ -689,7 +689,7 @@ async fn cold_snapshot_recovery_keeps_covered_and_new_concurrent_tips() {
         .await
         .expect("publish founder snapshot");
 
-    let (_restore_temp, restore_dir) = crate::sync::test_helpers::temp_store_dir();
+    let restore_dir = crate::sync::test_helpers::test_store_dir();
     let database_path = restore_dir.db_path();
     let bootstrap = store
         .prepare_snapshot_bootstrap(

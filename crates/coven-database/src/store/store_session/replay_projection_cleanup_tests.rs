@@ -35,7 +35,7 @@ fn connection() -> rusqlite::Connection {
 }
 
 fn assert_projection_cleanup(copy: CleanupCopy) {
-    let (_directory, store_dir) = coven_foundation::store_dir::temp_store_dir();
+    let store_dir = crate::synthetic_store::test_store_dir();
     let mut source = connection();
     let mut target = connection();
     let tables = [blob_binding_table()];

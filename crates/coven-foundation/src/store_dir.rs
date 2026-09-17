@@ -296,6 +296,8 @@ impl StoreLayout {
         StoreDir {
             path: self.stores_root().join(store_id),
             file_sync: crate::atomic_file::FileSync::Enabled,
+            #[cfg(any(test, feature = "test-utils"))]
+            _owned_tree: None,
         }
     }
 }
@@ -308,6 +310,12 @@ impl StoreLayout {
 pub struct StoreDir {
     path: PathBuf,
     file_sync: crate::atomic_file::FileSync,
+    /// The temporary tree this handle owns, removed once the last clone of it
+    /// drops. A host's store directory outlives every handle to it, so this is
+    /// `None` everywhere but [`StoreDir::temp_for_test`], whose directory
+    /// belongs to the fixture that made it.
+    #[cfg(any(test, feature = "test-utils"))]
+    _owned_tree: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 
 impl PartialEq for StoreDir {
@@ -321,16 +329,44 @@ impl StoreDir {
         Self {
             path: path.into(),
             file_sync: crate::atomic_file::FileSync::Enabled,
+            #[cfg(any(test, feature = "test-utils"))]
+            _owned_tree: None,
         }
     }
 
     /// A store directory whose owning database is itself ephemeral. Atomic
     /// visibility and rollback still run, but persistence barriers do not: no
     /// file can outlive the durable state that names it.
+    ///
+    /// Ephemeral describes the writes, not the directory: the caller (a
+    /// snapshot preparation, a received image, a host's own temp dir) owns the
+    /// tree and decides when it goes. A directory that owns itself comes from
+    /// [`StoreDir::temp_for_test`].
     pub fn new_ephemeral(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
             file_sync: crate::atomic_file::FileSync::Disabled,
+            #[cfg(any(test, feature = "test-utils"))]
+            _owned_tree: None,
+        }
+    }
+
+    /// A store directory a test owns outright: a fresh temporary tree, written
+    /// without persistence barriers like any ephemeral store, and removed with
+    /// everything under it when the last handle to it drops — the test's own
+    /// binding, every clone it hands a database, and whatever a
+    /// close-and-reopen carries across. Nothing else has to remember to clean
+    /// up after the test.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn temp_for_test() -> Self {
+        let tree = tempfile::Builder::new()
+            .prefix("coven-test-store-")
+            .tempdir()
+            .expect("create temporary store directory");
+        Self {
+            path: tree.path().to_path_buf(),
+            file_sync: crate::atomic_file::FileSync::Disabled,
+            _owned_tree: Some(std::sync::Arc::new(tree)),
         }
     }
 
@@ -343,6 +379,7 @@ impl StoreDir {
             Self {
                 path: path.into(),
                 file_sync: crate::atomic_file::FileSync::ObservedDisabled(requests.clone()),
+                _owned_tree: None,
             },
             requests,
         )
@@ -1148,15 +1185,6 @@ impl From<PathBuf> for StoreDir {
     fn from(path: PathBuf) -> Self {
         Self::new(path)
     }
-}
-
-/// A temp dir plus a [`StoreDir`] rooted at it. The returned `TempDir` must be
-/// held for the directory to outlive the test.
-#[cfg(any(test, feature = "test-utils"))]
-pub fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new_ephemeral(tmp.path());
-    (tmp, dir)
 }
 
 #[cfg(test)]

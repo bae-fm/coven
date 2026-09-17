@@ -1140,7 +1140,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         }
     }
 
-    let (_tmp_b, lib_b) = temp_store_dir();
+    let lib_b = test_store_dir();
     let error = storage
         .prepare_snapshot_bootstrap(
             &membership_floor,

@@ -20,7 +20,6 @@ mod uploaded_changeset;
 /// The synthetic store's schema and `Database` constructors, which the database
 /// layer owns and its own tests open directly.
 pub use coven_database::synthetic_store::*;
-pub use coven_foundation::store_dir::temp_store_dir;
 pub use coven_storage::cloud::test_utils::{test_cloud_home, test_cloud_home_with_binding};
 
 pub fn staged_snapshot_image(bytes: &[u8]) -> coven_database::SnapshotDatabaseImage {
