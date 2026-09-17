@@ -241,6 +241,9 @@ pub struct PreparedDeviceJoinSnapshot {
     authority: coven_database::VerifiedStoreSnapshotAuthority,
     membership: coven_database::InitialStoreMembershipAuthority,
     bootstrap: coven_database::DeviceJoinBootstrapPlan,
+    /// Admission reads this Store's own objects to verify the history the image
+    /// carries, so the preparation keeps the storage it downloaded through.
+    storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
 }
 
 impl PreparedDeviceJoinSnapshot {
@@ -367,11 +370,19 @@ impl PreparedDeviceJoinSnapshot {
             authority,
             membership,
             bootstrap,
+            storage: std::sync::Arc::clone(storage),
         })
     }
 
+    /// Install the downloaded image as this device's Store.
+    ///
+    /// The image opens as a guarded destination, exactly as a cold restore's
+    /// does: it is nobody's database until the history it carries has been
+    /// verified against this Store's own authority. A refusal discards the
+    /// destination, taking its database files and every payload file the
+    /// attempt wrote.
     #[allow(clippy::too_many_arguments)]
-    pub fn install(
+    pub async fn install(
         self,
         synced_tables: Vec<SyncedTable>,
         transfer_limits: coven_protocol::blob::TransferLimits,
@@ -390,11 +401,18 @@ impl PreparedDeviceJoinSnapshot {
             authority,
             membership,
             bootstrap,
+            storage,
         } = self;
         let bound_path = database_image.path().to_path_buf();
-        let result = (|| {
+        let prepared = (|| {
             let database_bytes = std::fs::read(&bound_path)?;
-            if snapshot_db_hash(&database_bytes) != db_hash {
+            // The staged bytes are the ones downloaded, and the ones downloaded
+            // are the ones the owner signed. The guarded open below does not
+            // repeat the second half, so both are checked here.
+            if snapshot_db_hash(&database_bytes) != db_hash
+                || coven_protocol::store_commit::ObjectHash::digest(&database_bytes)
+                    != snapshot.meta.image.image_hash
+            {
                 return Err(SnapshotError::BootstrapDatabaseChanged);
             }
             let root_ref = coven_protocol::store_commit::StoreRootRef {
@@ -410,33 +428,62 @@ impl PreparedDeviceJoinSnapshot {
                 membership,
                 Some(routing_encryption),
             )?;
-            let db = Database::open_initialized_store(
-                &bound_path,
-                &install,
-                synced_tables,
-                transfer_limits,
-                device_id,
-                clock,
-                coven_migration_policy,
-                migrations,
-            )?;
-            Ok(crate::sync::store::InstalledDeviceJoinSnapshot {
-                database: coven_database::StoreDatabase::from_database(db),
-                root: root_ref,
-                verified_root: root,
-                bootstrap,
-            })
+            let verified_root =
+                crate::sync::store::protocol_root::VerifiedStoreRoot::from_verified_object(
+                    root_ref.clone(),
+                    root.clone(),
+                )
+                .map_err(SnapshotError::StoreProtocol)?;
+            Ok((root_ref, root, install, verified_root))
         })();
-        match result {
-            Ok(installed) => {
-                let committed_path = database_image.commit();
-                debug_assert_eq!(committed_path, bound_path);
-                Ok(installed)
+        let (root_ref, root, install, verified_root) = match prepared {
+            Ok(prepared) => prepared,
+            Err(cause) => {
+                return database_image
+                    .finish_operation(Err(cause))
+                    .map_err(SnapshotError::from);
             }
-            Err(cause) => database_image
-                .finish_operation(Err(cause))
-                .map_err(SnapshotError::from),
+        };
+        let preparation = Database::open_cold_snapshot(
+            database_image,
+            &install,
+            synced_tables,
+            transfer_limits,
+            device_id,
+            clock,
+            coven_migration_policy,
+            migrations,
+        )?;
+        let admitted = preparation
+            .admit_snapshot_history(|installed| async move {
+                crate::sync::store::authorization::history::retained::admit_foreign_retained_history(
+                    &installed,
+                    storage.as_ref(),
+                    verified_root,
+                )
+                .await
+                .map_err(SnapshotError::from)
+            })
+            .await;
+        if let Err(cause) = admitted {
+            return match preparation.discard().await {
+                Ok(()) => Err(cause),
+                Err(cleanup) => Err(SnapshotError::StagedDatabaseCleanupAfterFailure {
+                    path: bound_path,
+                    cleanup: cleanup.to_string(),
+                    cause: Box::new(cause),
+                }),
+            };
         }
+        let database = coven_database::StoreDatabase::from_database(
+            Database::finish_cold_snapshot(preparation).await?,
+        );
+        Ok(crate::sync::store::InstalledDeviceJoinSnapshot {
+            database,
+            root: root_ref,
+            verified_root: root,
+            bootstrap,
+        })
     }
 }
 
@@ -750,38 +797,58 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         if fail_circle_install {
             preparation.fail_circle_restore_for_test();
         }
+        // The image's carried history is verified against this Store's own
+        // authority before anything stands on it. The destination is still
+        // private here, so a refusal discards it whole.
+        let admission_root = root.clone();
+        let admitted = preparation
+            .admit_snapshot_history(|installed| async move {
+                crate::sync::store::authorization::history::retained::admit_foreign_retained_history(
+                    &installed,
+                    storage.as_ref(),
+                    admission_root,
+                )
+                .await
+                .map_err(SnapshotError::from)
+            })
+            .await;
         // The selection runs against the destination's own installed rows, and
         // the install that follows it lands even when nothing is selected: it is
         // also what drops the publisher's imported Circle bootstrap coverage.
         let verifier = &mut history_verifier;
         let identity = &restorer_identity;
-        let restored = preparation
-            .restore_snapshot_circles(|restoring| async move {
-                if !local_membership.allows_circle_access() {
-                    return Ok(coven_database::StagedCircleRestore::empty());
-                }
-                let routing_key = routing_encryption
-                    .map(|encryption| {
-                        coven_protocol::circle::derive_row_routing_key(
-                            encryption,
-                            root_ref.store_root_hash,
+        let restored = match admitted {
+            Err(cause) => Err(cause),
+            Ok(()) => {
+                preparation
+                    .restore_snapshot_circles(|restoring| async move {
+                        if !local_membership.allows_circle_access() {
+                            return Ok(coven_database::StagedCircleRestore::empty());
+                        }
+                        let routing_key = routing_encryption
+                            .map(|encryption| {
+                                coven_protocol::circle::derive_row_routing_key(
+                                    encryption,
+                                    root_ref.store_root_hash,
+                                )
+                            })
+                            .transpose()?;
+                        crate::sync::store::snapshots::CircleSnapshotReader::new(
+                            &restoring,
+                            storage.as_ref(),
+                            verifier,
                         )
+                        .select_staged_installs(
+                            &store_frontier,
+                            identity,
+                            routing_key.as_ref(),
+                            local_membership,
+                        )
+                        .await
                     })
-                    .transpose()?;
-                crate::sync::store::snapshots::CircleSnapshotReader::new(
-                    &restoring,
-                    storage.as_ref(),
-                    verifier,
-                )
-                .select_staged_installs(
-                    &store_frontier,
-                    identity,
-                    routing_key.as_ref(),
-                    local_membership,
-                )
-                .await
-            })
-            .await;
+                    .await
+            }
+        };
         if let Err(cause) = restored {
             return match preparation.discard().await {
                 Ok(()) => Err(cause),

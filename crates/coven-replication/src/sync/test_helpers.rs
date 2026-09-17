@@ -733,15 +733,17 @@ mod test_device {
                     &cancel,
                 )
                 .await?;
-                let installed = prepared.install(
-                    joining_database.synced_tables_for_test(),
-                    joining_database.transfer_limits(),
-                    device_id,
-                    clock,
-                    &coven_database::synthetic_store::test_migrations(),
-                    coven_database::CovenMigrationPolicy::ApplyPending,
-                    &routing_encryption,
-                )?;
+                let installed = prepared
+                    .install(
+                        joining_database.synced_tables_for_test(),
+                        joining_database.transfer_limits(),
+                        device_id,
+                        clock,
+                        &coven_database::synthetic_store::test_migrations(),
+                        coven_database::CovenMigrationPolicy::ApplyPending,
+                        &routing_encryption,
+                    )
+                    .await?;
                 drop(pending_join);
                 let completion =
                 crate::sync::store::PendingDeviceJoinAuthority::prepare_same_principal_completion(

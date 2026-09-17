@@ -71,7 +71,11 @@ Follower is read-only. The puller judges every Store commit against the applicab
 author who is not a write-capable member at pull time is rejected, and the
 snapshot (a destructive, whole-catalog primitive) is authorized to Owners only.
 Membership is anchored to its founder, so a member cannot rewrite history
-to grant themselves a role they were never given. What a current member *can* do
+to grant themselves a role they were never given. An Owner's signature over a
+snapshot covers the image, its coverage and its summary; it is not a warrant for
+the history the image carries, so a receiver walks that history against its own
+membership authority before the image becomes its database
+(see [Bootstrap](/docs/bootstrap)). What a current member *can* do
 — they hold the store key and a valid identity — is exactly what membership
 grants: write store data. Removing that capability is the next section.
 

@@ -688,3 +688,6 @@ mod blob_capture_tests;
 
 #[cfg(test)]
 mod cadence_tests;
+
+#[cfg(test)]
+mod foreign_history_tests;

@@ -177,6 +177,7 @@ async fn device_join_clock_follows_rows_restored_only_from_a_circle_snapshot() {
             coven_database::CovenMigrationPolicy::ApplyPending,
             &routing,
         )
+        .await
         .expect("install the Store image using the receiver clock");
     installed
         .complete_and_assert_circle_snapshot_clock_for_test(

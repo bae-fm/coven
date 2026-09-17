@@ -284,6 +284,40 @@ pub(crate) async fn seed_verifier_from_retained_history(
     Ok(retained)
 }
 
+/// Verify the history a foreign snapshot image carries, while the database it
+/// was installed into is still private to its preparation.
+///
+/// A signed image attests its own hash, its coverage and its summary, and each
+/// retained input it carries opens against its own commit. None of that says
+/// the carried commits were authorized by this Store's membership at the
+/// positions they claim: acceptance for a covered commit is synthesised from
+/// the coverage the owner signed, so a body re-signed by its original device
+/// installs and is refused only when this device next seeds its own history —
+/// after the image has become the receiver's database.
+///
+/// Running the same walk here moves the refusal in front of the install. The
+/// verifier is new rather than the receiver's: its conclusions are about the
+/// foreign image alone, and the receiver's own baseline and retained rows are
+/// not the authority for what arrived.
+///
+/// This catches a hostile carried history. It does not establish complete
+/// foreign admission: the carried registrations still stand on the retained
+/// branch of the walk, snapshot coverage still supplies acceptance for covered
+/// commits, the walk does not run the Circle activation verifier's whole
+/// control admission, and snapshot-carried blob inventory keeps its own
+/// obligations.
+pub(crate) async fn admit_foreign_retained_history(
+    database: &StoreDatabase,
+    storage: &dyn CloudSyncObjectStorage,
+    root: crate::sync::store::protocol_root::VerifiedStoreRoot,
+) -> Result<(), pull::StorePullError> {
+    let mut history = crate::sync::store::authorization::HistoryConstructionAuthority::admission()
+        .bind_verified(storage, root)
+        .await?;
+    seed_verifier_from_retained_history(database, &mut history).await?;
+    Ok(())
+}
+
 /// The device state a commit's predecessor cut resolves to, read from the
 /// retained checkpoints its frontier names.
 pub(crate) async fn retained_history_checkpoints(

@@ -45,6 +45,18 @@ impl PullHistory<'_, '_> {
         };
         let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
             &self.database;
+        // The checkpoint database is private to this pull until the interval
+        // installs. Verify the history the image carries here: its retained
+        // inputs open against their own commits, which does not say this
+        // Store's membership ever authorized them. A refusal leaves the
+        // receiver untouched — the pull's terminal step discards the
+        // preparation.
+        crate::sync::store::authorization::history::retained::admit_foreign_retained_history(
+            database,
+            self.storage,
+            self.history.verified_root().clone(),
+        )
+        .await?;
         let local = LocalStoreMembership::from_membership(membership, identity);
         let circles = if local.allows_circle_access() {
             let identity = identity.ok_or_else(|| {

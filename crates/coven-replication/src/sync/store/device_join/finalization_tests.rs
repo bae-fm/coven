@@ -291,6 +291,7 @@ async fn assert_pending_handoff_retention(with_orphan_blob: bool) {
             coven_database::CovenMigrationPolicy::ApplyPending,
             &routing,
         )
+        .await
         .expect("install the original handoff image");
     let completed = super::PendingDeviceJoinAuthority::prepare_same_principal_completion(
         &pending,

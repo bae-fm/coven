@@ -1034,7 +1034,8 @@ impl DeviceJoinClient {
             .device_id
             .to_string();
         let installed = timings
-            .stage("install snapshot", async {
+            .stage(
+                "install snapshot",
                 prepared.install(
                     self.synced_tables.clone(),
                     self.transfer_limits,
@@ -1043,8 +1044,8 @@ impl DeviceJoinClient {
                     &self.migrations,
                     self.coven_migration_policy,
                     &routing_encryption,
-                )
-            })
+                ),
+            )
             .await?;
         let completion = timings.stage("install history", coven_replication::sync::store::PendingDeviceJoinAuthority::prepare_same_principal_completion(
             &pending,

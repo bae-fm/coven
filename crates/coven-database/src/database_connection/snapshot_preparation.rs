@@ -185,6 +185,26 @@ impl ColdSnapshotPreparation {
         }
     }
 
+    /// Verify the history the installed image carries, before this destination
+    /// can become a published database.
+    ///
+    /// `admit` is lent the destination for exactly as long as the verification
+    /// runs, the same way the Circle selection below is. It is the restore's
+    /// only chance to read the carried history with nothing outside this
+    /// preparation depending on it: refusing here discards the destination and
+    /// every file the attempt wrote.
+    pub async fn admit_snapshot_history<Admit, Admission, E>(&self, admit: Admit) -> Result<(), E>
+    where
+        Admit: FnOnce(crate::StoreDatabase) -> Admission,
+        Admission: std::future::Future<Output = Result<(), E>>,
+        E: From<DbError>,
+    {
+        let connection = self.connection.as_ref().expect(WORKER_HELD);
+        let installed =
+            crate::StoreDatabase::from_database(Database::from_connection(connection.clone()));
+        admit(installed).await
+    }
+
     /// Install the Circle images the restoring identity selects.
     ///
     /// `select` resolves that selection against this destination's installed

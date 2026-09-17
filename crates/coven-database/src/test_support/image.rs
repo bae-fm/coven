@@ -356,6 +356,120 @@ impl DatabaseImageTest {
             .map_err(DbError::from)
     }
 
+    /// Move one retained materialization inside a captured snapshot image onto
+    /// another commit: its canonical input carries `commit` instead, and every
+    /// row that named the reference it replaces names `commit_ref`.
+    ///
+    /// Device-state mappings are deliberately left where they are. An image may
+    /// only carry states its signed causal cut names, so rewriting them would
+    /// make the image fail that check instead of the one a hostile carried
+    /// history is supposed to fail.
+    pub fn replace_retained_materialization_commit(
+        &self,
+        stream_id: &str,
+        sequence: u64,
+        commit_ref: &str,
+        commit_hash: &str,
+        commit: coven_protocol::objects::PreparedExactObject,
+    ) -> Result<(), DbError> {
+        let sequence_sql = i64::try_from(sequence)
+            .map_err(|error| DbError::context("retained materialization sequence", error))?;
+        let (replaced, stored): (String, Vec<u8>) = self
+            .connection
+            .query_row(
+                "SELECT commit_ref, canonical_input FROM retained_merge_materializations
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id, sequence_sql],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)?;
+        let mut input: crate::store::materialization_models::RetainedMergeMaterializationInput =
+            serde_json::from_slice(&stored)
+                .map_err(|error| DbError::context("retained materialization input", error))?;
+        input.commit = commit;
+        // Everything a retained input holds names the commit it materializes.
+        // Its Circle activations carry that reference inside their own opaque
+        // canonical bytes, so they are moved before the input is serialized;
+        // every other carrier is a field of the input and moves with it.
+        input.activation.circle_activations = rename_reference(
+            &input.activation.circle_activations,
+            replaced.as_bytes(),
+            commit_ref.as_bytes(),
+        );
+        let canonical_input = serde_json::to_vec(&input)
+            .map_err(|error| DbError::context("serialize retained materialization input", error))?;
+        let canonical_input =
+            rename_reference(&canonical_input, replaced.as_bytes(), commit_ref.as_bytes());
+        self.rewrite_retained_materialization(
+            stream_id,
+            sequence_sql,
+            &replaced,
+            commit_ref,
+            commit_hash,
+            &canonical_input,
+        )
+    }
+
+    fn rewrite_retained_materialization(
+        &self,
+        stream_id: &str,
+        sequence: i64,
+        replaced: &str,
+        commit_ref: &str,
+        commit_hash: &str,
+        canonical_input: &[u8],
+    ) -> Result<(), DbError> {
+        let input_hash =
+            coven_protocol::store_commit::ObjectHash::digest(canonical_input).to_string();
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction
+            .pragma_update(None, "defer_foreign_keys", "ON")
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                "UPDATE retained_merge_materializations
+                 SET commit_ref = ?3, input_hash = ?4, canonical_input = ?5
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![
+                    stream_id,
+                    sequence,
+                    commit_ref,
+                    &input_hash,
+                    canonical_input
+                ],
+            )
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                "UPDATE retained_replay_objects SET commit_ref = ?3, input_hash = ?4
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id, sequence, commit_ref, &input_hash],
+            )
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                "UPDATE circle_control_activations SET commit_hash = ?3
+                 WHERE stream_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id, sequence, commit_hash],
+            )
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                "UPDATE circle_bootstrap_coverage SET activation_commit = ?2
+                 WHERE activation_commit = ?1",
+                rusqlite::params![replaced, commit_ref],
+            )
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                "UPDATE store_author_exclusion_activations SET activation_commit = ?2
+                 WHERE activation_commit = ?1",
+                rusqlite::params![replaced, commit_ref],
+            )
+            .map_err(DbError::from)?;
+        transaction.commit().map_err(DbError::from)
+    }
+
     pub fn create_interrupted_coven_schema(&self) -> Result<(), DbError> {
         self.connection
             .execute_batch(
@@ -373,4 +487,21 @@ impl DatabaseImageTest {
             .map(|bytes| bytes.to_vec())
             .map_err(DbError::from)
     }
+}
+
+/// Replace every occurrence of one canonical reference's serialized bytes with
+/// another's. Both come from the same serializer, so the result stays canonical.
+fn rename_reference(bytes: &[u8], replaced: &[u8], replacement: &[u8]) -> Vec<u8> {
+    let mut renamed = Vec::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while let Some(at) = rest
+        .windows(replaced.len())
+        .position(|window| window == replaced)
+    {
+        renamed.extend_from_slice(&rest[..at]);
+        renamed.extend_from_slice(replacement);
+        rest = &rest[at + replaced.len()..];
+    }
+    renamed.extend_from_slice(rest);
+    renamed
 }

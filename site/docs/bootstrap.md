@@ -108,6 +108,17 @@ publication authority. Pull verifies the accepted continuation above that base;
 it does not fabricate a materialized commit row for each retired historical
 entry.
 
+An image also carries the retained history the receiver will stand on, and the
+owner's signature over the image says nothing about whether this store's
+membership ever authorized the commits inside it. So the history an image
+carries is verified against the store's own authority while the database it was
+installed into is still private to its preparation: every retained commit is
+walked for its predecessor state, its membership at the cut it names, and the
+authority its author claims. A cold restore, a warm adoption during a pull, and
+a same-provider device join all run that walk before their destination can
+become anyone's database, and each refuses by discarding the preparation — its
+database files and every payload file the attempt wrote go with it.
+
 Restore resolves Circle access for the receiving identity. The destination is
 opened once and stays private until it can serve: the Store image installs
 first, the receiving identity then re-resolves its own access against those
