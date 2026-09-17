@@ -147,11 +147,6 @@ pub(super) const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     (
         "crates/coven-database/src/database_runtime.rs",
         "Database",
-        "open_initialized_store",
-    ),
-    (
-        "crates/coven-database/src/database_runtime.rs",
-        "Database",
         "open_with_hlc_and_coven_metadata",
     ),
     (
