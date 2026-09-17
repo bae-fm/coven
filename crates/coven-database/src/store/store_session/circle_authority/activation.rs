@@ -142,6 +142,40 @@ impl StoreSession<'_> {
         Ok(Some((activation, commit)))
     }
 
+    /// Every Circle entry position this device has accepted for one Circle.
+    ///
+    /// The Circle's current state names the control the accepted history has
+    /// reduced to, or every retained branch when it is conflicted; monotone
+    /// inheritance makes each of those inventories the whole accepted history
+    /// behind it, so their union is every position ever filled.
+    fn accepted_circle_entry_positions(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<coven_protocol::circle_activation::AcceptedCircleEntryPositions, DbError> {
+        let mut positions =
+            coven_protocol::circle_activation::AcceptedCircleEntryPositions::default();
+        let Some(state) = crate::store::store_session::circle_operations::circle_current_state_on(
+            self.conn, circle_id,
+        )?
+        else {
+            return Ok(positions);
+        };
+        let controls = match state.conflict_branches() {
+            Some(branches) => branches,
+            None => state
+                .resolved_control()
+                .map(|control| vec![control.coordinate().clone()])
+                .unwrap_or_default(),
+        };
+        for control in controls {
+            if let Some(activation) = self.verified_circle_activation(root, circle_id, &control)? {
+                positions.include(activation.reference.objects());
+            }
+        }
+        Ok(positions)
+    }
+
     fn verified_circle_activation(
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
@@ -202,6 +236,18 @@ impl StoreDatabase {
             )
         })
         .await
+    }
+
+    /// Every Circle entry position this device has already accepted for one
+    /// Circle, re-derived from the accepted activations it retains rather than
+    /// from any mutable record.
+    pub async fn accepted_circle_entry_positions(
+        &self,
+        root: coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<coven_protocol::circle_activation::AcceptedCircleEntryPositions, DbError> {
+        self.call_store(move |session| session.accepted_circle_entry_positions(&root, circle_id))
+            .await
     }
 
     pub async fn verified_circle_activation(

@@ -331,6 +331,7 @@ fn assert_exact_operation(expected: &CircleOperationJournal, actual: &CircleOper
 mod bootstrap_discard;
 mod conflict_fixture;
 mod deletion;
+mod discarded_state;
 mod journal;
 mod local_validation;
 mod metadata_clock;

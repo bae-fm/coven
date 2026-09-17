@@ -21,6 +21,13 @@ pub(super) fn routing() -> EncryptionService {
 /// can author a concurrent control successor. Both devices publish to one shared
 /// cloud home, so a control successor authored on each and not seen by the other
 /// forms a genuine `ControlConflict` once either device pulls both.
+/// What a one-position fork attempt leaves behind: the refusal its own device
+/// raised, and the prepared operation whose commit a peer can still be handed.
+pub(super) struct OnePositionFork {
+    pub(super) refusal: CircleOperationError,
+    pub(super) journal: CircleOperationJournal,
+}
+
 pub(super) struct ConflictFixture {
     db1: Database,
     device1: String,
@@ -270,13 +277,6 @@ impl ConflictFixture {
             .expect("read device 1 conflict branches")
     }
 
-    pub(super) async fn retained_conflict_device2(&self) -> Option<Vec<CircleControlCoord>> {
-        StoreDatabase::new(&self.db2)
-            .circle_control_conflict_branches(self.circle_id)
-            .await
-            .expect("read device 2 conflict branches")
-    }
-
     pub(super) async fn conflict_branches_device1(&self) -> Vec<CircleControlCoord> {
         StoreDatabase::new(&self.db1)
             .circle_control_conflict_branches(self.circle_id)
@@ -377,18 +377,15 @@ impl ConflictFixture {
         (chosen, losing)
     }
 
-    /// Fork one device against itself at one author-stream position: capture
-    /// the founder authoring context, publish an ordinary rename from it, then
-    /// publish a second rename authored from that same captured context. Both
-    /// controls succeed the founder control and both introduce a metadata entry
-    /// at this device's next metadata position, so the two entries collide at
-    /// one position.
+    /// Author a second Circle entry at one author-stream position on device 1:
+    /// publish a rename, settle it, then prepare another from the authoring
+    /// context captured before it. Only a device that ignores its own durable
+    /// operation journal authors that way, and this plays it exactly.
     ///
-    /// No command sequence reaches this — one in-flight operation per Circle
-    /// per device is what stops it. Only an Owner device that ignores its own
-    /// durable operation journal does, which is what authoring from the stale
-    /// captured context plays here.
-    pub(super) async fn fork_one_device_at_one_position(&self) -> Vec<CircleControlCoord> {
+    /// Returns the refusal device 1's own verifier raises and the prepared
+    /// operation behind it, so a test can also put the commit in front of a
+    /// peer that never ran the local check.
+    pub(super) async fn attempt_one_position_fork(&self) -> OnePositionFork {
         let store = self
             .store
             .bind_device(&self.db1, self.dir1.clone(), &self.founder)
@@ -442,22 +439,41 @@ impl ConflictFixture {
             .insert_circle_operation(prepared.journal.clone(), prepared.prepared_objects)
             .await
             .expect("journal the second successor");
-        circles
+        let refusal = circles
             .publish_prepared_operation_for_test(&prepared.journal.operation_id, None)
             .await
-            .expect("publish the second successor");
+            .expect_err("a device's own verifier refuses its second entry at one position");
         drop(circles);
         drop(authority);
         drop(store);
 
-        self.pull_device1().await;
-        let branches = self.conflict_branches_device1().await;
-        assert_eq!(
-            branches.len(),
-            2,
-            "both successors of the founder control are retained"
-        );
-        branches
+        OnePositionFork {
+            refusal,
+            journal: prepared.journal,
+        }
+    }
+
+    /// Put the refused commit in front of device 2, which never ran device 1's
+    /// local check: publish every object the operation owns, then verify the
+    /// commit as device 2 does when it pulls.
+    pub(super) async fn peer_verifies(
+        &self,
+        journal: &CircleOperationJournal,
+    ) -> Result<coven_protocol::circle_activation::VerifiedCircleActivations, CircleOperationError>
+    {
+        super::publish_prepared_objects(&self.store, &self.db1, journal).await;
+        let commit = journal.commit().expect("parse the refused commit");
+        let commit_ref = journal.operation().commit_ref().clone();
+        let author = StoreDatabase::new(&self.db1)
+            .activated_store_device_registration(commit.author_registration.clone())
+            .await
+            .expect("load the refused commit's author registration");
+        self.store
+            .bind_device(&self.db2, self.dir2.clone(), &self.founder)
+            .await
+            .expect("bind device 2")
+            .load_circle_activations(&commit_ref, &commit, author.value())
+            .await
     }
 
     pub(super) async fn assert_resolution_activated(&self, journal: &CircleOperationJournal) {

@@ -276,15 +276,13 @@ resolution cannot: a resolution carries its branches' roster and metadata
 history forward and must reduce it, while a deletion freezes the epoch and
 reduces nothing.
 
-One conflict has no exit at all. An author-stream position belongs to one
-`(identity, device, Owner grant)`, so two different entries at one position come
-from one device authoring twice from a Circle state it had already moved past —
-which its own durable operation journal exists to prevent. Both controls then
-sit at one position of that device's control stream, and a control covers one
-control per stream, so no successor can name both: every resolution is refused
-when it is authored, and a deletion covers one branch while the other outlives
-it. The Circle stays `ControlConflict` on every device. Nothing repairs it and
-nothing is silently dropped.
+An author-stream position is filled exactly once. A position belongs to one
+`(identity, device, Owner grant)`, and acceptance refuses a control that
+introduces a different entry at a position the Circle's accepted history has
+already filled — on the device that authored it, before it uploads anything,
+and on every peer that would admit it. So two entries can never reach one
+position, and no Circle reaches a conflict its branches cannot be resolved or
+deleted out of.
 
 An epoch-close branch cannot be chosen directly: participant responses bind to
 that closing control, and moving the close under a new control would strand

@@ -517,11 +517,8 @@ impl CircleCurrentState {
     /// Circle authors from the same branch.
     ///
     /// Deletion is the exit a conflict always offers, where a resolution is
-    /// conditional: a resolution must pick a branch whose roster and metadata
-    /// history still reduces, and a deletion reduces neither. It collapses the
-    /// conflict wherever the branches sit on distinct author streams, which is
-    /// every conflict but one device racing itself. `None` for every resolved
-    /// state.
+    /// conditional: a resolution must pick one branch to carry forward, and a
+    /// deletion carries none. `None` for every resolved state.
     pub fn deletion_branch(&self) -> Option<&CircleControlCoord> {
         match self {
             Self::ControlConflict { branches } => Some(branches[0].coordinate()),

@@ -191,6 +191,65 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         }
     }
 
+    /// Refuse a control that introduces an entry at an author-stream position
+    /// accepted history has already filled with a different entry.
+    ///
+    /// This is the Circle counterpart of the Store-position checks acceptance
+    /// already makes: a commit may not reuse an author sequence accepted
+    /// earlier in the interval or covered by the baseline. The accepted
+    /// positions are re-derived from accepted commits — the activations staged
+    /// earlier in this same pull, and the inventories this device's retained
+    /// current state carries — never from a mutable record.
+    ///
+    /// Publication order decides, not arrival order: a device installs the
+    /// publication interval contiguously and in position order, so every device
+    /// sees the same entry first and holds the same later one. A device
+    /// authoring from Circle state it has already moved past fails this on its
+    /// own candidate, before upload; a peer that skipped the check has its
+    /// commit held here instead.
+    pub(super) async fn verify_introduced_entry_positions(
+        &mut self,
+        prefix: &VerifiedCircleActivationPrefix,
+        circle_id: CircleId,
+        objects: &CircleActivationObjects,
+    ) -> Result<(), CircleOperationError> {
+        let introduced_roster = objects
+            .roster_entries
+            .iter()
+            .filter(|(_, entry)| entry.origin.is_introduced())
+            .map(|(coord, _)| coord.clone())
+            .collect::<Vec<_>>();
+        let introduced_metadata = objects
+            .metadata_entries
+            .iter()
+            .filter(|(_, entry)| entry.origin.is_introduced())
+            .map(|(coord, _)| coord.clone())
+            .collect::<Vec<_>>();
+        if introduced_roster.is_empty() && introduced_metadata.is_empty() {
+            return Ok(());
+        }
+        let root = self.root().clone();
+        let mut accepted = self
+            .database
+            .accepted_circle_entry_positions(root, circle_id)
+            .await?;
+        for activation in prefix.activations_for(circle_id) {
+            accepted.include(activation.reference.objects());
+        }
+        if introduced_roster
+            .iter()
+            .any(|coord| accepted.roster_conflict(coord).is_some())
+            || introduced_metadata
+                .iter()
+                .any(|coord| accepted.metadata_conflict(coord).is_some())
+        {
+            return Err(CircleOperationError::InvalidState(
+                "Circle control reuses an already accepted Circle entry position".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Verify every observed predecessor control this control names, and that
     /// this control carries every entry its predecessors published.
     ///
@@ -200,26 +259,12 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     /// holding any Circle key.
     ///
     /// Inheritance is monotone: a successor may add entries, never drop or
-    /// replace one. That is what stops an Owner from re-publishing a different
-    /// entry at an author-stream position an earlier accepted control already
-    /// filled — the earlier entry stays in the inventory, both land in the
-    /// successor's reduction, and the reduction refuses two entries at one
-    /// sequence.
-    ///
-    /// Two *concurrent* controls that each fill one position differently both
-    /// verify alone, so they surface as a control conflict — and that conflict
-    /// is terminal for the Circle. An entry position belongs to one author
-    /// device, so both controls also sit at one position of that device's
-    /// control stream, and `covered_controls` is a frontier of one control per
-    /// stream: no successor can name both. A resolution is refused when it is
-    /// authored, because its inventory would carry two entries its frontier
-    /// cannot both reach; a deletion is accepted but covers only the branch it
-    /// authors from, and the other branch outlives it.
-    ///
-    /// So the position stays held and the failure stays surfaced, on every
-    /// device, forever. Only an Owner device that authors from a Circle state
-    /// it has already moved past reaches it — which is what its own durable
-    /// operation journal exists to prevent — and nothing here repairs it.
+    /// replace one. That is what carries an entry's provenance forward
+    /// unchanged through every later control, and together with the position
+    /// check above it is what keeps an author-stream position filled exactly
+    /// once: the earlier entry stays in the inventory, and a control that
+    /// introduces a different entry at that position is refused before it can
+    /// be accepted anywhere.
     pub(super) async fn verify_covered_controls(
         &mut self,
         prefix: &VerifiedCircleActivationPrefix,

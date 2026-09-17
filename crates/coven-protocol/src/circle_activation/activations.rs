@@ -1,5 +1,7 @@
 use super::access::*;
 use super::*;
+use crate::circle_control::CircleMetadataCoord;
+use crate::circle_roster::{CircleAuthorStreamKey, CircleRosterCoord};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedStreamActivations {
@@ -103,6 +105,19 @@ impl VerifiedCircleActivationPrefix {
         Ok(())
     }
 
+    /// Every activation this prefix holds for `circle_id`, in commit order.
+    /// A position check reads all of them: an entry introduced earlier in the
+    /// same pull is already accepted history for the commit being verified.
+    pub fn activations_for(
+        &self,
+        circle_id: CircleId,
+    ) -> impl Iterator<Item = &VerifiedCircleReference> {
+        self.by_commit
+            .values()
+            .flatten()
+            .filter(move |activation| activation.circle_id == circle_id)
+    }
+
     /// The activation `activating_commit` carries for `circle_id`, when this
     /// prefix holds that commit.
     pub fn activation(
@@ -114,6 +129,47 @@ impl VerifiedCircleActivationPrefix {
             .get(activating_commit)?
             .iter()
             .find(|activation| activation.circle_id == circle_id)
+    }
+}
+
+/// The roster and metadata author-stream positions one Circle's accepted
+/// history has already filled, each with the exact entry that filled it.
+///
+/// Monotone inheritance is what makes a control's own inventory the whole
+/// accepted history behind it: a successor carries forward every entry each
+/// covered predecessor published. So the union over the Circle's current
+/// control — or over every retained branch of a conflict — is every position
+/// ever accepted, without walking the chain.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcceptedCircleEntryPositions {
+    roster: BTreeMap<(CircleAuthorStreamKey, u64), CircleRosterCoord>,
+    metadata: BTreeMap<(CircleAuthorStreamKey, u64), CircleMetadataCoord>,
+}
+
+impl AcceptedCircleEntryPositions {
+    pub fn include(&mut self, objects: &crate::store_commit::CircleActivationObjects) {
+        for coord in objects.roster_entries.keys() {
+            self.roster
+                .insert((coord.stream_key(), coord.seq), coord.clone());
+        }
+        for coord in objects.metadata_entries.keys() {
+            self.metadata
+                .insert((coord.stream_key(), coord.seq), coord.clone());
+        }
+    }
+
+    /// The entry already accepted at this roster coordinate's position, when it
+    /// is a different entry than `coord`.
+    pub fn roster_conflict(&self, coord: &CircleRosterCoord) -> Option<&CircleRosterCoord> {
+        self.roster
+            .get(&(coord.stream_key(), coord.seq))
+            .filter(|accepted| *accepted != coord)
+    }
+
+    pub fn metadata_conflict(&self, coord: &CircleMetadataCoord) -> Option<&CircleMetadataCoord> {
+        self.metadata
+            .get(&(coord.stream_key(), coord.seq))
+            .filter(|accepted| *accepted != coord)
     }
 }
 

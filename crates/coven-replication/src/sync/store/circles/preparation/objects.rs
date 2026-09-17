@@ -19,22 +19,15 @@ fn inherited_origin(
 /// position each stream reaches. A control's signed frontier is exactly this,
 /// because its inventory is exactly the history that frontier reaches.
 ///
-/// `reduced` is whether the control being prepared will have this history
-/// reduced when it activates. Every control but a terminal deletion will: its
-/// verifier walks the frontier's closure and requires it to equal the
-/// inventory. Two entries at one author-stream position make that impossible —
-/// one frontier position cannot reach both — so a control that will be reduced
-/// refuses to carry them, here, at the device that authors it and before it
-/// publishes anything. A deletion's frozen frontier is never walked, so it
-/// carries the whole inherited inventory and is the one exit from a conflict
-/// that holds two entries at one position.
-fn inventory_frontier<C: Clone + std::fmt::Debug>(
-    kind: &str,
-    reduced: bool,
+/// One position per stream is all a frontier can hold, and that is all an
+/// inventory can contain: acceptance refuses a control that introduces an
+/// entry at a position accepted history already filled, so no inventory
+/// carrying two entries at one position can ever be inherited.
+fn inventory_frontier<C: Clone>(
     coords: impl Iterator<Item = C>,
     stream_key: impl Fn(&C) -> coven_protocol::circle::CircleAuthorStreamKey,
     seq: impl Fn(&C) -> u64,
-) -> Result<Vec<C>, CircleOperationError> {
+) -> Vec<C> {
     let mut frontier: BTreeMap<coven_protocol::circle::CircleAuthorStreamKey, C> = BTreeMap::new();
     for coord in coords {
         match frontier.entry(stream_key(&coord)) {
@@ -42,19 +35,13 @@ fn inventory_frontier<C: Clone + std::fmt::Debug>(
                 slot.insert(coord);
             }
             std::collections::btree_map::Entry::Occupied(mut slot) => {
-                if reduced && seq(&coord) == seq(slot.get()) {
-                    return Err(CircleOperationError::InvalidState(format!(
-                        "Circle transition inherits two {kind} entries at one author stream \
-                         position"
-                    )));
-                }
                 if seq(&coord) > seq(slot.get()) {
                     slot.insert(coord);
                 }
             }
         }
     }
-    Ok(frontier.into_values().collect())
+    frontier.into_values().collect()
 }
 
 fn inherit_entries(
@@ -177,21 +164,16 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         // Both frontiers are derived from the inherited inventory, never from
         // the draft's own control: the inventory is the accepted history, and a
         // control's signed frontier is exactly the tips that history reaches.
-        let reduced = !draft.control.value.state().is_deleted();
         let mut roster_frontier = inventory_frontier(
-            "roster",
-            reduced,
             roster_entries.keys().cloned(),
             coven_protocol::circle::CircleRosterCoord::stream_key,
             |coord| coord.seq,
-        )?;
+        );
         let mut metadata_frontier = inventory_frontier(
-            "metadata",
-            reduced,
             metadata_entries.keys().cloned(),
             coven_protocol::circle::CircleMetadataCoord::stream_key,
             |coord| coord.seq,
-        )?;
+        );
         let mut prepared = BTreeMap::new();
         let mut close_outcome = None;
         let mut close_cancellation = None;

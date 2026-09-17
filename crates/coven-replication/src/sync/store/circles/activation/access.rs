@@ -474,6 +474,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             };
             self.verify_covered_controls(prefix, commit, &control.value, objects)
                 .await?;
+            self.verify_introduced_entry_positions(prefix, reference.circle_id(), objects)
+                .await?;
             verify_control_context_for_verified_commit(reference, &control, verified)?;
             let checkpoint_members = self
                 .verify_control_membership_at_verified_prefix(&control, verified_membership_prefix)

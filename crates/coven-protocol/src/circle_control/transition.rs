@@ -640,10 +640,7 @@ impl CircleTransitionDraft {
     /// deletion's inventory inherits every entry every branch published and the
     /// conflict collapses to this one terminal state on every device. It
     /// reduces none of those entry streams — a deleted control carries no
-    /// roster or metadata chain — so it lands where a resolution cannot. What
-    /// it cannot do is cover two branches on one author stream, because the
-    /// covered set holds one control per stream; one device racing itself
-    /// leaves a conflict no control can collapse.
+    /// roster or metadata chain — so it lands where a resolution cannot.
     #[allow(clippy::too_many_arguments)]
     pub fn delete(
         device_id: &str,

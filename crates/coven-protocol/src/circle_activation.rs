@@ -60,7 +60,8 @@ pub use access::{
     VerifiedCircleImage, VerifiedCircleReference,
 };
 pub use activations::{
-    VerifiedCircleActivationPrefix, VerifiedCircleActivations, VerifiedStreamActivations,
+    AcceptedCircleEntryPositions, VerifiedCircleActivationPrefix, VerifiedCircleActivations,
+    VerifiedStreamActivations,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use current_state::CircleCurrentControl;
