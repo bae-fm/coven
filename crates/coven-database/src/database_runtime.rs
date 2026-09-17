@@ -292,36 +292,6 @@ impl Database {
         )
     }
 
-    pub fn open_initialized_store(
-        path: &Path,
-        install: &VerifiedSnapshotBootstrapInstall,
-        synced_tables: Vec<SyncedTable>,
-        transfer_limits: coven_protocol::blob::TransferLimits,
-        device_id: String,
-        clock: coven_foundation::clock::ClockRef,
-        coven_migration_policy: CovenMigrationPolicy,
-        migrations: &[Migration],
-    ) -> Result<Database, OpenError> {
-        if ObjectHash::digest(&std::fs::read(path).map_err(DbError::from)?)
-            != install.snapshot.meta.image.image_hash
-        {
-            return Err(DbError::Message(
-                "snapshot database image differs from its authenticated plaintext hash".into(),
-            )
-            .into());
-        }
-        let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
-        Self::open_with_hlc_and_coven_metadata(
-            path,
-            synced_tables,
-            transfer_limits,
-            Arc::new(hlc),
-            coven_migration_policy,
-            migrations,
-            CovenMetadataOpen::VerifiedSnapshot(install),
-        )
-    }
-
     /// Open `path` as the destination of a cold snapshot restore: install the
     /// verified Store image and keep the database private to the returned
     /// preparation until it finishes. The preparation owns `image` from here on

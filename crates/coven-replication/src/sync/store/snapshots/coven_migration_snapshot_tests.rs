@@ -43,16 +43,16 @@ fn assert_current_initialized(path: &std::path::Path) {
 }
 
 #[tokio::test]
-async fn direct_snapshot_open_rejects_image_bytes_outside_its_verified_metadata() {
-    assert_direct_open_rejects_unaccepted_rows(false).await;
+async fn cold_snapshot_open_rejects_image_bytes_outside_its_verified_metadata() {
+    assert_cold_open_rejects_unaccepted_rows(false).await;
 }
 
 #[tokio::test]
-async fn direct_snapshot_open_rejects_unaccepted_rows_in_a_write_ahead_log() {
-    assert_direct_open_rejects_unaccepted_rows(true).await;
+async fn cold_snapshot_open_rejects_unaccepted_rows_in_a_write_ahead_log() {
+    assert_cold_open_rejects_unaccepted_rows(true).await;
 }
 
-async fn assert_direct_open_rejects_unaccepted_rows(in_write_ahead_log: bool) {
+async fn assert_cold_open_rejects_unaccepted_rows(in_write_ahead_log: bool) {
     let source_dir = crate::sync::test_helpers::test_store_dir();
     let source = crate::sync::test_helpers::open_test_db(source_dir.clone());
     let signer = coven_keys::keys::UserKeypair::generate();
@@ -116,12 +116,16 @@ async fn assert_direct_open_rejects_unaccepted_rows(in_write_ahead_log: bool) {
             coven_protocol::store_commit::ObjectHash::digest(&std::fs::read(image.path()).unwrap()),
             coven_protocol::store_commit::ObjectHash::digest(&accepted_image),
         );
-        let journal_path = std::path::PathBuf::from(format!("{}-wal", image.path().display()));
-        assert!(std::fs::metadata(journal_path).unwrap().len() > 0);
+        assert!(
+            std::fs::metadata(journal_path(image.path(), "wal"))
+                .unwrap()
+                .len()
+                > 0
+        );
     }
-    let changed_image = std::fs::read(image.path()).unwrap();
-    let error = match Database::open_initialized_store(
-        image.path(),
+    let image_path = image.path().to_path_buf();
+    let error = match Database::open_cold_snapshot(
+        image,
         &install,
         crate::sync::test_helpers::test_synced_tables(),
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -130,7 +134,7 @@ async fn assert_direct_open_rejects_unaccepted_rows(in_write_ahead_log: bool) {
         coven_database::CovenMigrationPolicy::ApplyPending,
         &crate::sync::test_helpers::test_migrations(),
     ) {
-        Ok(_) => panic!("the direct database opener accepted an unauthenticated image"),
+        Ok(_) => panic!("the cold snapshot open accepted an unauthenticated image"),
         Err(error) => error,
     };
     assert!(matches!(
@@ -138,11 +142,18 @@ async fn assert_direct_open_rejects_unaccepted_rows(in_write_ahead_log: bool) {
         coven_database::OpenError::Db(coven_database::DbError::Message(message))
             if message == "snapshot database image differs from its authenticated plaintext hash"
     ));
-    assert_eq!(
-        std::fs::read(image.path()).unwrap(),
-        changed_image,
-        "image authentication must precede migrations and installation"
+    // The destination is the preparation's, so a refusal takes it rather than
+    // leaving the rejected bytes where a later open could find them.
+    assert!(
+        !image_path.exists()
+            && !journal_path(&image_path, "wal").exists()
+            && !journal_path(&image_path, "shm").exists(),
+        "a refused cold open published part of an unauthenticated image"
     );
+}
+
+fn journal_path(database: &std::path::Path, extension: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}-{extension}", database.display()))
 }
 
 #[tokio::test]
@@ -211,8 +222,8 @@ async fn exact_v0_snapshot_obeys_writer_coven_migration_policy() {
 
     let tables = crate::sync::test_helpers::test_synced_tables();
     let migrations = crate::sync::test_helpers::test_migrations();
-    let applied = Database::open_initialized_store(
-        apply_image.path(),
+    let applied = Database::open_cold_snapshot(
+        apply_image,
         &apply_install,
         tables.clone(),
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -222,11 +233,15 @@ async fn exact_v0_snapshot_obeys_writer_coven_migration_policy() {
         &migrations,
     )
     .expect("apply pending Coven snapshot migration");
+    let applied = Database::finish_cold_snapshot(applied)
+        .await
+        .expect("publish the migrated destination");
     drop(applied);
-    assert_current_initialized(apply_image.path());
+    assert_current_initialized(&apply_path);
 
-    let error = match Database::open_initialized_store(
-        refuse_image.path(),
+    let refuse_image_path = refuse_image.path().to_path_buf();
+    let error = match Database::open_cold_snapshot(
+        refuse_image,
         &refuse_install,
         tables,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -245,5 +260,103 @@ async fn exact_v0_snapshot_obeys_writer_coven_migration_policy() {
             target: 2
         })
     ));
-    assert_v0_uninitialized(refuse_image.path());
+    // A refused migration publishes nothing: the destination goes with it,
+    // rather than leaving a half-migrated database behind.
+    assert!(
+        !refuse_image_path.exists(),
+        "a refused migration published its destination"
+    );
+}
+
+/// The old in-place opener proved this by leaving a rejected image untouched.
+/// The destination is the preparation's now, so the ordering is asserted where
+/// it lives: an image that is both unauthenticated and a pending migration is
+/// refused for its bytes, not for its schema version.
+#[tokio::test]
+async fn cold_snapshot_open_authenticates_before_migrating() {
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(source_store_dir.clone());
+    let signer = coven_keys::keys::UserKeypair::generate();
+    let store = crate::sync::test_helpers::TestStore::create(
+        &source,
+        source_store_dir.clone(),
+        "snapshot-authentication-order",
+        signer.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create the ordering Store");
+    let device = store
+        .open_into(&source, source_store_dir.clone())
+        .await
+        .expect("open the ordering Store");
+    let membership = device
+        .membership_for_test()
+        .await
+        .expect("project the ordering membership");
+    let image_dir = tempfile::tempdir().expect("ordering image directory");
+    let image = coven_database::StoreDatabase::new(&source)
+        .capture_snapshot_image_for_test(store.root().clone(), image_dir.path().to_path_buf(), None)
+        .await
+        .expect("capture the ordering image");
+    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+        coven_database::StoreDatabase::new(&source)
+            .materialized_frontier()
+            .await
+            .expect("load the ordering coverage"),
+    )
+    .expect("parse the ordering coverage");
+    let image = coven_database::DatabaseImageTest::from_bytes(&image)
+        .expect("open the ordering image before publication");
+    image
+        .downgrade_coven_schema_to_v0(false)
+        .expect("leave a pending migration in the published image");
+    let image = image.into_bytes().expect("serialize the old schema");
+    device
+        .publish_snapshot(image, coverage)
+        .await
+        .expect("publish the ordering image");
+
+    let destination = tempfile::tempdir().expect("ordering destination");
+    let path = destination.path().join("ordering.db");
+    let bootstrap = store
+        .prepare_snapshot_bootstrap(
+            &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+            1,
+            &path,
+            &signer,
+        )
+        .await
+        .expect("prepare the ordering bootstrap");
+    let (image, install) = direct_open_fixture(bootstrap);
+    assert_v0_uninitialized(image.path());
+    coven_database::DatabaseImageTest::open(image.path())
+        .expect("open the staged ordering image")
+        .execute(
+            "CREATE TABLE unaccepted_rows (id TEXT PRIMARY KEY) STRICT",
+            [],
+        )
+        .expect("write bytes the signed metadata does not name");
+
+    let error = match Database::open_cold_snapshot(
+        image,
+        &install,
+        crate::sync::test_helpers::test_synced_tables(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
+        "ordering-recipient".to_string(),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        coven_database::CovenMigrationPolicy::RefusePending,
+        &crate::sync::test_helpers::test_migrations(),
+    ) {
+        Ok(_) => panic!("the cold snapshot open accepted an unauthenticated image"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &error,
+            coven_database::OpenError::Db(coven_database::DbError::Message(message))
+                if message == "snapshot database image differs from its authenticated plaintext hash"
+        ),
+        "a pending migration was reported before the image was authenticated: {error:?}"
+    );
 }

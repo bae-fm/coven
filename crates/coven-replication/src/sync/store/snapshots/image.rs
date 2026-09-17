@@ -406,13 +406,9 @@ impl PreparedDeviceJoinSnapshot {
         let bound_path = database_image.path().to_path_buf();
         let prepared = (|| {
             let database_bytes = std::fs::read(&bound_path)?;
-            // The staged bytes are the ones downloaded, and the ones downloaded
-            // are the ones the owner signed. The guarded open below does not
-            // repeat the second half, so both are checked here.
-            if snapshot_db_hash(&database_bytes) != db_hash
-                || coven_protocol::store_commit::ObjectHash::digest(&database_bytes)
-                    != snapshot.meta.image.image_hash
-            {
+            // The staged file is the one downloaded. That the downloaded bytes
+            // are the ones the owner signed is the guarded open's check below.
+            if snapshot_db_hash(&database_bytes) != db_hash {
                 return Err(SnapshotError::BootstrapDatabaseChanged);
             }
             let root_ref = coven_protocol::store_commit::StoreRootRef {

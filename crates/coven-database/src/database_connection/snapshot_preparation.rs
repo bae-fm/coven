@@ -404,6 +404,8 @@ impl DatabaseConnection {
         migrations: &[Migration],
     ) -> Result<ColdSnapshotPreparation, OpenError> {
         let store_dir = crate::database_runtime::store_dir_of(image.path());
+        // The open authenticates the image against the signed metadata inside
+        // the write transaction that then migrates and installs it.
         // The open removes the payload files it created if it fails, and the
         // image goes with them — nothing is installed to keep them for.
         let opened = DatabaseCore::open_unseeded(
