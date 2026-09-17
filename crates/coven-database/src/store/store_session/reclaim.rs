@@ -126,12 +126,7 @@ impl StoreSession<'_> {
             }
         }
         for remote in &remotes {
-            persist_exact_remote_object_on(
-                &tx,
-                self.store_dir,
-                remote,
-                "Store reclaim candidate object",
-            )?;
+            persist_exact_remote_object_on(&tx, remote, "Store reclaim candidate object")?;
         }
         insert_store_reclaim_operation_on(&tx, &operation)?;
         tx.commit().map_err(DbError::from)?;
@@ -585,12 +580,7 @@ impl StoreSession<'_> {
             }
         }
         for remote in &remotes {
-            persist_exact_remote_object_on(
-                &tx,
-                self.store_dir,
-                remote,
-                "Store reclaim completion candidate",
-            )?;
+            persist_exact_remote_object_on(&tx, remote, "Store reclaim completion candidate")?;
         }
         update_store_reclaim_operation_on(&tx, &expected, &next)?;
         tx.commit().map_err(DbError::from)?;

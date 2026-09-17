@@ -397,6 +397,9 @@ accounts for 20 inclusive samples.
 
 ## Content-addressed payload reinstalls
 
+(Superseded by plans/payload-storage.md: there is no payload spool to reinstall
+into. The measurement below stands as it was taken.)
+
 Temporary instrumentation of every payload-spool commit during the complete
 replication suite counted 12,127 installs. Of those, 1,913 replaced a path that
 already held the same content hash. These are real production calls reached by
@@ -672,6 +675,10 @@ large and streaming inputs remain content-addressed files. A catalog row is the
 authoritative storage tag, so reads dispatch directly instead of probing both.
 The owner and cleanup rows reference that catalog. This preserves one content
 identity and one claim graph while removing one-file-per-protocol-object work.
+
+(Superseded: every payload is now bounded SQL chunk rows, with no file arm and
+no cleanup obligation. See plans/payload-storage.md. The measurements below
+stand as they were taken.)
 
 The database now owns the complete payload path. Every value is stored as one
 LZ4 frame while its content address and reported size continue to describe the

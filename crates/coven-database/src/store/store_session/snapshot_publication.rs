@@ -12,7 +12,7 @@ impl StoreSession<'_> {
         &mut self,
     ) -> Result<Option<DurableSnapshotPublication>, DbError> {
         let authority = self.local_store_authority()?;
-        load_outbound_store_snapshot_on(self.conn, self.store_dir, &authority)
+        load_outbound_store_snapshot_on(self.conn, &authority)
     }
 
     fn stage_snapshot_publication(
@@ -29,20 +29,23 @@ impl StoreSession<'_> {
     ) -> Result<StoreSnapshotRef, DbError> {
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let image_facts =
-            crate::payload_store::write_payload_file_blocking(&tx, self.store_dir, image.path())
+        // The metadata names the image, so the file is retained under that
+        // identity and one that does not hash to it fails here rather than being
+        // stored under the address of something else. That is what binds the
+        // stored plaintext to `meta.image` — the check `validate_snapshot_image`
+        // makes below over the same value has already happened, at the write.
+        let stored_image_hash = meta.image.image_hash;
+        let retained =
+            crate::payload_store::write_payload_file_blocking(&tx, stored_image_hash, image.path())
+                .map(drop)
                 .map_err(|source| SnapshotImageError::ProjectionPayloadStore {
-                    operation: "spool Store snapshot image".to_string(),
+                    operation: "retain the Store snapshot image".to_string(),
                     source,
                 });
-        let (image_hash, _) = image.finish(image_facts).map_err(snapshot_image_db_error)?;
-        let image_prepared_hash = crate::payload_store::write_payload_blocking(
-            &tx,
-            self.store_dir,
-            image_prepared.stored_bytes(),
-            crate::payload_store::CreatedPayloadFiles::untracked(),
-        )
-        .map_err(|error| DbError::context("spool prepared Store snapshot image", error))?;
+        image.finish(retained).map_err(snapshot_image_db_error)?;
+        let image_prepared_hash =
+            crate::payload_store::write_payload_blocking(&tx, image_prepared.stored_bytes())
+                .map_err(|error| DbError::context("spool prepared Store snapshot image", error))?;
         let image_prepared_size = image_prepared.stored_bytes().len() as u64;
         let registration_ref = authority.reference();
         let registration = authority.value();
@@ -50,7 +53,7 @@ impl StoreSession<'_> {
         validate_snapshot_image(
             &meta.image,
             &image_prepared,
-            image_hash,
+            stored_image_hash,
             image_prepared_hash,
             image_prepared_size,
             format!(
@@ -91,20 +94,11 @@ impl StoreSession<'_> {
         // Spooled beside the image rather than carried in the row: a rollup
         // holds every membership object the Store has, which is KB-class and
         // belongs in the payload store.
-        let rollup_hash = crate::payload_store::write_payload_blocking(
-            &tx,
-            self.store_dir,
-            &rollup_bytes,
-            crate::payload_store::CreatedPayloadFiles::untracked(),
-        )
-        .map_err(|error| DbError::context("spool membership rollup", error))?;
-        let rollup_prepared_hash = crate::payload_store::write_payload_blocking(
-            &tx,
-            self.store_dir,
-            rollup_prepared.stored_bytes(),
-            crate::payload_store::CreatedPayloadFiles::untracked(),
-        )
-        .map_err(|error| DbError::context("spool prepared membership rollup", error))?;
+        let rollup_hash = crate::payload_store::write_payload_blocking(&tx, &rollup_bytes)
+            .map_err(|error| DbError::context("spool membership rollup", error))?;
+        let rollup_prepared_hash =
+            crate::payload_store::write_payload_blocking(&tx, rollup_prepared.stored_bytes())
+                .map_err(|error| DbError::context("spool prepared membership rollup", error))?;
         if rollup_hash != meta.membership_rollup.rollup_hash {
             return Err(DbError::Message(
                 "staged membership rollup bytes differ from the hash the snapshot names"
@@ -117,7 +111,7 @@ impl StoreSession<'_> {
         // The publication names this immutable image. Current rows may already
         // contain unpublished replacements, deletions, or audience changes.
         let image_bytes =
-            crate::payload_store::read_verified_payload_blocking(&tx, self.store_dir, image_hash)
+            crate::payload_store::read_verified_payload_blocking(&tx, stored_image_hash)
                 .map_err(|error| DbError::context("read staged Store snapshot image", error))?;
         let mut captured = Connection::open_in_memory()?;
         crate::connection_io::deserialize_database_image_into(&mut captured, &image_bytes)?;
@@ -155,10 +149,9 @@ impl StoreSession<'_> {
                 }
             }
             StoreSnapshotPublicationStage::Replacing { previous, accepted } => {
-                let old = load_outbound_store_snapshot_on(&tx, self.store_dir, &authority)?
-                    .ok_or_else(|| {
-                        DbError::Message("replacement snapshot has no pending candidate".into())
-                    })?;
+                let old = load_outbound_store_snapshot_on(&tx, &authority)?.ok_or_else(|| {
+                    DbError::Message("replacement snapshot has no pending candidate".into())
+                })?;
                 if old.reference != previous {
                     return Err(DbError::Message(
                         "snapshot candidate changed before replacement".into(),
@@ -251,7 +244,7 @@ impl StoreSession<'_> {
             &tx,
             crate::payload_store::OUTBOUND_STORE_SNAPSHOT_OWNER_KEY,
             &BTreeSet::from([
-                image_hash,
+                stored_image_hash,
                 image_prepared_hash,
                 rollup_hash,
                 rollup_prepared_hash,
@@ -275,7 +268,7 @@ impl StoreSession<'_> {
         }
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction()?;
-        let old = load_outbound_store_snapshot_on(&tx, self.store_dir, &authority)?
+        let old = load_outbound_store_snapshot_on(&tx, &authority)?
             .ok_or_else(|| DbError::Message("superseded snapshot has no pending request".into()))?;
         let active = super::active_store_publication::load_active_store_publication_on(&tx)?
             .ok_or_else(|| DbError::Message("superseded snapshot has no active owner".into()))?;
@@ -330,7 +323,7 @@ impl StoreSession<'_> {
         })?;
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction()?;
-        let pending = load_outbound_store_snapshot_on(&tx, self.store_dir, &authority)?
+        let pending = load_outbound_store_snapshot_on(&tx, &authority)?
             .ok_or_else(|| DbError::Message("superseded snapshot request is absent".into()))?;
         if expected.attempt()? != &pending.publication {
             return Err(DbError::Message(
@@ -382,7 +375,7 @@ impl StoreSession<'_> {
     ) -> Result<SnapshotMeta, DbError> {
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let outbound = load_outbound_store_snapshot_on(&tx, self.store_dir, &authority)?
+        let outbound = load_outbound_store_snapshot_on(&tx, &authority)?
             .ok_or_else(|| DbError::Message("outbound Store snapshot is absent".to_string()))?;
         let accepted_entry = accepted
             .interval()
@@ -424,14 +417,12 @@ impl StoreSession<'_> {
         };
         persist_snapshot_image_on(
             &tx,
-            self.store_dir,
             &outbound.meta.value.image,
             snapshot_owner.clone(),
             "Store snapshot image",
         )?;
         crate::snapshot_objects::persist_membership_rollup_on(
             &tx,
-            self.store_dir,
             &outbound.meta.value.membership_rollup,
             snapshot_owner,
             "Store membership rollup",

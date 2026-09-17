@@ -483,6 +483,16 @@ impl StoreRowWrites {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
+    pub async fn has_payload_for_test(&self, hash: crate::ObjectHash) -> Result<bool, DbError> {
+        self.database.has_payload_for_test(hash).await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn payload_for_test(&self, hash: crate::ObjectHash) -> Result<Vec<u8>, DbError> {
+        self.database.payload_for_test(hash).await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn cleanup_intent_count_for_test(
         &self,
         namespace: &str,

@@ -116,8 +116,9 @@ installed into is still private to its preparation: every retained commit is
 walked for its predecessor state, its membership at the cut it names, and the
 authority its author claims. A cold restore, a warm adoption during a pull, and
 a same-provider device join all run that walk before their destination can
-become anyone's database, and each refuses by discarding the preparation — its
-database files and every payload file the attempt wrote go with it.
+become anyone's database, and each refuses by discarding the preparation — the
+database files go with it, and so does everything the attempt installed, because
+it was installed into them.
 
 Restore resolves Circle access for the receiving identity. The destination is
 opened once and stays private until it can serve: the Store image installs
@@ -126,8 +127,8 @@ installed rows, and the selected Circle images and accepted packages install
 beyond that base. Restore selects each Circle's verified image or founding base;
 a same-epoch successor without a new image continues the recipient's exact
 earlier bootstrap through verified control history. Missing or invalid required
-images fail installation, and the failed attempt takes the database files and
-every payload file it wrote with it. The snapshot author's cached access does
+images fail installation, and the failed attempt takes its database files with
+it. The snapshot author's cached access does
 not grant the receiver access. Join and restore complete their required
 membership, registration, eager-blob, and continuation work before returning the
 Store.

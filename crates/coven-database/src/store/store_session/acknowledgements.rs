@@ -94,7 +94,7 @@ impl StoreSession<'_> {
                     current.add_retained_authority_candidate(candidate.reference.clone())?;
                     update_remote_object_on(tx, proposed.object_id(), &current)?;
                 } else {
-                    persist_exact_remote_object_on(tx, transaction.store.store_dir, &proposed, "replacement acknowledgement candidate")?;
+                    persist_exact_remote_object_on(tx, &proposed, "replacement acknowledgement candidate")?;
                 }
             }
             super::candidate_records::begin_candidate_nonactivation_targets_on(
@@ -255,7 +255,6 @@ impl StoreSession<'_> {
         {
             persist_exact_remote_object_on(
                 &tx,
-                self.store_dir,
                 &remote,
                 "Merge Store acknowledgement activation object",
             )?;
@@ -273,7 +272,6 @@ impl StoreSession<'_> {
             {
                 persist_exact_remote_object_on(
                     &tx,
-                    self.store_dir,
                     &remote,
                     "Merge Circle acknowledgement activation object",
                 )?;

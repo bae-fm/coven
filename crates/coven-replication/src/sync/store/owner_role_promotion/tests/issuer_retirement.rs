@@ -130,7 +130,6 @@ fn assert_retired(journal: &OwnerPromotionJournal, stage: PromotionStage) {
 
 async fn reopen(
     database: &coven_database::Database,
-    source: &coven_foundation::store_dir::StoreDir,
     host_device_id: &str,
 ) -> (
     coven_database::Database,
@@ -141,7 +140,6 @@ async fn reopen(
         .vacuum_into_for_test(directory.db_path().to_string_lossy().into_owned())
         .await
         .unwrap();
-    test_helpers::copy_payload_files(source, &directory);
     let reopened = coven_database::Database::open_synthetic_for_test(
         &directory.db_path(),
         directory.clone(),
@@ -379,7 +377,7 @@ async fn issuer_retirement(stage: PromotionStage, interruption: Interruption) {
             return;
         }
         drop(publishing);
-        let (reopened, directory) = reopen(&fixture.owner_db, &fixture.owner_db_store_dir, "test-device").await;
+        let (reopened, directory) = reopen(&fixture.owner_db, "test-device").await;
         let mut issuer = fixture
             .store
             .bind_device_in(&reopened, directory.clone(), &fixture.owner)
@@ -414,7 +412,7 @@ async fn issuer_retirement(stage: PromotionStage, interruption: Interruption) {
                 .unwrap()
                 .is_some());
             assert!(fixture.home.exact_creates().is_empty());
-            let (reopened_again, next_directory) = reopen(&reopened, &directory, "test-device").await;
+            let (reopened_again, next_directory) = reopen(&reopened, "test-device").await;
             issuer = fixture
                 .store
                 .bind_device_in(&reopened_again, next_directory, &fixture.owner)
@@ -624,7 +622,7 @@ async fn cross_removals_from_one_prefix_preserve_the_first_accepted_owner() {
             assert_eq!(cold.active_grant(&grant), accepted_membership.active_grant(&grant));
         }
         assert!(!cold.contains_coord(&losing.prepared_membership_publication().unwrap().entry.coord()));
-        let (reopened, directory) = reopen(&fixture.member_db, &fixture.member_db_store_dir, &fixture.member_registration.device_id.to_string()).await;
+        let (reopened, directory) = reopen(&fixture.member_db, &fixture.member_registration.device_id.to_string()).await;
         let reopened_peer = TestDevice::load_with_database(
             StoreDatabase::new(&reopened), peer_storage.clone(), fixture.member.clone(), directory,
         ).await.expect("reopen the accepted Owner's exact database");

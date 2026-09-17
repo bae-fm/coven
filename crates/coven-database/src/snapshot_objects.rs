@@ -65,25 +65,20 @@ pub fn validate_snapshot_image(
 /// and Circle publication retain the plaintext and upload bytes under this ref.
 pub(crate) fn load_snapshot_image_on(
     conn: &Connection,
-    store_dir: &coven_foundation::store_dir::StoreDir,
     reference: &SnapshotImageRef,
     label: &str,
 ) -> Result<PreparedProtocolObject<Vec<u8>>, DbError> {
-    let value = crate::payload_store::read_payload_blocking(conn, store_dir, reference.image_hash)
+    let value = crate::payload_store::read_payload_blocking(conn, reference.image_hash)
         .map_err(|error| DbError::context(format!("outbound {label} snapshot image"), error))?;
     if ObjectHash::digest(&value) != reference.image_hash {
         return Err(DbError::Message(format!(
             "outbound {label} snapshot image differs from its exact hash"
         )));
     }
-    let stored = crate::payload_store::read_payload_blocking(
-        conn,
-        store_dir,
-        reference.object.stored_hash(),
-    )
-    .map_err(|error| {
-        DbError::context(format!("outbound prepared {label} snapshot image"), error)
-    })?;
+    let stored = crate::payload_store::read_payload_blocking(conn, reference.object.stored_hash())
+        .map_err(|error| {
+            DbError::context(format!("outbound prepared {label} snapshot image"), error)
+        })?;
     let prepared = PreparedExactObject::new(reference.object.clone(), stored).map_err(|error| {
         DbError::context(format!("outbound prepared {label} snapshot image"), error)
     })?;
@@ -161,27 +156,25 @@ pub(crate) fn validate_snapshot_blob_plans_on(
 
 pub(crate) fn persist_snapshot_image_on(
     conn: &Connection,
-    store_dir: &coven_foundation::store_dir::StoreDir,
     image: &SnapshotImageRef,
     owner: coven_protocol::remote_object::SnapshotObjectOwner,
     label: &str,
 ) -> Result<(), DbError> {
     let image = RemoteObjectRecord::snapshot_activated_image(image, owner)
         .map_err(|error| DbError::context(format!("{label} ownership"), error))?;
-    persist_exact_remote_object_on(conn, store_dir, &image, label)
+    persist_exact_remote_object_on(conn, &image, label)
 }
 
 /// Persist this snapshot candidate's exact membership rollup ownership.
 pub(crate) fn persist_membership_rollup_on(
     conn: &Connection,
-    store_dir: &coven_foundation::store_dir::StoreDir,
     rollup: &coven_protocol::store_commit::MembershipRollupRef,
     owner: coven_protocol::remote_object::SnapshotObjectOwner,
     label: &str,
 ) -> Result<(), DbError> {
     let rollup = RemoteObjectRecord::snapshot_activated_membership_rollup(rollup, owner)
         .map_err(|error| DbError::context(format!("{label} ownership"), error))?;
-    persist_exact_remote_object_on(conn, store_dir, &rollup, label)
+    persist_exact_remote_object_on(conn, &rollup, label)
 }
 
 pub fn snapshot_generation_as_i64(generation: u64, label: &str) -> Result<i64, DbError> {

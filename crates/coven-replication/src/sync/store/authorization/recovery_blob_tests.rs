@@ -182,7 +182,7 @@ async fn recover_captured_blob(case: CapturedWrite) {
         owns_source_payload
     );
     if restart_after_upload_failure {
-        assert!(store_dir.payload_spool_path(source_hash).is_file());
+        assert!(records.has_payload_for_test(source_hash).await.unwrap());
     }
     assert_eq!(
         records.write_status(&captured.write_id).await.unwrap(),

@@ -32,7 +32,7 @@ impl StoreSession<'_> {
         circle_id: CircleId,
     ) -> Result<Option<DurableCircleSnapshotPublication>, DbError> {
         let authority = self.local_store_authority()?;
-        load_outbound_circle_snapshot_on(self.conn, self.store_dir, &authority, circle_id)
+        load_outbound_circle_snapshot_on(self.conn, &authority, circle_id)
     }
 
     fn latest_local_circle_snapshot(
@@ -52,24 +52,15 @@ impl StoreSession<'_> {
     ) -> Result<CircleSnapshotRef, DbError> {
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let image_hash = crate::payload_store::write_payload_blocking(
-            &tx,
-            self.store_dir,
-            &rows,
-            crate::payload_store::CreatedPayloadFiles::untracked(),
-        )
-        .map_err(|source| SnapshotImageError::ProjectionPayloadStore {
-            operation: "spool Circle snapshot rows".to_string(),
-            source,
-        })
-        .map_err(snapshot_image_db_error)?;
-        let image_prepared_hash = crate::payload_store::write_payload_blocking(
-            &tx,
-            self.store_dir,
-            image_prepared.stored_bytes(),
-            crate::payload_store::CreatedPayloadFiles::untracked(),
-        )
-        .map_err(|error| DbError::context("spool prepared Circle snapshot image", error))?;
+        let image_hash = crate::payload_store::write_payload_blocking(&tx, &rows)
+            .map_err(|source| SnapshotImageError::ProjectionPayloadStore {
+                operation: "spool Circle snapshot rows".to_string(),
+                source,
+            })
+            .map_err(snapshot_image_db_error)?;
+        let image_prepared_hash =
+            crate::payload_store::write_payload_blocking(&tx, image_prepared.stored_bytes())
+                .map_err(|error| DbError::context("spool prepared Circle snapshot image", error))?;
         let image_prepared_size = image_prepared.stored_bytes().len() as u64;
         let registration_ref = authority.reference();
         let registration = authority.value();
@@ -196,11 +187,8 @@ impl StoreSession<'_> {
                 .map_err(|error| DbError::context("accepted Circle snapshot metadata", error))?;
             meta.circle_id
         };
-        let outbound =
-            load_outbound_circle_snapshot_on(&tx, self.store_dir, &authority, circle_id)?
-                .ok_or_else(|| {
-                    DbError::Message("outbound Circle snapshot is absent".to_string())
-                })?;
+        let outbound = load_outbound_circle_snapshot_on(&tx, &authority, circle_id)?
+            .ok_or_else(|| DbError::Message("outbound Circle snapshot is absent".to_string()))?;
         if outbound.reference != accepted {
             return Err(DbError::Message(
                 "accepted Circle snapshot differs from the prepared exact object".to_string(),
@@ -217,7 +205,6 @@ impl StoreSession<'_> {
         };
         persist_snapshot_image_on(
             &tx,
-            self.store_dir,
             &outbound.meta.value.bootstrap.image,
             snapshot_owner,
             "Circle snapshot image",

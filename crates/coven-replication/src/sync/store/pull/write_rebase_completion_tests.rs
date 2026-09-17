@@ -164,7 +164,6 @@ async fn check_covered_write_cleanup(interruption: CleanupInterruption) {
             .vacuum_into_for_test(continuation_path.to_str().unwrap().into())
             .await
             .unwrap();
-        crate::sync::test_helpers::copy_payload_files(&fixture.source_dir, &continuation_dir);
         let source_blob = fixture
             .source_dir
             .local_blob_path("photos", "covered-photo")
@@ -533,7 +532,6 @@ async fn a_restarted_writer_settles_a_compacted_replacement_of_its_reserved_oper
         .vacuum_into_for_test(continuation_path.to_str().unwrap().to_string())
         .await
         .expect("copy the reserved operation database");
-    crate::sync::test_helpers::copy_payload_files(&fixture.source_dir, &continuation_dir);
     let continuation_db = RebaseFixture::open(&continuation_path, continuation_dir.clone());
     fixture.snapshot_peer_edit(false).await;
     let continuation = fixture

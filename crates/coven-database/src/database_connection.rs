@@ -244,8 +244,7 @@ impl DatabaseConnection {
     }
 
     /// Run one Store operation against the connection-owned row, payload, and
-    /// verified-authority state, then discharge every payload deletion the
-    /// operation committed before another Store operation can run.
+    /// verified-authority state.
     pub(crate) fn call_store<F, R>(
         &self,
         operation: F,
@@ -258,23 +257,8 @@ impl DatabaseConnection {
     {
         self.on_connection_thread(move |core| {
             capture_committed_changes(core, |core| {
-                let outcome = {
-                    let mut session = store_session(core);
-                    operation(&mut session)
-                };
-                let cleanup = crate::payload_store::pay_owed_payload_deletions_on(
-                    &core.conn,
-                    &core.context.store_dir,
-                );
-                match (outcome, cleanup) {
-                    (Ok(value), Ok(())) => Ok(value),
-                    (Err(operation), Ok(())) => Err(operation),
-                    (Ok(_), Err(cleanup)) => Err(cleanup),
-                    (Err(operation), Err(cleanup)) => Err(DbError::PayloadCleanupFailed {
-                        operation: Box::new(operation),
-                        cleanup: Box::new(cleanup),
-                    }),
-                }
+                let mut session = store_session(core);
+                operation(&mut session)
             })
         })
     }
@@ -499,7 +483,7 @@ impl DatabaseConnection {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn assert_owns_payload_directory_for_test(
+    pub(crate) fn assert_owns_store_directory_for_test(
         &self,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) {
@@ -507,13 +491,13 @@ impl DatabaseConnection {
             .context
             .store_dir
             .canonicalize()
-            .expect("canonicalize database payload directory");
+            .expect("canonicalize the database's store directory");
         let supplied = store_dir
             .canonicalize()
-            .expect("canonicalize supplied payload directory");
+            .expect("canonicalize the supplied store directory");
         assert_eq!(
             owned, supplied,
-            "payload directory does not belong to this database",
+            "store directory does not belong to this database",
         );
     }
 

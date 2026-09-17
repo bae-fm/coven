@@ -29,7 +29,6 @@ pub type PreparedCircleObjects = std::collections::BTreeMap<String, PreparedExac
 
 fn persist_circle_operation_objects_on(
     conn: &Connection,
-    store_dir: &coven_foundation::store_dir::StoreDir,
     remotes: &[coven_protocol::remote_object::ClosedRemoteObject],
     prepared_objects: &PreparedCircleObjects,
     owner: &coven_protocol::store_commit::StoreBatchCommitRef,
@@ -37,7 +36,7 @@ fn persist_circle_operation_objects_on(
 ) -> Result<(), DbError> {
     let mut installed = std::collections::BTreeSet::new();
     for remote in remotes {
-        persist_prepared_remote_object_on(conn, store_dir, remote, owner, domain)?;
+        persist_prepared_remote_object_on(conn, remote, owner, domain)?;
         installed.extend(remote.payload_bytes().keys().copied());
     }
     for object in prepared_objects.values() {
@@ -45,13 +44,8 @@ fn persist_circle_operation_objects_on(
         if !installed.insert(expected) {
             continue;
         }
-        let actual = crate::payload_store::write_payload_blocking(
-            conn,
-            store_dir,
-            object.stored_bytes(),
-            crate::payload_store::CreatedPayloadFiles::untracked(),
-        )
-        .map_err(|error| DbError::context(format!("install {domain} payload"), error))?;
+        let actual = crate::payload_store::write_payload_blocking(conn, object.stored_bytes())
+            .map_err(|error| DbError::context(format!("install {domain} payload"), error))?;
         if actual != expected {
             return Err(DbError::Message(format!(
                 "{domain} payload installed as {actual}, referenced as {expected}"
@@ -94,7 +88,6 @@ impl StoreSession<'_> {
         claim_circle_publication_on(&tx, &journal)?;
         persist_circle_operation_objects_on(
             &tx,
-            self.store_dir,
             &remotes,
             &prepared_objects,
             &owner,
@@ -142,7 +135,6 @@ impl StoreSession<'_> {
         claim_circle_publication_on(&tx, &journal)?;
         persist_circle_operation_objects_on(
             &tx,
-            self.store_dir,
             &remotes,
             &prepared_objects,
             &owner,
@@ -329,7 +321,6 @@ impl StoreSession<'_> {
         claim_circle_publication_on(&tx, &journal)?;
         persist_circle_operation_objects_on(
             &tx,
-            self.store_dir,
             &remotes,
             &prepared_objects,
             &owner,

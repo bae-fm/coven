@@ -294,12 +294,7 @@ impl StoreSession<'_> {
             }
         }
         for remote in verified.remote_objects()? {
-            persist_exact_remote_object_on(
-                &tx,
-                self.store_dir,
-                &remote,
-                "Owner recovery candidate authority",
-            )?;
+            persist_exact_remote_object_on(&tx, &remote, "Owner recovery candidate authority")?;
         }
         crate::store::store_session::StoreRecords::new(&tx, self.store_dir)
             .stage_owner_recovery_publication(&registration_hash, &encoded)?;

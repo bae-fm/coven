@@ -80,7 +80,7 @@ impl StoreSession<'_> {
                     .parse()
                     .map_err(|error| DbError::context("prepared remote object id", error))?;
                 Ok(PreparedRemoteObject {
-                    closed: crate::reopen_remote_object_on(self.conn, self.store_dir, id)?,
+                    closed: crate::reopen_remote_object_on(self.conn, id)?,
                     spool_path: spool_path.map(PathBuf::from),
                 })
             })
@@ -163,12 +163,7 @@ impl StoreSession<'_> {
                     "covered membership acceptance has no durable finalization owner".into(),
                 ));
             }
-            persist_exact_remote_object_on(
-                &tx,
-                self.store_dir,
-                &closed,
-                "accepted membership head result",
-            )?;
+            persist_exact_remote_object_on(&tx, &closed, "accepted membership head result")?;
             closed.record().clone()
         };
         tx.commit().map_err(DbError::from)?;
@@ -307,7 +302,7 @@ impl StoreSession<'_> {
         &self,
         write_id: &WriteId,
     ) -> Result<PreparedAudienceObjects, DbError> {
-        load_prepared_audience_objects_on(self.conn, self.store_dir, write_id)
+        load_prepared_audience_objects_on(self.conn, write_id)
     }
 }
 
@@ -410,7 +405,6 @@ impl StoreDatabase {
 
 pub(crate) fn persist_prepared_audience_objects_on(
     conn: &rusqlite::Transaction<'_>,
-    store_dir: &coven_foundation::store_dir::StoreDir,
     write_id: &WriteId,
     packages: &[PreparedAudiencePackage],
     blobs: &[PreparedAudienceBlob],
@@ -452,7 +446,7 @@ pub(crate) fn persist_prepared_audience_objects_on(
             ],
         )
         .map_err(DbError::from)?;
-        validate_prepared_package_on(conn, store_dir, write_id, prepared)?;
+        validate_prepared_package_on(conn, write_id, prepared)?;
     }
     for prepared in blobs {
         if !package_audiences.contains(prepared.audience()) {

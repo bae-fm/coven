@@ -1106,7 +1106,6 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     db.vacuum_into_for_test(reopened_store_dir.db_path().to_string_lossy().into_owned())
         .await
         .expect("copy the unfinished removal's database");
-    crate::sync::test_helpers::copy_payload_files(&db_store_dir, &reopened_store_dir);
     let reopened = coven_database::Database::open_synthetic_for_test(
         &reopened_store_dir.db_path(),
         reopened_store_dir.clone(),

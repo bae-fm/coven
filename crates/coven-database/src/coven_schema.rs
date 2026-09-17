@@ -313,43 +313,44 @@ macro_rules! coven_tables {
     meta_bytes BLOB NOT NULL
 "
         );
-        // Content-addressed payload bytes owned by bookkeeping rows. Every
-        // payload is compressed; the compressed size selects SQLite or a file
-        // in the payload area. `storage` is the authoritative dispatch tag, so
-        // a reader never probes both representations.
+        // One compressed, content-addressed payload owned by bookkeeping rows.
+        // The row states what its chunks must add up to, so a chunk set that
+        // lost or reordered a row fails the read instead of decoding.
         $visit!(
             payload_storage,
             "
     payload_hash TEXT PRIMARY KEY CHECK (length(payload_hash) = 64),
     payload_size INTEGER NOT NULL CHECK (payload_size >= 0),
-    storage TEXT NOT NULL CHECK (storage IN ('inline', 'file')),
-    compressed_bytes BLOB,
     compressed_size INTEGER NOT NULL CHECK (compressed_size > 0),
-    CHECK (
-        (storage = 'inline' AND compressed_bytes IS NOT NULL
-         AND compressed_size = length(compressed_bytes)
-         AND compressed_size <= 65536)
-        OR
-        (storage = 'file' AND compressed_bytes IS NULL)
-    )
+    chunk_count INTEGER NOT NULL CHECK (chunk_count > 0)
 "
         );
-        // Payload storage the owning row no longer needs. The obligation names
-        // the content hash so the catalog can dispatch to inline bytes or the
-        // matching file without recording a movable filesystem path.
+        // One bounded piece of one payload's compressed frame. Ordinals run
+        // 0..chunk_count, and the cascade makes bytes outliving their metadata
+        // row unrepresentable rather than something a reader checks for.
+        //
+        // The reference is deferred because a payload is compressed as it is
+        // read: its chunks are written before its final length and count are
+        // known, so the catalog row lands last. Deferring moves the check to
+        // the commit, where a writer that never settled its payload fails the
+        // transaction it wrote into rather than committing bytes no row names.
         $visit!(
-            payload_cleanup,
+            payload_chunks,
             "
-    payload_hash TEXT PRIMARY KEY CHECK (length(payload_hash) = 64)
-        REFERENCES payload_storage(payload_hash)
+    payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    bytes BLOB NOT NULL CHECK (length(bytes) > 0),
+    PRIMARY KEY (payload_hash, ordinal),
+    FOREIGN KEY (payload_hash) REFERENCES payload_storage(payload_hash)
+        ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 "
         );
         // One owner's claim on one payload. Two rows can name the same
         // payload — a Circle operation and the remote object it prepared both
         // need the bytes — so a payload is deleted when its last claim goes,
-        // not when any one owner is done with it. `owner_key` names the row
-        // holding the claim ('circle-operation:<id>', 'remote-object:<id>'),
-        // so an orphan is traceable to the flow that leaked it.
+        // not when any one owner is done with it, and that deletion is the same
+        // commit as the claim's. `owner_key` names the row holding the claim
+        // ('circle-operation:<id>', 'remote-object:<id>').
         $visit!(
             payload_owners,
             "

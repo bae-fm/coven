@@ -233,7 +233,6 @@ impl StoreSession<'_> {
         for remote in &stage.remote_objects {
             crate::persist_prepared_remote_object_on(
                 &tx,
-                self.store_dir,
                 remote,
                 &commit_ref,
                 "candidate audience object",
@@ -245,7 +244,7 @@ impl StoreSession<'_> {
             stage.commit.prepared.stored_bytes(),
         )
         .map_err(|error| DbError::context("prepared candidate commit", error))?;
-        persist_exact_remote_object_on(&tx, self.store_dir, &commit_remote, "candidate commit")?;
+        persist_exact_remote_object_on(&tx, &commit_remote, "candidate commit")?;
         let expected_partition_count = usize::from(partitions.store.is_some())
             .checked_add(partitions.circles.len())
             .ok_or_else(|| DbError::Message("audience partition count overflow".to_string()))?;
@@ -322,7 +321,6 @@ impl StoreSession<'_> {
         debug_assert_eq!(indexed, object_ids);
         super::prepared_remote_objects::persist_prepared_audience_objects_on(
             &tx,
-            self.store_dir,
             &stage.write_id,
             &stage.audiences.packages,
             &stage.audiences.blobs,
@@ -390,12 +388,7 @@ impl StoreSession<'_> {
             &partitions,
             self.blob_decls,
         )?;
-        let changeset_hash = crate::payload_store::write_payload_blocking(
-            &tx,
-            self.store_dir,
-            &changeset,
-            crate::payload_store::CreatedPayloadFiles::untracked(),
-        )?;
+        let changeset_hash = crate::payload_store::write_payload_blocking(&tx, &changeset)?;
         crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
             .insert_store_write(&write_id, &partitions, changeset_hash, &base, &blob_facts)?;
         tx.commit().map_err(DbError::from)

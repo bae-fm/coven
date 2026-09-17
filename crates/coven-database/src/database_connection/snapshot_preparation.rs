@@ -4,114 +4,47 @@ use super::*;
 /// means. Both kinds hold their database private until the preparation
 /// finishes.
 pub(crate) enum SnapshotPreparation {
-    /// Warm adoption: a disposable directory holding the copy and its payloads.
-    /// Finishing it removes the directory whole.
+    /// Warm adoption: a disposable directory holding the copy. Finishing it
+    /// removes the directory whole.
     Directory(SnapshotPreparationDirectory),
     /// Cold restore: the destination database itself, unpublished until it can
-    /// serve. Finishing it removes the database files and the payload files the
-    /// restore created, and leaves every other file in the store directory.
-    Destination(ColdSnapshotDestination),
+    /// serve. Every payload the restore installs is a row inside that database,
+    /// so finishing it removes the database files and touches nothing else in
+    /// the store directory.
+    Destination(crate::SnapshotDatabaseImage),
 }
 
 impl SnapshotPreparation {
     fn finish<T>(self, outcome: Result<T, DbError>) -> Result<T, DbError> {
         match self {
             Self::Directory(directory) => directory.finish(outcome),
-            Self::Destination(destination) => destination.finish(outcome),
+            Self::Destination(image) => finish_destination(image, outcome),
         }
     }
 }
 
-/// The destination database of a cold restore while it is still private: its
-/// image files, and every payload spool file this restore put beside them.
-///
-/// A spool file the install found already there and reused is not one of these,
-/// so releasing the destination never removes a file the restore did not write.
-pub(crate) struct ColdSnapshotDestination {
+/// Remove everything a cold restore attempt created. The caller closes SQLite
+/// first, so the image's sidecars are gone rather than written again after.
+fn finish_destination<T>(
     image: crate::SnapshotDatabaseImage,
-    created_payload_files: DestinationPayloadFiles,
-}
-
-impl ColdSnapshotDestination {
-    fn new(
-        image: crate::SnapshotDatabaseImage,
-        store_dir: coven_foundation::store_dir::StoreDir,
-        created_payload_files: Vec<PathBuf>,
-    ) -> Self {
-        Self {
-            image,
-            created_payload_files: DestinationPayloadFiles {
-                store_dir,
-                files: created_payload_files,
-            },
+    outcome: Result<T, DbError>,
+) -> Result<T, DbError> {
+    match image.finish_operation(outcome) {
+        Ok(value) => Ok(value),
+        Err(crate::SnapshotImageOperationError::Operation(cause)) => Err(cause),
+        Err(crate::SnapshotImageOperationError::Cleanup { path, cleanup }) => {
+            Err(crate::SnapshotImageError::Cleanup { path, cleanup }.into())
         }
-    }
-
-    fn record(&mut self, created: Vec<PathBuf>) {
-        self.created_payload_files.files.extend(created);
-    }
-
-    /// Publish the destination: the database is the store's now, and its payload
-    /// files belong to the committed rows that name them.
-    fn commit(self) {
-        let Self {
-            image,
-            mut created_payload_files,
-        } = self;
-        created_payload_files.files.clear();
-        image.commit();
-    }
-
-    /// Remove everything the restore attempt created. The caller closes SQLite
-    /// first, so the image's sidecars are gone rather than written again after.
-    fn finish<T>(self, outcome: Result<T, DbError>) -> Result<T, DbError> {
-        let Self {
-            image,
-            mut created_payload_files,
-        } = self;
-        let cleanup = created_payload_files.remove();
-        match image.finish_operation(outcome.and_then(|value| cleanup.map(|()| value))) {
-            Ok(value) => Ok(value),
-            Err(crate::SnapshotImageOperationError::Operation(cause)) => Err(cause),
-            Err(crate::SnapshotImageOperationError::Cleanup { path, cleanup }) => {
-                Err(crate::SnapshotImageError::Cleanup { path, cleanup }.into())
-            }
-            Err(crate::SnapshotImageOperationError::CleanupAfterFailure {
-                path,
-                cleanup,
-                cause,
-            }) => Err(crate::SnapshotImageError::CleanupAfterFailure {
-                path,
-                cleanup,
-                cause: Box::new(crate::SnapshotImageError::from(cause)),
-            }
-            .into()),
+        Err(crate::SnapshotImageOperationError::CleanupAfterFailure {
+            path,
+            cleanup,
+            cause,
+        }) => Err(crate::SnapshotImageError::CleanupAfterFailure {
+            path,
+            cleanup,
+            cause: Box::new(crate::SnapshotImageError::from(cause)),
         }
-    }
-}
-
-/// Payload spool files an unfinished restore created. Removing them is the
-/// terminal act; an abandoned guard removes them too, but can only log.
-struct DestinationPayloadFiles {
-    store_dir: coven_foundation::store_dir::StoreDir,
-    files: Vec<PathBuf>,
-}
-
-impl DestinationPayloadFiles {
-    fn remove(&mut self) -> Result<(), DbError> {
-        crate::store::remove_created_payload_files(&self.store_dir, std::mem::take(&mut self.files))
-            .map_err(DbError::StagedBlobRollback)
-    }
-}
-
-impl Drop for DestinationPayloadFiles {
-    fn drop(&mut self) {
-        if self.files.is_empty() {
-            return;
-        }
-        if let Err(error) = self.remove() {
-            error!(%error, "could not remove an abandoned snapshot restore's payload files");
-        }
+        .into()),
     }
 }
 
@@ -144,9 +77,12 @@ impl DatabaseCore {
     pub(crate) fn close_snapshot_directory(self) -> Result<SnapshotPreparationDirectory, DbError> {
         match self.close_snapshot()? {
             SnapshotPreparation::Directory(directory) => Ok(directory),
-            SnapshotPreparation::Destination(destination) => destination.finish(Err(
-                DbError::Message("a cold restore destination has no prepared snapshot".into()),
-            )),
+            SnapshotPreparation::Destination(image) => finish_destination(
+                image,
+                Err(DbError::Message(
+                    "a cold restore destination has no prepared snapshot".into(),
+                )),
+            ),
         }
     }
 
@@ -209,9 +145,9 @@ impl ColdSnapshotPreparation {
     ///
     /// `select` resolves that selection against this destination's installed
     /// Store image. It is lent the database for exactly as long as the selection
-    /// runs, so the restore keeps the only lasting handle to it. The spool files
-    /// the install then writes join the destination's own, so abandoning the
-    /// restore removes them whether or not the install committed.
+    /// runs, so the restore keeps the only lasting handle to it. What the
+    /// install writes lands in that database, so abandoning the restore takes it
+    /// whether or not the install committed.
     pub async fn restore_snapshot_circles<Select, Selection, E>(
         &self,
         select: Select,
@@ -231,8 +167,7 @@ impl ColdSnapshotPreparation {
             .map_err(E::from)
     }
 
-    /// Release the destination: close SQLite, then remove its database files and
-    /// every payload file this attempt created.
+    /// Release the destination: close SQLite, then remove its database files.
     pub async fn discard(mut self) -> Result<(), DbError> {
         let connection = self
             .connection
@@ -241,8 +176,8 @@ impl ColdSnapshotPreparation {
         connection.discard_snapshot_preparation().await
     }
 
-    /// Fail the next Circle restore after its payload files are written — a
-    /// test's stand-in for a crash between the Store and Circle installs.
+    /// Fail the next Circle restore after its payloads are written — a test's
+    /// stand-in for a crash between the Store and Circle installs.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn fail_circle_restore_for_test(&self) {
         self.connection
@@ -269,8 +204,7 @@ impl Database {
         let mut core = connection
             .finish_snapshot(DbJob::TakeCore(reply), result)
             .await?;
-        let Some(SnapshotPreparation::Destination(destination)) = core.snapshot_preparation.take()
-        else {
+        let Some(SnapshotPreparation::Destination(image)) = core.snapshot_preparation.take() else {
             return Err(DbError::Message(
                 "only a cold restore destination can finish a cold restore".into(),
             ));
@@ -293,14 +227,14 @@ impl Database {
         })?;
         let core = match seeded {
             Ok(core) => core,
-            Err(error) => return destination.finish(Err(error)),
+            Err(error) => return finish_destination(image, Err(error)),
         };
         match Self::from_core(core, "coven-db") {
             Ok(database) => {
-                destination.commit();
+                image.commit();
                 Ok(database)
             }
-            Err(error) => destination.finish(Err(error)),
+            Err(error) => finish_destination(image, Err(error)),
         }
     }
 }
@@ -331,11 +265,7 @@ impl DatabaseConnection {
                     "recipient Circle preparation requires a disposable checkpoint database".into(),
                 ));
             }
-            store_session(core).restore_snapshot_circles(
-                &selection,
-                receiver_wall_ms,
-                crate::payload_store::CreatedPayloadFiles::untracked(),
-            )
+            store_session(core).restore_snapshot_circles(&selection, receiver_wall_ms)
         })
         .await
     }
@@ -354,38 +284,11 @@ impl DatabaseConnection {
                     "recipient Circle restoration requires a cold restore destination".into(),
                 ));
             }
-            let created = std::cell::RefCell::new(Vec::new());
-            let restored = store_session(core).restore_snapshot_circles(
-                &selection,
-                receiver_wall_ms,
-                crate::payload_store::CreatedPayloadFiles::tracked(&created),
-            );
+            let restored =
+                store_session(core).restore_snapshot_circles(&selection, receiver_wall_ms);
             #[cfg(any(test, feature = "test-utils"))]
             let restored = restored.and_then(|()| core.injected_circle_restore_failure());
-            let created = created.into_inner();
-            match restored {
-                Ok(()) => {
-                    let Some(SnapshotPreparation::Destination(destination)) =
-                        &mut core.snapshot_preparation
-                    else {
-                        unreachable!("the destination was checked before the restore ran");
-                    };
-                    destination.record(created);
-                    Ok(())
-                }
-                Err(operation) => Err(
-                    match crate::store::remove_created_payload_files(
-                        &core.context.store_dir,
-                        created,
-                    ) {
-                        Ok(()) => operation,
-                        Err(rollback) => DbError::AudienceBlobRollbackFailed {
-                            operation: Box::new(operation),
-                            rollback,
-                        },
-                    },
-                ),
-            }
+            restored
         })
         .await
     }
@@ -405,9 +308,9 @@ impl DatabaseConnection {
     ) -> Result<ColdSnapshotPreparation, OpenError> {
         let store_dir = crate::database_runtime::store_dir_of(image.path());
         // The open authenticates the image against the signed metadata inside
-        // the write transaction that then migrates and installs it.
-        // The open removes the payload files it created if it fails, and the
-        // image goes with them — nothing is installed to keep them for.
+        // the write transaction that then migrates and installs it. A failed
+        // open takes the image with it, and the payloads it installed are rows
+        // inside that image.
         let opened = DatabaseCore::open_unseeded(
             image.path(),
             store_dir.clone(),
@@ -420,7 +323,7 @@ impl DatabaseConnection {
             crate::database_open::CovenMetadataOpen::VerifiedSnapshot(install),
             true,
         );
-        let (mut core, created_payload_files) = match opened {
+        let mut core = match opened {
             Ok(opened) => opened,
             Err(operation) => {
                 return Err(match image.finish_operation(Err(operation)) {
@@ -446,9 +349,7 @@ impl DatabaseConnection {
                 });
             }
         };
-        core.snapshot_preparation = Some(SnapshotPreparation::Destination(
-            ColdSnapshotDestination::new(image, store_dir, created_payload_files),
-        ));
+        core.snapshot_preparation = Some(SnapshotPreparation::Destination(image));
         Self::start(core, "coven-snapshot-preparation")
             .map(ColdSnapshotPreparation::new)
             .map_err(OpenError::from)
@@ -500,9 +401,7 @@ impl DatabaseConnection {
                     )
                 })();
                 match prepared {
-                    // The directory owns every file the preparation writes, its
-                    // payloads included, so removing it covers the reported list.
-                    Ok((mut core, _created_payload_files)) => {
+                    Ok(mut core) => {
                         core.snapshot_preparation = Some(SnapshotPreparation::Directory(directory));
                         Ok(core)
                     }

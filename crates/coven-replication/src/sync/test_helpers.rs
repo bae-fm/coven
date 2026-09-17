@@ -98,35 +98,6 @@ impl MasterKeyCustody for TestCustody {
     }
 }
 
-/// Copy the file-backed payloads one store directory holds into another.
-///
-/// A store is a directory, not a file: rows name payload files beside the
-/// database, so a test that copies the database with `VACUUM INTO` and opens the
-/// copy has to bring those files along, exactly as a device carries its whole
-/// store directory rather than one file out of it.
-pub fn copy_payload_files(
-    from: &coven_foundation::store_dir::StoreDir,
-    to: &coven_foundation::store_dir::StoreDir,
-) {
-    let source = from.payload_spool_dir();
-    let destination = to.payload_spool_dir();
-    match std::fs::metadata(&source) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => panic!("payload file path is not a directory: {}", source.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-        Err(error) => panic!(
-            "inspect payload file directory {}: {error}",
-            source.display()
-        ),
-    }
-    std::fs::create_dir_all(&destination).expect("create the copied payload spool directory");
-    for entry in std::fs::read_dir(&source).expect("read the payload spool being copied") {
-        let entry = entry.expect("payload spool entry");
-        std::fs::copy(entry.path(), destination.join(entry.file_name()))
-            .expect("copy one payload into the copied store directory");
-    }
-}
-
 /// Hex-encoded ed25519 public key, as membership entries identify a member.
 pub fn pubkey_hex(kp: &UserKeypair) -> String {
     coven_keys::keys::public_key_hex(kp)
@@ -588,7 +559,7 @@ mod test_device {
             founder_timestamp: &str,
             identity: UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreInitializationError> {
-            database.assert_owns_payload_directory_for_test(&store_dir);
+            database.assert_owns_store_directory_for_test(&store_dir);
             let initialized = crate::sync::store::Store::create(
                 database.clone(),
                 storage.clone(),
@@ -619,7 +590,7 @@ mod test_device {
             root: &coven_protocol::store_commit::StoreRootRef,
             identity: &UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreInitializationError> {
-            database.assert_owns_payload_directory_for_test(&store_dir);
+            database.assert_owns_store_directory_for_test(&store_dir);
             let initialized = crate::sync::store::Store::open(
                 database.clone(),
                 storage.clone(),
@@ -934,7 +905,7 @@ mod test_device {
             identity: UserKeypair,
             store_dir: StoreDir,
         ) -> Result<Self, crate::sync::store::StoreError> {
-            database.assert_owns_payload_directory_for_test(&store_dir);
+            database.assert_owns_store_directory_for_test(&store_dir);
             let store = crate::sync::store::Store::load(
                 database.clone(),
                 storage.clone(),

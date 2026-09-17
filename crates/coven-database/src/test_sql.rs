@@ -37,33 +37,10 @@ impl DatabaseTestSql<'_> {
     }
 
     pub(crate) fn payload(&self, encoded_hash: String) -> Result<Vec<u8>, DbError> {
-        let store_dir = self.required_store_dir()?;
         let hash = encoded_hash
             .parse()
             .map_err(|error| DbError::context("parse test payload hash", error))?;
-        crate::payload_store::read_payload_blocking(self.connection, store_dir, hash)
-            .map_err(DbError::from)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn install_payload(
-        &self,
-        bytes: &[u8],
-    ) -> Result<coven_protocol::ObjectHash, DbError> {
-        let store_dir = self.required_store_dir()?;
-        let transaction = self
-            .connection
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let hash = crate::payload_store::write_payload_blocking(
-            &transaction,
-            store_dir,
-            bytes,
-            crate::payload_store::CreatedPayloadFiles::untracked(),
-        )
-        .map_err(DbError::from)?;
-        transaction.commit().map_err(DbError::from)?;
-        Ok(hash)
+        crate::payload_store::read_payload_blocking(self.connection, hash).map_err(DbError::from)
     }
 
     fn required_store_dir(&self) -> Result<&coven_foundation::store_dir::StoreDir, DbError> {
@@ -101,15 +78,6 @@ impl DatabaseTestSql<'_> {
         values
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_payload_owner_claims(
-        &self,
-        owner_key: &str,
-        payloads: &std::collections::BTreeSet<coven_protocol::store_commit::ObjectHash>,
-    ) -> Result<(), DbError> {
-        crate::payload_store::set_payload_owner_claims_on(self.connection, owner_key, payloads)
-    }
-
     pub(crate) fn persist_exact_remote_object(
         &self,
         remote: &coven_protocol::remote_object::ClosedRemoteObject,
@@ -119,12 +87,7 @@ impl DatabaseTestSql<'_> {
             .connection
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        crate::persist_exact_remote_object_on(
-            &transaction,
-            self.required_store_dir()?,
-            remote,
-            subject,
-        )?;
+        crate::persist_exact_remote_object_on(&transaction, remote, subject)?;
         transaction.commit().map_err(DbError::from)
     }
 

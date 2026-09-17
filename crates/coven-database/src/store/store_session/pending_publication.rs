@@ -233,8 +233,7 @@ impl StoreSession<'_> {
                 ));
             }
             let partitions = records.store_write_partitions(write_id.as_str())?;
-            let audiences =
-                load_prepared_audience_objects_on(self.conn, self.store_dir, &write_id)?;
+            let audiences = load_prepared_audience_objects_on(self.conn, &write_id)?;
             let graph_commit = &commit_value;
             let expected_package_count = usize::from(graph_commit.store_package().is_some())
                 .checked_add(graph_commit.circle_packages().len())

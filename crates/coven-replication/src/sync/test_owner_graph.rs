@@ -23,7 +23,7 @@ fn blob_owner(database: StoreDatabase, store_dir: StoreDir) -> LocalStoreBlobAcc
 
 impl TestOwnerGraph {
     pub fn new(database: StoreDatabase, store_dir: StoreDir) -> Self {
-        database.assert_owns_payload_directory_for_test(&store_dir);
+        database.assert_owns_store_directory_for_test(&store_dir);
         let local_access = blob_owner(database.clone(), store_dir.clone());
         let local_transitions = LocalBlobTransitions::new(database.clone(), store_dir.clone());
         Self {
@@ -336,8 +336,8 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "payload directory does not belong to this database")]
-    fn owner_graph_rejects_a_database_payload_directory_mismatch() {
+    #[should_panic(expected = "store directory does not belong to this database")]
+    fn owner_graph_rejects_a_database_store_directory_mismatch() {
         let database_store_dir = crate::sync::test_helpers::test_store_dir();
         let database = crate::sync::test_helpers::open_test_db(database_store_dir);
         let unrelated_store_dir = crate::sync::test_helpers::test_store_dir();

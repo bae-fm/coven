@@ -1,7 +1,7 @@
 use coven::{Config, Coven, CovenError, DbError, Migration, RowIdentity, StoreDir, SyncedTable};
 
 #[tokio::test]
-async fn read_on_write_path_is_rejected_after_payload_spooling() {
+async fn read_on_write_path_is_rejected_after_payload_installation() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new_ephemeral(temp.path());
     let config = Config::with_defaults(

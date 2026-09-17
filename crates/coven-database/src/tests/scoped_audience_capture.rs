@@ -83,7 +83,7 @@ fn inspect_database<R>(
 }
 
 fn payload_bytes(store_dir: &StoreDir, encoded_hash: String) -> Result<Vec<u8>, crate::DbError> {
-    crate::DatabaseImageTest::open(&store_dir.db_path())?.payload(store_dir, encoded_hash)
+    crate::DatabaseImageTest::open(&store_dir.db_path())?.payload(encoded_hash)
 }
 
 fn audience_partitions(

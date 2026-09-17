@@ -151,7 +151,6 @@ async fn covered_circle_replacement(retire_store_package: bool) {
         .vacuum_into_for_test(continuation_path.to_str().unwrap().into())
         .await
         .unwrap();
-    crate::sync::test_helpers::copy_payload_files(&fixture.source_dir, &continuation_dir);
     let copied_blob = continuation_dir
         .local_blob_path("files", "covered-file")
         .unwrap();

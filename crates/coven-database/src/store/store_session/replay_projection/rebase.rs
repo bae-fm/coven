@@ -22,11 +22,8 @@ impl ReplayProjection {
             Some(rebased) => rebased.blob_facts,
             None => original_facts.clone(),
         };
-        let prepared_audiences = crate::load_prepared_audience_objects_on(
-            live.store.transaction,
-            live.store.store_dir,
-            &effect.write_id,
-        )?;
+        let prepared_audiences =
+            crate::load_prepared_audience_objects_on(live.store.transaction, &effect.write_id)?;
         let schema = self.table_schema(live.synced_tables, live.gates)?;
         let tx = self.connection.unchecked_transaction()?;
         tx.pragma_update(None, "defer_foreign_keys", "ON")?;

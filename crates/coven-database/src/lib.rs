@@ -569,11 +569,6 @@ pub enum DbError {
     SnapshotImage(#[source] Box<crate::store::SnapshotImageError>),
     #[error("{0}")]
     PayloadStore(#[source] Box<PayloadStoreError>),
-    #[error("{operation}; payload cleanup failed: {cleanup}")]
-    PayloadCleanupFailed {
-        operation: Box<DbError>,
-        cleanup: Box<DbError>,
-    },
     #[error("{operation}; committed-change capture failed: {capture}")]
     ChangeCaptureFailed {
         operation: Box<DbError>,
@@ -670,8 +665,7 @@ impl DbError {
         match self {
             Self::WriteRebaseConflict(conflict) => Some(conflict),
             Self::Context { source, .. } => source.write_rebase_conflict(),
-            Self::PayloadCleanupFailed { operation, .. }
-            | Self::ChangeCaptureFailed { operation, .. }
+            Self::ChangeCaptureFailed { operation, .. }
             | Self::AudienceBlobRollbackFailed { operation, .. } => {
                 operation.write_rebase_conflict()
             }

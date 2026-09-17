@@ -6,7 +6,7 @@ pub struct CandidateObjectMaterial {
     pub canonical_semantic_bytes: Vec<u8>,
     /// The ciphertext this object is uploaded as. Carried here because the
     /// transaction that writes the record's row is what installs it in the
-    /// payload spool, and a record cannot be persisted without it.
+    /// payload store, and a record cannot be persisted without it.
     pub stored_bytes: Vec<u8>,
 }
 

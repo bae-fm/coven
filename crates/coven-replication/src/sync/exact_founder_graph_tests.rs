@@ -454,11 +454,6 @@ async fn writer_migrates_the_retained_replay_image_with_the_store() {
         .has_payload_for_test(old_image_hash)
         .await
         .expect("check superseded replay payload"));
-    assert!(database
-        .owed_payload_cleanup()
-        .await
-        .expect("read payload cleanup obligations")
-        .is_empty());
 }
 
 #[tokio::test]
@@ -585,13 +580,12 @@ async fn generation_zero_replay_baseline_names_its_owned_payloads() {
         .replay_baseline_for_test()
         .await
         .expect_err("a baseline whose image payload is gone must not load");
-    assert!(
-        error.to_string().contains("absent from the spool"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("catalog records"), "{error}");
 
+    // Reinstalling cannot repair a payload whose rows disagree: the writer
+    // leaves committed chunks alone. The test puts the removed chunks back.
     database
-        .install_payload_for_test(image_bytes)
+        .corrupt_payload_for_test(baseline.image_payload_hash, image_bytes)
         .await
         .expect("restore image payload");
     database
@@ -728,11 +722,4 @@ async fn replacing_the_replay_authority_deletes_the_superseded_payload() {
         .has_payload_for_test(baseline.image_payload_hash)
         .await
         .expect("check retained image payload"));
-    assert_eq!(
-        database
-            .owed_payload_cleanup()
-            .await
-            .expect("read owed payload cleanup"),
-        Vec::new()
-    );
 }

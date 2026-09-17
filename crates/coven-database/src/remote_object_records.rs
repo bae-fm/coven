@@ -1,4 +1,3 @@
-use coven_foundation::store_dir::StoreDir;
 use coven_protocol::remote_object::{ClosedRemoteObject, SemanticPayload};
 
 use crate::blob_records::remote_audience_to_db;
@@ -81,14 +80,13 @@ pub(crate) fn load_remote_object_on(
 /// the bytes agree" a single check rather than a per-caller convention.
 pub(crate) fn reopen_remote_object_on(
     conn: &Connection,
-    store_dir: &StoreDir,
     object_id: ObjectHash,
 ) -> Result<coven_protocol::remote_object::ClosedRemoteObject, DbError> {
     let remote = load_remote_object_on(conn, object_id)?;
     let mut payloads = std::collections::BTreeMap::new();
     for hash in remote.payload_claims() {
-        let bytes = crate::payload_store::read_payload_blocking(conn, store_dir, hash)
-            .map_err(DbError::from)?;
+        let bytes =
+            crate::payload_store::read_payload_blocking(conn, hash).map_err(DbError::from)?;
         payloads.insert(hash, bytes);
     }
     coven_protocol::remote_object::ClosedRemoteObject::with_payloads(remote, payloads)
@@ -397,17 +395,11 @@ pub(crate) fn record_reclaimed_store_package_on(
 /// a fact of one function instead of a per-caller convention.
 fn install_record_payloads_on(
     conn: &Connection,
-    store_dir: &StoreDir,
     closed: &ClosedRemoteObject,
 ) -> Result<(), DbError> {
     for (hash, bytes) in closed.payload_bytes() {
-        let written = crate::payload_store::write_payload_blocking(
-            conn,
-            store_dir,
-            bytes,
-            crate::payload_store::CreatedPayloadFiles::untracked(),
-        )
-        .map_err(DbError::from)?;
+        let written =
+            crate::payload_store::write_payload_blocking(conn, bytes).map_err(DbError::from)?;
         if written != *hash {
             return Err(DbError::Message(format!(
                 "remote object payload stored under {written}, named as {hash}"
@@ -446,7 +438,6 @@ pub(crate) fn delete_remote_object_on(
 
 pub(crate) fn persist_exact_remote_object_on(
     conn: &Connection,
-    store_dir: &StoreDir,
     closed: &ClosedRemoteObject,
     domain: &str,
 ) -> Result<(), DbError> {
@@ -476,9 +467,9 @@ pub(crate) fn persist_exact_remote_object_on(
                 "prepared {domain} {object_id} already has different closed state"
             )));
         }
-        return install_record_payloads_on(conn, store_dir, closed);
+        return install_record_payloads_on(conn, closed);
     }
-    install_record_payloads_on(conn, store_dir, closed)?;
+    install_record_payloads_on(conn, closed)?;
     let state = serde_json::to_string(remote)
         .map_err(|error| DbError::context(format!("serialize prepared {domain}"), error))?;
     conn.execute(
@@ -504,7 +495,6 @@ fn ensure_remote_object_is_writable_on(
 
 pub(crate) fn persist_prepared_remote_object_on(
     conn: &Connection,
-    store_dir: &StoreDir,
     closed: &ClosedRemoteObject,
     owner: &StoreBatchCommitRef,
     domain: &str,
@@ -523,11 +513,11 @@ pub(crate) fn persist_prepared_remote_object_on(
         )
         .map_err(DbError::from)?;
     if !exists {
-        return persist_exact_remote_object_on(conn, store_dir, closed, domain);
+        return persist_exact_remote_object_on(conn, closed, domain);
     }
     let existing = load_remote_object_on(conn, object_id)?;
     let merged = merge_prepared_remote_object(existing, remote, owner)?;
-    install_record_payloads_on(conn, store_dir, closed)?;
+    install_record_payloads_on(conn, closed)?;
     update_remote_object_on(conn, object_id, &merged)
 }
 
@@ -929,7 +919,6 @@ pub(crate) fn merge_prepared_remote_object(
 
 pub(crate) fn validate_prepared_package_on(
     conn: &Connection,
-    store_dir: &StoreDir,
     write_id: &WriteId,
     expected: &PreparedAudiencePackage,
 ) -> Result<(), DbError> {
@@ -946,11 +935,8 @@ pub(crate) fn validate_prepared_package_on(
     let remote_object_id = remote_object_id
         .parse()
         .map_err(|error| DbError::context("stored prepared remote object id is invalid", error))?;
-    let actual = PreparedAudiencePackage::from_remote(
-        conn,
-        store_dir,
-        load_remote_object_on(conn, remote_object_id)?,
-    )?;
+    let actual =
+        PreparedAudiencePackage::from_remote(conn, load_remote_object_on(conn, remote_object_id)?)?;
     if actual.package() != expected.package()
         || actual.semantic_bytes() != expected.semantic_bytes()
         || actual.stored_bytes() != expected.stored_bytes()

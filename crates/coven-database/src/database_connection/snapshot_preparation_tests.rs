@@ -3,7 +3,7 @@ use super::*;
 fn open_preparation(path: std::path::PathBuf) -> DatabaseConnection {
     let directory = SnapshotPreparationDirectory::create(path.clone()).expect("create preparation");
     let store_dir = coven_foundation::store_dir::StoreDir::new_ephemeral(&path);
-    let (mut core, _created_payload_files) = DatabaseCore::open_unseeded(
+    let mut core = DatabaseCore::open_unseeded(
         &store_dir.db_path(),
         store_dir.clone(),
         crate::connection_io::ConnectionDurability::Full,

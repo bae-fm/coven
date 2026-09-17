@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::path::PathBuf;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -26,7 +25,6 @@ use super::*;
 
 #[path = "host_write_blob_transaction.rs"]
 mod blob_transaction;
-pub(crate) use blob_transaction::remove_created_payload_files;
 pub use blob_transaction::HostWriteBlobTransaction;
 
 /// Rolls back the staged audience blob files after a failed capture,
@@ -900,11 +898,9 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             let staged_files = match (moved_blob_exists, &blob_materialization) {
                 (false, _) => None,
                 (true, Some(AudienceBlobMoveMaterialization::Host(staging))) => {
-                    let created_payload_files = std::cell::RefCell::new(Vec::new());
                     let mut blob_transaction = HostWriteBlobTransaction::new(
                         crate::store::store_session::StoreTransaction::new(&tx, store_dir),
                         verified_authority,
-                        &created_payload_files,
                     );
                     let staged = staging.stage_audience_move_blobs_on(
                         &mut blob_transaction,
@@ -912,26 +908,8 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                         &partitioned.moves,
                     );
                     match staged {
-                        Ok(rollback) => {
-                            let directory = store_dir.clone();
-                            let created_payload_files = created_payload_files.into_inner();
-                            Some(Box::new(move |error| {
-                                blob_transaction::rollback_captured_payload_files(
-                                    &directory,
-                                    created_payload_files,
-                                    rollback(error),
-                                )
-                            }) as StagedAudienceBlobRollback)
-                        }
-                        Err(error) => {
-                            return Err(E::from(
-                                blob_transaction::rollback_captured_payload_files(
-                                    store_dir,
-                                    created_payload_files.into_inner(),
-                                    error,
-                                ),
-                            ));
-                        }
+                        Ok(rollback) => Some(rollback),
+                        Err(error) => return Err(E::from(error)),
                     }
                 }
                 (true, Some(AudienceBlobMoveMaterialization::PreparedTransition)) => {
@@ -956,15 +934,9 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     &tx,
                     blob_decls,
                 )?;
-                let mut changeset_writer =
-                    crate::store::store_session::StoreTransaction::new(&tx, store_dir)
-                        .payload_writer();
-                changeset_writer
-                    .write_all(&captured)
-                    .map_err(|error| DbError::context("write captured changeset", error))?;
-                Ok(changeset_writer
-                    .commit(crate::payload_store::CreatedPayloadFiles::untracked())?
-                    .0)
+                Ok(crate::payload_store::write_payload_blocking(
+                    &tx, &captured,
+                )?)
             })() {
                 Ok(hash) => hash,
                 Err(error) => {

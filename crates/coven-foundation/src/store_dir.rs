@@ -396,15 +396,6 @@ impl StoreDir {
         .await
     }
 
-    pub fn create_payload_spool_stage(
-        &self,
-    ) -> Result<crate::atomic_file::AtomicFileStage, std::io::Error> {
-        crate::atomic_file::AtomicFileStage::create_in_with_file_sync(
-            &self.payload_spool_dir(),
-            self.file_sync.clone(),
-        )
-    }
-
     pub async fn sync_parent_dir(&self, path: &Path) -> Result<(), FileError> {
         self.file_sync.sync_parent(path).await
     }
@@ -459,19 +450,11 @@ impl StoreDir {
             .join(locator_hash.to_string())
     }
 
-    /// The directory holding every internal payload file.
-    pub fn payload_spool_dir(&self) -> PathBuf {
-        self.path.join("spool").join("payloads")
-    }
-
-    /// The file holding one internal payload — bytes a database row owns,
-    /// stored beside the database rather than inside it. The file is named for
-    /// the digest of the bytes it holds, so a retry of a failed insert rewrites
-    /// the same path with the same contents. Unlike a blob, a payload is never
-    /// leased, packaged for an audience, or evicted: it is deleted by the flow
-    /// that deletes the row referencing it.
-    pub fn payload_spool_path(&self, payload_hash: crate::object_hash::ObjectHash) -> PathBuf {
-        self.payload_spool_dir().join(payload_hash.to_string())
+    /// Where an audience move stages the plaintext it downloads before the
+    /// write retaining it reads it back. Nothing published lives here: the file
+    /// exists for the length of one capture and is never committed.
+    pub fn blob_move_stage_dir(&self) -> PathBuf {
+        self.path.join("spool").join("blob-moves")
     }
 
     pub async fn remove_outbound_blob_spool(
@@ -842,7 +825,7 @@ impl StoreDir {
     }
 
     /// Remove in-progress write temporaries left by an earlier process — blob
-    /// files and payload-spool files alike. Files created at or after
+    /// files and audience-move stages alike. Files created at or after
     /// `process_start` belong to the current process and are left untouched.
     pub fn remove_orphaned_write_temps(
         &self,
@@ -853,7 +836,7 @@ impl StoreDir {
             storage.join("local"),
             storage.join("cache"),
             storage.join("pinned"),
-            self.payload_spool_dir(),
+            self.blob_move_stage_dir(),
         ] {
             self.remove_orphaned_temps_in_dir(&directory, process_start)?;
         }

@@ -9,7 +9,6 @@ use super::*;
 
 pub(crate) fn install_pulled_package_activation_on(
     conn: &Connection,
-    store_dir: &coven_foundation::store_dir::StoreDir,
     commit_ref: &StoreBatchCommitRef,
     domain: SharedLiveSetObjectDomain,
     object: &ExactObjectRef,
@@ -53,13 +52,12 @@ pub(crate) fn install_pulled_package_activation_on(
                         error,
                     )
                 })?;
-        persist_exact_remote_object_on(conn, store_dir, &remote, "pulled audience package")
+        persist_exact_remote_object_on(conn, &remote, "pulled audience package")
     }
 }
 
 pub(crate) fn install_pulled_merge_membership_activations_on(
     conn: &Connection,
-    store_dir: &coven_foundation::store_dir::StoreDir,
     commit_ref: &StoreBatchCommitRef,
     remotes: &[coven_protocol::remote_object::ClosedRemoteObject],
 ) -> Result<(), DbError> {
@@ -90,12 +88,7 @@ pub(crate) fn install_pulled_merge_membership_activations_on(
                 })?;
             update_remote_object_on(conn, object_id, &remote)?;
         } else {
-            persist_exact_remote_object_on(
-                conn,
-                store_dir,
-                expected,
-                "pulled Merge membership authority",
-            )?;
+            persist_exact_remote_object_on(conn, expected, "pulled Merge membership authority")?;
         }
     }
     Ok(())

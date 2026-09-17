@@ -2,22 +2,15 @@ use super::*;
 
 impl StoreSession<'_> {
     /// Install the recipient's selected Circle images into a snapshot database
-    /// that is not yet published, reporting the payload spool files the install
-    /// creates to whoever owns that unfinished database.
+    /// that is not yet published.
     pub(crate) fn restore_snapshot_circles(
         &mut self,
         selection: &crate::StagedCircleRestore,
         receiver_wall_ms: u64,
-        created_payload_files: crate::payload_store::CreatedPayloadFiles<'_>,
     ) -> Result<(), DbError> {
         let root = self.required_root_authority()?;
         let transaction = self.conn.unchecked_transaction()?;
-        StoreTransaction::capturing_created_payload_files(
-            &transaction,
-            self.store_dir,
-            created_payload_files,
-        )
-        .restore_snapshot_circles(
+        StoreTransaction::new(&transaction, self.store_dir).restore_snapshot_circles(
             &root,
             selection,
             self.synced_tables,
@@ -31,8 +24,8 @@ impl StoreSession<'_> {
     }
 }
 
-/// A closed, migrated snapshot database and the directory owning its payloads.
-/// Installation opens the database only within the receiving database operation.
+/// A closed, migrated snapshot database. Installation opens it only within the
+/// receiving database operation.
 pub struct PreparedStoreSnapshot {
     directory: SnapshotPreparationDirectory,
 }

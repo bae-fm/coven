@@ -16,68 +16,161 @@ fn incompressible_payload(seed: u64, len: usize) -> Vec<u8> {
         .collect()
 }
 
-fn payload_store() -> (StoreDir, Connection) {
-    let store_dir = crate::synthetic_store::test_store_dir();
+fn payload_store() -> Connection {
     let conn = Connection::open_in_memory().expect("open payload database");
     conn.pragma_update(None, "foreign_keys", "ON")
         .expect("enable payload foreign keys");
     crate::apply_coven_schema(&conn).expect("apply payload schema");
-    (store_dir, conn)
+    conn
 }
 
-fn storage_row(conn: &Connection, hash: ObjectHash) -> (String, i64, Option<Vec<u8>>, i64) {
+/// One payload's catalog row: payload size, compressed size, chunk count.
+fn storage_row(conn: &Connection, hash: ObjectHash) -> (i64, i64, i64) {
     conn.query_row(
-        "SELECT storage, payload_size, compressed_bytes, compressed_size
+        "SELECT payload_size, compressed_size, chunk_count
          FROM payload_storage WHERE payload_hash = ?1",
         [hash.to_string()],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )
     .expect("read payload storage row")
 }
 
-fn install(conn: &Connection, store_dir: &StoreDir, bytes: &[u8]) -> ObjectHash {
+/// The chunk rows behind one payload, in ordinal order.
+fn chunks(conn: &Connection, hash: ObjectHash) -> Vec<(i64, Vec<u8>)> {
+    crate::query_mapped_rows(
+        conn,
+        "SELECT ordinal, bytes FROM payload_chunks
+         WHERE payload_hash = ?1 ORDER BY ordinal",
+        [hash.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .expect("read payload chunks")
+}
+
+fn payload_row_counts(conn: &Connection) -> (i64, i64) {
+    conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM payload_storage),
+                (SELECT COUNT(*) FROM payload_chunks)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .expect("count payload rows")
+}
+
+fn install(conn: &Connection, bytes: &[u8]) -> ObjectHash {
     let transaction = conn
         .unchecked_transaction()
         .expect("begin payload installation");
-    let hash = PayloadStore::new(&transaction, store_dir)
-        .install(bytes, CreatedPayloadFiles::untracked())
+    let hash = PayloadStore::new(&transaction)
+        .install(bytes)
         .expect("install payload");
     transaction.commit().expect("commit payload installation");
     hash
 }
 
-#[test]
-fn protocol_sized_payloads_live_inline_in_the_database() {
-    let (store_dir, conn) = payload_store();
-    let bytes = payload(2, 16 * 1024);
-    let hash = install(&conn, &store_dir, &bytes);
-    let (storage, payload_size, compressed, compressed_size) = storage_row(&conn, hash);
-    let compressed = compressed.expect("inline compressed payload");
+/// Stream `bytes` in `step`-sized writes under the identity `expected` names.
+fn stream(
+    conn: &Connection,
+    expected: ObjectHash,
+    bytes: &[u8],
+    step: usize,
+) -> Result<u64, PayloadStoreError> {
+    let transaction = conn
+        .unchecked_transaction()
+        .expect("begin streamed installation");
+    let outcome = (|| {
+        let mut writer = PayloadStore::new(&transaction).writer(expected)?;
+        for chunk in bytes.chunks(step) {
+            writer
+                .write_all(chunk)
+                .expect("stream one slice of the payload");
+        }
+        writer.commit()
+    })();
+    match outcome {
+        Ok(size) => {
+            transaction.commit().expect("commit streamed installation");
+            Ok(size)
+        }
+        Err(error) => {
+            transaction.rollback().expect("roll back a failed stream");
+            Err(error)
+        }
+    }
+}
 
-    assert_eq!(storage, "inline");
+#[test]
+fn a_payload_smaller_than_one_chunk_is_one_row() {
+    let conn = payload_store();
+    let bytes = payload(2, 16 * 1024);
+    let hash = install(&conn, &bytes);
+    let (payload_size, compressed_size, chunk_count) = storage_row(&conn, hash);
+    let stored = chunks(&conn, hash);
+
     assert_eq!(payload_size, bytes.len() as i64);
-    assert_eq!(compressed_size, compressed.len() as i64);
+    assert_eq!(chunk_count, 1);
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].0, 0);
+    assert_eq!(stored[0].1.len() as i64, compressed_size);
     assert!(compressed_size < payload_size);
-    assert!(!store_dir.payload_spool_path(hash).exists());
     assert_eq!(
-        PayloadStore::new(&conn, &store_dir)
-            .read(hash)
-            .expect("read inline payload"),
+        PayloadStore::new(&conn).read(hash).expect("read payload"),
+        bytes
+    );
+}
+
+#[test]
+fn a_payload_spanning_chunks_is_ordered_rows_summing_to_its_compressed_size() {
+    let conn = payload_store();
+    let bytes = incompressible_payload(15, PAYLOAD_CHUNK_BYTES * 5 / 2);
+    let hash = install(&conn, &bytes);
+    let (_, compressed_size, chunk_count) = storage_row(&conn, hash);
+    let stored = chunks(&conn, hash);
+
+    assert!(chunk_count > 1, "an incompressible payload spans chunks");
+    assert_eq!(stored.len() as i64, chunk_count);
+    assert_eq!(
+        stored
+            .iter()
+            .map(|(ordinal, _)| *ordinal)
+            .collect::<Vec<_>>(),
+        (0..chunk_count).collect::<Vec<_>>()
+    );
+    for (ordinal, chunk) in &stored[..stored.len() - 1] {
+        assert_eq!(
+            chunk.len(),
+            PAYLOAD_CHUNK_BYTES,
+            "chunk {ordinal} is not full"
+        );
+    }
+    assert_eq!(
+        stored
+            .iter()
+            .map(|(_, chunk)| chunk.len() as i64)
+            .sum::<i64>(),
+        compressed_size
+    );
+    assert_eq!(
+        PayloadStore::new(&conn)
+            .read_verified(hash)
+            .expect("read payload"),
         bytes
     );
 }
 
 #[test]
 fn payload_storage_compresses_bytes_without_changing_their_content_address() {
-    let (store_dir, conn) = payload_store();
+    let conn = payload_store();
     let bytes = payload(12, 16 * 1024);
-    let hash = install(&conn, &store_dir, &bytes);
-    let (_, _, stored_bytes, _) = storage_row(&conn, hash);
+    let hash = install(&conn, &bytes);
+    let stored = chunks(&conn, hash);
 
     assert_eq!(hash, ObjectHash::digest(&bytes));
-    assert_ne!(stored_bytes.as_deref(), Some(bytes.as_slice()));
+    assert_eq!(stored.len(), 1);
+    assert_ne!(stored[0].1, bytes);
+    assert!(stored[0].1.len() < bytes.len());
     assert_eq!(
-        PayloadStore::new(&conn, &store_dir)
+        PayloadStore::new(&conn)
             .read_verified(hash)
             .expect("read compressed payload"),
         bytes
@@ -85,241 +178,132 @@ fn payload_storage_compresses_bytes_without_changing_their_content_address() {
 }
 
 #[test]
-fn compressed_size_selects_inline_storage() {
-    let (store_dir, conn) = payload_store();
-    let bytes = payload(13, INLINE_PAYLOAD_LIMIT * 4);
-    let hash = install(&conn, &store_dir, &bytes);
-
-    assert_eq!(storage_row(&conn, hash).0, "inline");
-    assert!(!store_dir.payload_spool_path(hash).exists());
-    assert_eq!(
-        PayloadStore::new(&conn, &store_dir)
-            .read(hash)
-            .expect("read compressed inline payload"),
-        bytes
-    );
-}
-
-#[test]
 fn payload_installation_requires_an_owning_transaction() {
-    let (store_dir, conn) = payload_store();
-    let bytes = b"unowned payload";
-    let hash = ObjectHash::digest(bytes);
+    let conn = payload_store();
 
-    let error = PayloadStore::new(&conn, &store_dir)
-        .install(bytes, CreatedPayloadFiles::untracked())
-        .expect_err("a bare connection must not install payload storage");
+    let error = PayloadStore::new(&conn)
+        .install(b"autocommit payload")
+        .expect_err("installation outside a transaction is refused");
 
-    assert!(error.to_string().contains("transaction"), "{error}");
-    assert!(PayloadStore::new(&conn, &store_dir)
-        .stored(hash)
-        .expect("check unowned payload storage")
-        .is_none());
-}
-
-#[test]
-fn compressed_payloads_over_the_inline_limit_live_in_the_file_spool() {
-    let (store_dir, conn) = payload_store();
-    let inline = payload(3, INLINE_PAYLOAD_LIMIT * 4);
-    let file = incompressible_payload(4, INLINE_PAYLOAD_LIMIT * 2);
-    let inline_hash = install(&conn, &store_dir, &inline);
-    let file_hash = install(&conn, &store_dir, &file);
-    let (inline_storage, inline_size, inline_compressed, inline_compressed_size) =
-        storage_row(&conn, inline_hash);
-    let (file_storage, file_size, file_compressed, file_compressed_size) =
-        storage_row(&conn, file_hash);
-
-    assert_eq!(inline_storage, "inline");
-    assert_eq!(inline_size, inline.len() as i64);
-    assert!(inline_compressed.is_some());
-    assert!(inline_compressed_size <= INLINE_PAYLOAD_LIMIT as i64);
-    assert_eq!(file_storage, "file");
-    assert_eq!(file_size, file.len() as i64);
-    assert!(file_compressed.is_none());
-    assert!(file_compressed_size > INLINE_PAYLOAD_LIMIT as i64);
-    let stored = std::fs::read(store_dir.payload_spool_path(file_hash))
-        .expect("read compressed file payload");
-    assert_eq!(stored.len() as i64, file_compressed_size);
-    assert_ne!(stored, file);
-    assert_eq!(
-        PayloadStore::new(&conn, &store_dir)
-            .read(file_hash)
-            .expect("decompress file payload"),
-        file
-    );
-}
-
-#[test]
-fn payload_installation_reports_only_the_spool_files_it_creates() {
-    let (store_dir, conn) = payload_store();
-    let bytes = incompressible_payload(23, INLINE_PAYLOAD_LIMIT * 2);
-    let path = store_dir.payload_spool_path(ObjectHash::digest(&bytes));
-
-    let created = std::cell::RefCell::new(Vec::new());
-    let transaction = conn
-        .unchecked_transaction()
-        .expect("begin the first installation");
-    PayloadStore::new(&transaction, &store_dir)
-        .install(&bytes, CreatedPayloadFiles::tracked(&created))
-        .expect("install the payload");
-    transaction.commit().expect("commit the first installation");
-    assert_eq!(created.into_inner(), vec![path.clone()]);
-
-    // Another database installing the same bytes into the same spool finds the
-    // file already there. It reuses that file, and must not report it as its
-    // own: removing it would take a file this installation never wrote.
-    let other = Connection::open_in_memory().expect("open the second payload database");
-    crate::apply_coven_schema(&other).expect("apply payload schema");
-    let created = std::cell::RefCell::new(Vec::new());
-    let transaction = other
-        .unchecked_transaction()
-        .expect("begin the reusing installation");
-    PayloadStore::new(&transaction, &store_dir)
-        .install(&bytes, CreatedPayloadFiles::tracked(&created))
-        .expect("install the payload over an identical spool file");
-    transaction
-        .commit()
-        .expect("commit the reusing installation");
     assert!(
-        created.into_inner().is_empty(),
-        "an identical spool file belongs to whoever wrote it"
+        error
+            .to_string()
+            .contains("installation requires the owning database transaction"),
+        "{error}"
     );
-    assert!(path.exists(), "the reused spool file stays where it was");
+    assert_eq!(payload_row_counts(&conn), (0, 0));
 }
 
 #[test]
-fn reinstalling_a_file_payload_reuses_and_repairs_its_exact_path() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let (store_dir, sync_requests) =
-        StoreDir::new_with_file_sync_observer_for_test(directory.path());
-    let conn = Connection::open_in_memory().expect("open payload database");
-    crate::apply_coven_schema(&conn).expect("apply payload schema");
-    let bytes = incompressible_payload(5, INLINE_PAYLOAD_LIMIT * 2);
-
-    let first = install(&conn, &store_dir, &bytes);
-    let second = install(&conn, &store_dir, &bytes);
-    assert_eq!(first, second);
-    assert_eq!(
-        sync_requests.load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "the exact reinstall performs no durability work"
-    );
-
-    std::fs::write(store_dir.payload_spool_path(first), b"changed")
-        .expect("change installed payload");
-    assert_eq!(install(&conn, &store_dir, &bytes), first);
-    assert_eq!(
-        PayloadStore::new(&conn, &store_dir)
-            .read(first)
-            .expect("read repaired payload"),
-        bytes
-    );
-    assert_eq!(
-        sync_requests.load(std::sync::atomic::Ordering::SeqCst),
-        4,
-        "repair atomically replaces the changed file"
-    );
-}
-
-#[test]
-fn conflicting_file_metadata_fails_without_replacing_the_file() {
-    let (store_dir, conn) = payload_store();
-    let bytes = incompressible_payload(17, INLINE_PAYLOAD_LIMIT * 2);
-    let hash = install(&conn, &store_dir, &bytes);
-    let path = store_dir.payload_spool_path(hash);
-    std::fs::write(&path, b"changed").expect("change installed payload");
-    conn.execute(
-        "UPDATE payload_storage
-         SET payload_size = ?2, compressed_size = 7
-         WHERE payload_hash = ?1",
-        rusqlite::params![hash.to_string(), bytes.len() as i64 - 1],
-    )
-    .expect("change catalog sizes");
-
-    let transaction = conn
-        .unchecked_transaction()
-        .expect("begin conflicting reinstall");
-    let error = PayloadStore::new(&transaction, &store_dir)
-        .install(&bytes, CreatedPayloadFiles::untracked())
-        .expect_err("conflicting metadata must reject reinstall");
-
-    assert!(error.to_string().contains("catalog records"), "{error}");
-    assert_eq!(
-        std::fs::read(path).expect("read unchanged file"),
-        b"changed"
-    );
-}
-
-#[test]
-fn verified_reads_reject_changed_inline_and_file_payloads() {
-    let (store_dir, conn) = payload_store();
-    let store = PayloadStore::new(&conn, &store_dir);
-    let inline_hash = install(&conn, &store_dir, b"inline payload");
-    let file_hash = install(
-        &conn,
-        &store_dir,
-        &incompressible_payload(6, INLINE_PAYLOAD_LIMIT * 2),
-    );
+fn verified_reads_reject_a_changed_chunk() {
+    let conn = payload_store();
+    let bytes = incompressible_payload(6, PAYLOAD_CHUNK_BYTES * 2);
+    let hash = install(&conn, &bytes);
+    let stored = chunks(&conn, hash);
+    let mut replacement = stored[0].1.clone();
+    replacement[7] ^= 0xff;
 
     conn.execute(
-        "UPDATE payload_storage
-         SET compressed_bytes = x'00', compressed_size = 1
-         WHERE payload_hash = ?1",
-        [inline_hash.to_string()],
+        "UPDATE payload_chunks SET bytes = ?3
+         WHERE payload_hash = ?1 AND ordinal = ?2",
+        rusqlite::params![hash.to_string(), 0_i64, replacement],
     )
-    .expect("change inline payload");
-    std::fs::write(store_dir.payload_spool_path(file_hash), b"changed")
-        .expect("change file payload");
+    .expect("change one chunk");
 
-    assert!(matches!(
-        store.read_verified(inline_hash),
-        Err(PayloadStoreError::CompressionIo { hash, .. }) if hash == inline_hash
-    ));
-    assert!(matches!(
-        store.read_verified(file_hash),
-        Err(PayloadStoreError::Storage { hash, .. }) if hash == file_hash
-    ));
+    PayloadStore::new(&conn)
+        .read_verified(hash)
+        .expect_err("a changed chunk must fail the verified read");
+}
+
+#[test]
+fn a_truncated_chunk_set_fails_the_read() {
+    let conn = payload_store();
+    let bytes = incompressible_payload(7, PAYLOAD_CHUNK_BYTES * 2);
+    let hash = install(&conn, &bytes);
+    let (_, _, chunk_count) = storage_row(&conn, hash);
+
+    conn.execute(
+        "DELETE FROM payload_chunks WHERE payload_hash = ?1 AND ordinal = ?2",
+        rusqlite::params![hash.to_string(), chunk_count - 1],
+    )
+    .expect("drop the last chunk");
+
+    let error = PayloadStore::new(&conn)
+        .read(hash)
+        .expect_err("a truncated chunk set must fail the read");
+    assert!(
+        error.to_string().contains("catalog records"),
+        "the read names the disagreement: {error}"
+    );
+}
+
+#[test]
+fn a_reordered_chunk_set_fails_the_read() {
+    let conn = payload_store();
+    let bytes = incompressible_payload(8, PAYLOAD_CHUNK_BYTES * 3);
+    let hash = install(&conn, &bytes);
+    let stored = chunks(&conn, hash);
+    assert!(stored.len() >= 3);
+
+    // Swap two whole chunks, so every count and length the catalog states still
+    // holds and only the order is wrong.
+    conn.execute(
+        "UPDATE payload_chunks SET bytes = ?3 WHERE payload_hash = ?1 AND ordinal = ?2",
+        rusqlite::params![hash.to_string(), 0_i64, stored[1].1],
+    )
+    .expect("swap chunk 0");
+    conn.execute(
+        "UPDATE payload_chunks SET bytes = ?3 WHERE payload_hash = ?1 AND ordinal = ?2",
+        rusqlite::params![hash.to_string(), 1_i64, stored[0].1],
+    )
+    .expect("swap chunk 1");
+
+    PayloadStore::new(&conn)
+        .read_verified(hash)
+        .expect_err("a reordered chunk set must fail the read");
 }
 
 #[test]
 fn verified_reads_hash_the_decompressed_payload() {
-    let (store_dir, conn) = payload_store();
+    let conn = payload_store();
     let expected = b"expected logical payload";
     let replacement = b"different logical bytes";
-    let hash = install(&conn, &store_dir, expected);
-    let compressed = compress_payload(hash, replacement).expect("compress replacement payload");
+    let hash = install(&conn, expected);
+    let other = install(&conn, replacement);
+    let stored = chunks(&conn, other);
+    let (other_size, other_compressed, _) = storage_row(&conn, other);
+
     conn.execute(
-        "UPDATE payload_storage
-         SET payload_size = ?2, compressed_bytes = ?3, compressed_size = ?4
+        "UPDATE payload_storage SET payload_size = ?2, compressed_size = ?3
          WHERE payload_hash = ?1",
-        rusqlite::params![
-            hash.to_string(),
-            replacement.len() as i64,
-            &compressed,
-            compressed.len() as i64
-        ],
+        rusqlite::params![hash.to_string(), other_size, other_compressed],
     )
-    .expect("replace compressed payload");
+    .expect("restate the catalog row");
+    conn.execute(
+        "UPDATE payload_chunks SET bytes = ?3 WHERE payload_hash = ?1 AND ordinal = ?2",
+        rusqlite::params![hash.to_string(), 0_i64, stored[0].1],
+    )
+    .expect("replace the chunk under a name it does not hash to");
 
     assert!(matches!(
-        PayloadStore::new(&conn, &store_dir).read_verified(hash),
-        Err(PayloadStoreError::InlineContentMismatch { expected, actual })
+        PayloadStore::new(&conn).read_verified(hash),
+        Err(PayloadStoreError::ContentMismatch { expected, actual })
             if expected == hash && actual == ObjectHash::digest(replacement)
     ));
 }
 
 #[test]
 fn decompression_is_bounded_by_the_catalog_payload_size() {
-    let (store_dir, conn) = payload_store();
+    let conn = payload_store();
     let bytes = payload(16, 4096);
-    let hash = install(&conn, &store_dir, &bytes);
+    let hash = install(&conn, &bytes);
     conn.execute(
         "UPDATE payload_storage SET payload_size = 8 WHERE payload_hash = ?1",
         [hash.to_string()],
     )
     .expect("lower catalog payload size");
 
-    let error = PayloadStore::new(&conn, &store_dir)
+    let error = PayloadStore::new(&conn)
         .read(hash)
         .expect_err("decompression must stop beyond the catalog size");
     assert!(
@@ -331,121 +315,128 @@ fn decompression_is_bounded_by_the_catalog_payload_size() {
 }
 
 #[test]
-fn streamed_protocol_payloads_finish_inline() {
-    let (store_dir, conn) = payload_store();
-    let bytes = payload(7, 4096);
-    let transaction = conn
-        .unchecked_transaction()
-        .expect("begin streamed payload installation");
-    let mut writer = PayloadStore::new(&transaction, &store_dir).writer();
-    writer.write_all(&bytes).expect("stream payload");
+fn a_streamed_payload_is_the_one_its_caller_named() {
+    let conn = payload_store();
+    for bytes in [
+        payload(7, 4096),
+        incompressible_payload(9, PAYLOAD_CHUNK_BYTES * 2 + 17),
+    ] {
+        let hash = ObjectHash::digest(&bytes);
 
-    let (hash, size) = writer
-        .commit(CreatedPayloadFiles::untracked())
-        .expect("commit payload");
-    transaction
-        .commit()
-        .expect("commit streamed payload installation");
+        let size = stream(&conn, hash, &bytes, 997).expect("stream the payload");
 
-    assert_eq!(size, bytes.len() as u64);
-    let (storage, payload_size, compressed, compressed_size) = storage_row(&conn, hash);
-    assert_eq!(storage, "inline");
-    assert_eq!(payload_size, bytes.len() as i64);
-    assert_eq!(
-        compressed_size,
-        compressed.expect("inline compressed payload").len() as i64
-    );
-    assert!(!store_dir.payload_spool_path(hash).exists());
-    assert_eq!(
-        PayloadStore::new(&conn, &store_dir)
-            .read_verified(hash)
-            .expect("read streamed payload"),
-        bytes
-    );
-}
-
-#[test]
-fn streamed_placement_uses_the_finished_compressed_size() {
-    let (store_dir, conn) = payload_store();
-    let inline = payload(14, INLINE_PAYLOAD_LIMIT * 4);
-    let file = incompressible_payload(15, INLINE_PAYLOAD_LIMIT * 2);
-
-    for (bytes, expected_storage) in [(inline, "inline"), (file, "file")] {
-        let transaction = conn
-            .unchecked_transaction()
-            .expect("begin streamed payload installation");
-        let mut writer = PayloadStore::new(&transaction, &store_dir).writer();
-        for chunk in bytes.chunks(997) {
-            writer.write_all(chunk).expect("stream payload chunk");
-        }
-        let (hash, size) = writer
-            .commit(CreatedPayloadFiles::untracked())
-            .expect("commit streamed payload");
-        transaction
-            .commit()
-            .expect("commit streamed payload installation");
-
-        assert_eq!(hash, ObjectHash::digest(&bytes));
         assert_eq!(size, bytes.len() as u64);
-        assert_eq!(storage_row(&conn, hash).0, expected_storage);
+        assert_eq!(storage_row(&conn, hash).0, bytes.len() as i64);
         assert_eq!(
-            PayloadStore::new(&conn, &store_dir)
+            PayloadStore::new(&conn)
                 .read_verified(hash)
-                .expect("read streamed payload"),
+                .expect("read the streamed payload"),
             bytes
         );
     }
 }
 
 #[test]
-fn reinstall_accepts_the_same_payload_from_different_compression_chunks() {
-    let (store_dir, conn) = payload_store();
-    for bytes in [
-        payload(18, INLINE_PAYLOAD_LIMIT * 4),
-        incompressible_payload(19, INLINE_PAYLOAD_LIMIT * 2),
-    ] {
-        let transaction = conn
-            .unchecked_transaction()
-            .expect("begin streamed payload installation");
-        let mut writer = PayloadStore::new(&transaction, &store_dir).writer();
-        for chunk in bytes.chunks(997) {
-            writer.write_all(chunk).expect("stream payload chunk");
-        }
-        let (hash, _) = writer
-            .commit(CreatedPayloadFiles::untracked())
-            .expect("commit streamed payload");
-        transaction
-            .commit()
-            .expect("commit streamed payload installation");
-        let row = storage_row(&conn, hash);
-        let file = std::fs::read(store_dir.payload_spool_path(hash)).ok();
+fn a_stream_whose_digest_differs_from_its_expected_identity_fails() {
+    let conn = payload_store();
+    let expected = ObjectHash::digest(b"the payload its owner declared");
 
-        assert_eq!(install(&conn, &store_dir, &bytes), hash);
-        let transaction = conn
-            .unchecked_transaction()
-            .expect("begin differently chunked reinstall");
-        let mut writer = PayloadStore::new(&transaction, &store_dir).writer();
-        for chunk in bytes.chunks(4093) {
-            writer.write_all(chunk).expect("reinstall payload chunk");
-        }
-        assert_eq!(
-            writer
-                .commit(CreatedPayloadFiles::untracked())
-                .expect("commit streamed reinstall")
-                .0,
-            hash
-        );
-        transaction
-            .commit()
-            .expect("commit differently chunked reinstall");
-        assert_eq!(storage_row(&conn, hash), row);
-        assert_eq!(std::fs::read(store_dir.payload_spool_path(hash)).ok(), file);
-    }
+    let error = stream(&conn, expected, b"something else entirely", 8)
+        .expect_err("a stream that is not what its caller named must fail");
+
+    assert!(matches!(
+        error,
+        PayloadStoreError::ContentMismatch { expected: named, .. } if named == expected
+    ));
+    assert_eq!(payload_row_counts(&conn), (0, 0));
+}
+
+/// A writer that never settles its payload poisons the transaction it wrote
+/// into: the deferred reference from its chunks to the catalog row it never
+/// wrote fails the commit, so the caller cannot mistake half a payload for one.
+#[test]
+fn a_writer_that_never_commits_fails_the_transaction_it_wrote_into() {
+    let conn = payload_store();
+    let bytes = incompressible_payload(21, PAYLOAD_CHUNK_BYTES * 2);
+    let hash = ObjectHash::digest(&bytes);
+
+    let transaction = conn.unchecked_transaction().expect("begin the transaction");
+    let mut writer = PayloadStore::new(&transaction)
+        .writer(hash)
+        .expect("open the writer");
+    writer.write_all(&bytes).expect("stream the payload");
+    drop(writer);
+
+    let error = transaction
+        .commit()
+        .expect_err("an unsettled payload must not commit");
+
+    assert!(error.to_string().contains("FOREIGN KEY"), "{error}");
+    assert_eq!(payload_row_counts(&conn), (0, 0));
+}
+
+#[test]
+fn a_rolled_back_transaction_leaves_no_payload_rows() {
+    let conn = payload_store();
+    let bytes = incompressible_payload(22, PAYLOAD_CHUNK_BYTES * 2);
+
+    let transaction = conn.unchecked_transaction().expect("begin the transaction");
+    PayloadStore::new(&transaction)
+        .install(&bytes)
+        .expect("install the payload");
+    transaction.rollback().expect("roll the transaction back");
+
+    assert_eq!(payload_row_counts(&conn), (0, 0));
+}
+
+#[test]
+fn restreaming_an_existing_payload_verifies_it_without_rewriting_chunks() {
+    let conn = payload_store();
+    let bytes = incompressible_payload(19, PAYLOAD_CHUNK_BYTES * 2);
+    let hash = ObjectHash::digest(&bytes);
+    let size = stream(&conn, hash, &bytes, 997).expect("stream the payload");
+    let installed = chunks(&conn, hash);
+    let row = storage_row(&conn, hash);
+
+    // A different slicing of the same content produces a different compressed
+    // frame; the committed chunks are what the catalog row describes, so they
+    // stay exactly as they are.
+    assert_eq!(
+        stream(&conn, hash, &bytes, 4093).expect("re-stream the payload"),
+        size
+    );
+
+    assert_eq!(chunks(&conn, hash), installed);
+    assert_eq!(storage_row(&conn, hash), row);
+}
+
+#[test]
+fn restreaming_rejects_content_that_is_not_the_installed_payload() {
+    let conn = payload_store();
+    let bytes = incompressible_payload(20, PAYLOAD_CHUNK_BYTES * 2);
+    let hash = install(&conn, &bytes);
+    let mut changed = bytes.clone();
+    changed[PAYLOAD_CHUNK_BYTES] ^= 0xff;
+
+    let error = stream(&conn, hash, &changed, 997)
+        .expect_err("a changed source fails even where its payload is installed");
+
+    assert!(matches!(
+        error,
+        PayloadStoreError::ContentMismatch { expected, actual }
+            if expected == hash && actual == ObjectHash::digest(&changed)
+    ));
+    assert_eq!(
+        PayloadStore::new(&conn)
+            .read_verified(hash)
+            .expect("the installed payload is untouched"),
+        bytes
+    );
 }
 
 #[test]
 fn an_owner_cannot_claim_bytes_that_were_never_installed() {
-    let (_store_dir, conn) = payload_store();
+    let conn = payload_store();
     let absent = ObjectHash::digest(b"absent payload");
 
     let error = set_payload_owner_claims_on(&conn, "missing-owner", &BTreeSet::from([absent]))
@@ -455,42 +446,39 @@ fn an_owner_cannot_claim_bytes_that_were_never_installed() {
 }
 
 #[test]
-fn last_claim_cleanup_removes_inline_and_file_storage() {
+fn the_last_claim_leaving_deletes_the_payload_and_its_chunks() {
     for bytes in [
         payload(8, 64),
-        incompressible_payload(9, INLINE_PAYLOAD_LIMIT * 2),
+        incompressible_payload(9, PAYLOAD_CHUNK_BYTES * 2),
     ] {
-        let (store_dir, mut conn) = payload_store();
-        let hash = install(&conn, &store_dir, &bytes);
+        let mut conn = payload_store();
+        let hash = install(&conn, &bytes);
         let tx = conn.transaction().expect("begin claim");
         set_payload_owner_claims_on(&tx, "owner", &BTreeSet::from([hash])).expect("claim payload");
         tx.commit().expect("commit claim");
+
         let tx = conn.transaction().expect("begin release");
         release_payload_owner_on(&tx, "owner").expect("release payload");
-        tx.commit().expect("commit release");
-
-        pay_owed_payload_deletions_on(&conn, &store_dir).expect("pay deletion");
-
-        let stored: bool = conn
+        // The deletion is this transaction's, not a later pass's.
+        let stored: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM payload_storage WHERE payload_hash = ?1)",
                 [hash.to_string()],
                 |row| row.get(0),
             )
-            .expect("check storage");
+            .expect("check storage inside the releasing transaction");
         assert!(!stored);
-        assert!(!store_dir.payload_spool_path(hash).exists());
-        assert!(payload_cleanup_hashes_on(&conn)
-            .expect("read cleanup")
-            .is_empty());
+        tx.commit().expect("commit release");
+
+        assert_eq!(payload_row_counts(&conn), (0, 0));
     }
 }
 
 #[test]
 fn a_second_owner_keeps_shared_payload_storage() {
-    let (store_dir, mut conn) = payload_store();
+    let mut conn = payload_store();
     let bytes = payload(10, 128);
-    let hash = install(&conn, &store_dir, &bytes);
+    let hash = install(&conn, &bytes);
     let tx = conn.transaction().expect("begin claims");
     set_payload_owner_claims_on(&tx, "owner-a", &BTreeSet::from([hash]))
         .expect("claim for owner a");
@@ -501,11 +489,8 @@ fn a_second_owner_keeps_shared_payload_storage() {
     release_payload_owner_on(&tx, "owner-a").expect("release owner a");
     tx.commit().expect("commit release");
 
-    assert!(payload_cleanup_hashes_on(&conn)
-        .expect("read cleanup")
-        .is_empty());
     assert_eq!(
-        PayloadStore::new(&conn, &store_dir)
+        PayloadStore::new(&conn)
             .read(hash)
             .expect("read shared payload"),
         bytes
@@ -513,24 +498,28 @@ fn a_second_owner_keeps_shared_payload_storage() {
 }
 
 #[test]
-fn a_file_deletion_retry_finishes_after_the_file_is_already_absent() {
-    let (store_dir, mut conn) = payload_store();
-    let hash = install(
-        &conn,
-        &store_dir,
-        &incompressible_payload(11, INLINE_PAYLOAD_LIMIT * 2),
-    );
+fn a_travelling_image_reports_and_sheds_its_payload_rows() {
+    let mut conn = payload_store();
+    let hash = install(&conn, b"a payload an image must not carry");
     let tx = conn.transaction().expect("begin claim");
     set_payload_owner_claims_on(&tx, "owner", &BTreeSet::from([hash])).expect("claim payload");
     tx.commit().expect("commit claim");
-    let tx = conn.transaction().expect("begin release");
-    release_payload_owner_on(&tx, "owner").expect("release payload");
-    tx.commit().expect("commit release");
-    std::fs::remove_file(store_dir.payload_spool_path(hash)).expect("remove payload file");
 
-    pay_owed_payload_deletions_on(&conn, &store_dir).expect("retry deletion");
+    assert_eq!(
+        payload_rows_in_image(&conn).expect("count carried payload rows"),
+        vec![
+            ("payload_owners", 1),
+            ("payload_chunks", 1),
+            ("payload_storage", 1)
+        ]
+    );
 
-    assert!(payload_cleanup_hashes_on(&conn)
-        .expect("read cleanup")
-        .is_empty());
+    let tx = conn.transaction().expect("begin clearing");
+    clear_payload_tables_on(&tx).expect("clear the payload tables");
+    tx.commit().expect("commit clearing");
+
+    assert_eq!(
+        payload_rows_in_image(&conn).expect("count carried payload rows"),
+        Vec::new()
+    );
 }

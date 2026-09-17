@@ -154,11 +154,8 @@ impl StoreRecords<'_> {
         )>,
         DbError,
     > {
-        let audiences = crate::load_prepared_audience_objects_on(
-            self.conn,
-            self.store_dir,
-            &proof.candidate.write_id,
-        )?;
+        let audiences =
+            crate::load_prepared_audience_objects_on(self.conn, &proof.candidate.write_id)?;
         let mut objects = crate::candidate_graph_exact_objects(proof.candidate.value())?
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
@@ -250,7 +247,7 @@ impl StoreRecords<'_> {
                 return Err(DbError::Message("covered write deletion targets changed during cleanup".into()));
             }
             let write_id = proof.candidate.write_id.clone();
-            let audiences = crate::load_prepared_audience_objects_on(store.transaction, store.store_dir, &write_id)?;
+            let audiences = crate::load_prepared_audience_objects_on(store.transaction, &write_id)?;
             let mut completed_active = proof.active.clone();
             if completed_active.superseded_entry().is_some() {
                 completed_active.complete_superseded_entry_cleanup()?;

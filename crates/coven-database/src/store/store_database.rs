@@ -170,12 +170,12 @@ impl StoreDatabase {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn assert_owns_payload_directory_for_test(
+    pub fn assert_owns_store_directory_for_test(
         &self,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) {
         self.database
-            .assert_owns_payload_directory_for_test(store_dir);
+            .assert_owns_store_directory_for_test(store_dir);
     }
 
     pub fn sync_routing_hash(&self) -> coven_protocol::store_commit::ObjectHash {
@@ -526,8 +526,6 @@ impl coven_foundation::id_provider::IdProvider for StoreDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coven_protocol::blob::TransferLimits;
-    use std::{collections::BTreeSet, sync::Arc};
 
     #[tokio::test]
     async fn store_calls_dispatch_in_poll_order_and_ignore_unpolled_calls() {
@@ -574,72 +572,5 @@ mod tests {
                 .as_deref(),
             Some("committed")
         );
-    }
-
-    #[tokio::test]
-    async fn read_only_store_reads_leave_writer_payload_cleanup_owed() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let path = directory.path().join("read-only-store.sqlite");
-        let writer = StoreDatabase::from_database(
-            Database::open(
-                &path,
-                Vec::new(),
-                TransferLimits::one_at_a_time(),
-                "writer".to_string(),
-                Arc::new(coven_foundation::clock::SystemClock),
-                crate::CovenMigrationPolicy::ApplyPending,
-                &[],
-            )
-            .expect("open writer"),
-        );
-
-        writer
-            .call_database(|session| {
-                session.run_test_sql(|database| {
-                    let hash = database.install_payload(b"pending cleanup")?;
-                    database.set_payload_owner_claims("owner", &BTreeSet::from([hash]))?;
-                    database.set_payload_owner_claims("owner", &BTreeSet::new())
-                })
-            })
-            .await
-            .expect("create pending payload cleanup");
-
-        let reader = StoreDatabase::from_database(
-            Database::open_read_only(
-                &path,
-                Vec::new(),
-                TransferLimits::one_at_a_time(),
-                "writer".to_string(),
-                Arc::new(coven_foundation::clock::SystemClock),
-                &[],
-            )
-            .expect("open reader"),
-        );
-
-        let value = reader
-            .read(|database| database.query_row("SELECT 1", [], |row| row.get::<_, i64>(0)))
-            .await
-            .expect("run read-only Store operation")
-            .expect("read value");
-        assert_eq!(value, 1);
-
-        let (tracked_value, _) = StoreReads::open(&path)
-            .expect("open application readers")
-            .read_tracked(|database| database.query_row("SELECT 2", [], |row| row.get::<_, i64>(0)))
-            .await
-            .expect("run tracked read-only Store operation");
-        assert_eq!(tracked_value.expect("read tracked value"), 2);
-
-        let cleanup_count: i64 = writer
-            .call_database(|session| {
-                session.run_test_sql(|database| {
-                    database
-                        .query_row("SELECT COUNT(*) FROM payload_cleanup", [], |row| row.get(0))
-                        .map_err(DbError::from)
-                })
-            })
-            .await
-            .expect("count pending payload cleanup");
-        assert_eq!(cleanup_count, 1);
     }
 }

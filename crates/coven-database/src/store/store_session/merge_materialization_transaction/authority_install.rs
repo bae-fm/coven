@@ -55,7 +55,6 @@ impl MergeMaterializationTransaction<'_, '_> {
         }
         crate::install_pulled_merge_membership_activations_on(
             conn,
-            self.store.store_dir,
             commit_ref,
             membership_remote_objects,
         )
@@ -68,7 +67,6 @@ impl MergeMaterializationTransaction<'_, '_> {
     ) -> Result<(), DbError> {
         crate::install_pulled_package_activation_on(
             self.store.transaction,
-            self.store.store_dir,
             commit,
             retained.domain(),
             retained.object(),

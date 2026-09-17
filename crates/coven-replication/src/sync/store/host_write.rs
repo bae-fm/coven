@@ -88,9 +88,8 @@ impl HostWriteBlobStaging {
                     fact.audience_move = Some(StoreWriteBlobMoveMaterialization::Local);
                 }
                 _ => {
-                    let source_stage = self.store_dir.payload_spool_path(fact.plaintext_hash);
                     let source_path = self
-                        .move_source_plaintext(transaction, fact, &source, &source_stage)
+                        .move_source_plaintext(transaction, fact, &source)
                         .await?;
                     transaction
                         .retain_source_plaintext(fact, source_path.path())
@@ -130,12 +129,18 @@ impl HostWriteBlobStaging {
         }
     }
 
+    /// The plaintext this move's source names, either where it already sits or
+    /// downloaded into an unpublished stage.
+    ///
+    /// A downloaded stage is never committed: the write transaction reads it
+    /// back into the payload the fact names and the stage goes with its guard,
+    /// so it lives in the store's own scratch area rather than anywhere a later
+    /// reader looks.
     async fn move_source_plaintext(
         &self,
         transaction: &mut HostWriteBlobTransaction<'_, '_>,
         fact: &StoreWriteBlobFact,
         source: &RowBlobAuthority,
-        spool_path: &Path,
     ) -> Result<MoveSourcePlaintext, DbError> {
         if let Some(path) = self.local_source_path(transaction, fact, source)? {
             match tokio::fs::metadata(&path).await {
@@ -171,7 +176,10 @@ impl HostWriteBlobStaging {
             )
         })?;
         let opening = self.opening_protection(transaction, fact, source, &previous.stored)?;
-        let destination = spool_path.with_extension("move-plaintext");
+        let destination = self
+            .store_dir
+            .blob_move_stage_dir()
+            .join(fact.plaintext_hash.to_string());
         let stage = self
             .store_dir
             .stage_atomic_file(&destination)

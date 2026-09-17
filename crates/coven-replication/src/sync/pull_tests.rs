@@ -1841,7 +1841,6 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         .vacuum_into_for_test(copied_path.to_string_lossy().into_owned())
         .await
         .expect("copy the locally-authored retained input");
-    crate::sync::test_helpers::copy_payload_files(&source_store_dir, &target_store_dir);
     let target = coven_database::Database::open_synthetic_for_test(
         &target_path,
         target_store_dir.clone(),

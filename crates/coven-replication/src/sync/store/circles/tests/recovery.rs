@@ -659,14 +659,6 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
 
     assert_eq!(
         coven_database::StoreDatabase::new(&db)
-            .owed_payload_cleanup()
-            .await
-            .expect("read the payloads still owed a deletion"),
-        Vec::new(),
-        "activation discharges its own cleanup obligations"
-    );
-    assert_eq!(
-        coven_database::StoreDatabase::new(&db)
             .circle_operation_payload_claims_for_test(&activating.operation_id)
             .await
             .expect("read the activated operation's payload claims"),
@@ -755,14 +747,6 @@ async fn discard_releases_its_payload_claims() {
         .await
         .expect("the accepted membership revocation permits discard");
 
-    assert_eq!(
-        coven_database::StoreDatabase::new(&revoked.db)
-            .owed_payload_cleanup()
-            .await
-            .expect("read the payloads still owed a deletion"),
-        Vec::new(),
-        "discard discharges its own cleanup obligations"
-    );
     assert_eq!(
         coven_database::StoreDatabase::new(&revoked.db)
             .circle_operation_payload_claims_for_test(&revoked.operation_id)

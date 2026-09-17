@@ -161,7 +161,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
                 "prepared write {write_id} retains {remaining_spools} uploaded blob spool(s)"
             )));
         }
-        let audiences = load_prepared_audience_objects_on(tx, self.store.store_dir, &write_id)?;
+        let audiences = load_prepared_audience_objects_on(tx, &write_id)?;
         let retained_packages = audiences
             .packages
             .iter()

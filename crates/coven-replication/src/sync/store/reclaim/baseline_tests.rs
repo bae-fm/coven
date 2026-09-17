@@ -722,3 +722,195 @@ async fn an_old_retained_materialization_cannot_resurrect_a_completed_package() 
         "a retained row the baseline covers cannot put a completed package back in live state"
     );
 }
+
+/// The payload rows a serialized database image carries, by table.
+fn payload_rows_in(bytes: &[u8]) -> Vec<(&'static str, i64)> {
+    coven_database::DatabaseImageTest::from_bytes(bytes)
+        .expect("open the image")
+        .carried_payload_rows()
+        .expect("count the image's payload rows")
+}
+
+/// The installed retained replay baseline image, and the payload rows it
+/// carries inside itself.
+async fn installed_baseline_image(
+    db: &coven_database::Database,
+) -> (Vec<u8>, Vec<(&'static str, i64)>) {
+    let database = coven_database::StoreDatabase::new(db);
+    let baseline = database
+        .replay_baseline_for_test()
+        .await
+        .expect("read the installed baseline");
+    let bytes = database
+        .payload_for_test(baseline.image_payload_hash)
+        .await
+        .expect("read the baseline image payload");
+    let carried = payload_rows_in(&bytes);
+    (bytes, carried)
+}
+
+/// The payload catalog's row count and the bytes its chunks hold.
+async fn payload_totals(db: &coven_database::Database) -> (i64, i64) {
+    let bytes = coven_database::StoreDatabase::new(db)
+        .database_image_for_test()
+        .await
+        .expect("serialize the store database");
+    coven_database::DatabaseImageTest::from_bytes(&bytes)
+        .expect("open the image")
+        .payload_totals()
+        .expect("read the payload totals")
+}
+
+/// A body lz4 cannot shrink, so each cycle's payloads are worth their size.
+fn incompressible_body(seed: u64) -> String {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut body = String::with_capacity(256 * 1024);
+    while body.len() < 256 * 1024 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        body.push_str(&format!("{state:016x}"));
+    }
+    body
+}
+
+/// A baseline image is this device's own rewind point, not a second copy of its
+/// payload store.
+///
+/// Every payload a replay reads is resolved in the live catalog, so the image
+/// carries the rows that name payloads and none of the payloads themselves. If
+/// it carried them, each capture would embed the image it replaces — and the
+/// image doing the embedding is itself a payload, so the nesting compounds once
+/// per cycle. The cycle below is the one that would compound: writes, a snapshot
+/// capture and publication, and a baseline advance, three times over.
+#[tokio::test]
+async fn a_write_snapshot_and_advance_cycle_neither_nests_nor_strands_its_baseline() {
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let signer = UserKeypair::generate();
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let (store, _storage) = crate::sync::test_helpers::TestStore::create_with_connection(
+        &db,
+        db_store_dir.clone(),
+        "baseline-cycle",
+        signer.clone(),
+        home,
+    )
+    .await
+    .expect("create Store");
+    let device = store
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
+        .await
+        .expect("bind Store");
+
+    let mut sequence = 0_u64;
+    let mut superseded = Vec::new();
+    for round in 1..=3_u64 {
+        for _ in 0..2 {
+            sequence += 1;
+            let row = format!(
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('note-{sequence}', 'title {sequence}', '{}', \
+                 '{:013}-0000-cycle', '2026-01-01')",
+                incompressible_body(sequence),
+                sequence * 1000,
+            );
+            let changeset = crate::sync::test_helpers::open_test_db(
+                crate::sync::test_helpers::test_store_dir(),
+            )
+            .capture_test_changeset(&[row.as_str()])
+            .await;
+            store
+                .publish_changeset("founder", sequence, &changeset, db.schema_version())
+                .await
+                .expect("publish package activation");
+        }
+
+        let previous = coven_database::StoreDatabase::new(&db)
+            .replay_baseline_for_test()
+            .await
+            .expect("read the baseline this round supersedes")
+            .image_payload_hash;
+
+        let image_dir = tempfile::tempdir().expect("snapshot image dir");
+        let image = coven_database::StoreDatabase::new(&db)
+            .capture_snapshot_image_for_test(
+                store.root().clone(),
+                image_dir.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("capture a snapshot image");
+        // The published image has the same contract as the private one, from the
+        // other direction: its recipients read payloads out of their own catalogs.
+        assert_eq!(
+            payload_rows_in(&image),
+            Vec::new(),
+            "round {round}'s published snapshot image carries payload rows",
+        );
+        let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+            coven_database::StoreDatabase::new(&db)
+                .materialized_frontier()
+                .await
+                .expect("materialized frontier"),
+        )
+        .expect("frontier");
+        device
+            .publish_snapshot(image, coverage.clone())
+            .await
+            .expect("publish the snapshot");
+        device
+            .publish_acknowledgement_without_advancing(coverage)
+            .await
+            .expect("publish an acknowledgement");
+        // The snapshot publication consumed the next sequence of its own.
+        sequence += 1;
+        assert!(
+            matches!(
+                device
+                    .stand_on_accepted_snapshot()
+                    .await
+                    .expect("advance the baseline"),
+                crate::sync::store::ReplayBaselineAdvance::Advanced(_)
+            ),
+            "round {round} had an accepted snapshot to advance onto",
+        );
+
+        let (image_bytes, carried) = installed_baseline_image(&db).await;
+        assert_eq!(
+            carried,
+            Vec::new(),
+            "round {round}'s baseline image carries payload rows",
+        );
+        let (payloads, payload_bytes) = payload_totals(&db).await;
+        assert!(payloads > 0, "the cycle installs payloads to carry");
+        assert!(
+            (image_bytes.len() as i64) < payload_bytes,
+            "round {round}'s baseline image ({} bytes) is as large as the payload store \
+             it is supposed to name rather than copy ({payload_bytes} bytes)",
+            image_bytes.len(),
+        );
+        superseded.push(previous);
+    }
+
+    // And the payload each superseded image occupied went with the claim that
+    // named it, in the transaction that dropped that claim.
+    let database = coven_database::StoreDatabase::new(&db);
+    let installed = database
+        .replay_baseline_for_test()
+        .await
+        .expect("read the installed baseline")
+        .image_payload_hash;
+    for hash in superseded {
+        if hash == installed {
+            continue;
+        }
+        assert!(
+            !database
+                .has_payload_for_test(hash)
+                .await
+                .expect("check a superseded baseline image"),
+            "a superseded baseline image outlived the advance that replaced it",
+        );
+    }
+}
