@@ -1,45 +1,5 @@
 use super::*;
 
-pub(crate) fn parse_drive_file_identities(
-    page: &serde_json::Value,
-) -> Result<Vec<DriveFileIdentity>, CloudHomeError> {
-    let files = page["files"].as_array().ok_or_else(|| {
-        CloudHomeError::Transport("Drive file identity response omitted files".to_string())
-    })?;
-    files
-        .iter()
-        .map(|file| {
-            let id = file["id"]
-                .as_str()
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| {
-                    CloudHomeError::Transport(
-                        "Drive file identity response omitted a file id".to_string(),
-                    )
-                })?
-                .to_string();
-            let create_token = file["appProperties"][CREATE_TOKEN_PROPERTY]
-                .as_str()
-                .filter(|token| !token.is_empty())
-                .ok_or_else(|| {
-                    CloudHomeError::Transport(format!(
-                        "Drive file {id} omitted its Coven create token"
-                    ))
-                })?
-                .to_string();
-            Ok(DriveFileIdentity { id, create_token })
-        })
-        .collect()
-}
-
-pub(crate) fn select_drive_file(files: &[DriveFileIdentity]) -> Option<&DriveFileIdentity> {
-    files.iter().min_by(|left, right| {
-        left.create_token
-            .cmp(&right.create_token)
-            .then_with(|| left.id.cmp(&right.id))
-    })
-}
-
 pub(crate) fn parse_generated_file_id(
     response: &serde_json::Value,
     key: &str,
@@ -103,43 +63,6 @@ impl OAuthRestHome for GoogleDriveCloudHome {
         NotFound::Status
     }
 
-    async fn send_read(
-        &self,
-        key: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<reqwest::Response, CloudHomeError> {
-        let file_id = self
-            .find_file_id(&encode_key(key))
-            .await?
-            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
-        let range = range.map(|(start, end)| crate::cloud::range_header(start, end));
-        self.session
-            .api_call(|oauth| {
-                let mut req =
-                    supports_all_drives(oauth.get(format!("{}/files/{}", self.drive_api, file_id)))
-                        .query(&[("alt", "media")]);
-                if let Some(ref range) = range {
-                    req = req.header("Range", range);
-                }
-                req
-            })
-            .await
-    }
-
-    async fn send_delete(&self, key: &str) -> Result<reqwest::Response, CloudHomeError> {
-        // No file id ⇒ already absent; surface as not-found so `rest_delete` treats
-        // it as success.
-        let file_id = self
-            .find_file_id(&encode_key(key))
-            .await?
-            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
-        self.session
-            .api_call(|oauth| {
-                supports_all_drives(oauth.delete(format!("{}/files/{}", self.drive_api, file_id)))
-            })
-            .await
-    }
-
     async fn send_list_page(
         &self,
         prefix: &str,
@@ -192,28 +115,6 @@ impl OAuthRestHome for GoogleDriveCloudHome {
 
 #[async_trait]
 impl CloudHome for GoogleDriveCloudHome {
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        rest_read(self, key).await
-    }
-
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        rest_read_range(self, key, start, end).await
-    }
-
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        rest_list(self, prefix).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        rest_delete(self, key).await
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        // A name query confirms existence in one request; the generic 2xx/404 rule
-        // doesn't fit (the query returns 200 with an empty array for an absent key).
-        Ok(self.find_file_id(&encode_key(key)).await?.is_some())
-    }
-
     async fn set_access(
         &self,
         desired: CloudAccessState,

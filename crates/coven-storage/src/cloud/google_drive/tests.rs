@@ -277,7 +277,7 @@ async fn immutable_copy_uses_preallocated_id_for_create_read_and_delete() {
         upload.contains(r#""covenLogicalKey":"protocol/copy""#),
         "{upload}"
     );
-    assert!(!upload.contains(CREATE_TOKEN_PROPERTY), "{upload}");
+    assert!(!upload.contains("covenCreateToken"), "{upload}");
     assert!(upload.contains(&encode_key("protocol/copy")), "{upload}");
     assert!(upload.contains("copy-bytes"), "{upload}");
     assert_eq!(requests[2].method, "GET");
@@ -304,6 +304,157 @@ async fn immutable_copy_uses_preallocated_id_for_create_read_and_delete() {
     }
     drop(requests);
     shutdown.send(()).expect("shut down Drive endpoint");
+}
+
+/// Two Drive files can carry the same name and the same `covenLogicalKey` —
+/// Drive does not enforce unique names, and two devices creating the same
+/// logical key each allocate their own id. An exact read is told which file it
+/// means, so each slot serves its own file's bytes and neither read searches
+/// for a filename or elects a winner between them.
+async fn duplicate_name_endpoint(
+    State(requests): State<Arc<Mutex<Vec<RecordedRequest>>>>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let query = request.uri().query().map(str::to_string);
+    requests
+        .lock()
+        .expect("lock requests")
+        .push(RecordedRequest {
+            method: method.clone(),
+            path: path.clone(),
+            query: query.clone(),
+            body: Vec::new(),
+        });
+    let Some(file_id) = path.strip_prefix("/files/") else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from(format!("unexpected path: {path}")))
+            .expect("build unexpected response");
+    };
+    if query
+        .as_deref()
+        .is_some_and(|query| query.contains("fields="))
+    {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "id": file_id,
+                    "name": encode_key("protocol/twin"),
+                    "parents": ["folder123"],
+                    "trashed": false,
+                    "size": "9",
+                    "md5Checksum": "00000000000000000000000000000000",
+                    "appProperties": { LOGICAL_KEY_PROPERTY: "protocol/twin" },
+                })
+                .to_string(),
+            ))
+            .expect("build metadata response");
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(format!("bytes-{file_id}")))
+        .expect("build read response")
+}
+
+#[tokio::test]
+async fn duplicate_drive_names_are_read_by_their_own_exact_ids() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (endpoint, shutdown) = crate::cloud::test_server::spawn_test_server(
+        Router::new()
+            .fallback(duplicate_name_endpoint)
+            .with_state(requests.clone()),
+    )
+    .await;
+    let home = home().with_endpoints(endpoint.clone(), endpoint);
+    let first = ObjectSlot::opaque("protocol/twin".to_string(), "file-a".to_string())
+        .expect("first twin slot");
+    let second = ObjectSlot::opaque("protocol/twin".to_string(), "file-b".to_string())
+        .expect("second twin slot");
+
+    assert_eq!(
+        home.read_at(&first).await.expect("read twin a"),
+        b"bytes-file-a"
+    );
+    assert_eq!(
+        home.read_at(&second).await.expect("read twin b"),
+        b"bytes-file-b"
+    );
+
+    let requests = requests.lock().expect("lock requests");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.path.starts_with("/files/file-")),
+        "a read searched for a filename instead of naming its file: {requests:?}",
+    );
+    drop(requests);
+    shutdown.send(()).expect("shut down test endpoint");
+}
+
+/// A resumable create writes the same file metadata a bounded one does. No
+/// create token is stamped, because nothing reads one: the slot's id is the
+/// object's identity and exact inspection checks the id, name, parent and
+/// logical key against it.
+async fn resumable_create_metadata_endpoint(
+    State(bodies): State<Arc<Mutex<Vec<String>>>>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let path = request.uri().path().to_string();
+    let body = to_bytes(request.into_body(), usize::MAX)
+        .await
+        .expect("read request body");
+    if path == "/files" {
+        bodies
+            .lock()
+            .expect("lock bodies")
+            .push(String::from_utf8(body.to_vec()).expect("session body is UTF-8"));
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(reqwest::header::LOCATION, "https://upload.invalid/session")
+            .body(Body::empty())
+            .expect("build session response");
+    }
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Body::from(format!("unexpected path: {path}")))
+        .expect("build unexpected response")
+}
+
+#[tokio::test]
+async fn a_resumable_create_session_carries_no_create_token() {
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let (endpoint, shutdown) = crate::cloud::test_server::spawn_test_server(
+        Router::new()
+            .fallback(resumable_create_metadata_endpoint)
+            .with_state(bodies.clone()),
+    )
+    .await;
+    let home = home().with_endpoints(endpoint.clone(), endpoint);
+    let slot = ObjectSlot::opaque("protocol/large".to_string(), "generated-id".to_string())
+        .expect("opaque Drive slot");
+
+    home.open_resumable_create_session(&slot)
+        .await
+        .expect("open a resumable create session");
+
+    let bodies = bodies.lock().expect("lock bodies");
+    let body = bodies.first().expect("the session request was recorded");
+    assert!(body.contains(r#""id":"generated-id""#), "{body}");
+    assert!(
+        body.contains(&format!(r#""name":"{}""#, encode_key("protocol/large"))),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#""covenLogicalKey":"protocol/large""#),
+        "{body}"
+    );
+    assert!(!body.contains("covenCreateToken"), "{body}");
+    drop(bodies);
+    shutdown.send(()).expect("shut down test endpoint");
 }
 
 #[tokio::test]
@@ -355,13 +506,11 @@ async fn resumable_create_rejects_a_non_utf8_location_header() {
     )
     .await;
     let home = home().with_endpoints(endpoint.clone(), endpoint);
-    let attempt = DriveAppendAttempt {
-        file_id: "generated-id".to_string(),
-        create_token: "create-token".to_string(),
-    };
+    let slot = ObjectSlot::opaque("protocol/copy".to_string(), "generated-id".to_string())
+        .expect("opaque Drive slot");
 
     let error = home
-        .open_resumable_create_session("protocol/copy", &attempt)
+        .open_resumable_create_session(&slot)
         .await
         .expect_err("non-UTF-8 Location must fail");
 
@@ -378,7 +527,7 @@ async fn resumable_create_rejects_a_non_utf8_location_header() {
     shutdown.send(()).expect("shut down test endpoint");
 }
 
-async fn repeated_file_identity_page_endpoint(request: Request<Body>) -> Response<Body> {
+async fn repeated_listing_page_endpoint(request: Request<Body>) -> Response<Body> {
     let path = request.uri().path();
     let body = if path == "/files" {
         r#"{"files":[],"nextPageToken":"same"}"#
@@ -395,18 +544,20 @@ async fn repeated_file_identity_page_endpoint(request: Request<Body>) -> Respons
         .expect("build repeated page response")
 }
 
+/// A listing that keeps handing back the same page token is not making
+/// progress; it must fail rather than loop or report a partial result as whole.
 #[tokio::test]
-async fn file_identity_listing_rejects_a_repeated_page_token() {
+async fn prefix_listing_rejects_a_repeated_page_token() {
     let (endpoint, shutdown) = crate::cloud::test_server::spawn_test_server(
-        Router::new().fallback(repeated_file_identity_page_endpoint),
+        Router::new().fallback(repeated_listing_page_endpoint),
     )
     .await;
     let home = home().with_endpoints(endpoint.clone(), endpoint);
 
     let error = home
-        .list_file_identities(&encode_key("protocol/copy"))
+        .list_slots("protocol/")
         .await
-        .expect_err("repeated identity page token must fail");
+        .expect_err("repeated listing page token must fail");
 
     assert!(error.to_string().contains("repeated"), "{error}");
     shutdown.send(()).expect("shut down test endpoint");
@@ -443,8 +594,10 @@ async fn shared_drive_listing_endpoint(
         .expect("build listing response")
 }
 
+/// A store folder can live on a shared drive, and Drive hides those from a
+/// listing unless it is asked for them.
 #[tokio::test]
-async fn exact_slot_identity_lookup_includes_shared_drives() {
+async fn prefix_listing_includes_shared_drives() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let (endpoint, shutdown) = crate::cloud::test_server::spawn_test_server(
         Router::new()
@@ -454,9 +607,9 @@ async fn exact_slot_identity_lookup_includes_shared_drives() {
     .await;
     let home = home().with_endpoints(endpoint.clone(), endpoint);
 
-    home.list_file_identities(&encode_key("protocol/copy"))
+    home.list_slots("protocol/")
         .await
-        .expect("look up shared Drive exact-slot identity");
+        .expect("list a shared Drive folder");
 
     let requests = requests.lock().expect("lock requests");
     assert_eq!(requests.len(), 1, "{requests:?}");
@@ -584,7 +737,7 @@ async fn ambiguous_create_endpoint(
                 body.contains(r#""covenLogicalKey":"protocol/ambiguous""#),
                 "{body}"
             );
-            assert!(!body.contains(CREATE_TOKEN_PROPERTY), "{body}");
+            assert!(!body.contains("covenCreateToken"), "{body}");
             let mut committed = state.committed.lock().expect("lock commit state");
             if *committed {
                 Response::builder()
@@ -714,12 +867,10 @@ fn parse_google_api_error_reason_returns_none_for_non_drive_body() {
 }
 
 #[test]
-fn find_file_query_escapes_encoded_name_and_folder() {
-    let query = find_file_query("folder'1", "encoded'name");
+fn list_file_query_escapes_the_folder_id() {
+    let query = list_file_query("folder'1", "protocol/");
 
-    assert!(query.contains("'folder\\'1' in parents"));
-    assert!(query.contains("name = 'encoded\\'name'"));
-    assert!(!query.contains("encoded'name"));
+    assert!(query.contains("'folder\\'1' in parents"), "{query}");
 }
 
 #[test]
@@ -743,50 +894,6 @@ fn drive_permissions_next_page_url_appends_encoded_page_token() {
             .as_deref(),
             Some("https://www.googleapis.com/drive/v3/files/folder/permissions?fields=permissions(id,emailAddress),nextPageToken&pageToken=tok%2Fen%2B1")
         );
-}
-
-#[test]
-fn parse_drive_file_identities_requires_create_tokens() {
-    let page = serde_json::json!({
-        "files": [
-            {"id": "file-a", "appProperties": {"covenCreateToken": "token-b"}},
-            {"id": "file-b", "appProperties": {"other": "ignored"}}
-        ]
-    });
-
-    let error = parse_drive_file_identities(&page)
-        .expect_err("a Drive file without its create token must fail");
-    assert!(error.to_string().contains("file-b"), "{error}");
-}
-
-#[test]
-fn select_drive_file_uses_deterministic_create_token_tiebreak() {
-    let files = vec![
-        DriveFileIdentity {
-            id: "local-loser".to_string(),
-            create_token: "token-z".to_string(),
-        },
-        DriveFileIdentity {
-            id: "peer-winner".to_string(),
-            create_token: "token-a".to_string(),
-        },
-    ];
-
-    assert_eq!(
-        select_drive_file(&files).map(|file| file.id.as_str()),
-        Some("peer-winner")
-    );
-}
-
-#[test]
-fn parse_drive_file_identities_rejects_missing_ids() {
-    let page = serde_json::json!({
-        "files": [
-            {"appProperties": {"covenCreateToken": "token-a"}}
-        ]
-    });
-
-    assert!(parse_drive_file_identities(&page).is_err());
 }
 
 #[test]

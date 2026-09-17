@@ -1,4 +1,4 @@
-use super::chunking::*;
+use super::staging::*;
 use super::*;
 
 const EXACT_MANIFEST_MAGIC: &[u8] = b"coven-cloudkit-exact-manifest-v2\0";
@@ -10,8 +10,20 @@ pub(crate) struct ExactManifest {
     pub(crate) stored_hash: coven_protocol::store_commit::ObjectHash,
 }
 
+const EXACT_PART_INFIX: &str = ".exact-part";
+
 pub(crate) fn exact_part_key(logical_key: &str, index: usize) -> String {
-    format!("{logical_key}.exact-part{index}")
+    format!("{logical_key}{EXACT_PART_INFIX}{index}")
+}
+
+/// Whether a record name is one of an exact object's parts rather than an
+/// object slot of its own. Parts are addressed only through the manifest that
+/// names them, so a listing reports the manifest's slot and never its parts.
+pub(crate) fn is_exact_part_key(key: &str) -> bool {
+    key.rsplit_once(EXACT_PART_INFIX)
+        .is_some_and(|(base, index)| {
+            !base.is_empty() && !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 pub(crate) fn encode_exact_manifest(manifest: ExactManifest) -> Vec<u8> {
@@ -444,8 +456,19 @@ impl ExactSlotStorage for CloudKitCloudHome {
         Ok(outcome)
     }
 
+    /// The slots under `prefix`: every record CloudKit holds there except the
+    /// parts of an exact object, which are reachable only through the manifest
+    /// record that sits at the object's own slot.
     async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
-        crate::cloud::logical_slots(CloudHome::list(self, prefix).await?)
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let prefix = prefix.to_string();
+        let keys = blocking(move || ops.list_records(&scope, &prefix)).await?;
+        crate::cloud::logical_slots(
+            keys.into_iter()
+                .filter(|key| !is_exact_part_key(key))
+                .collect(),
+        )
     }
 
     async fn create_versioned_at(

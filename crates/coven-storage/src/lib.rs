@@ -1,12 +1,13 @@
 //! The cloud home and what Coven keeps in it.
 //!
-//! A `CloudHome` is raw bytes in and out of one provider — S3 and its
-//! compatibles, CloudKit, and the OAuth providers (Google Drive, Dropbox,
-//! OneDrive). Above it, `CloudSyncConnection` applies the key layout and the
-//! at-rest protection, and exposes the exact-slot protocol-object and blob
-//! operations replication runs against. Beside them sit the join and restore
-//! codes that carry a home's coordinates between devices, and the OAuth
-//! authorization flow that obtains a provider session in the first place.
+//! A `CloudHome` is one provider — S3 and its compatibles, CloudKit, and the
+//! OAuth providers (Google Drive, Dropbox, OneDrive) — addressed through the
+//! exact slots it allocates and lists. Above it, `CloudSyncConnection` applies
+//! the key layout and the at-rest protection, and exposes the exact-slot
+//! protocol-object and blob operations replication runs against. Beside them
+//! sit the join and restore codes that carry a home's coordinates between
+//! devices, and the OAuth authorization flow that obtains a provider session in
+//! the first place.
 
 pub mod cloud;
 mod cloud_object_storage;

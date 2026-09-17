@@ -96,7 +96,7 @@ impl Drop for InflightGuard {
 ///
 /// Beyond the happy path it carries fault-injection knobs
 /// ([`arm_write_failures`](Self::arm_write_failures),
-/// [`fail_next_range_reads`](Self::fail_next_range_reads),
+/// [`fail_next_exact_stream_reads`](Self::fail_next_exact_stream_reads),
 /// [`remove`](Self::remove)) so a host test can drive upload-failure,
 /// read-retry, and missing-blob paths without a bespoke `CloudHome` impl. The
 /// arming state is shared across clones, like the backing store.
@@ -111,10 +111,8 @@ pub struct InMemoryCloudHome {
     exact_slot_allocation_max_inflight: Arc<AtomicUsize>,
     deletes: Arc<Mutex<Vec<String>>>,
     fail_writes: Arc<AtomicBool>,
-    fail_next_range_reads: Arc<AtomicUsize>,
     fail_next_exact_stream_reads: Arc<AtomicUsize>,
     fail_exact_stream_read_after_bytes: Arc<Mutex<Option<u64>>>,
-    sort_listings: Arc<AtomicBool>,
     exact_create_count: Arc<AtomicUsize>,
     exact_creates: Arc<Mutex<Vec<ObjectSlot>>>,
     fail_exact_create_before: Arc<AtomicUsize>,
@@ -193,10 +191,8 @@ impl InMemoryCloudHome {
             exact_slot_allocation_max_inflight: Arc::new(AtomicUsize::new(0)),
             deletes: Arc::new(Mutex::new(Vec::new())),
             fail_writes: Arc::new(AtomicBool::new(false)),
-            fail_next_range_reads: Arc::new(AtomicUsize::new(0)),
             fail_next_exact_stream_reads: Arc::new(AtomicUsize::new(0)),
             fail_exact_stream_read_after_bytes: Arc::new(Mutex::new(None)),
-            sort_listings: Arc::new(AtomicBool::new(false)),
             exact_create_count: Arc::new(AtomicUsize::new(0)),
             exact_creates: Arc::new(Mutex::new(Vec::new())),
             fail_exact_create_before: Arc::new(AtomicUsize::new(0)),
@@ -239,15 +235,6 @@ impl InMemoryCloudHome {
         self
     }
 
-    /// Return `list` results in sorted key order instead of the backing map's
-    /// arbitrary order. A real bucket LIST has no defined order, so the pull's
-    /// cross-device apply order is arbitrary; a test that needs a fixed order (to
-    /// reproduce an order-dependent bug deterministically) arms this and picks the
-    /// order through its device ids.
-    pub fn sort_listings(&self) {
-        self.sort_listings.store(true, Ordering::SeqCst);
-    }
-
     /// Arm every subsequent exact create to fail with a retryable transport
     /// error. A test can let a home's setup writes land and then arm this before
     /// driving the path whose uploads must fail; it stays armed for the store's
@@ -260,14 +247,6 @@ impl InMemoryCloudHome {
     /// failed one rather than only the failure.
     pub fn clear_write_failures(&self) {
         self.fail_writes.store(false, Ordering::SeqCst);
-    }
-
-    /// Make the next `n` `read_range` calls fail with a retryable transport
-    /// error before any serves bytes, to exercise a caller's read-retry path.
-    /// Each failed call consumes one; once `n` are spent, ranges serve
-    /// normally.
-    pub fn fail_next_range_reads(&self, n: usize) {
-        self.fail_next_range_reads.store(n, Ordering::SeqCst);
     }
 
     /// Make the next `n` exact streaming reads fail before creating their local
@@ -894,62 +873,6 @@ impl InMemoryCloudHome {
         self.deletes.lock().unwrap().push(key);
         Ok(())
     }
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        self.writes
-            .lock()
-            .unwrap()
-            .bytes(key)
-            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))
-    }
-
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        // An armed range read fails before touching the store. `checked_sub`
-        // returns `None` at zero, so `fetch_update` only succeeds (and errors)
-        // while the countdown is positive.
-        if self
-            .fail_next_range_reads
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok()
-        {
-            return Err(CloudHomeError::Transport(
-                "InMemoryCloudHome: armed range-read failure".into(),
-            ));
-        }
-        let data = self.read(key).await?;
-        let s = start as usize;
-        let e = (end as usize).min(data.len());
-        if s > data.len() {
-            return Err(CloudHomeError::NotFound(format!("range past end of {key}")));
-        }
-        Ok(data[s..e].to_vec())
-    }
-
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        let mut keys: Vec<String> = self
-            .writes
-            .lock()
-            .unwrap()
-            .values
-            .keys()
-            .filter(|k| k.starts_with(prefix))
-            .cloned()
-            .collect();
-        if self.sort_listings.load(Ordering::SeqCst) {
-            keys.sort();
-        }
-        Ok(keys)
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        self.writes.lock().unwrap().values.remove(key);
-        self.deletes.lock().unwrap().push(key.to_string());
-        Ok(())
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        Ok(self.writes.lock().unwrap().values.contains_key(key))
-    }
-
     async fn set_access(
         &self,
         desired: super::CloudAccessState,
@@ -995,26 +918,6 @@ impl CloudHome for InMemoryCloudHome {
             ));
         }
         Ok(())
-    }
-
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        InMemoryCloudHome::read(self, key).await
-    }
-
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        InMemoryCloudHome::read_range(self, key, start, end).await
-    }
-
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        InMemoryCloudHome::list(self, prefix).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        InMemoryCloudHome::delete(self, key).await
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        InMemoryCloudHome::exists(self, key).await
     }
 
     async fn set_access(

@@ -1,10 +1,11 @@
 //! Dropbox `CloudHome` implementation.
 //!
 //! Uses the Dropbox HTTP API v2 with OAuth 2.0 (PKCE) tokens. Files live under a
-//! folder using path-based access — no filename encoding. The
-//! `read`/`read_range`/`list`/`delete` methods are the shared `OAuthRestHome`
-//! implementations; this file supplies only the Dropbox request shapes (POST with
-//! a `Dropbox-API-Arg` header), the page parser, the upload session, and sharing.
+//! folder using path-based access — no filename encoding, so a slot's logical
+//! key is its Dropbox path and every exact operation acts on that path directly.
+//! Prefix listing is the shared `OAuthRestHome` pagination; this file supplies
+//! the Dropbox request shapes (POST with a `Dropbox-API-Arg` header), the page
+//! parser, the upload session, and sharing.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -15,10 +16,8 @@ use std::sync::OnceLock;
 #[path = "dropbox/content_hash.rs"]
 mod content_hash;
 
-use super::http::{self, ensure_ok, exists_from_response, NotFound};
-use super::oauth_rest::{
-    rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
-};
+use super::http::{self, ensure_ok, NotFound};
+use super::oauth_rest::{ListPage, OAuthRestHome};
 use super::oauth_session::OAuthSession;
 use super::{
     combine_cleanup_failure, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
@@ -875,45 +874,6 @@ impl OAuthRestHome for DropboxCloudHome {
         }
     }
 
-    async fn send_read(
-        &self,
-        key: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<reqwest::Response, CloudHomeError> {
-        let namespace_id = self.get_or_create_shared_folder_id().await?;
-        let path_root = Self::path_root_header(&namespace_id);
-        let arg = dropbox_api_arg(&serde_json::json!({ "path": Self::namespace_path(key) }));
-        let range = range.map(|(start, end)| super::range_header(start, end));
-        self.session
-            .api_call(|oauth| {
-                let mut req = Self::scoped_request(
-                    oauth.post(format!("{}/files/download", self.content_base)),
-                    &path_root,
-                )
-                .header("Dropbox-API-Arg", &arg);
-                if let Some(ref range) = range {
-                    req = req.header("Range", range);
-                }
-                req
-            })
-            .await
-    }
-
-    async fn send_delete(&self, key: &str) -> Result<reqwest::Response, CloudHomeError> {
-        let namespace_id = self.get_or_create_shared_folder_id().await?;
-        let path_root = Self::path_root_header(&namespace_id);
-        let body = serde_json::json!({ "path": Self::namespace_path(key) });
-        self.session
-            .api_call(|oauth| {
-                Self::scoped_request(
-                    oauth.post(format!("{}/files/delete_v2", self.api_base)),
-                    &path_root,
-                )
-                .json(&body)
-            })
-            .await
-    }
-
     async fn send_list_page(
         &self,
         _prefix: &str,
@@ -1000,39 +960,6 @@ impl OAuthRestHome for DropboxCloudHome {
 
 #[async_trait]
 impl CloudHome for DropboxCloudHome {
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        rest_read(self, key).await
-    }
-
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        rest_read_range(self, key, start, end).await
-    }
-
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        rest_list(self, prefix).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        rest_delete(self, key).await
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        let namespace_id = self.get_or_create_shared_folder_id().await?;
-        let path_root = Self::path_root_header(&namespace_id);
-        let body = serde_json::json!({ "path": Self::namespace_path(key) });
-        let resp = self
-            .session
-            .api_call(|oauth| {
-                Self::scoped_request(
-                    oauth.post(format!("{}/files/get_metadata", self.api_base)),
-                    &path_root,
-                )
-                .json(&body)
-            })
-            .await?;
-        exists_from_response(resp, &format!("exists {key}"), self.not_found()).await
-    }
-
     async fn set_access(
         &self,
         desired: CloudAccessState,
@@ -1248,7 +1175,7 @@ impl ExactSlotStorage for DropboxCloudHome {
     }
 
     async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
-        crate::cloud::logical_slots(CloudHome::list(self, prefix).await?)
+        super::oauth_rest::rest_list_slots(self, prefix).await
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {

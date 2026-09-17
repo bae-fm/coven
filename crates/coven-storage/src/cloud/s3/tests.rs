@@ -685,10 +685,12 @@ async fn every_s3_operation_preserves_bucket_permission_denial() {
         crate::cloud::create_exact_bytes(&home, &slot, &[1], &crate::cloud::no_progress())
             .await
             .expect_err("create"),
-        home.read("object").await.expect_err("read"),
-        home.list("").await.expect_err("list"),
-        home.delete("object").await.expect_err("delete"),
-        home.exists("object").await.expect_err("head"),
+        home.read_at(&slot).await.expect_err("read"),
+        home.read_range_at(&slot, 0, 1)
+            .await
+            .expect_err("read range"),
+        home.list_slots("").await.expect_err("list"),
+        home.delete_at(&slot).await.expect_err("delete"),
     ];
     for error in errors {
         assert_eq!(
@@ -944,11 +946,14 @@ async fn listing_exhausts_every_page() {
     .await;
     let home = standard_test_home(bucket, endpoint).await;
 
-    let listing = home.list("objects/").await.expect("list objects");
+    let listing = home.list_slots("objects/").await.expect("list objects");
 
     assert_eq!(requests.load(Ordering::SeqCst), 2);
     assert_eq!(
-        listing,
+        listing
+            .iter()
+            .map(|slot| slot.logical_key().to_string())
+            .collect::<Vec<_>>(),
         vec!["objects/copy-a".to_string(), "objects/copy-b".to_string()]
     );
     shutdown.send(()).expect("shut down fake S3");
@@ -1751,8 +1756,9 @@ async fn read_range_accepts_s3_compatible_full_object_checksum_header() {
     )
     .await;
 
+    let slot = ObjectSlot::logical(key.clone()).expect("valid exact slot");
     let bytes = home
-        .read_range(&key, 0, range_body.len() as u64)
+        .read_range_at(&slot, 0, range_body.len() as u64)
         .await
         .expect("read range");
 
@@ -1785,8 +1791,9 @@ async fn read_range_rejects_full_object_200_response() {
     )
     .await;
 
+    let slot = ObjectSlot::logical(key.clone()).expect("valid exact slot");
     let err = home
-        .read_range(&key, 8, 16)
+        .read_range_at(&slot, 8, 16)
         .await
         .expect_err("a 200 full-object response to a range request must error");
     assert!(matches!(err, CloudHomeError::Transport(_)), "got {err:?}");
@@ -1908,9 +1915,12 @@ async fn list_errors_when_truncated_response_has_no_continuation_token() {
     )
     .await;
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(1), home.list("objects/"))
-        .await
-        .expect("list should return instead of refetching the first page");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        home.list_slots("objects/"),
+    )
+    .await
+    .expect("list should return instead of refetching the first page");
     let err = result.expect_err("truncated response without token must fail");
     let msg = err.to_string();
 
@@ -2128,10 +2138,11 @@ async fn read_range_succeeds_against_existing_s3_object() {
     .expect("construct S3CloudHome");
 
     eprintln!("reading {key} range {start}..{end}");
+    let slot = ObjectSlot::logical(key.clone()).expect("valid exact slot");
     let bytes = home
-        .read_range(&key, start, end)
+        .read_range_at(&slot, start, end)
         .await
-        .unwrap_or_else(|e| panic!("read_range failed: {e:?}"));
+        .unwrap_or_else(|e| panic!("read_range_at failed: {e:?}"));
 
     assert_eq!(bytes.len() as u64, end - start);
 }
@@ -2166,10 +2177,11 @@ async fn s3_big_stack_reads_real_bytes_from_existing_object() {
     .await
     .expect("construct S3CloudHome");
 
+    let slot = ObjectSlot::logical(env.key.clone()).expect("valid exact slot");
     let whole = home
-        .read(&env.key)
+        .read_at(&slot)
         .await
-        .unwrap_or_else(|e| panic!("read({}) failed: {e:?}", env.key));
+        .unwrap_or_else(|e| panic!("read_at({}) failed: {e:?}", env.key));
     assert!(
         !whole.is_empty(),
         "expected non-empty object at {}",
@@ -2179,9 +2191,9 @@ async fn s3_big_stack_reads_real_bytes_from_existing_object() {
 
     let n = whole.len().min(16) as u64;
     let head = home
-        .read_range(&env.key, 0, n)
+        .read_range_at(&slot, 0, n)
         .await
-        .unwrap_or_else(|e| panic!("read_range({}, 0..{n}) failed: {e:?}", env.key));
+        .unwrap_or_else(|e| panic!("read_range_at({}, 0..{n}) failed: {e:?}", env.key));
     assert_eq!(
         head.as_slice(),
         &whole[..n as usize],

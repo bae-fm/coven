@@ -4,7 +4,7 @@ use coven_foundation::config::{
     CloudHomeConfig, CloudProvider, ExactUploadVerification, HomeStorage,
 };
 use coven_keys::keys::CloudHomeCredentials;
-use coven_storage::cloud::{CloudHome as _, CloudHomeFactory, ExactCloudHome};
+use coven_storage::cloud::{CloudHomeFactory, ExactCloudHome, ExactSlotStorage as _};
 
 /// A reserved prefix in the configured live S3-compatible test bucket.
 ///
@@ -82,9 +82,14 @@ impl RealS3TestHome {
     }
 
     pub(crate) async fn reset(&self) {
-        for key in self.home.list("").await.expect("list live test objects") {
+        for slot in self
+            .home
+            .list_slots("")
+            .await
+            .expect("list live test objects")
+        {
             self.home
-                .delete(&key)
+                .delete_at(&slot)
                 .await
                 .expect("delete live test object");
         }

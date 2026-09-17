@@ -33,14 +33,21 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         state: crate::cloud::CloudAccessState,
     ) -> Result<crate::cloud::CloudAccessOutcome, StorageError>;
 
+    /// The bytes the provider holds at one exact slot, read without opening
+    /// them, so a test can assert what is actually at rest.
     #[cfg(any(test, feature = "test-utils"))]
-    async fn read_provider_bytes_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError>;
+    async fn read_provider_bytes_for_test(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<Vec<u8>, StorageError>;
 
+    /// Every exact slot the provider holds under `prefix`, unfiltered by
+    /// protocol context, for tests that assert which objects exist.
     #[cfg(any(test, feature = "test-utils"))]
-    async fn list_provider_keys_for_test(&self, prefix: &str) -> Result<Vec<String>, StorageError>;
-
-    #[cfg(any(test, feature = "test-utils"))]
-    async fn provider_key_exists_for_test(&self, key: &str) -> Result<bool, StorageError>;
+    async fn list_provider_slots_for_test(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<ObjectSlot>, StorageError>;
 
     async fn reserve_cross_principal_response_slot(
         &self,

@@ -36,7 +36,7 @@ use coven_storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
 };
-use coven_storage::cloud::{CloudHome, CloudHomeJoinInfo};
+use coven_storage::cloud::CloudHomeJoinInfo;
 use coven_storage::cloud::{
     CloudHomeError, CloudObjectVersion, CloudVersionedObject, ConditionalWriteOutcome,
 };
@@ -98,28 +98,6 @@ impl CloudKitOps for RestoreCloudKitOps {
         Err(CloudHomeError::NotFound(
             "accepted CloudKit share".to_string(),
         ))
-    }
-
-    fn write_record(
-        &self,
-        scope: &CloudKitScope,
-        key: &str,
-        data: Vec<u8>,
-    ) -> Result<(), CloudHomeError> {
-        self.records
-            .lock()
-            .unwrap()
-            .insert((scope.clone(), key.to_string()), data);
-        Ok(())
-    }
-
-    fn read_record(&self, scope: &CloudKitScope, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        self.records
-            .lock()
-            .unwrap()
-            .get(&(scope.clone(), key.to_string()))
-            .cloned()
-            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))
     }
 
     fn list_records(

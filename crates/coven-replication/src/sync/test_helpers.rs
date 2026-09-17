@@ -3181,10 +3181,6 @@ impl TestStore {
         self.home.fail_nth_exact_delete_of(slots, call);
     }
 
-    pub fn sort_provider_listings(&self) {
-        self.home.sort_listings();
-    }
-
     pub fn provider_object_is_absent(&self, logical_key: &str) -> bool {
         self.home.get(logical_key).is_none()
     }
@@ -4739,12 +4735,6 @@ pub enum ProtocolRead {
     Listing,
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-pub enum ProviderObjectExistsInterception {
-    Proceed,
-    DeleteAndReportAbsent,
-}
-
 /// Test-side observation of a [`CloudSyncObjectStorage`] call.
 ///
 /// Every hook runs before the wrapped storage does the work, and returning `Err`
@@ -4808,13 +4798,6 @@ pub trait StorageInterceptor: Send + Sync {
         _key: &str,
     ) -> Result<(), coven_protocol::objects::StorageError> {
         Ok(())
-    }
-
-    async fn before_provider_object_exists(
-        &self,
-        _key: &str,
-    ) -> Result<ProviderObjectExistsInterception, coven_protocol::objects::StorageError> {
-        Ok(ProviderObjectExistsInterception::Proceed)
     }
 
     async fn before_provider_object_delete(
@@ -4885,13 +4868,6 @@ where
         key: &str,
     ) -> Result<(), coven_protocol::objects::StorageError> {
         (**self).before_provider_object_write(key).await
-    }
-
-    async fn before_provider_object_exists(
-        &self,
-        key: &str,
-    ) -> Result<ProviderObjectExistsInterception, coven_protocol::objects::StorageError> {
-        (**self).before_provider_object_exists(key).await
     }
 
     async fn before_provider_object_delete(
@@ -5069,34 +5045,20 @@ where
 
     async fn read_provider_bytes_for_test(
         &self,
-        key: &str,
+        slot: &coven_protocol::objects::ObjectSlot,
     ) -> Result<Vec<u8>, coven_protocol::objects::StorageError> {
-        self.interceptor.before_provider_object_read(key).await?;
-        self.inner.read_provider_bytes_for_test(key).await
+        self.interceptor
+            .before_provider_object_read(slot.logical_key())
+            .await?;
+        self.inner.read_provider_bytes_for_test(slot).await
     }
 
-    async fn list_provider_keys_for_test(
+    async fn list_provider_slots_for_test(
         &self,
         prefix: &str,
-    ) -> Result<Vec<String>, coven_protocol::objects::StorageError> {
-        self.inner.list_provider_keys_for_test(prefix).await
-    }
-
-    async fn provider_key_exists_for_test(
-        &self,
-        key: &str,
-    ) -> Result<bool, coven_protocol::objects::StorageError> {
-        match self.interceptor.before_provider_object_exists(key).await? {
-            ProviderObjectExistsInterception::Proceed => {
-                self.inner.provider_key_exists_for_test(key).await
-            }
-            ProviderObjectExistsInterception::DeleteAndReportAbsent => {
-                Err(coven_protocol::objects::StorageError::InvalidContent(
-                    "raw test-key interception cannot delete through the production API"
-                        .to_string(),
-                ))
-            }
-        }
+    ) -> Result<Vec<coven_protocol::objects::ObjectSlot>, coven_protocol::objects::StorageError>
+    {
+        self.inner.list_provider_slots_for_test(prefix).await
     }
 
     async fn reserve_cross_principal_response_slot(

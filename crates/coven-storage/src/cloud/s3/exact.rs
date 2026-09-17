@@ -137,11 +137,11 @@ impl ExactSlotStorage for S3CloudHome {
         .await
     }
     async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
-        crate::cloud::logical_slots(CloudHome::list(self, prefix).await?)
+        crate::cloud::logical_slots(self.list_keys(prefix).await?)
     }
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         slot.require_logical_key_for("S3")?;
-        S3CloudHome::read(self, slot.logical_key()).await
+        self.get_object_bytes(slot.logical_key()).await
     }
     async fn read_versioned_at(
         &self,
@@ -289,16 +289,16 @@ impl ExactSlotStorage for S3CloudHome {
         end: u64,
     ) -> Result<Vec<u8>, CloudHomeError> {
         slot.require_logical_key_for("S3")?;
-        S3CloudHome::read_range(self, slot.logical_key(), start, end).await
+        self.get_object_range(slot.logical_key(), start, end).await
     }
     async fn open_stream_at(
         &self,
         slot: &ObjectSlot,
     ) -> Result<crate::cloud::CloudObjectStream, CloudHomeError> {
-        S3CloudHome::open_exact_stream(self, slot).await
+        self.open_exact_stream(slot).await
     }
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         slot.require_logical_key_for("S3")?;
-        S3CloudHome::delete(self, slot.logical_key()).await
+        self.delete_object(slot.logical_key()).await
     }
 }

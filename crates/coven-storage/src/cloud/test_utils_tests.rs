@@ -6,24 +6,21 @@ use crate::cloud::{
 #[tokio::test]
 async fn write_then_read_roundtrips() {
     let h = InMemoryCloudHome::new();
-    create_exact_bytes(
-        &h,
-        &h.allocate_slot("foo").await.unwrap(),
-        b"hello",
-        &no_progress(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(h.read("foo").await.unwrap(), b"hello");
-    assert!(h.exists("foo").await.unwrap());
-    assert!(!h.exists("bar").await.unwrap());
+    let slot = h.allocate_slot("foo").await.unwrap();
+    create_exact_bytes(&h, &slot, b"hello", &no_progress())
+        .await
+        .unwrap();
+    assert_eq!(h.read_at(&slot).await.unwrap(), b"hello");
+    assert!(h.observe_at(&slot).await.unwrap().is_some());
+    let absent = h.allocate_slot("bar").await.unwrap();
+    assert!(h.observe_at(&absent).await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn read_range_returns_a_slice() {
     let h = InMemoryCloudHome::new();
-    h.insert_exact_object("k", b"0123456789".to_vec());
-    assert_eq!(h.read_range("k", 2, 5).await.unwrap(), b"234");
+    let slot = h.insert_exact_object("k", b"0123456789".to_vec());
+    assert_eq!(h.read_range_at(&slot, 2, 5).await.unwrap(), b"234");
 }
 
 #[tokio::test]
@@ -32,18 +29,20 @@ async fn list_filters_by_prefix() {
     h.insert_exact_object("a/x", vec![1]);
     h.insert_exact_object("a/y", vec![2]);
     h.insert_exact_object("b/x", vec![3]);
-    let mut got = h.list("a/").await.unwrap();
-    got.sort();
-    assert_eq!(got, vec!["a/x".to_string(), "a/y".to_string()]);
+    let got = h.list_slots("a/").await.unwrap();
+    assert_eq!(
+        got.iter().map(ObjectSlot::logical_key).collect::<Vec<_>>(),
+        vec!["a/x", "a/y"]
+    );
 }
 
 #[tokio::test]
 async fn delete_removes_and_records() {
     let h = InMemoryCloudHome::new();
-    h.insert_exact_object("k", vec![1]);
-    h.delete("k").await.unwrap();
+    let slot = h.insert_exact_object("k", vec![1]);
+    h.delete_at(&slot).await.unwrap();
     assert!(matches!(
-        h.read("k").await,
+        h.read_at(&slot).await,
         Err(CloudHomeError::NotFound(_))
     ));
     assert_eq!(h.deletes_seen(), vec!["k".to_string()]);
@@ -79,31 +78,13 @@ async fn arm_write_failures_fails_writes_after_arming() {
 }
 
 #[tokio::test]
-async fn fail_next_range_reads_fails_the_next_n_then_recovers() {
-    let h = InMemoryCloudHome::new();
-    h.insert_exact_object("k", b"0123456789".to_vec());
-
-    h.fail_next_range_reads(2);
-    assert!(matches!(
-        h.read_range("k", 0, 4).await,
-        Err(CloudHomeError::Transport(_))
-    ));
-    assert!(matches!(
-        h.read_range("k", 0, 4).await,
-        Err(CloudHomeError::Transport(_))
-    ));
-    // The third serves real bytes — the countdown is spent.
-    assert_eq!(h.read_range("k", 0, 4).await.unwrap(), b"0123");
-}
-
-#[tokio::test]
 async fn remove_drops_a_key_out_of_band() {
     let h = InMemoryCloudHome::new();
-    h.insert_exact_object("k", vec![1]);
+    let slot = h.insert_exact_object("k", vec![1]);
 
     h.remove("k");
     assert!(matches!(
-        h.read("k").await,
+        h.read_at(&slot).await,
         Err(CloudHomeError::NotFound(_))
     ));
     // Out-of-band removal is not a delete, so it leaves no delete record.

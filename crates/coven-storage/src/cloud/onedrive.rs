@@ -1,19 +1,17 @@
 //! OneDrive `CloudHome` implementation.
 //!
 //! Uses the Microsoft Graph API. Files are stored flat in a single folder — path
-//! separators are escaped by the `key_encoding` helpers. The
-//! `read`/`read_range`/`list`/`delete` methods are the shared `OAuthRestHome`
-//! implementations; this file supplies only the Graph request shapes, the page
-//! parser, the upload paths, and sharing.
+//! separators are escaped by the `key_encoding` helpers — so a slot's logical
+//! key names its Graph item directly. Prefix listing is the shared
+//! `OAuthRestHome` pagination; this file supplies the Graph request shapes, the
+//! page parser, the upload paths, and sharing.
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use super::http::{self, ensure_ok, exists_from_response, NotFound};
+use super::http::{self, ensure_ok, ok_bytes, NotFound};
 use super::key_encoding::{decode_listed_key, encode_key};
-use super::oauth_rest::{
-    rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
-};
+use super::oauth_rest::{validated_range_bytes, ListPage, OAuthRestHome};
 use super::oauth_session::OAuthSession;
 use super::{
     combine_cleanup_failure, sharing, BlobBody, CloudAccessOutcome, CloudAccessState, CloudHome,
@@ -401,21 +399,53 @@ impl OneDriveCloudHome {
         }
     }
 
+    /// Verify the slot, then GET its item content, optionally a byte range —
+    /// the preamble every immutable exact read shares; the callers differ only
+    /// in what they do with the response. A versioned read brackets the body
+    /// with its own metadata reads, so it goes straight to
+    /// [`get_item_content`](Self::get_item_content) instead of verifying twice.
+    async fn send_item_read(
+        &self,
+        slot: &ObjectSlot,
+        range: Option<(u64, u64)>,
+    ) -> Result<reqwest::Response, CloudHomeError> {
+        self.verify_slot(slot).await?;
+        self.get_item_content(slot, range).await
+    }
+
+    /// GET one item's content without first proving the slot names it. Only a
+    /// caller that has already established the item's identity may use this.
+    async fn get_item_content(
+        &self,
+        slot: &ObjectSlot,
+        range: Option<(u64, u64)>,
+    ) -> Result<reqwest::Response, CloudHomeError> {
+        slot.require_logical_key_for("OneDrive")?;
+        let url = format!("{}/content", self.item_path_url(slot.logical_key()));
+        let range = range.map(|(start, end)| super::range_header(start, end));
+        let response = self
+            .session
+            .api_call(|oauth| {
+                let mut req = oauth.get(&url);
+                if let Some(ref range) = range {
+                    req = req.header("Range", range);
+                }
+                req
+            })
+            .await?;
+        ensure_ok(
+            response,
+            &format!("read exact OneDrive item {}", slot.logical_key()),
+            NotFound::Status,
+        )
+        .await
+    }
+
     async fn open_exact_stream(
         &self,
         slot: &ObjectSlot,
     ) -> Result<super::CloudObjectStream, CloudHomeError> {
-        self.verify_slot(slot).await?;
-        let response = self
-            .session
-            .api_call(|oauth| {
-                oauth.get(format!(
-                    "{}/content",
-                    self.item_path_url(slot.logical_key())
-                ))
-            })
-            .await?;
-        let response = ensure_ok(response, "read exact OneDrive item", NotFound::Status).await?;
+        let response = self.send_item_read(slot, None).await?;
         Ok(super::oauth_rest::response_stream(
             response,
             "read exact OneDrive item body",
@@ -486,29 +516,6 @@ impl OAuthRestHome for OneDriveCloudHome {
         NotFound::Status
     }
 
-    async fn send_read(
-        &self,
-        key: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<reqwest::Response, CloudHomeError> {
-        let url = format!("{}/content", self.item_path_url(key));
-        let range = range.map(|(start, end)| super::range_header(start, end));
-        self.session
-            .api_call(|oauth| {
-                let mut req = oauth.get(&url);
-                if let Some(ref range) = range {
-                    req = req.header("Range", range);
-                }
-                req
-            })
-            .await
-    }
-
-    async fn send_delete(&self, key: &str) -> Result<reqwest::Response, CloudHomeError> {
-        let url = self.item_path_url(key);
-        self.session.api_call(|oauth| oauth.delete(&url)).await
-    }
-
     async fn send_list_page(
         &self,
         _prefix: &str,
@@ -549,28 +556,6 @@ impl OAuthRestHome for OneDriveCloudHome {
 
 #[async_trait]
 impl CloudHome for OneDriveCloudHome {
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        rest_read(self, key).await
-    }
-
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        rest_read_range(self, key, start, end).await
-    }
-
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        rest_list(self, prefix).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        rest_delete(self, key).await
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        let url = self.item_path_url(key);
-        let resp = self.session.api_call(|oauth| oauth.get(&url)).await?;
-        exists_from_response(resp, &format!("exists {key}"), NotFound::Status).await
-    }
-
     async fn set_access(
         &self,
         desired: CloudAccessState,
@@ -735,18 +720,30 @@ impl ExactSlotStorage for OneDriveCloudHome {
         .await
     }
     async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
-        crate::cloud::logical_slots(CloudHome::list(self, prefix).await?)
+        super::oauth_rest::rest_list_slots(self, prefix).await
     }
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
-        self.verify_slot(slot).await?;
-        OneDriveCloudHome::read(self, slot.logical_key()).await
+        let response = self.send_item_read(slot, None).await?;
+        ok_bytes(
+            response,
+            &format!("read exact OneDrive body for {}", slot.logical_key()),
+        )
+        .await
     }
     async fn read_versioned_at(
         &self,
         slot: &ObjectSlot,
     ) -> Result<CloudVersionedObject, CloudHomeError> {
+        // The bracketing metadata reads are what prove this body belongs to
+        // this item at this revision, so the body read does not verify the
+        // slot a third time.
         let before = self.exact_metadata(slot).await?;
-        let bytes = OneDriveCloudHome::read(self, slot.logical_key()).await?;
+        let response = self.get_item_content(slot, None).await?;
+        let bytes = ok_bytes(
+            response,
+            &format!("read versioned OneDrive body for {}", slot.logical_key()),
+        )
+        .await?;
         let after = self.exact_metadata(slot).await?;
         if before.version != after.version {
             return Err(CloudHomeError::Transport(format!(
@@ -841,17 +838,23 @@ impl ExactSlotStorage for OneDriveCloudHome {
         start: u64,
         end: u64,
     ) -> Result<Vec<u8>, CloudHomeError> {
-        self.verify_slot(slot).await?;
-        OneDriveCloudHome::read_range(self, slot.logical_key(), start, end).await
+        let response = self.send_item_read(slot, Some((start, end))).await?;
+        validated_range_bytes(
+            response,
+            &format!("read exact OneDrive range for {}", slot.logical_key()),
+            start,
+            end,
+        )
+        .await
     }
     async fn open_stream_at(
         &self,
         slot: &ObjectSlot,
     ) -> Result<super::CloudObjectStream, CloudHomeError> {
-        OneDriveCloudHome::open_exact_stream(self, slot).await
+        self.open_exact_stream(slot).await
     }
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        OneDriveCloudHome::delete_at_slot(self, slot).await
+        self.delete_at_slot(slot).await
     }
 }
 

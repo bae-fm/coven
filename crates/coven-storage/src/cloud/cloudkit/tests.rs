@@ -1,4 +1,3 @@
-use super::chunking::*;
 use super::exact::*;
 use super::*;
 use crate::cloud::no_progress;
@@ -7,35 +6,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// The tokened chunk layout's key and manifest encodings. Coven writes exact
-/// objects now, so nothing in production produces this layout; the readers that
-/// still have to serve objects already at a provider are tested against records
-/// seeded here.
-fn encode_chunk_manifest(part_count: usize, total_len: usize, upload_id: &str) -> Vec<u8> {
-    let mut encoded = b"coven-cloudkit-chunk-manifest-v1\0".to_vec();
-    encoded.extend_from_slice(part_count.to_string().as_bytes());
-    encoded.push(b'\n');
-    encoded.extend_from_slice(total_len.to_string().as_bytes());
-    encoded.push(b'\n');
-    encoded.extend_from_slice(upload_id.as_bytes());
-    encoded.push(b'\n');
-    encoded
-}
-
-fn chunk_part_key(key: &str, upload_id: &str, index: usize) -> String {
-    format!("{key}.part{index}.{upload_id}")
-}
-
-const SEED_UPLOAD_ID: &str = "0123456789abcdef0123456789abcdef";
-
 fn exact_slot(key: &str) -> ObjectSlot {
     ObjectSlot::logical(key.to_string()).expect("valid exact slot")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum MockCall {
-    Write(String),
-    Read(String),
     List(String),
     Delete(String),
     Exists(String),
@@ -44,12 +20,6 @@ enum MockCall {
     CommitBatch(String),
     DiscardBatch(String),
     DeleteVersions(Vec<String>),
-}
-
-struct PausedWrite {
-    key: String,
-    stored: Arc<std::sync::Barrier>,
-    release: Arc<std::sync::Barrier>,
 }
 
 struct MockCloudKitOps {
@@ -65,7 +35,6 @@ struct MockCloudKitOps {
     fail_discards: AtomicBool,
     lose_commit_response: AtomicBool,
     return_wrong_commit_keys: AtomicBool,
-    pause_write_after_store: Mutex<Option<PausedWrite>>,
     record_exists_calls: AtomicUsize,
     /// Every versioned-record fetch, by key. Kept apart from `calls` so a
     /// test can count which records a read touched without disturbing the
@@ -99,7 +68,6 @@ impl MockCloudKitOps {
             fail_discards: AtomicBool::new(false),
             lose_commit_response: AtomicBool::new(false),
             return_wrong_commit_keys: AtomicBool::new(false),
-            pause_write_after_store: Mutex::new(None),
             record_exists_calls: AtomicUsize::new(0),
             versioned_reads: Mutex::new(Vec::new()),
             grant_share_calls: AtomicUsize::new(0),
@@ -128,36 +96,26 @@ impl MockCloudKitOps {
         self.return_wrong_commit_keys.store(true, Ordering::SeqCst);
     }
 
-    fn write_chunk_manifest(&self, key: &str, total_len: usize) {
-        self.write_record(
-            &CloudKitScope::Private,
-            &chunk_manifest_key(key),
-            encode_chunk_manifest(total_len.div_ceil(CHUNK_SIZE), total_len, SEED_UPLOAD_ID),
-        )
-        .unwrap();
+    /// Put a record in the zone behind the adapter's back, so a test can drive
+    /// what an exact operation does about a record it did not write — a slot a
+    /// competing writer already occupies, or a manifest something replaced.
+    fn seed_record(&self, key: &str, data: Vec<u8>) {
+        let record = (CloudKitScope::Private, key.to_string());
+        self.store.lock().unwrap().insert(record.clone(), data);
+        let mut versions = self.versions.lock().unwrap();
+        let next = versions.get(&record).copied().unwrap_or(0) + 1;
+        versions.insert(record, next);
     }
 
-    fn write_chunk_part(&self, key: &str, index: usize, data: Vec<u8>) {
-        self.write_record(
-            &CloudKitScope::Private,
-            &chunk_part_key(key, SEED_UPLOAD_ID, index),
-            data,
-        )
-        .unwrap();
-    }
-
-    /// Seed one whole object in the tokened layout: a single record when it
-    /// fits one chunk, otherwise a manifest and its numbered parts.
-    fn seed_object(&self, key: &str, data: &[u8]) {
-        if data.len() <= CHUNK_SIZE {
-            self.write_record(&CloudKitScope::Private, key, data.to_vec())
-                .unwrap();
-            return;
-        }
-        self.write_chunk_manifest(key, data.len());
-        for (index, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
-            self.write_chunk_part(key, index, chunk.to_vec());
-        }
+    /// The bytes the zone currently holds at `key`, without going through the
+    /// adapter, so a test can assert on the stored representation itself.
+    fn stored_record(&self, key: &str) -> Vec<u8> {
+        self.store
+            .lock()
+            .unwrap()
+            .get(&(CloudKitScope::Private, key.to_string()))
+            .cloned()
+            .unwrap_or_else(|| panic!("no CloudKit record at {key}"))
     }
 }
 
@@ -204,53 +162,6 @@ impl CloudKitOps for MockCloudKitOps {
             acceptance: CloudKitShareAcceptance::Accepted,
             canonical_record: b"canonical accepted CKShare".to_vec(),
         })
-    }
-
-    fn write_record(
-        &self,
-        scope: &CloudKitScope,
-        key: &str,
-        data: Vec<u8>,
-    ) -> Result<(), CloudHomeError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(MockCall::Write(key.to_string()));
-        if self.fail_writes.lock().unwrap().contains(key) {
-            return Err(CloudHomeError::Transport(format!("write {key} failed")));
-        }
-        let record = (scope.clone(), key.to_string());
-        self.store.lock().unwrap().insert(record.clone(), data);
-        let mut versions = self.versions.lock().unwrap();
-        let next = versions.get(&record).copied().unwrap_or(0) + 1;
-        versions.insert(record, next);
-        drop(versions);
-        let pause = {
-            let mut pause = self.pause_write_after_store.lock().unwrap();
-            match pause.as_ref() {
-                Some(paused) if paused.key == key => pause.take(),
-                _ => None,
-            }
-        };
-        if let Some(paused) = pause {
-            assert_eq!(paused.key, key);
-            paused.stored.wait();
-            paused.release.wait();
-        }
-        Ok(())
-    }
-
-    fn read_record(&self, scope: &CloudKitScope, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(MockCall::Read(key.to_string()));
-        self.store
-            .lock()
-            .unwrap()
-            .get(&(scope.clone(), key.to_string()))
-            .cloned()
-            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))
     }
 
     fn list_records(
@@ -601,225 +512,50 @@ async fn provider_binding_uses_the_bridge_container_zone_and_current_user() {
     );
 }
 
+/// A listing names the object slots CloudKit holds. An exact object's parts
+/// are reachable only through the manifest record at its own slot, so the
+/// listing reports that slot and never the `.exact-part` records beside it.
 #[tokio::test]
-async fn test_small_file_roundtrip() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    let data = b"hello world".to_vec();
-    ops.seed_object("small.bin", &data);
-    let read = ch.read("small.bin").await.unwrap();
-    assert_eq!(read, data);
-}
+async fn list_slots_reports_base_slots_and_omits_exact_parts() {
+    let (ch, _ops) = make_cloud_home_with_ops();
+    for (key, bytes) in [
+        ("files/album.flac", vec![0u8; 25 * 1024 * 1024]),
+        ("files/cover.jpg", b"img".to_vec()),
+    ] {
+        crate::cloud::create_exact_bytes(&ch, &exact_slot(key), &bytes, &no_progress())
+            .await
+            .expect("create exact object");
+    }
 
-#[tokio::test]
-async fn test_large_file_roundtrip() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    // 25MB of data -- spans 3 chunks (10 + 10 + 5)
-    let data: Vec<u8> = (0..25 * 1024 * 1024).map(|i| (i % 256) as u8).collect();
-    ops.seed_object("large.bin", &data);
-    let read = ch.read("large.bin").await.unwrap();
-    assert_eq!(read.len(), data.len());
-    assert_eq!(read, data);
-}
+    let listed = ch.list_slots("files/").await.expect("list exact slots");
 
-#[tokio::test]
-async fn test_read_range_single() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    ops.seed_object("range.bin", b"0123456789");
-    let slice = ch.read_range("range.bin", 3, 7).await.unwrap();
-    assert_eq!(slice, b"3456");
-}
-
-#[tokio::test]
-async fn read_single_record_does_not_probe_existence() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    let data = b"hello world".to_vec();
-    ops.seed_object("single.bin", &data);
-
-    let read = ch.read("single.bin").await.unwrap();
-
-    assert_eq!(read, data);
-    assert_eq!(ops.record_exists_calls.load(Ordering::Relaxed), 0);
-}
-
-#[tokio::test]
-async fn read_range_single_record_does_not_probe_existence() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    ops.seed_object("single-range.bin", b"0123456789");
-
-    let read = ch.read_range("single-range.bin", 2, 6).await.unwrap();
-
-    assert_eq!(read, b"2345");
-    assert_eq!(ops.record_exists_calls.load(Ordering::Relaxed), 0);
-}
-
-#[tokio::test]
-async fn read_chunked_record_without_manifest_errors() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    let first = vec![1u8; CHUNK_SIZE];
-    let second = b"tail".to_vec();
-    ops.write_chunk_part("chunked.bin", 0, first.clone());
-    ops.write_chunk_part("chunked.bin", 1, second.clone());
-
-    let err = ch
-        .read("chunked.bin")
-        .await
-        .expect_err("chunks without manifest must fail");
-    let msg = err.to_string();
-
-    assert!(
-        msg.contains("chunked.bin") && msg.contains("no manifest"),
-        "unexpected error: {msg}"
-    );
-    assert!(!ch.exists("chunked.bin").await.unwrap());
-}
-
-#[tokio::test]
-async fn list_omits_base_key_whose_manifest_is_absent() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    // Part records with no manifest — an interrupted upload that never
-    // published. `read` cannot assemble them, so `list` must not report them.
-    ops.write_chunk_part("files/orphan.bin", 0, vec![1u8; CHUNK_SIZE]);
-    ops.write_chunk_part("files/orphan.bin", 1, b"tail".to_vec());
-    ops.seed_object("files/ok.bin", b"hi");
-
-    let keys = ch.list("files/").await.unwrap();
-
-    assert_eq!(keys, vec!["files/ok.bin".to_string()]);
-}
-
-#[tokio::test]
-async fn read_chunked_record_with_missing_manifest_part_errors() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    let first = vec![1u8; CHUNK_SIZE];
-    let second = vec![2u8; CHUNK_SIZE];
-    let total_len = (CHUNK_SIZE * 2) + 4;
-    ops.write_chunk_manifest("chunked.bin", total_len);
-    ops.write_chunk_part("chunked.bin", 0, first);
-    ops.write_chunk_part("chunked.bin", 1, second);
-
-    let err = ch
-        .read("chunked.bin")
-        .await
-        .expect_err("missing manifest part must fail");
-    let msg = err.to_string();
-
-    assert!(
-        msg.contains("expects 3 parts") && msg.contains("found 2"),
-        "unexpected error: {msg}"
-    );
-    assert!(!ch.exists("chunked.bin").await.unwrap());
-}
-
-#[tokio::test]
-async fn read_range_chunked_rejects_range_past_manifest_length() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    ops.seed_object("range-limit.bin", &vec![7u8; 15 * 1024 * 1024]);
-
-    let err = ch
-        .read_range("range-limit.bin", 0, (16 * 1024 * 1024) as u64)
-        .await
-        .expect_err("range past manifest length must fail");
-    let msg = err.to_string();
-
-    assert!(msg.contains("exceeds file size"), "unexpected error: {msg}");
-}
-
-#[tokio::test]
-async fn read_range_chunked_short_chunk_errors_instead_of_panicking() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    let total_len = CHUNK_SIZE + 8;
-    ops.write_chunk_manifest("short-tail.bin", total_len);
-    ops.write_chunk_part("short-tail.bin", 0, vec![1u8; CHUNK_SIZE]);
-    ops.write_chunk_part("short-tail.bin", 1, vec![2u8; 4]);
-
-    let err = ch
-        .read_range("short-tail.bin", CHUNK_SIZE as u64, (CHUNK_SIZE + 8) as u64)
-        .await
-        .expect_err("short tail chunk must fail");
-    let msg = err.to_string();
-
-    assert!(
-        msg.contains("part 1") && msg.contains("expected 8"),
-        "unexpected error: {msg}"
+    // A provider's listing order is its own, so the assertion is on which
+    // slots came back, not the sequence they arrived in.
+    let mut keys = listed
+        .iter()
+        .map(|slot| slot.logical_key().to_string())
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "files/album.flac".to_string(),
+            "files/cover.jpg".to_string()
+        ]
     );
 }
 
+/// An empty range is the caller asking for nothing, which costs no record
+/// read rather than erroring on a manifest it never needed.
 #[tokio::test]
-async fn test_read_range_chunked() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    // Create data that spans 2 chunks: 15MB
-    let data: Vec<u8> = (0..15 * 1024 * 1024).map(|i| (i % 256) as u8).collect();
-    ops.seed_object("big.bin", &data);
+async fn exact_ranged_read_is_empty_when_end_equals_start() {
+    let (ch, _ops) = make_cloud_home_with_ops();
+    let slot = exact_slot("range.bin");
+    crate::cloud::create_exact_bytes(&ch, &slot, b"0123456789", &no_progress())
+        .await
+        .expect("create exact object");
 
-    // Read a range that crosses the chunk boundary (last byte of chunk 0, first byte of chunk 1)
-    let boundary = CHUNK_SIZE;
-    let start = (boundary - 2) as u64;
-    let end = (boundary + 3) as u64;
-    let slice = ch.read_range("big.bin", start, end).await.unwrap();
-    assert_eq!(slice.len(), 5);
-    assert_eq!(slice, &data[start as usize..end as usize]);
-}
-
-#[tokio::test]
-async fn test_list_deduplicates_chunks() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    ops.seed_object("files/album.flac", &vec![0u8; 25 * 1024 * 1024]);
-    ops.seed_object("files/cover.jpg", b"img");
-
-    let keys = ch.list("files/").await.unwrap();
-    assert_eq!(keys.len(), 2);
-    assert!(keys.contains(&"files/album.flac".to_string()));
-    assert!(keys.contains(&"files/cover.jpg".to_string()));
-}
-
-#[tokio::test]
-async fn test_delete_removes_all_chunks() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    ops.seed_object("to-delete.bin", &vec![0u8; 25 * 1024 * 1024]);
-
-    assert!(ch.exists("to-delete.bin").await.unwrap());
-
-    ch.delete("to-delete.bin").await.unwrap();
-
-    assert!(!ch.exists("to-delete.bin").await.unwrap());
-
-    // Verify the underlying ops store is empty of related keys
-    let keys = ops
-        .list_records(&CloudKitScope::Private, "to-delete.bin")
-        .unwrap();
-    assert!(keys.is_empty());
-}
-
-#[tokio::test]
-async fn test_exists() {
-    let (ch, ops) = make_cloud_home_with_ops();
-
-    assert!(!ch.exists("nope.bin").await.unwrap());
-
-    ops.seed_object("yep.bin", b"data");
-    assert!(ch.exists("yep.bin").await.unwrap());
-
-    // Chunked file
-    ops.seed_object("chunked.bin", &vec![0u8; 15 * 1024 * 1024]);
-    assert!(ch.exists("chunked.bin").await.unwrap());
-}
-
-#[tokio::test]
-async fn test_read_range_empty_when_end_leq_start() {
-    let (ch, ops) = make_cloud_home_with_ops();
-    ops.seed_object("range.bin", b"0123456789");
-
-    // end == start returns empty
-    let slice = ch.read_range("range.bin", 3, 3).await.unwrap();
-    assert!(slice.is_empty());
-
-    // end < start returns empty
-    let slice = ch.read_range("range.bin", 5, 2).await.unwrap();
-    assert!(slice.is_empty());
-
-    // end == 0 returns empty (the underflow case)
-    let slice = ch.read_range("range.bin", 0, 0).await.unwrap();
-    assert!(slice.is_empty());
+    assert!(ch.read_range_at(&slot, 3, 3).await.unwrap().is_empty());
 }
 
 /// The O(range) receipt for the backend the app actually ships on. CloudKit
@@ -1008,12 +744,7 @@ async fn exact_bounded_records_are_create_only() {
         b"first"
     );
 
-    ops.write_record(
-        &CloudKitScope::Private,
-        "copies/bounded",
-        b"replacement".to_vec(),
-    )
-    .unwrap();
+    ops.seed_record("copies/bounded", b"replacement".to_vec());
     let changed = ExactSlotStorage::read_at(&home, &slot)
         .await
         .expect_err("an exact read must reject a replaced manifest");
@@ -1081,11 +812,8 @@ async fn exact_multipart_stages_one_bounded_part_at_a_time_and_manifest_last() {
     assert_eq!(ops.max_stage_payload.load(Ordering::SeqCst), CHUNK_SIZE);
     assert_eq!(ExactSlotStorage::read_at(&home, &slot).await.unwrap(), data);
 
-    let manifest_bytes = ops
-        .read_record(&CloudKitScope::Private, "copies/chunked")
-        .unwrap();
     assert_eq!(
-        decode_exact_manifest(&manifest_bytes).unwrap(),
+        decode_exact_manifest(&ops.stored_record("copies/chunked")).unwrap(),
         ExactManifest {
             part_count: 2,
             total_len: data.len(),
@@ -1179,8 +907,7 @@ async fn immutable_atomic_multipart_failure_and_collision_create_no_partial_layo
     let (home, ops) = make_cloud_home_with_ops();
     let first_part = exact_part_key("copies/collision", 0);
     let second_part = exact_part_key("copies/collision", 1);
-    ops.write_record(&CloudKitScope::Private, &second_part, b"existing".to_vec())
-        .unwrap();
+    ops.seed_record(&second_part, b"existing".to_vec());
     let slot = exact_slot("copies/collision");
     let collision_bytes = vec![3u8; CHUNK_SIZE + 1];
     let error = crate::cloud::create_exact_bytes(&home, &slot, &collision_bytes, &no_progress())
@@ -1384,16 +1111,15 @@ async fn repeated_absent_access_does_not_revoke_twice() {
     assert_eq!(ops.revoke_share_calls.load(Ordering::Relaxed), 1);
 }
 
+/// The part-name rule a listing filters on, stated from both sides: a record
+/// this spelling produces is a part, and a record that merely looks like one
+/// is not.
 #[test]
-fn test_strip_part_suffix() {
-    assert_eq!(strip_part_suffix("file.bin.part0"), "file.bin");
-    assert_eq!(strip_part_suffix("file.bin.part123"), "file.bin");
-    assert_eq!(
-        strip_part_suffix("file.bin.part123.0123456789abcdef0123456789abcdef"),
-        "file.bin"
-    );
-    assert_eq!(strip_part_suffix("file.bin.manifest"), "file.bin");
-    assert_eq!(strip_part_suffix("file.bin"), "file.bin");
-    assert_eq!(strip_part_suffix("file.partition"), "file.partition");
-    assert_eq!(strip_part_suffix("file.part"), "file.part"); // no digits after .part
+fn exact_part_keys_are_recognized_by_their_own_spelling() {
+    assert!(is_exact_part_key(&exact_part_key("file.bin", 0)));
+    assert!(is_exact_part_key(&exact_part_key("file.bin", 123)));
+    assert!(!is_exact_part_key("file.bin"));
+    assert!(!is_exact_part_key("file.bin.exact-part"));
+    assert!(!is_exact_part_key("file.bin.exact-part1x"));
+    assert!(!is_exact_part_key(".exact-part0"));
 }

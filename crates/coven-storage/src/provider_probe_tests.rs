@@ -139,26 +139,6 @@ impl CloudHome for ProbeHome {
         self.inner.as_ref().probe().await
     }
 
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        self.inner.as_ref().read(key).await
-    }
-
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        self.inner.as_ref().read_range(key, start, end).await
-    }
-
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        self.inner.as_ref().list(prefix).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        self.inner.as_ref().delete(key).await
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        self.inner.as_ref().exists(key).await
-    }
-
     async fn set_access(
         &self,
         desired: CloudAccessState,

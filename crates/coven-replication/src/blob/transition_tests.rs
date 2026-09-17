@@ -34,7 +34,6 @@ use coven_protocol::blob::DeferredLocalBlobDisposition;
 use coven_protocol::blob::{BlobTransitionObserver, CacheFill, Provenance, RowBlobRef};
 use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
-use coven_storage::cloud::CloudHome;
 use coven_storage::CloudSyncObjectStorage;
 
 mod pending_upload;
@@ -1059,10 +1058,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
         "the blob is not uploaded before routing validation",
     );
     assert!(
-        !home
-            .exists("photos/cv/photo-user-scoped.jpg")
-            .await
-            .unwrap(),
+        home.get("photos/cv/photo-user-scoped.jpg").is_none(),
         "the cloud is untouched",
     );
     assert!(source.exists(), "the user-owned source remains in place");
@@ -1210,10 +1206,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
         "the host-provided blob is not uploaded before routing validation",
     );
     assert!(
-        !home
-            .exists("covers/cv/cover-host-scoped.jpg")
-            .await
-            .unwrap(),
+        home.get("covers/cv/cover-host-scoped.jpg").is_none(),
         "the cloud is untouched",
     );
     assert!(

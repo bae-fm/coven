@@ -345,28 +345,6 @@ impl CloudKitOps for TestCloudKitOps {
         ))
     }
 
-    fn write_record(
-        &self,
-        scope: &CloudKitScope,
-        key: &str,
-        data: Vec<u8>,
-    ) -> Result<(), CloudHomeError> {
-        let mut store = self.store.lock().unwrap();
-        let coordinate = (scope.clone(), key.to_string());
-        let version = store.get(&coordinate).map_or(1, |(_, version)| version + 1);
-        store.insert(coordinate, (data, version));
-        Ok(())
-    }
-
-    fn read_record(&self, scope: &CloudKitScope, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        self.store
-            .lock()
-            .unwrap()
-            .get(&(scope.clone(), key.to_string()))
-            .map(|(bytes, _)| bytes.clone())
-            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))
-    }
-
     fn list_records(
         &self,
         scope: &CloudKitScope,

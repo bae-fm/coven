@@ -50,19 +50,6 @@ impl CloudKitOps for ScopeRecordingOps {
         ))
     }
 
-    fn write_record(
-        &self,
-        _scope: &CloudKitScope,
-        _key: &str,
-        _data: Vec<u8>,
-    ) -> Result<(), CloudHomeError> {
-        unimplemented!("not exercised by these tests")
-    }
-
-    fn read_record(&self, _scope: &CloudKitScope, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!("not exercised by these tests")
-    }
-
     fn list_records(
         &self,
         scope: &CloudKitScope,
@@ -215,7 +202,9 @@ async fn neither_owner_nor_zone_builds_a_private_home() {
         .create(&config, clock, Some(ops.clone()), credentials(&config))
         .await
         .expect("private CloudKit config builds a home");
-    home.list("").await.expect("list against the built home");
+    home.list_slots("")
+        .await
+        .expect("list against the built home");
 
     assert_eq!(
         ops.seen.lock().unwrap().as_slice(),
@@ -235,7 +224,9 @@ async fn both_owner_and_zone_build_a_shared_home() {
         .create(&config, clock, Some(ops.clone()), credentials(&config))
         .await
         .expect("shared CloudKit config builds a home");
-    home.list("").await.expect("list against the built home");
+    home.list_slots("")
+        .await
+        .expect("list against the built home");
 
     assert_eq!(
         ops.seen.lock().unwrap().as_slice(),

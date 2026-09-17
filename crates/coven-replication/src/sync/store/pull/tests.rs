@@ -610,7 +610,6 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
         )
         .await
         .expect("create scoped replay Store");
-        home.sort_listings();
         store
             .open_into(&founder, founder_store_dir.clone())
             .await

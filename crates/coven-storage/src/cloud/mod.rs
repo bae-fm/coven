@@ -1,12 +1,14 @@
 //! CloudHome: low-level cloud storage abstraction.
 //!
-//! Each backend (S3, R2, B2, etc.) implements `CloudHome` -- raw bytes in and
-//! out, with no way to overwrite an object that exists: every write coven makes
-//! is an exact create or a versioned conditional replacement, both of which
-//! belong to [`ExactSlotStorage`]. No encryption, no path layout knowledge, no
-//! sync semantics. Higher-level concerns live in `CloudSyncConnection` which
-//! wraps any `dyn CloudHome` and applies the path layout and at-rest
-//! protection.
+//! Each backend (S3, R2, B2, etc.) implements `CloudHome`. Objects are named
+//! one way: an [`ObjectSlot`] the provider allocated or listed, carrying the
+//! physical identity that provider uses. There is no way to overwrite an object
+//! that exists -- every write coven makes is an exact create or a versioned
+//! conditional replacement, both of which belong to [`ExactSlotStorage`], and
+//! every read, range, stream and deletion names the slot it acts on. No
+//! encryption, no path layout knowledge, no sync semantics. Higher-level
+//! concerns live in `CloudSyncConnection`, which wraps any `dyn ExactCloudHome`
+//! and applies the path layout and at-rest protection.
 
 // Pure helpers that S3-compatible backends share.
 pub(crate) mod s3_common;
@@ -420,6 +422,10 @@ pub(crate) fn range_header(start: u64, end: u64) -> String {
     format!("bytes={start}-{}", end.saturating_sub(1))
 }
 
+/// The prefix a reachability probe lists and a capability probe writes its
+/// throwaway objects under. Nothing coven keeps lives below it.
+pub(crate) const PROBE_PREFIX: &str = "__coven_probe__";
+
 /// [`ExactSlotStorage::list_slots`] for a provider that addresses objects by
 /// their key, where the listed key is the whole locator.
 pub(crate) fn logical_slots(keys: Vec<String>) -> Result<Vec<ObjectSlot>, CloudHomeError> {
@@ -428,10 +434,17 @@ pub(crate) fn logical_slots(keys: Vec<String>) -> Result<Vec<ObjectSlot>, CloudH
         .collect()
 }
 
-/// Low-level cloud storage. Implementations handle a single store.
+/// The one way an object is addressed at a provider: an [`ObjectSlot`] the
+/// provider allocated for a logical key or reported from a listing, carrying
+/// whatever physical identity that provider uses. An implementation handles a
+/// single store, moves stored bytes, and interprets nothing about them — no
+/// encryption, no path layout.
 ///
-/// All methods deal in raw bytes. No encryption or path layout logic.
-///
+/// Slots come from [`allocate_slot`](Self::allocate_slot) and
+/// [`list_slots`](Self::list_slots) and from nowhere else, so a caller can
+/// never name an object it did not first reserve or find, and a provider that
+/// mints its own object ids can never be asked to guess which of two files
+/// sharing a name was meant.
 #[async_trait]
 pub trait ExactSlotStorage: Send + Sync {
     async fn provider_binding(
@@ -475,10 +488,10 @@ pub trait ExactSlotStorage: Send + Sync {
 
     /// Name every slot this home holds whose logical key starts with `prefix`.
     ///
-    /// The slot-shaped counterpart of [`CloudHome::list`], and the read side of
-    /// [`allocate_slot`](ExactSlotStorage::allocate_slot): a provider that
-    /// addresses objects by their key derives each slot from the listed key,
-    /// and one that mints its own object ids reports the ids it listed.
+    /// The read side of [`allocate_slot`](ExactSlotStorage::allocate_slot): a
+    /// provider that addresses objects by their key derives each slot from the
+    /// listed key, and one that mints its own object ids reports the ids it
+    /// listed.
     /// Callers get slots rather than keys because [`read_at`](Self::read_at) is
     /// what they will do next, and that takes a slot.
     async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError>;
@@ -574,16 +587,21 @@ pub trait ExactSlotStorage: Send + Sync {
     }
 }
 
+/// The provider itself, beyond the objects it holds: whether it can be reached,
+/// how much has been asked of it, and who may reach it. It requires
+/// [`ExactSlotStorage`] because one value carries both, so a caller that opened
+/// a home never has to ask it for a second provider object — and because the
+/// default reachability probe is an exact listing.
 #[async_trait]
-pub trait CloudHome: Send + Sync {
+pub trait CloudHome: ExactSlotStorage {
     /// Verify the backend is reachable with the configured credentials.
     /// Setup flows call this *before* persisting credentials, so a typo or
     /// missing bucket fails fast at setup time instead of via a delayed
-    /// reconnect banner. Default implementation issues a no-op list against
-    /// a sentinel prefix — backends override when a provider-specific operation
-    /// verifies the capabilities sync requires.
+    /// reconnect banner. Default implementation issues a no-op exact listing
+    /// against a sentinel prefix — backends override when a provider-specific
+    /// operation verifies the capabilities sync requires.
     async fn probe(&self) -> Result<(), CloudHomeError> {
-        self.list("__coven_probe__").await.map(drop)
+        self.list_slots(PROBE_PREFIX).await.map(drop)
     }
 
     /// The running total of provider operations issued through this home, for
@@ -600,21 +618,6 @@ pub trait CloudHome: Send + Sync {
         None
     }
 
-    /// Read the full contents of a key.
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError>;
-
-    /// Read a byte range from a key. `start` is inclusive, `end` is exclusive.
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError>;
-
-    /// List all keys under a prefix.
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError>;
-
-    /// Delete a key. Not an error if the key does not exist.
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError>;
-
-    /// Check whether a key exists.
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError>;
-
     /// Set the provider's access for one stable member principal to the absolute
     /// desired state. Implementations read the authoritative permission state,
     /// create/update/delete as required, then read it back and verify the desired
@@ -627,12 +630,13 @@ pub trait CloudHome: Send + Sync {
     ) -> Result<CloudAccessOutcome, CloudHomeError>;
 }
 
-/// A cloud home admitted to sync: raw object operations and exact immutable
-/// slots are one provider capability, so callers cannot open the home and then
-/// ask it to hand back a second provider object.
-pub trait ExactCloudHome: CloudHome + ExactSlotStorage {}
+/// A cloud home admitted to sync. [`CloudHome`] already requires
+/// [`ExactSlotStorage`], so this names nothing further; it is the name callers
+/// hold a provider by, and saying it at a call site says that the value is a
+/// whole provider rather than either half of one.
+pub trait ExactCloudHome: CloudHome {}
 
-impl<T> ExactCloudHome for T where T: CloudHome + ExactSlotStorage {}
+impl<T> ExactCloudHome for T where T: CloudHome {}
 
 #[cfg(test)]
 mod counting_tests;

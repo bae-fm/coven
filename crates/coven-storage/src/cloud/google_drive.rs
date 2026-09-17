@@ -1,10 +1,14 @@
 //! Google Drive `CloudHome` implementation.
 //!
 //! Uses the Google Drive REST API v3 with OAuth 2.0 tokens. Files are stored flat
-//! in a single folder — path separators are escaped by
-//! the `key_encoding` helpers). The `read`/`read_range`/`list`/`delete` methods are
-//! the shared `OAuthRestHome` implementations; this file supplies only the Drive
-//! request shapes, the page parser, the upload paths, and sharing.
+//! in a single folder — path separators are escaped by the `key_encoding`
+//! helpers. Drive mints its own file ids, so every exact operation names the
+//! file by the opaque id its slot carries and checks that the file it found is
+//! the one the slot means: same id, the encoded name for the slot's logical key,
+//! this folder among its parents, the matching `covenLogicalKey`, not trashed,
+//! and the size and checksum an exact verification needs. Nothing is ever found
+//! by searching for a filename. Prefix listing reports the ids it saw beside the
+//! names; folder discovery is the one place a name query survives.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -13,10 +17,7 @@ use futures_util::StreamExt;
 use super::exact_upload::settle_exact_create;
 use super::http::{self, ensure_ok, ok_bytes, ok_json, NotFound};
 use super::key_encoding::{decode_listed_key, encode_key};
-use super::oauth_rest::{
-    response_stream, rest_delete, rest_list, rest_read, rest_read_range, validated_range_bytes,
-    ListPage, OAuthRestHome, PageTokenTracker,
-};
+use super::oauth_rest::{response_stream, validated_range_bytes, ListPage, OAuthRestHome};
 use super::oauth_session::OAuthSession;
 use super::{
     sharing, BlobBody, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
@@ -28,7 +29,6 @@ use coven_protocol::objects::{ObjectSlot, PhysicalObjectLocator};
 
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
-const CREATE_TOKEN_PROPERTY: &str = "covenCreateToken";
 const LOGICAL_KEY_PROPERTY: &str = "covenLogicalKey";
 const DRIVE_FOLDER_MIME_TYPE: &str = "application/vnd.google-apps.folder";
 
@@ -84,10 +84,6 @@ fn drive_file_query(
     predicates.join(" and ")
 }
 
-fn find_file_query(folder_id: &str, encoded_name: &str) -> String {
-    drive_file_query(Some(folder_id), DriveNameMatch::Equals, encoded_name, None)
-}
-
 fn list_file_query(folder_id: &str, prefix: &str) -> String {
     let encoded_prefix = encode_key(prefix);
     drive_file_query(
@@ -114,20 +110,6 @@ pub struct GoogleDriveCloudHome {
     upload_api: String,
     session: OAuthSession,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
-}
-
-/// One Drive file named by the provider id it was given and the create token
-/// this device stamped on it, whether the name came back from a create response
-/// or from listing the folder.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DriveFileIdentity {
-    id: String,
-    create_token: String,
-}
-
-struct DriveAppendAttempt {
-    file_id: String,
-    create_token: String,
 }
 
 enum DriveSlotState {
@@ -171,53 +153,6 @@ impl GoogleDriveCloudHome {
             redirect_port: 19284,
             extra_auth_params: vec![("access_type".to_string(), "offline".to_string())],
         }
-    }
-
-    /// Find a file's Google Drive ID by name within our folder.
-    async fn find_file_id(&self, encoded_name: &str) -> Result<Option<String>, CloudHomeError> {
-        let files = self.list_file_identities(encoded_name).await?;
-        Ok(select_drive_file(&files).map(|file| file.id.clone()))
-    }
-
-    async fn list_file_identities(
-        &self,
-        encoded_name: &str,
-    ) -> Result<Vec<DriveFileIdentity>, CloudHomeError> {
-        let query = find_file_query(&self.folder_id, encoded_name);
-        let mut page_token: Option<String> = None;
-        let mut page_tokens = PageTokenTracker::new("Google Drive file identity listing");
-        let mut files = Vec::new();
-
-        loop {
-            let page = page_token.clone();
-            let resp =
-                self.session
-                    .api_call(|oauth| {
-                        let mut req =
-                            supports_all_drives(oauth.get(format!("{}/files", self.drive_api)))
-                                .query(&[
-                                    ("q", query.as_str()),
-                                    ("fields", "nextPageToken,files(id,appProperties)"),
-                                    ("pageSize", "1000"),
-                                    ("includeItemsFromAllDrives", "true"),
-                                ]);
-                        if let Some(ref page) = page {
-                            req = req.query(&[("pageToken", page.as_str())]);
-                        }
-                        req
-                    })
-                    .await?;
-            let resp = ensure_ok(resp, "list files", NotFound::Status).await?;
-            let json: serde_json::Value = ok_json(resp, "parse list response").await?;
-            files.extend(parse_drive_file_identities(&json)?);
-
-            match json["nextPageToken"].as_str() {
-                Some(next) => page_token = Some(page_tokens.record(next)?),
-                None => break,
-            }
-        }
-
-        Ok(files)
     }
 
     async fn delete_created_file(&self, key: &str, file_id: &str) -> Result<(), CloudHomeError> {
@@ -458,19 +393,19 @@ impl GoogleDriveCloudHome {
         ))
     }
 
+    /// Open a resumable session that will create exactly the file the slot
+    /// names. The metadata is the same the bounded create writes, so a large
+    /// object and a small one are the same file to every later inspection.
     async fn open_resumable_create_session(
         &self,
-        key: &str,
-        attempt: &DriveAppendAttempt,
+        slot: &ObjectSlot,
     ) -> Result<String, CloudHomeError> {
+        let key = slot.logical_key();
         let metadata = serde_json::json!({
-            "id": attempt.file_id,
+            "id": self.validate_slot(slot)?,
             "name": encode_key(key),
             "parents": [self.folder_id],
-            "appProperties": {
-                (CREATE_TOKEN_PROPERTY): attempt.create_token,
-                (LOGICAL_KEY_PROPERTY): key,
-            },
+            "appProperties": { (LOGICAL_KEY_PROPERTY): key },
         });
         let response = self
             .session
@@ -521,14 +456,7 @@ impl GoogleDriveCloudHome {
                 .create_small_at(slot, body.collect().await?, control)
                 .await;
         }
-        let file_id = self.validate_slot(slot)?.to_string();
-        let attempt = DriveAppendAttempt {
-            file_id,
-            create_token: format!("exact:{}", slot.logical_key()),
-        };
-        let session_url = self
-            .open_resumable_create_session(slot.logical_key(), &attempt)
-            .await?;
+        let session_url = self.open_resumable_create_session(slot).await?;
         let key = slot.logical_key().to_string();
         let classify = Box::new(move |status, response: &str| {
             classify_write_error(status, response, &key, "create exact")

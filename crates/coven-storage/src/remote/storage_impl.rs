@@ -49,18 +49,19 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    async fn read_provider_bytes_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        self.home.read(key).await.map_err(Into::into)
+    async fn read_provider_bytes_for_test(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.home.read_at(slot).await.map_err(Into::into)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    async fn list_provider_keys_for_test(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
-        self.home.list(prefix).await.map_err(Into::into)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    async fn provider_key_exists_for_test(&self, key: &str) -> Result<bool, StorageError> {
-        self.home.exists(key).await.map_err(Into::into)
+    async fn list_provider_slots_for_test(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<ObjectSlot>, StorageError> {
+        self.home.list_slots(prefix).await.map_err(Into::into)
     }
 
     async fn reserve_cross_principal_response_slot(

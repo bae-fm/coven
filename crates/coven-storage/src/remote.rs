@@ -53,8 +53,8 @@ pub enum CloudCipher {
     Plaintext,
 }
 
-/// `CloudSyncObjectStorage` that delegates raw I/O to a `CloudHome` and handles the path
-/// layout and the at-rest protection (its [`CloudCipher`]).
+/// `CloudSyncObjectStorage` that delegates exact-slot I/O to a `CloudHome` and
+/// handles the path layout and the at-rest protection (its [`CloudCipher`]).
 pub struct CloudSyncConnection {
     /// `Arc` because ranged readers retain this provider across awaits.
     home: Arc<dyn ExactCloudHome>,

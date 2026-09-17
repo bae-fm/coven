@@ -1,7 +1,8 @@
 //! S3-backed `CloudHome` implementation.
 //!
-//! Wraps `aws-sdk-s3` to provide raw storage operations against any
-//! S3-compatible endpoint.
+//! Wraps `aws-sdk-s3` to serve exact object slots against any S3-compatible
+//! endpoint. The bucket key is the slot's logical key, so each exact operation
+//! is one of the private transport primitives below applied to it.
 
 use async_trait::async_trait;
 use aws_config::stalled_stream_protection::StalledStreamProtectionConfig;
@@ -24,7 +25,7 @@ use super::s3_common::{
 use super::{
     combine_cleanup_failure, range_header, BlobBody, CloudAccessOutcome, CloudAccessState,
     CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, MultipartUpload, RevokeOutcome,
-    UploadControl,
+    UploadControl, PROBE_PREFIX,
 };
 use coven_foundation::id_provider::{IdRef, UuidProvider};
 use coven_protocol::objects::{ObjectSlot, StorageBackendFailure};
@@ -468,6 +469,179 @@ impl S3CloudHome {
             .await
     }
 
+    /// GET one object's whole body. The body `collect()` runs inside the spawn
+    /// too: streaming the response drives the same aws connector that needs the
+    /// big stack.
+    async fn get_object_bytes(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        let full = self.full_key(key);
+        let key = key.to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        self.runtime
+            .run_cloud(move || async move {
+                let resp = client
+                    .get_object()
+                    .bucket(&bucket)
+                    .key(&full)
+                    .send()
+                    .await
+                    .map_err(|e| get_object_error(&key, e))?;
+
+                let bytes = resp
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|e| body_read_error("read body", &key, e))?
+                    .into_bytes()
+                    .to_vec();
+
+                Ok(bytes)
+            })
+            .await
+    }
+
+    async fn get_object_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, CloudHomeError> {
+        let full = self.full_key(key);
+        let range = range_header(start, end);
+        let key = key.to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        self.runtime
+            .run_cloud(move || async move {
+                let resp = client
+                    .get_object()
+                    .bucket(&bucket)
+                    .key(&full)
+                    .range(range)
+                    .send()
+                    .await
+                    .map_err(|e| get_object_error(&key, e))?;
+
+                let bytes = resp
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|e| body_read_error("read range body", &key, e))?
+                    .into_bytes()
+                    .to_vec();
+
+                // A ranged GET is honored only with 206 Partial Content; a 200 means
+                // the provider ignored `Range` and returned the whole object from
+                // byte 0. The aws-sdk `GetObjectOutput` doesn't surface the raw HTTP
+                // status, so verify the equivalent invariant the reqwest transports
+                // check by status: the body must be exactly the requested byte count
+                // (the `CloudHome` contract never reads past the object's end).
+                let expected = end - start;
+                if bytes.len() as u64 != expected {
+                    return Err(CloudHomeError::Transport(format!(
+                        "read range {key}: expected {expected} bytes for range {start}..{end}, \
+                     got {} — the provider likely ignored Range and returned the whole object",
+                        bytes.len()
+                    )));
+                }
+
+                Ok(bytes)
+            })
+            .await
+    }
+
+    async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+        let full_prefix = self.full_key(prefix);
+        let key_prefix = self.key_prefix.clone();
+        let prefix = prefix.to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        // The whole continuation loop is one spawned task: every page's `send`
+        // runs on the retained cloud runtime.
+        self.runtime
+            .run_cloud(move || async move {
+                let mut keys = Vec::new();
+                let mut continuation_token: Option<String> = None;
+
+                loop {
+                    let mut req = client
+                        .list_objects_v2()
+                        .bucket(&bucket)
+                        .prefix(&full_prefix);
+
+                    if let Some(token) = continuation_token.take() {
+                        req = req.continuation_token(token);
+                    }
+
+                    let resp = req
+                        .send()
+                        .await
+                        .map_err(|error| s3_operation_error(format!("list {prefix}"), error))?;
+
+                    for obj in resp.contents() {
+                        let Some(key) = obj.key() else {
+                            warn!("list {prefix}: S3 returned an object with no key; skipping it");
+                            continue;
+                        };
+                        let Some(stripped) =
+                            strip_listed_key_prefix(key_prefix.as_deref(), &full_prefix, key)
+                        else {
+                            warn!(
+                            "list {prefix}: key {key} is outside the configured S3 prefix {:?}; \
+                             skipping it",
+                            key_prefix
+                        );
+                            continue;
+                        };
+                        keys.push(stripped.to_string());
+                    }
+
+                    if resp.is_truncated() == Some(true) {
+                        let token = resp.next_continuation_token().ok_or_else(|| {
+                            CloudHomeError::Transport(format!(
+                                "list {prefix}: S3 truncated but returned no continuation token"
+                            ))
+                        })?;
+                        continuation_token = Some(token.to_string());
+                    } else {
+                        break;
+                    }
+                }
+
+                Ok(keys)
+            })
+            .await
+    }
+
+    async fn delete_object(&self, key: &str) -> Result<(), CloudHomeError> {
+        let full = self.full_key(key);
+        let key = key.to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        self.runtime
+            .run_cloud(move || async move {
+                use aws_sdk_s3::error::ProvideErrorMetadata;
+                if let Err(e) = client
+                    .delete_object()
+                    .bucket(&bucket)
+                    .key(&full)
+                    .send()
+                    .await
+                {
+                    // Delete is idempotent: AWS S3 returns 204 for an already-absent key,
+                    // but GCS's S3 XML API returns 404 `NoSuchKey`. A missing object is not
+                    // a failure. Exact cleanup operations are retried after uncertain
+                    // outcomes, so deleting an already-absent object must succeed. Swallow
+                    // not-found and surface only real errors.
+                    if !is_not_found_code(e.code()) {
+                        return Err(s3_operation_error(format!("delete {key}"), e));
+                    }
+                }
+                Ok(())
+            })
+            .await
+    }
+
     /// The exact object's body as a stream. The SDK body only advances on the
     /// cloud runtime, so a task there pumps it into a bounded channel and this
     /// returns the receiving end. The bound is how far ahead of its reader the
@@ -616,8 +790,8 @@ impl S3CloudHome {
         use coven_foundation::config::ExactUploadVerification;
 
         let suffix = self.ids.new_id();
-        let key = format!("__coven_probe__/exact-{suffix}");
-        let bad_key = format!("__coven_probe__/bad-checksum-{suffix}");
+        let key = format!("{PROBE_PREFIX}/exact-{suffix}");
+        let bad_key = format!("{PROBE_PREFIX}/bad-checksum-{suffix}");
         let bytes = b"coven exact-slot checksum probe".to_vec();
         let checksum = sha256_bytes_base64(&bytes);
         let sends_checksum = self.google_xml.is_none()
@@ -650,12 +824,12 @@ impl S3CloudHome {
                 Err(error) => return Err(error),
             }
 
-            if self.read(&key).await? != bytes {
+            if self.get_object_bytes(&key).await? != bytes {
                 return Err(CloudHomeError::Configuration(
                     "S3 exact-slot readback returned different bytes".to_string(),
                 ));
             }
-            let listed = self.list("__coven_probe__/").await?;
+            let listed = self.list_keys(&format!("{PROBE_PREFIX}/")).await?;
             if !listed.iter().any(|listed_key| listed_key == &key) {
                 return Err(CloudHomeError::Configuration(
                     "S3 listing did not return the exact-slot probe object".to_string(),
@@ -702,8 +876,8 @@ impl S3CloudHome {
         }
         .await;
 
-        let cleanup_key = self.delete(&key).await;
-        let cleanup_bad = self.delete(&bad_key).await;
+        let cleanup_key = self.delete_object(&key).await;
+        let cleanup_bad = self.delete_object(&bad_key).await;
         let cleanup = match (cleanup_key, cleanup_bad) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -1170,201 +1344,6 @@ fn put_object_error(
 impl CloudHome for S3CloudHome {
     async fn probe(&self) -> Result<(), CloudHomeError> {
         self.probe_exact_slots().await
-    }
-
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        let full = self.full_key(key);
-        let key = key.to_string();
-        let client = self.client.clone();
-        let bucket = self.bucket.clone();
-        // The body `collect()` runs inside the spawn too: streaming the response
-        // drives the same aws connector that needs the big stack.
-        self.runtime
-            .run_cloud(move || async move {
-                let resp = client
-                    .get_object()
-                    .bucket(&bucket)
-                    .key(&full)
-                    .send()
-                    .await
-                    .map_err(|e| get_object_error(&key, e))?;
-
-                let bytes = resp
-                    .body
-                    .collect()
-                    .await
-                    .map_err(|e| body_read_error("read body", &key, e))?
-                    .into_bytes()
-                    .to_vec();
-
-                Ok(bytes)
-            })
-            .await
-    }
-
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        let full = self.full_key(key);
-        let range = range_header(start, end);
-        let key = key.to_string();
-        let client = self.client.clone();
-        let bucket = self.bucket.clone();
-        self.runtime
-            .run_cloud(move || async move {
-                let resp = client
-                    .get_object()
-                    .bucket(&bucket)
-                    .key(&full)
-                    .range(range)
-                    .send()
-                    .await
-                    .map_err(|e| get_object_error(&key, e))?;
-
-                let bytes = resp
-                    .body
-                    .collect()
-                    .await
-                    .map_err(|e| body_read_error("read range body", &key, e))?
-                    .into_bytes()
-                    .to_vec();
-
-                // A ranged GET is honored only with 206 Partial Content; a 200 means
-                // the provider ignored `Range` and returned the whole object from
-                // byte 0. The aws-sdk `GetObjectOutput` doesn't surface the raw HTTP
-                // status, so verify the equivalent invariant the reqwest transports
-                // check by status: the body must be exactly the requested byte count
-                // (the `CloudHome` contract never reads past the object's end).
-                let expected = end - start;
-                if bytes.len() as u64 != expected {
-                    return Err(CloudHomeError::Transport(format!(
-                        "read range {key}: expected {expected} bytes for range {start}..{end}, \
-                     got {} — the provider likely ignored Range and returned the whole object",
-                        bytes.len()
-                    )));
-                }
-
-                Ok(bytes)
-            })
-            .await
-    }
-
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        let full_prefix = self.full_key(prefix);
-        let key_prefix = self.key_prefix.clone();
-        let prefix = prefix.to_string();
-        let client = self.client.clone();
-        let bucket = self.bucket.clone();
-        // The whole continuation loop is one spawned task: every page's `send`
-        // runs on the retained cloud runtime.
-        self.runtime
-            .run_cloud(move || async move {
-                let mut keys = Vec::new();
-                let mut continuation_token: Option<String> = None;
-
-                loop {
-                    let mut req = client
-                        .list_objects_v2()
-                        .bucket(&bucket)
-                        .prefix(&full_prefix);
-
-                    if let Some(token) = continuation_token.take() {
-                        req = req.continuation_token(token);
-                    }
-
-                    let resp = req
-                        .send()
-                        .await
-                        .map_err(|error| s3_operation_error(format!("list {prefix}"), error))?;
-
-                    for obj in resp.contents() {
-                        let Some(key) = obj.key() else {
-                            warn!("list {prefix}: S3 returned an object with no key; skipping it");
-                            continue;
-                        };
-                        let Some(stripped) =
-                            strip_listed_key_prefix(key_prefix.as_deref(), &full_prefix, key)
-                        else {
-                            warn!(
-                            "list {prefix}: key {key} is outside the configured S3 prefix {:?}; \
-                             skipping it",
-                            key_prefix
-                        );
-                            continue;
-                        };
-                        keys.push(stripped.to_string());
-                    }
-
-                    if resp.is_truncated() == Some(true) {
-                        let token = resp.next_continuation_token().ok_or_else(|| {
-                            CloudHomeError::Transport(format!(
-                                "list {prefix}: S3 truncated but returned no continuation token"
-                            ))
-                        })?;
-                        continuation_token = Some(token.to_string());
-                    } else {
-                        break;
-                    }
-                }
-
-                Ok(keys)
-            })
-            .await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        let full = self.full_key(key);
-        let key = key.to_string();
-        let client = self.client.clone();
-        let bucket = self.bucket.clone();
-        self.runtime
-            .run_cloud(move || async move {
-                use aws_sdk_s3::error::ProvideErrorMetadata;
-                if let Err(e) = client
-                    .delete_object()
-                    .bucket(&bucket)
-                    .key(&full)
-                    .send()
-                    .await
-                {
-                    // Delete is idempotent: AWS S3 returns 204 for an already-absent key,
-                    // but GCS's S3 XML API returns 404 `NoSuchKey`. A missing object is not
-                    // a failure. Exact cleanup operations are retried after uncertain
-                    // outcomes, so deleting an already-absent object must succeed. Swallow
-                    // not-found and surface only real errors.
-                    if !is_not_found_code(e.code()) {
-                        return Err(s3_operation_error(format!("delete {key}"), e));
-                    }
-                }
-                Ok(())
-            })
-            .await
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        let full = self.full_key(key);
-        let key = key.to_string();
-        let client = self.client.clone();
-        let bucket = self.bucket.clone();
-        self.runtime
-            .run_cloud(move || async move {
-                use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
-                match client.head_object().bucket(&bucket).key(&full).send().await {
-                    Ok(_) => Ok(true),
-                    // Apply the shared not-found rule (NoSuchKey/NotFound, or a raw 404)
-                    // off the modeled error code and status, not a Display-string match.
-                    Err(e) => {
-                        let status = match &e {
-                            SdkError::ServiceError(svc) => Some(svc.raw().status().as_u16()),
-                            _ => None,
-                        };
-                        if is_not_found_code(e.code()) || status == Some(404) {
-                            Ok(false)
-                        } else {
-                            Err(s3_operation_error(format!("head {key}"), e))
-                        }
-                    }
-                }
-            })
-            .await
     }
 
     async fn set_access(

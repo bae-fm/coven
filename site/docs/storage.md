@@ -1,20 +1,29 @@
 # Storage
 
-coven syncs over a [`CloudHome`](rustdoc:trait:coven::CloudHome):
-a trait that moves object bytes between a device and storage the user
-already controls. coven owns encryption, the key layout, ordering, and retry.
+coven syncs over a [`CloudHome`](rustdoc:trait:coven::CloudHome): one provider
+value that moves object bytes between a device and storage the user already
+controls, and answers for the storage itself — whether it can be reached, and
+who may reach it. coven owns encryption, the key layout, ordering, and retry.
 A provider handles bytes without interpreting application rows or assigning
 protocol sequence numbers. Coven signs the publication order; the provider
 enforces conditional replacement of its current record.
 
-The provider boundary combines two traits: `CloudHome` supplies flat-key byte
-operations, while
-[`ExactSlotStorage`](rustdoc:trait:coven::ExactSlotStorage)
-allocates a provider-specific location before publication and creates it once.
-[`ExactCloudHome`](rustdoc:trait:coven::ExactCloudHome) requires both traits on
-the same provider. A repeated create of the same exact
-object reports `AlreadyPresent`; different bytes report `SlotCollision` and
-never replace the first object.
+Objects are named one way.
+[`ExactSlotStorage`](rustdoc:trait:coven::ExactSlotStorage) allocates a
+provider-specific location before publication, creates it once, and reads,
+ranges, streams and deletes by that same location; `CloudHome` builds on it with
+what is true of the provider rather than of one object — whether it is
+reachable, how many operations it has been asked for, and who may reach it.
+[`ExactCloudHome`](rustdoc:trait:coven::ExactCloudHome) is the name callers hold
+a whole provider by. There is no second way to address an object by name, and no
+second provider value to obtain after opening the home. A repeated create of the
+same exact object reports `AlreadyPresent`; different bytes report
+`SlotCollision` and never replace the first object.
+
+The location is opaque to coven. For S3, Dropbox and OneDrive it is the object's
+logical key. Google Drive mints its own file ids, so a Drive slot carries the id
+and every operation names the file by it — two Drive files may share a name, and
+each slot still means exactly one of them.
 
 `ExactSlotStorage` also reads a mutable record with its provider revision and
 replaces it only if that revision still matches. Store publication uses this
@@ -25,7 +34,7 @@ competing accepted history before retrying.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
-<svg class="flow" viewBox="0 0 660 210" role="img" aria-label="Sync concepts pass through the sealing layer to the raw byte trait and then to a provider">
+<svg class="flow" viewBox="0 0 660 210" role="img" aria-label="Sync concepts pass through the sealing layer to the exact-slot provider trait and then to a provider">
 <rect class="lane" x="80" y="16" width="500" height="40" rx="9"/>
 <text class="lbl s11" x="330" y="34" text-anchor="middle">sync concepts</text>
 <text class="sub" x="330" y="48" text-anchor="middle">a device's changeset seq · a blob id · a membership entry</text>
@@ -36,7 +45,7 @@ competing accepted history before retrying.
 <line class="arr" x1="330" y1="122" x2="330" y2="136" marker-end="url(#fa)"/>
 <rect class="chipo" x="80" y="140" width="500" height="40" rx="9"/>
 <text class="lbl s11" x="330" y="158" text-anchor="middle">ExactCloudHome</text>
-<text class="sub" x="330" y="172" text-anchor="middle">bytes · immutable slots · conditional record replacement · access</text>
+<text class="sub" x="330" y="172" text-anchor="middle">exact slots · conditional record replacement · reachability · access</text>
 <line class="arr" x1="330" y1="184" x2="330" y2="196" marker-end="url(#fa)"/>
 <text class="sub" x="330" y="208" text-anchor="middle">S3 · Dropbox · OneDrive · CloudKit</text>
 </svg>
@@ -63,29 +72,14 @@ keyring").
 ## The trait
 
 Encryption, protocol ordering, verification, and retry live above the provider
-implementations. A backend supplies bytes by key plus the provider-shaped
-operations no wrapper can manufacture: create-once exact slots and the
-multipart sessions behind them, conditional replacement, and account access.
-`CloudHome` has no way to overwrite an object that exists: every write coven
-makes is an exact create or a versioned conditional replacement, both of which
-live on `ExactSlotStorage`. These excerpts show the publication boundary; the
+implementations. A backend supplies the provider-shaped operations no wrapper
+can manufacture: create-once exact slots and the multipart sessions behind them,
+conditional replacement, and account access. There is no way to overwrite an
+object that exists: every write coven makes is an exact create or a versioned
+conditional replacement. These excerpts show the publication boundary; the
 linked trait definitions include the complete API.
 
 ```rust
-pub trait CloudHome: Send + Sync {
-    async fn probe(&self) -> Result<(), CloudHomeError> { /* default: no-op list */ }
-
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError>;
-    async fn read_range(&self, key: &str, start: u64, end: u64)
-        -> Result<Vec<u8>, CloudHomeError>;
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError>;
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError>;
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError>;
-
-    async fn set_access(&self, desired: CloudAccessState)
-        -> Result<CloudAccessOutcome, CloudHomeError>;
-}
-
 pub trait ExactSlotStorage: Send + Sync {
     async fn provider_binding(&self) -> Result<ResolvedProviderBinding, CloudHomeError>;
     async fn cross_principal_evidence(&self)
@@ -110,12 +104,24 @@ pub trait ExactSlotStorage: Send + Sync {
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError>;
 }
 
-pub trait ExactCloudHome: CloudHome + ExactSlotStorage {}
+pub trait CloudHome: ExactSlotStorage {
+    async fn probe(&self) -> Result<(), CloudHomeError> { /* default: list a sentinel prefix */ }
+
+    async fn set_access(&self, desired: CloudAccessState)
+        -> Result<CloudAccessOutcome, CloudHomeError>;
+}
+
+pub trait ExactCloudHome: CloudHome {}
 ```
 
-- `ExactCloudHome` supplies raw operations and exact storage through one
-  provider value. There is no optional second provider object to obtain after
-  opening the home.
+- `ExactCloudHome` is one provider value carrying both the object contract and
+  the provider's own facts. There is no optional second provider object to
+  obtain after opening the home, and no way to reach an object except through a
+  slot the provider allocated or listed.
+- `allocate_slot` reserves a location before anything is written, and
+  `list_slots` reports the locations of what is already there. Every slot that
+  names a stored object comes from one of those two, so a read can never land on
+  a different provider object that happens to share a name.
 - `create_at` preserves immutable object identity. `read_versioned_at` returns
   bytes and the revision that `replace_at_if_version` must present for that
   exact slot. A revision mismatch is a competing writer; an unavailable or
@@ -129,22 +135,23 @@ pub trait ExactCloudHome: CloudHome + ExactSlotStorage {}
 - `probe` checks that the backend is reachable with the configured credentials.
   Setup flows call it before persisting credentials, so a typo or a missing
   bucket fails at setup instead of via a delayed reconnect banner. The default
-  implementation lists a sentinel prefix; backends override it with a cheaper
-  check. S3 uses `HeadBucket`, then creates a probe object twice to prove
-  create-only behavior and runs the configured integrity check. Upload-checksum
-  mode also sends a deliberately wrong SHA-256 and requires the endpoint to
-  reject it.
+  implementation lists a sentinel prefix through `list_slots`; backends override
+  it with a provider-specific capability check. S3 reads no bucket metadata at
+  all: it creates a probe object twice to prove create-only behavior, reads it
+  back, checks the listing reports it, runs the configured integrity check, and
+  deletes what it wrote. Upload-checksum mode also sends a deliberately wrong
+  SHA-256 and requires the endpoint to reject it.
 - `create_at` is the only upload. A provider serves a small object in one
   bounded request and a large one through its own streaming session, choosing
   by its own threshold, and pumps a sized `BlobBody` through the shared
   multipart driver — which reports cumulative bytes to the `progress` callback
   for the per-file bar. Small control files (auth keys, head pointers, the
   snapshot) pass `no_progress`, which discards the reports.
-- `read` returns the whole value. `read_range` returns a half-open byte range
-  (`start` inclusive, `end` exclusive), which is how coven fetches only the
-  encrypted chunks covering a blob byte range.
-- `list` returns every key under a prefix. `delete` is not an error when the key
-  is absent. `exists` is a presence check.
+- `read_at` returns the whole object. `read_range_at` returns a half-open byte
+  range (`start` inclusive, `end` exclusive), which is how coven fetches only
+  the encrypted chunks covering a blob byte range.
+- `list_slots` returns every slot under a logical-key prefix. `delete_at` is not
+  an error when the slot is already empty.
 - `set_access` sets whether one member principal can reach the cloud home. The
   command carries the absolute desired state, verifies provider readback, and
   is safe to retry after an unknown outcome. It is provider-shaped and
@@ -180,7 +187,7 @@ same cloud home:
 provider supports per-member revocation and reports a `RevokeOutcome`.
 Because access updates work with folder shares and share URLs,
 not encrypted payloads, they live below the encryption layer and are called
-directly on the `CloudHome`, not through the wrapper described under
+directly on the provider, not through the wrapper described under
 [Where encryption sits](#where-encryption-sits).
 
 ## Errors
@@ -239,7 +246,7 @@ codes (`storageQuotaExceeded`, `path/insufficient_space`, `quotaLimitReached`).
 Every other service error keeps its raw code and message so it stays debuggable
 in logs.
 
-Above the raw `CloudHome` boundary, blob reads retain three distinct causes. A
+Above the `CloudHome` boundary, blob reads retain three distinct causes. A
 provider or network failure is transport and sets the sync loop to `Offline`.
 Plaintext that fails its signed content hash is `InvalidContent`; failure to
 create, write, sync, or rename the local destination is `LocalFilesystem`.
@@ -282,15 +289,18 @@ presence alone.
 
 - **Google Drive**
   (`GoogleDriveCloudHome`)
-  implements immutable slots and raw storage, but refuses the conditional
-  record operations required by Store publication. Its storage methods keep
-  files flat in one folder. Drive filenames cannot carry the key's
-  slashes, so each key is hex-encoded into a slash-free filename and decoded on
-  list; the encoding is exact and reversible, never a lossy substitution. Large
-  files use a resumable upload session in 8 MiB chunks (Drive requires 256
-  KiB alignment). Exact-upload metadata verification compares Drive's
-  `md5Checksum` and size; an ambiguous create response is settled through that
-  metadata without downloading the body.
+  implements immutable slots but refuses the conditional record operations
+  required by Store publication. It keeps files flat in one folder. Drive
+  filenames cannot carry the key's slashes, so each key is hex-encoded into a
+  slash-free filename and decoded on list; the encoding is exact and reversible,
+  never a lossy substitution. Drive assigns its own file id, which a slot
+  carries: reads, ranges and deletions name that id and then check that the file
+  it reached is the one the slot means — same id, the encoded name for the
+  slot's logical key, the store folder among its parents, the matching
+  `covenLogicalKey`, not trashed. Large files use a resumable upload session in
+  8 MiB chunks (Drive requires 256 KiB alignment). Exact-upload metadata
+  verification compares Drive's `md5Checksum` and size; an ambiguous create
+  response is settled through that metadata without downloading the body.
 
 - **OneDrive**
   (`OneDriveCloudHome`)
@@ -309,20 +319,24 @@ presence alone.
 - **CloudKit**
   (`CloudKitCloudHome`)
   stores files in the user's iCloud private database. A `CKAsset` caps at 50 MB,
-  so a file larger than 10 MiB is split into 10 MiB part records and read back
-  by reassembling those parts. Exact parts and their hash-bearing manifest are
-  committed as one atomic record batch. The raw record operations are defined by the
-  [`CloudKitOps`](rustdoc:trait:coven::CloudKitOps)
-  trait and implemented in Swift through a UniFFI callback interface; coven
-  cannot build this one from Rust alone and returns a `Storage` error directing
-  you to construct it through your Swift layer.
+  so an object larger than 10 MiB is split into 10 MiB part records at
+  deterministic names beside a hash-bearing manifest record at the object's own
+  slot. Manifest and parts are committed as one atomic record batch, so an
+  object is either wholly present or absent; a listing reports the manifest's
+  slot and never the part records behind it. The record operations are defined
+  by the [`CloudKitOps`](rustdoc:trait:coven::CloudKitOps) trait and implemented
+  in Swift through a UniFFI callback interface; coven cannot build this one from
+  Rust alone and returns a `Storage` error directing you to construct it through
+  your Swift layer.
 
 - **In-memory**
   ([`InMemoryCloudHome`](rustdoc:struct:coven::InMemoryCloudHome),
   under the `test-utils` feature) is a `HashMap`-backed home that two simulated
   devices share through an `Arc` to round-trip changesets and blobs in unit
   tests. It exposes `keys()`, `get()`, `len()`, and `deletes_seen()` for
-  after-the-fact assertions.
+  after-the-fact assertions, and `insert_exact_object()` /
+  `replace_exact_object()` / `restore_exact_object()` for a test that needs to
+  put bytes at a slot behind the adapter's back.
 
 ## OAuth sessions: refresh and retry
 
@@ -350,8 +364,8 @@ reconnect message.
 ## Where encryption sits
 
 Encryption stays out of the providers so that all five share one at-rest
-implementation instead of five slightly different ones. `CloudHome` deals
-only in raw bytes. The at-rest protection and the key layout
+implementation instead of five slightly different ones. `ExactSlotStorage`
+deals only in stored bytes. The at-rest protection and the key layout
 live one level up, in
 `CloudSyncConnection`,
 which wraps an `Arc<dyn ExactCloudHome>`: it seals on the way down, opens on the way up,

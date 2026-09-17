@@ -606,7 +606,7 @@ async fn authoritative_listing_rejects_a_repeated_cursor() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(200),
-        home.list("protocol/"),
+        home.list_slots("protocol/"),
     )
     .await
     .expect("listing must terminate on a repeated cursor")

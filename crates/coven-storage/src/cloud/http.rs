@@ -109,23 +109,6 @@ pub(crate) async fn body_text(resp: Response) -> String {
         .unwrap_or_else(|e| format!("<body read failed: {e}>"))
 }
 
-/// Resolve a sent existence-probe response to a bool: 2xx → present, the
-/// provider's `not_found` signal → absent, any other non-2xx → error. The one
-/// definition of the `match ensure_ok(..) { Ok => true, NotFound => false, Err =>
-/// err }` three-arm match each `exists` repeated. The caller still builds and
-/// sends its own (GET vs metadata POST) request.
-pub(crate) async fn exists_from_response(
-    resp: Response,
-    ctx: &str,
-    not_found: NotFound,
-) -> Result<bool, CloudHomeError> {
-    match ensure_ok(resp, ctx, not_found).await {
-        Ok(_) => Ok(true),
-        Err(CloudHomeError::NotFound(_)) => Ok(false),
-        Err(e) => Err(e),
-    }
-}
-
 /// The `Content-Range` header value for one resumable-upload part:
 /// `bytes {start}-{end}/{total}` (both bounds inclusive). The single definition of
 /// the string Google Drive and OneDrive each formatted by hand in their upload

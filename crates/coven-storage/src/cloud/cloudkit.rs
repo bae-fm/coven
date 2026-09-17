@@ -1,13 +1,14 @@
 //! CloudKit-backed `CloudHome` implementation.
 //!
-//! CloudKit's CKAsset has a 50MB limit, so large files are split into 10MB
-//! chunks stored as tokened part records plus a manifest record.
+//! CloudKit's CKAsset has a 50MB limit, so an exact object larger than 10MB is
+//! split into 10MB part records at deterministic names beside a manifest record
+//! at the object's own slot. Manifest and parts are created as one atomic
+//! record batch, so an object is either wholly there or not there at all.
 //!
 //! The `CloudKitOps` trait defines synchronous record operations implemented by
-//! a host bridge to its CloudKit driver. `CloudKitCloudHome` wraps these ops,
-//! adds chunking logic, and implements `CloudHome`.
+//! a host bridge to its CloudKit driver. `CloudKitCloudHome` wraps those ops,
+//! assembles exact objects over them, and implements `CloudHome`.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -21,16 +22,15 @@ use super::{
 use coven_protocol::objects::ObjectSlot;
 
 const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
-const CHUNK_MANIFEST_MAGIC: &[u8] = b"coven-cloudkit-chunk-manifest-v1\0";
-const CHUNK_MANIFEST_SUFFIX: &str = ".manifest";
 
-mod chunking;
-use chunking::*;
+mod staging;
+use staging::*;
 mod exact;
 
-/// Synchronous interface for raw CloudKit record operations.
-/// Implemented by a host bridge to its platform CloudKit driver.
-/// Methods block the calling thread while CloudKit async operations complete.
+/// Synchronous interface for the CloudKit record operations an exact object is
+/// assembled from. Implemented by a host bridge to its platform CloudKit
+/// driver. Methods block the calling thread while CloudKit async operations
+/// complete.
 pub trait CloudKitOps: Send + Sync {
     /// Stable CloudKit namespace and principal facts for the selected zone.
     fn provider_identity(
@@ -45,13 +45,6 @@ pub trait CloudKitOps: Send + Sync {
         scope: &CloudKitScope,
     ) -> Result<CloudKitAcceptedShareRecord, CloudHomeError>;
 
-    fn write_record(
-        &self,
-        scope: &CloudKitScope,
-        key: &str,
-        data: Vec<u8>,
-    ) -> Result<(), CloudHomeError>;
-    fn read_record(&self, scope: &CloudKitScope, key: &str) -> Result<Vec<u8>, CloudHomeError>;
     fn list_records(
         &self,
         scope: &CloudKitScope,
@@ -418,154 +411,6 @@ where
 
 #[async_trait]
 impl CloudHome for CloudKitCloudHome {
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
-        let key = key.to_string();
-        blocking(move || {
-            match ops.read_record(&scope, &key) {
-                Ok(data) => return Ok(data),
-                Err(CloudHomeError::NotFound(_)) => {}
-                Err(e) => return Err(e),
-            }
-
-            match ops.read_record(&scope, &chunk_manifest_key(&key)) {
-                Ok(data) => {
-                    let manifest = decode_chunk_manifest(&data)?;
-                    return read_chunked_object(&*ops, &scope, &key, manifest);
-                }
-                Err(CloudHomeError::NotFound(_)) => {}
-                Err(e) => return Err(e),
-            }
-
-            Err(missing_or_unassembled(&*ops, &scope, key))
-        })
-        .await
-    }
-
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        if end <= start {
-            return Ok(Vec::new());
-        }
-
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
-        let key = key.to_string();
-        blocking(move || {
-            let start = start as usize;
-            let end = end as usize;
-
-            match ops.read_record(&scope, &key) {
-                Ok(data) => {
-                    if end > data.len() {
-                        return Err(CloudHomeError::Transport(format!(
-                            "range {start}..{end} exceeds file size {}",
-                            data.len()
-                        )));
-                    }
-                    return Ok(data[start..end].to_vec());
-                }
-                Err(CloudHomeError::NotFound(_)) => {}
-                Err(e) => return Err(e),
-            }
-
-            match ops.read_record(&scope, &chunk_manifest_key(&key)) {
-                Ok(data) => {
-                    let manifest = decode_chunk_manifest(&data)?;
-                    let chunks = list_numbered_chunks(&*ops, &scope, &key, &manifest)?;
-                    verify_chunk_manifest(&key, &manifest, &chunks)?;
-                    if end > manifest.total_len {
-                        return Err(CloudHomeError::Transport(format!(
-                            "range {start}..{end} exceeds file size {}",
-                            manifest.total_len
-                        )));
-                    }
-
-                    let first_chunk = start / CHUNK_SIZE;
-                    let last_chunk = (end - 1) / CHUNK_SIZE;
-                    let mut result = Vec::with_capacity(end - start);
-                    for (i, chunk_key) in chunks
-                        .iter()
-                        .filter(|(i, _)| (first_chunk..=last_chunk).contains(i))
-                    {
-                        let chunk = read_chunk(&*ops, &scope, &key, &manifest, *i, chunk_key)?;
-                        let chunk_start = i * CHUNK_SIZE;
-                        let slice_start = if *i == first_chunk {
-                            start - chunk_start
-                        } else {
-                            0
-                        };
-                        let slice_end = if *i == last_chunk {
-                            end - chunk_start
-                        } else {
-                            chunk.len()
-                        };
-                        result.extend_from_slice(&chunk[slice_start..slice_end]);
-                    }
-                    return Ok(result);
-                }
-                Err(CloudHomeError::NotFound(_)) => {}
-                Err(e) => return Err(e),
-            }
-
-            Err(missing_or_unassembled(&*ops, &scope, key))
-        })
-        .await
-    }
-
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
-        let prefix = prefix.to_string();
-        blocking(move || {
-            let raw_keys = ops.list_records(&scope, &prefix)?;
-
-            // A base key exists only when its single record or its manifest is
-            // present — the manifest is what makes a chunked object readable. Part
-            // records with no manifest are an incomplete or aborted upload, which
-            // `read` cannot assemble, so they are not reported.
-            let present: HashSet<&str> = raw_keys.iter().map(String::as_str).collect();
-            let mut base_keys: Vec<String> = raw_keys
-                .iter()
-                .map(|k| strip_part_suffix(k))
-                .filter(|&base| {
-                    present.contains(base) || present.contains(chunk_manifest_key(base).as_str())
-                })
-                .map(str::to_string)
-                .collect();
-            base_keys.sort();
-            base_keys.dedup();
-            Ok(base_keys)
-        })
-        .await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
-        let key = key.to_string();
-        blocking(move || delete_all_variants(&*ops, &scope, &key)).await
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
-        let key = key.to_string();
-        blocking(move || {
-            if ops.record_exists(&scope, &key)? {
-                return Ok(true);
-            }
-            let manifest = match ops.read_record(&scope, &chunk_manifest_key(&key)) {
-                Ok(data) => decode_chunk_manifest(&data)?,
-                Err(CloudHomeError::NotFound(_)) => return Ok(false),
-                Err(e) => return Err(e),
-            };
-            let chunks = list_numbered_chunks(&*ops, &scope, &key, &manifest)?;
-            Ok(verify_chunk_manifest(&key, &manifest, &chunks).is_ok())
-        })
-        .await
-    }
-
     async fn set_access(
         &self,
         desired: CloudAccessState,

@@ -1,4 +1,5 @@
 use super::*;
+use coven_storage::cloud::ExactSlotStorage as _;
 
 #[path = "recovery_retry_tests.rs"]
 mod recovery_retry_tests;
@@ -153,7 +154,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         .publish_fixture_position("history-after-recovery-head")
         .await;
     let candidates_before_retry = cloud
-        .list(candidate_prefix)
+        .list_slots(candidate_prefix)
         .await
         .expect("list candidate objects before recovery retry");
 
@@ -190,7 +191,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
     assert_eq!(retry.device_id, "device-late-0");
     assert_eq!(
         cloud
-            .list(candidate_prefix)
+            .list_slots(candidate_prefix)
             .await
             .expect("list candidate objects after retry"),
         candidates_before_retry,
@@ -554,7 +555,7 @@ async fn a_repeated_owner_recovery_restore_resumes_the_device_s_published_stream
             "the first cycle published past the initial acknowledgement"
         );
         let snapshot_objects = storage()
-            .list_provider_keys_for_test("store-v1/snapshots/")
+            .list_provider_slots_for_test("store-v1/snapshots/")
             .await
             .expect("list Store snapshot objects");
 
@@ -621,7 +622,7 @@ async fn a_repeated_owner_recovery_restore_resumes_the_device_s_published_stream
         );
         assert_eq!(
             storage()
-                .list_provider_keys_for_test("store-v1/snapshots/")
+                .list_provider_slots_for_test("store-v1/snapshots/")
                 .await
                 .expect("list Store snapshot objects"),
             snapshot_objects,

@@ -4,6 +4,7 @@ use super::counting::CountingCloudHome;
 use super::test_utils::InMemoryCloudHome;
 use super::{create_exact_bytes, CloudHome, ExactCloudHome, UploadProgress};
 use coven_foundation::stage_timing::{ProviderRequests, StageTimings};
+use coven_protocol::objects::ObjectSlot;
 use std::sync::Arc;
 
 fn counting_home() -> (Arc<dyn ExactCloudHome>, Arc<dyn ProviderRequests>) {
@@ -38,6 +39,7 @@ fn counts(timings: &StageTimings) -> String {
 #[tokio::test]
 async fn a_join_choreography_reports_its_operations_by_stage() {
     let (home, requests) = counting_home();
+    let mut slots = std::collections::HashMap::new();
     for (key, bytes) in [
         ("root", b"root".to_vec()),
         ("founder", b"founder".to_vec()),
@@ -47,14 +49,15 @@ async fn a_join_choreography_reports_its_operations_by_stage() {
         create_exact_bytes(home.as_ref(), &slot, &bytes, &no_progress())
             .await
             .unwrap();
+        slots.insert(key, slot);
     }
     let mut timings = StageTimings::counting("device join", Some(requests));
 
     // Pin the Store root: one read of the root, one of the founder behind it.
     timings
         .stage("pin the Store root", async {
-            home.read("root").await.unwrap();
-            home.read("founder").await.unwrap();
+            home.read_at(&slots["root"]).await.unwrap();
+            home.read_at(&slots["founder"]).await.unwrap();
         })
         .await;
 
@@ -64,7 +67,8 @@ async fn a_join_choreography_reports_its_operations_by_stage() {
     timings
         .stage("walk the membership chain", async {
             for entry in 0..3 {
-                let _ = home.read(&format!("membership/{entry}")).await;
+                let slot = ObjectSlot::logical(format!("membership/{entry}")).unwrap();
+                let _ = home.read_at(&slot).await;
             }
         })
         .await;
@@ -74,7 +78,7 @@ async fn a_join_choreography_reports_its_operations_by_stage() {
     // which is exactly what telling the two apart is for.
     timings
         .stage("download the snapshot", async {
-            home.read("snapshot").await.unwrap();
+            home.read_at(&slots["snapshot"]).await.unwrap();
         })
         .await;
 
@@ -94,23 +98,25 @@ async fn a_join_choreography_reports_its_operations_by_stage() {
 async fn the_run_total_exceeds_its_stages_by_what_they_did_not_name() {
     let (home, requests) = counting_home();
     let mut timings = StageTimings::counting("device join", Some(Arc::clone(&requests)));
+    let root = ObjectSlot::logical("root".to_string()).unwrap();
+    let stray = ObjectSlot::logical("stray".to_string()).unwrap();
 
     timings
         .stage("pin the Store root", async {
-            let _ = home.read("root").await;
+            let _ = home.read_at(&root).await;
         })
         .await;
-    let _ = home.read("stray").await;
+    let _ = home.read_at(&stray).await;
 
     assert_eq!(counts(&timings), "pin the Store root 1req");
     assert_eq!(requests.issued(), 2, "the stray read is still the home's");
 }
 
-/// The slot side of the home counts too. Both traits cross the same provider
-/// boundary, so a caller working in slots must not be invisible to a budget
-/// written against a caller working in keys.
+/// Naming a slot, looking at it, and listing for it are each one thing asked
+/// of the provider, and the counter says three — a decorator that inherited a
+/// trait default instead of forwarding it would lose the operation it skipped.
 #[tokio::test]
-async fn slot_operations_count_the_same_as_key_operations() {
+async fn every_exact_operation_counts() {
     let (home, requests) = counting_home();
 
     let slot = home.allocate_slot("commit/1").await.unwrap();

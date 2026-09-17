@@ -1403,14 +1403,6 @@ impl SyncComponents {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn list_storage_objects_for_test(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, coven_protocol::objects::StorageError> {
-        self.storage.list_provider_keys_for_test(prefix).await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub fn uses_storage_for_test(
         &self,
         expected: &std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,

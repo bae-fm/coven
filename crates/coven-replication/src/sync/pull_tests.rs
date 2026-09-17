@@ -3599,7 +3599,6 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     )
     .await
     .expect("create Store for Circle activation ordering");
-    storage.sort_provider_listings();
     let first_store_dir = crate::sync::test_helpers::test_store_dir();
     let first = open_scoped_circle_test_db(first_store_dir.clone());
     let second_store_dir = crate::sync::test_helpers::test_store_dir();
@@ -4231,19 +4230,21 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
         blob_key.starts_with("photos/readable/n1/cover-p1cover.jpg/.coven-versions/"),
         "the exact object stays grouped below its readable path: {blob_key}",
     );
+    let readable_slots = storage
+        .list_provider_slots_for_test("photos/")
+        .await
+        .expect("list the readable blob namespace");
+    let readable_keys = readable_slots
+        .iter()
+        .map(|slot| slot.logical_key())
+        .collect::<Vec<_>>();
     assert!(
-        storage
-            .provider_key_exists_for_test(&blob_key)
-            .await
-            .expect("exists at exact readable version"),
-        "the exact readable blob version exists",
+        readable_keys.contains(&blob_key.as_str()),
+        "the exact readable blob version exists: {readable_keys:?}",
     );
     assert!(
-        !storage
-            .provider_key_exists_for_test("photos/n1/cover-p1cover.jpg")
-            .await
-            .expect("check obsolete mutable readable key"),
-        "no mutable object occupies the bare readable path",
+        !readable_keys.contains(&"photos/n1/cover-p1cover.jpg"),
+        "no object occupies the bare readable path: {readable_keys:?}",
     );
 
     // Device B: a fresh DB and its own store dir, same cloud + plain scheme,
@@ -4876,14 +4877,13 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         .row_blob_ref("note_photos", "p1cover")
         .await
         .expect("load exact published blob row");
-    let blob_key = source_blob
+    let blob_slot = source_blob
         .stored()
         .expect("published blob row has exact object authority")
         .object()
-        .slot()
-        .logical_key();
+        .slot();
     let at_rest = storage
-        .read_provider_bytes_for_test(blob_key)
+        .read_provider_bytes_for_test(blob_slot)
         .await
         .expect("blob present in cloud");
     assert_ne!(
@@ -7403,7 +7403,6 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
     )
     .await
     .expect("create exact Store for dependency-order test");
-    storage.sort_provider_listings();
 
     let first_store_dir = crate::sync::test_helpers::test_store_dir();
     let first = crate::sync::test_helpers::open_test_db(first_store_dir.clone());

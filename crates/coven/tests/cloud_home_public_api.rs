@@ -114,12 +114,6 @@ impl CloudKitOps for ExternalCloudKitBridge {
         unimplemented!()
     }
 
-    fn write_record(&self, _: &CloudKitScope, _: &str, _: Vec<u8>) -> Result<(), CloudHomeError> {
-        unimplemented!()
-    }
-    fn read_record(&self, _: &CloudKitScope, _: &str) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!()
-    }
     fn list_records(&self, _: &CloudKitScope, _: &str) -> Result<Vec<String>, CloudHomeError> {
         unimplemented!()
     }
@@ -218,31 +212,6 @@ fn object_slot_rejects_empty_components() {
 
 #[async_trait]
 impl CloudHome for ExternalProvider {
-    async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        Ok(Vec::new())
-    }
-
-    async fn read_range(
-        &self,
-        _key: &str,
-        _start: u64,
-        _end: u64,
-    ) -> Result<Vec<u8>, CloudHomeError> {
-        Ok(Vec::new())
-    }
-
-    async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        Ok(Vec::new())
-    }
-
-    async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
-        Ok(())
-    }
-
-    async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
-        Ok(false)
-    }
-
     async fn set_access(
         &self,
         _desired: CloudAccessState,
@@ -274,14 +243,13 @@ impl ExactSlotStorage for ExternalProvider {
     }
 
     async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
-        CloudHome::list(self, prefix)
-            .await?
-            .into_iter()
-            .map(|key| {
-                ObjectSlot::opaque(key, "provider:created-copy".to_string())
-                    .map_err(CloudHomeError::from)
-            })
-            .collect()
+        Ok(match prefix {
+            "objects/" => vec![ObjectSlot::opaque(
+                "objects/copy".to_string(),
+                "provider:copy".to_string(),
+            )?],
+            _ => Vec::new(),
+        })
     }
 
     async fn create_at(
@@ -369,6 +337,10 @@ async fn external_provider_can_name_and_implement_the_full_cloud_home_surface() 
         provider.provider_binding().await.unwrap().store,
         StoreProviderBinding::Dropbox { .. }
     ));
+    // The default reachability probe is an exact listing of a sentinel prefix,
+    // so a provider that implements only the exact contract is already
+    // probeable — there is nothing else for a setup flow to call.
+    provider.probe().await.expect("external provider probe");
     let created = provider
         .allocate_slot("objects/default-create")
         .await
@@ -388,8 +360,20 @@ async fn external_provider_can_name_and_implement_the_full_cloud_home_surface() 
         .expect("provider creates the exact slot");
     assert_eq!(created.logical_key(), "objects/default-create");
     assert!(exact_create_called.load(Ordering::SeqCst));
-    let object = ObjectSlot::opaque("objects/copy".to_string(), "provider:copy".to_string())
-        .expect("valid external provider slot");
+    // A listing is the only other source of a slot, and it hands back the
+    // provider's own locator rather than anything derived from the key.
+    let listed = provider
+        .list_slots("objects/")
+        .await
+        .expect("external provider listing");
+    assert_eq!(
+        listed,
+        vec![
+            ObjectSlot::opaque("objects/copy".to_string(), "provider:copy".to_string())
+                .expect("valid external provider slot")
+        ]
+    );
+    let object = listed.into_iter().next().expect("one listed slot");
 
     let mut stream = provider
         .open_stream_at(&object)
