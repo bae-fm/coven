@@ -1325,5 +1325,6 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
 mod blobs;
 mod reclaim;
 mod restoration;
+mod restoration_destination;
 mod restoration_provenance;
 mod snapshots;

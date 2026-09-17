@@ -1,4 +1,5 @@
-use super::restoration::{ActiveMemberCircleSnapshot, CircleFixtureMode, RestoreTarget};
+use super::restoration::{ActiveMemberCircleSnapshot, CircleFixtureMode};
+use super::restoration_destination::RestoreTarget;
 
 /// A restored recipient resolves an inherited entry's introduction through its
 /// own retained accepted activations.
