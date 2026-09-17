@@ -387,7 +387,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 founder = Some(control.coord);
                 continue;
             }
-            for predecessor in &control.value.access_epoch().covered_control_heads {
+            for predecessor in control.value.covered_controls() {
                 let (activation, commit) = self
                     .database
                     .verified_circle_activation_context(

@@ -32,12 +32,56 @@ pub struct CircleBootstrapObjectRef {
     pub image: SnapshotImageRef,
 }
 
-/// Exact Circle-metadata object and the epoch key that must open it.
+/// Where one Circle roster or metadata entry entered accepted Store history.
+///
+/// An entry is published exactly once, by the commit whose signing device
+/// authored it. Every later control that still carries the entry names that
+/// exact earlier accepted activation instead of re-asserting the entry itself:
+/// a later control's signed object map is not evidence that the entry was ever
+/// accepted.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CircleEntryOrigin {
+    /// Published by the Store commit that carries this control. That commit is
+    /// signed by the entry author's own device registration, which is what
+    /// certifies the entry's device authorship.
+    Introduced,
+    /// Published by an exact earlier accepted Store commit, which carried this
+    /// Circle's control and named this entry `Introduced` at the same object.
+    Inherited {
+        activating_commit: StoreBatchCommitRef,
+    },
+}
+
+impl CircleEntryOrigin {
+    pub fn inherited_from(&self) -> Option<&StoreBatchCommitRef> {
+        match self {
+            Self::Introduced => None,
+            Self::Inherited { activating_commit } => Some(activating_commit),
+        }
+    }
+
+    pub fn is_introduced(&self) -> bool {
+        matches!(self, Self::Introduced)
+    }
+}
+
+/// Exact Circle-roster entry object and where it entered accepted history.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleRosterEntryRef {
+    pub object: ExactObjectRef,
+    pub origin: CircleEntryOrigin,
+}
+
+/// Exact Circle-metadata object, the epoch key that must open it, and where it
+/// entered accepted history.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CircleMetadataObjectRef {
     pub key_fingerprint: KeyFingerprint,
     pub object: ExactObjectRef,
+    pub origin: CircleEntryOrigin,
 }
 
 /// Closed exact object graph needed to verify one Store-activated Circle control.
@@ -49,11 +93,9 @@ pub struct CircleActivationObjects {
     pub close_outcome: Option<crate::circle::CircleEpochCloseOutcomeRef>,
     pub close_cancellation: Option<crate::circle::CircleEpochCloseCancellationRef>,
     #[serde(with = "ordered_map_entries")]
-    pub roster_entries: BTreeMap<CircleRosterCoord, ExactObjectRef>,
-    pub roster_heads: Vec<CircleRosterHeadRef>,
+    pub roster_entries: BTreeMap<CircleRosterCoord, CircleRosterEntryRef>,
     #[serde(with = "ordered_map_entries")]
     pub metadata_entries: BTreeMap<CircleMetadataCoord, CircleMetadataObjectRef>,
-    pub metadata_heads: Vec<CircleMetadataHeadRef>,
     pub bootstraps: Vec<CircleBootstrapObjectRef>,
 }
 
@@ -78,8 +120,6 @@ impl CircleActivationObjects {
 pub struct CircleControlRef {
     pub circle_id: CircleId,
     pub control: CircleControlCoord,
-    pub head_hash: ObjectHash,
-    pub head_object: ExactObjectRef,
     pub objects: CircleActivationObjects,
 }
 
@@ -90,14 +130,6 @@ impl CircleControlRef {
 
     pub fn control(&self) -> &CircleControlCoord {
         &self.control
-    }
-
-    pub fn head_hash(&self) -> ObjectHash {
-        self.head_hash
-    }
-
-    pub fn head_object(&self) -> &ExactObjectRef {
-        &self.head_object
     }
 
     pub fn objects(&self) -> &CircleActivationObjects {

@@ -61,7 +61,7 @@ async fn remote_activation_rejects_a_tampered_access_entry_in_a_resigned_control
         draft.control.value.access_epoch().store_membership.clone();
     peer_leaf.value.body_mut().store_membership.state_hash =
         ObjectHash::digest(b"foreign Store membership state");
-    let (creation, objects, prepared, control_head_object, stream_activations) = device
+    let (creation, objects, prepared) = device
         .prepare_circle_activation_objects(draft, &journal.operation().history)
         .await
         .expect("prepare exact tampered access objects");
@@ -72,14 +72,9 @@ async fn remote_activation_rejects_a_tampered_access_entry_in_a_resigned_control
             .expect("publish exact tampered access object");
     }
     let commit_coord = journal.operation().commit_ref().coord.clone();
-    let circle_reference = creation.control_ref(objects, control_head_object);
+    let circle_reference = creation.control_ref(objects);
     let commit = device
-        .sign_circle_commit(
-            &old_commit,
-            commit_coord.clone(),
-            circle_reference,
-            stream_activations,
-        )
+        .sign_circle_commit(&old_commit, commit_coord.clone(), circle_reference)
         .await
         .expect("sign tampered access commit");
     let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
@@ -175,7 +170,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .expect("load exact Circle commit author");
     let mut draft = draft_from_transition(&journal.operation().creation);
     promote_store_member_access_without_adding_to_circle_roster(&mut draft, &founder, &peer);
-    let (creation, objects, prepared, control_head_object, stream_activations) = device
+    let (creation, objects, prepared) = device
         .prepare_circle_activation_objects(draft, &journal.operation().history)
         .await
         .expect("prepare exact promoted access objects");
@@ -186,14 +181,9 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
             .expect("publish exact promoted access object");
     }
     let commit_coord = journal.operation().commit_ref().coord.clone();
-    let circle_reference = creation.control_ref(objects, control_head_object);
+    let circle_reference = creation.control_ref(objects);
     let commit = device
-        .sign_circle_commit(
-            &old_commit,
-            commit_coord.clone(),
-            circle_reference,
-            stream_activations,
-        )
+        .sign_circle_commit(&old_commit, commit_coord.clone(), circle_reference)
         .await
         .expect("sign promoted access commit");
     let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
@@ -278,7 +268,7 @@ async fn candidate_graph_rejects_an_access_leaf_that_differs_from_its_control() 
 }
 
 #[tokio::test]
-async fn inactive_circle_member_verifies_public_first_head_activations() {
+async fn inactive_circle_member_verifies_the_public_activation_graph() {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let founder = UserKeypair::generate();
@@ -433,7 +423,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
-    let (creation, objects, prepared, control_head_object, stream_activations) = device
+    let (creation, objects, prepared) = device
         .prepare_circle_activation_objects(draft, &journal.operation().history)
         .await
         .expect("prepare forged exact Circle activation objects");
@@ -443,14 +433,9 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
             .await
             .expect("publish forged exact Circle activation object");
     }
-    let circle_reference = creation.control_ref(objects, control_head_object);
+    let circle_reference = creation.control_ref(objects);
     let commit = device
-        .sign_circle_commit(
-            &old_commit,
-            commit_coord.clone(),
-            circle_reference,
-            stream_activations,
-        )
+        .sign_circle_commit(&old_commit, commit_coord.clone(), circle_reference)
         .await
         .expect("sign forged metadata activation commit");
     let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
@@ -491,6 +476,65 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .expect_err("metadata cannot borrow authority from a different roster state");
     assert!(
         error.to_string().contains("roster state hash differs"),
+        "{error}"
+    );
+}
+
+/// A Store member admitted outside the Circle holds no Circle key, so a Circle
+/// activation gives it only the public arm. That arm still covers the whole
+/// predecessor spine: every covered control resolves to the accepted activation
+/// it names, and the successor's inherited entry inventory is checked against
+/// it. Neither step opens a Circle object.
+#[tokio::test]
+async fn a_nonrecipient_verifies_covered_controls_without_a_circle_key() {
+    let fixture = super::provenance::PreparedSuccessor::build("circle-nonrecipient-covered").await;
+
+    let verified = fixture
+        .nonrecipient_activation(|_| {})
+        .await
+        .expect("a Store member outside the Circle verifies the successor");
+
+    let [circle] = verified.circles() else {
+        panic!("the successor commit activates one Circle")
+    };
+    assert!(
+        matches!(
+            circle
+                .local_access
+                .as_ref()
+                .expect("a Store member receives an inactive leaf")
+                .leaf
+                .value
+                .disposition,
+            CircleAccessDisposition::Inactive
+        ),
+        "the verifying member holds no Circle key"
+    );
+    assert!(
+        !circle.control.value.covered_controls().is_empty(),
+        "the successor names the predecessor control it covers"
+    );
+}
+
+/// And it is the nonrecipient's own refusal, not a side effect of holding the
+/// Circle key: the same successor with one of its covered predecessor's entries
+/// dropped is refused by a member that can read none of those entries.
+#[tokio::test]
+async fn a_nonrecipient_refuses_a_successor_that_drops_a_covered_predecessors_entry() {
+    let fixture = super::provenance::PreparedSuccessor::build("circle-nonrecipient-drop").await;
+    let inherited = fixture.inherited_roster_entry();
+
+    let error = fixture
+        .nonrecipient_activation(|objects| {
+            objects.roster_entries.remove(&inherited);
+        })
+        .await
+        .expect_err("a nonrecipient refuses a successor that drops a covered entry");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Circle control drops or replaces an entry a covered predecessor published"),
         "{error}"
     );
 }

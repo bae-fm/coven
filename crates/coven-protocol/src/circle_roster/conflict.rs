@@ -12,14 +12,16 @@ pub struct ResolvedCircleRoster {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleRosterConflict {
     ConcurrentMemberAssignments {
-        heads: Vec<CircleRosterHeadRef>,
+        /// The raw author-stream frontier of the conflicting history.
+        raw_frontier: Vec<CircleRosterCoord>,
         effective_frontier: Vec<CircleRosterCoord>,
         member_pubkey: String,
         conflicting_grants: BTreeMap<MembershipGrantId, CircleGrantRecord>,
         uncontested_grants: BTreeMap<MembershipGrantId, CircleGrantRecord>,
     },
     RevocationCycle {
-        heads: Vec<CircleRosterHeadRef>,
+        /// The raw author-stream frontier of the conflicting history.
+        raw_frontier: Vec<CircleRosterCoord>,
         cyclic_sources: Vec<CircleRosterCoord>,
         involved_owner_grants: BTreeSet<MembershipGrantId>,
     },

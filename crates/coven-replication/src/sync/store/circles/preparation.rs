@@ -2,25 +2,21 @@ use std::collections::BTreeMap;
 
 use super::commands::CircleOperationRequest;
 use super::{
-    read_exact_circle_object, CircleOperationError, CircleOperationJournal,
-    CircleTransitionHistory, PreparedCircleOperation,
+    CircleOperationError, CircleOperationJournal, CircleTransitionHistory, PreparedCircleOperation,
 };
 use crate::sync::store::circles::bootstrap_blobs::CircleBootstrapBlobVerification;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_protocol::circle::{
-    circle_control_head_prefix, circle_metadata_head_prefix, circle_roster_head_prefix,
-    circle_semantic_prefix, CircleAccessDisposition, CircleAccessMap, CircleMetadataHeadRef,
-    CircleOperationId, CirclePublicationBlocked, CircleRosterHeadRef, CircleSemanticSlot,
-    CircleTransitionDraft, CircleTransitionPolicyObjects, PreparedAccessLeaf,
-    PreparedCircleTransition,
+    circle_semantic_prefix, CircleAccessDisposition, CircleAccessMap, CircleOperationId,
+    CirclePublicationBlocked, CircleSemanticSlot, CircleTransitionDraft,
+    CircleTransitionPolicyObjects, PreparedAccessLeaf, PreparedCircleTransition,
 };
-use coven_protocol::objects::{
-    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
-};
+use coven_protocol::circle_journal::CircleControlActivation;
+use coven_protocol::objects::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
-    CircleActivationObjects, CircleBootstrapObjectRef, CircleMetadataObjectRef, GrantStreamAnchor,
-    ObjectHash, StreamActivation, StreamAnchorDomain, SuccessorLink,
+    CircleActivationObjects, CircleBootstrapObjectRef, CircleEntryOrigin, CircleMetadataObjectRef,
+    ObjectHash,
 };
 use coven_storage::CloudSyncObjectStorage;
 
@@ -147,10 +143,9 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             let resolved_devices = plan.predecessor_state();
             let candidate_family = plan.candidate_family(&write_id);
             // A control-conflict resolution covers the losing branches' frontiers by
-            // carrying their already-published activation objects (metadata and roster
-            // heads and entries) into its own commit, so activation can verify the
-            // merged frontier. Empty for every other operation.
-            let mut merged_branch_objects: Vec<CircleActivationObjects> = Vec::new();
+            // inheriting their already-accepted entries under the activations that
+            // introduced them. Empty for every other operation.
+            let mut merged_branches: Vec<CircleControlActivation> = Vec::new();
             let (creation, additional_prepared) = match &request {
                 CircleOperationRequest::Create {
                     name,
@@ -197,7 +192,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             &request.current.roster,
                             &request.current.metadata,
                             keyring,
-                            db,
                             signer,
                         )?,
                         Vec::new(),
@@ -218,27 +212,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             ));
                         }
                     };
-                    let owner_grant = request
-                        .current
-                        .roster
-                        .active_grants()
-                        .find(|(_, record)| {
-                            record.member_pubkey == author_pubkey
-                                && record.role == coven_protocol::circle::CircleRole::Owner
-                        })
-                        .map(|(grant, _)| grant)
-                        .ok_or_else(|| {
-                            CircleOperationError::InvalidState(
-                                "Circle member-addition author is not an active Owner".to_string(),
-                            )
-                        })?;
-                    let roster_stream = local_writer.circle_grant_authorized_stream_id(
-                        store_root_hash,
-                        owner_grant,
-                        StreamAnchorDomain::CircleRoster {
-                            circle_id: request.circle_id,
-                        },
-                    );
                     let keyring_value =
                         coven_keys::encryption::MasterKeyring::from_serialized(keyring)?;
                     let circle_encryption =
@@ -297,7 +270,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             request.roster_chain.clone(),
                             &request.current.metadata,
                             keyring,
-                            roster_stream,
                             request.member_pubkey.clone(),
                             request.role,
                             bootstrap,
@@ -327,32 +299,10 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             ));
                         }
                     };
-                    let owner_grant = request
-                        .current
-                        .roster
-                        .active_grants()
-                        .find(|(_, record)| {
-                            record.member_pubkey == author_pubkey
-                                && record.role == coven_protocol::circle::CircleRole::Owner
-                        })
-                        .map(|(grant, _)| grant)
-                        .ok_or_else(|| {
-                            CircleOperationError::InvalidState(
-                                "Circle member-removal author is not an active Owner".to_string(),
-                            )
-                        })?;
-                    let roster_stream = local_writer.circle_grant_authorized_stream_id(
-                        store_root_hash,
-                        owner_grant,
-                        StreamAnchorDomain::CircleRoster {
-                            circle_id: request.circle_id,
-                        },
-                    );
                     let removal = request
                         .roster_chain
                         .signed_remove_member(
                             &circle_device_id,
-                            roster_stream,
                             request.member_pubkey.clone(),
                             signer,
                         )
@@ -477,7 +427,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             participants,
                             provisional_frontier,
                             outcome_slot,
-                            db,
                             signer,
                         )?,
                         vec![("epoch-close-intent".to_string(), intent_prepared)],
@@ -490,23 +439,12 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                                 .to_string(),
                         ));
                     }
-                    // The conflicting set the command captured must still equal the
-                    // currently retained branches inside this journal transaction. A
-                    // branch discovered since the command fails the resolution loud
-                    // so it is never silently dropped; the Owner resolves the
-                    // complete new set.
-                    let retained = database
-                        .circle_control_conflict_branches(request.circle_id)
-                        .await?
-                        .ok_or(CircleOperationError::NotConflicted {
-                            circle_id: request.circle_id,
-                        })?;
-                    if retained != request.conflicting_branches {
-                        return Err(CircleOperationError::InvalidState(
-                            "Circle control conflict changed since the resolution was requested"
-                                .to_string(),
-                        ));
-                    }
+                    verify_conflict_unchanged(
+                        database,
+                        request.circle_id,
+                        &request.conflicting_branches,
+                    )
+                    .await?;
                     let keyring = match &request.chosen.access.disposition {
                         CircleAccessDisposition::Active { keyring, .. } => keyring,
                         CircleAccessDisposition::Inactive => {
@@ -520,16 +458,15 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let mut losing_branches = Vec::with_capacity(request.losing_branches.len());
                     for branch in &request.losing_branches {
                         losing_branches.push(coven_protocol::circle::ResolvedConflictBranch {
-                            control_head: coven_protocol::circle::MergeCircleControlHeadRef {
-                                coord: branch.reference.control().clone(),
-                                head_hash: branch.reference.head_hash(),
-                                object: branch.reference.head_object().clone(),
+                            control: coven_protocol::circle::CircleControlActivationRef {
+                                coord: branch.activation.reference.control().clone(),
+                                activating_commit: branch.activation.activating_commit.clone(),
                             },
-                            metadata_heads: branch.reference.objects().metadata_heads.clone(),
-                            roster_heads: branch.reference.objects().roster_heads.clone(),
+                            metadata_frontier: branch.metadata_frontier.clone(),
+                            roster_frontier: branch.roster_frontier.clone(),
                             selected_metadata: branch.selected_metadata.clone(),
                         });
-                        merged_branch_objects.push(branch.reference.objects().clone());
+                        merged_branches.push(branch.activation.clone());
                     }
                     (
                         CircleTransitionDraft::resolve(
@@ -543,7 +480,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             &request.chosen.metadata,
                             keyring,
                             losing_branches,
-                            db,
                             signer,
                         )?,
                         Vec::new(),
@@ -563,6 +499,27 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             ));
                         }
                     };
+                    let mut covered_branches = Vec::with_capacity(request.covered_branches.len());
+                    if !request.conflicting_branches.is_empty() {
+                        verify_conflict_unchanged(
+                            database,
+                            request.circle_id,
+                            &request.conflicting_branches,
+                        )
+                        .await?;
+                    }
+                    for branch in &request.covered_branches {
+                        covered_branches.push(coven_protocol::circle::ResolvedConflictBranch {
+                            control: coven_protocol::circle::CircleControlActivationRef {
+                                coord: branch.activation.reference.control().clone(),
+                                activating_commit: branch.activation.activating_commit.clone(),
+                            },
+                            metadata_frontier: branch.metadata_frontier.clone(),
+                            roster_frontier: branch.roster_frontier.clone(),
+                            selected_metadata: branch.selected_metadata.clone(),
+                        });
+                        merged_branches.push(branch.activation.clone());
+                    }
                     (
                         CircleTransitionDraft::delete(
                             &circle_device_id,
@@ -573,7 +530,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             &request.current.roster,
                             &request.current.metadata,
                             keyring,
-                            db,
+                            covered_branches,
                             signer,
                         )?,
                         Vec::new(),
@@ -700,13 +657,10 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     )
                 }
             };
-            let (creation, objects, mut prepared_objects, control_head_object, stream_activations) =
-                Box::pin(self.prepare_circle_activation_objects(
-                    creation,
-                    &history,
-                    &merged_branch_objects,
-                ))
-                .await?;
+            let (creation, objects, mut prepared_objects) = Box::pin(
+                self.prepare_circle_activation_objects(creation, &history, &merged_branches),
+            )
+            .await?;
             for (step, object) in additional_prepared {
                 if prepared_objects.insert(step.clone(), object).is_some() {
                     return Err(CircleOperationError::InvalidState(format!(
@@ -714,12 +668,11 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     )));
                 }
             }
-            let circle_reference = creation.control_ref(objects, control_head_object);
+            let circle_reference = creation.control_ref(objects);
             let store_commit = self.writer.prepare_candidate_for_write(
                 plan,
                 crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Circle {
                     reference: circle_reference,
-                    stream_activations,
                 },
                 write_id,
             ).await?;
@@ -750,6 +703,27 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             prepared_objects,
         })
     }
+}
+
+/// The conflicting branch set a command captured must still equal the retained
+/// set inside the journal transaction that authors against it. A branch
+/// discovered in between fails the operation loud so it is never silently
+/// dropped: the Owner acts on the complete new set.
+async fn verify_conflict_unchanged(
+    database: &StoreDatabase,
+    circle_id: coven_protocol::circle::CircleId,
+    captured: &[coven_protocol::circle::CircleControlCoord],
+) -> Result<(), CircleOperationError> {
+    let retained = database
+        .circle_control_conflict_branches(circle_id)
+        .await?
+        .ok_or(CircleOperationError::NotConflicted { circle_id })?;
+    if retained != captured {
+        return Err(CircleOperationError::InvalidState(
+            "Circle control conflict changed since the operation was requested".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// A freshly prepared Circle operation: the journal that names its objects, and

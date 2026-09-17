@@ -1,18 +1,14 @@
 use crate::sync::test_helpers::{open_test_db, test_cloud_home, test_store_dir, TestStore};
 use coven_database::StoreDatabase;
 use coven_keys::keys::UserKeypair;
+use coven_protocol::store_commit::CircleEntryOrigin;
 
+/// A device that joined from a snapshot keeps the accepted Circle activations
+/// the snapshot carried, so a successor control's inherited roster entry still
+/// resolves to the exact earlier activation that introduced it — history the
+/// joined device never walked commit by commit.
 #[tokio::test]
-async fn snapshot_join_preserves_circle_streams_through_successor_replay() {
-    assert_snapshot_stream_continuation(false).await;
-}
-
-#[tokio::test]
-async fn snapshot_stream_locator_cannot_borrow_another_accepted_commits_authority() {
-    assert_snapshot_stream_continuation(true).await;
-}
-
-async fn assert_snapshot_stream_continuation(corrupt_association: bool) {
+async fn snapshot_join_preserves_circle_entry_provenance_through_successor_replay() {
     let source_dir = test_store_dir();
     let source = open_test_db(source_dir.clone());
     let signer = UserKeypair::generate();
@@ -46,8 +42,13 @@ async fn assert_snapshot_stream_continuation(corrupt_association: bool) {
                 .any(|c| c.circle_id() == circle)
         })
         .expect("Circle creation is retained");
-    let activations = creation.circle_activations().stream_activations();
-    assert!(!activations.as_slice().is_empty());
+    // A Circle operations commit owns no author streams: its control, roster
+    // and metadata are named by accepted Store history alone.
+    assert!(creation
+        .circle_activations()
+        .stream_activations()
+        .as_slice()
+        .is_empty());
     let target_dir = test_store_dir();
     let target = open_test_db(target_dir.clone());
     let peer = store
@@ -66,53 +67,22 @@ async fn assert_snapshot_stream_continuation(corrupt_association: bool) {
         .await
         .expect("read joined snapshot coverage")
         .covers_commit(creation.commit_ref()));
+
     for index in 0..2 {
-        for activation in activations.as_slice() {
-            let registered = database
-                .registered_stream_activation(activation.activation_id())
+        // The joining device retains the Circle creation as an accepted
+        // activation, which is what every inherited entry resolves through.
+        assert!(
+            database
+                .retained_circle_activation(
+                    store.root().clone(),
+                    circle,
+                    creation.commit_ref().clone(),
+                )
                 .await
-                .expect("read snapshot stream association")
-                .expect("covered Circle stream remains available after joining and replay");
-            assert_eq!(registered.activation(), activation);
-            assert_eq!(registered.activating_commit(), creation.commit_ref());
-        }
-        let before_publication = database
-            .store_current_publication()
-            .await
-            .expect("read boundary");
-        let before_frontier = database
-            .materialized_frontier()
-            .await
-            .expect("read frontier");
-        let before_control = database
-            .current_circle_control(circle)
-            .await
-            .expect("read control");
-        if corrupt_association {
-            let substitute = owner
-                .latest_store_position()
-                .await
-                .expect("read owner position")
-                .expect("the owner activated the joining device");
-            assert_ne!(&substitute, creation.commit_ref());
-            let substitute_commit = owner
-                .load_commit_for_test(&substitute)
-                .await
-                .expect("read substitute commit");
-            assert!(substitute_commit.value().stream_activations().is_empty());
-            assert!(before_frontier
-                .values()
-                .any(|reference| reference == &substitute));
-            let encoded = serde_json::to_string(&substitute)
-                .expect("serialize substitute")
-                .replace("'", "''");
-            for activation in activations.as_slice() {
-                target.execute_test_sql(&format!(
-                    "UPDATE stream_activations SET activating_commit = '{encoded}' WHERE activation_id = '{}'",
-                    activation.activation_id().as_hash(),
-                )).await;
-            }
-        }
+                .expect("resolve the retained Circle creation")
+                .is_some()
+        );
+
         owner
             .rename_circle(
                 &format!("000000000300{index}-0000-owner"),
@@ -122,47 +92,6 @@ async fn assert_snapshot_stream_continuation(corrupt_association: bool) {
             .await
             .expect("publish successor Circle control");
         let (_, pulled) = peer.pull_store().await.expect("pull successor control");
-        if corrupt_association {
-            assert_eq!(pulled.changesets_applied, 0);
-            assert_eq!(pulled.held_positions.len(), 1, "{pulled:?}");
-            assert!(
-                format!("{:?}", pulled.held_positions[0].reason)
-                    .contains("outside the commit predecessor history"),
-                "{pulled:?}"
-            );
-            assert_eq!(
-                database
-                    .store_current_publication()
-                    .await
-                    .expect("read held boundary"),
-                StoreDatabase::new(&source)
-                    .store_current_publication()
-                    .await
-                    .expect("read the authentic accepted successor")
-            );
-            assert_ne!(
-                database
-                    .store_current_publication()
-                    .await
-                    .expect("the accepted successor is retained for retry"),
-                before_publication
-            );
-            assert_eq!(
-                database
-                    .materialized_frontier()
-                    .await
-                    .expect("read held frontier"),
-                before_frontier
-            );
-            assert_eq!(
-                database
-                    .current_circle_control(circle)
-                    .await
-                    .expect("read held control"),
-                before_control
-            );
-            return;
-        }
         assert!(pulled.held_positions.is_empty(), "{pulled:?}");
         assert_eq!(pulled.changesets_applied, 1);
         let successor = owner
@@ -187,6 +116,15 @@ async fn assert_snapshot_stream_continuation(corrupt_association: bool) {
                 .await
                 .expect("read owner control")
         );
+        // The successor inherits the founder's roster entry, and names the exact
+        // accepted commit that introduced it — the one the snapshot retained.
+        let roster = &received.reference.objects().roster_entries;
+        assert_eq!(roster.len(), 1);
+        assert!(roster.values().all(|entry| matches!(
+            &entry.origin,
+            CircleEntryOrigin::Inherited { activating_commit }
+                if activating_commit == creation.commit_ref()
+        )));
         let access = received
             .local_access
             .as_ref()

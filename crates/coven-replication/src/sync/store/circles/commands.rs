@@ -2,7 +2,7 @@ use super::{
     CircleAuthoringState, CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
 };
 use coven_protocol::circle::{CircleCloseStatus, CircleId, CircleRole, CircleRosterChain};
-use coven_protocol::store_commit::CircleControlRef;
+use coven_protocol::circle_journal::CircleControlActivation;
 use coven_storage::BlobPathScheme;
 
 pub struct StoreCircleCommands<'store> {
@@ -198,7 +198,7 @@ pub(crate) struct CircleRenameRequest {
     pub(super) name: String,
     pub(super) metadata_stamp: String,
     pub(super) current: CircleAuthoringState,
-    pub(super) previous_control: CircleControlRef,
+    pub(super) previous_control: CircleControlActivation,
 }
 
 pub(crate) struct CircleAddMemberRequest {
@@ -207,7 +207,7 @@ pub(crate) struct CircleAddMemberRequest {
     pub(super) role: CircleRole,
     bootstrap: crate::sync::store::SnapshotCut,
     pub(super) current: CircleAuthoringState,
-    pub(super) previous_control: CircleControlRef,
+    pub(super) previous_control: CircleControlActivation,
     pub(super) roster_chain: CircleRosterChain,
 }
 
@@ -218,7 +218,7 @@ impl CircleAddMemberRequest {
         role: CircleRole,
         bootstrap: crate::sync::store::SnapshotCut,
         current: CircleAuthoringState,
-        previous_control: CircleControlRef,
+        previous_control: CircleControlActivation,
         roster_chain: CircleRosterChain,
     ) -> Self {
         Self {
@@ -249,20 +249,30 @@ pub(crate) struct CircleRemoveMemberRequest {
     pub(super) circle_id: CircleId,
     pub(super) member_pubkey: String,
     pub(super) current: CircleAuthoringState,
-    pub(super) previous_control: CircleControlRef,
+    pub(super) previous_control: CircleControlActivation,
     pub(super) roster_chain: CircleRosterChain,
 }
 
 pub(crate) struct CircleDeleteRequest {
     pub(super) circle_id: CircleId,
     pub(super) current: CircleAuthoringState,
-    pub(super) previous_control: CircleControlRef,
+    pub(super) previous_control: CircleControlActivation,
+    /// The retained conflicting branches other than the one this deletion
+    /// authors from — empty unless the Circle is conflicted. The deletion
+    /// covers every branch, which is what collapses the conflict.
+    pub(super) covered_branches: Vec<CircleResolveLosingBranch>,
+    /// Every retained branch coordinate, in canonical order, as captured when
+    /// the command ran; empty unless the Circle is conflicted. Preparation
+    /// verifies this still equals the retained conflict set inside the journal
+    /// transaction, so a branch discovered in between resurfaces as a conflict
+    /// instead of being deleted around.
+    pub(super) conflicting_branches: Vec<coven_protocol::circle::CircleControlCoord>,
 }
 
 pub(crate) struct CircleResolveControlRequest {
     pub(super) circle_id: CircleId,
     pub(super) chosen: CircleAuthoringState,
-    pub(super) previous_control: CircleControlRef,
+    pub(super) previous_control: CircleControlActivation,
     /// The retained branches other than `chosen`. The resolution merges each
     /// one's control, metadata, and roster head frontiers into its own so no
     /// author-stream head slot is re-allocated once the conflict collapses.
@@ -276,10 +286,14 @@ pub(crate) struct CircleResolveControlRequest {
 }
 
 pub(crate) struct CircleResolveLosingBranch {
-    /// The losing branch's exact activation reference: its control head plus the
-    /// full activation objects (metadata and roster head frontiers and their
-    /// entries) the resolution covers.
-    pub(super) reference: CircleControlRef,
+    /// The losing branch's exact accepted activation: the control reference its
+    /// commit carried, and that commit. The resolution inherits every entry the
+    /// branch published under the activation that introduced it.
+    pub(super) activation: CircleControlActivation,
+    /// The branch's roster and metadata author-stream frontiers, merged into
+    /// the resolution's own so every branch position stays covered.
+    pub(super) roster_frontier: Vec<coven_protocol::circle::CircleRosterCoord>,
+    pub(super) metadata_frontier: Vec<coven_protocol::circle::CircleMetadataCoord>,
     /// The metadata entry this branch selected — one input to the resolution's
     /// deterministic name selection over the merged frontier.
     pub(super) selected_metadata: coven_protocol::circle::CircleMetadata,
@@ -291,7 +305,7 @@ pub(crate) struct CircleFinalizeEpochCloseRequest {
     pub(super) member_pubkey: String,
     pub(super) metadata_stamp: String,
     pub(super) current: CircleAuthoringState,
-    pub(super) previous_control: CircleControlRef,
+    pub(super) previous_control: CircleControlActivation,
     pub(super) roster_chain: CircleRosterChain,
     pub(super) intent: coven_protocol::circle::CircleEpochCloseIntent,
     pub(super) responses: Vec<coven_protocol::circle::CircleEpochCloseSettlement>,
@@ -306,7 +320,7 @@ impl CircleFinalizeEpochCloseRequest {
         member_pubkey: String,
         metadata_stamp: String,
         current: CircleAuthoringState,
-        previous_control: CircleControlRef,
+        previous_control: CircleControlActivation,
         roster_chain: CircleRosterChain,
         intent: coven_protocol::circle::CircleEpochCloseIntent,
         responses: Vec<coven_protocol::circle::CircleEpochCloseSettlement>,
@@ -344,7 +358,7 @@ pub(crate) struct CircleCancelEpochCloseRequest {
     pub(super) circle_id: CircleId,
     pub(super) member_pubkey: String,
     pub(super) current: CircleAuthoringState,
-    pub(super) previous_control: CircleControlRef,
+    pub(super) previous_control: CircleControlActivation,
 }
 
 pub(crate) enum CircleOperationRequest {

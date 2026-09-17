@@ -24,15 +24,20 @@ impl VerifiedStreamActivations {
         })
     }
 
-    pub fn from_verified_circle_commit(
+    /// The author-stream activations a verified commit carries.
+    ///
+    /// Only a Store membership control activates author streams. A Circle
+    /// operations commit owns none: its controls, rosters and metadata are
+    /// named by accepted Store history alone.
+    pub fn for_verified_commit(
         commit: &StoreBatchCommit,
         activating_commit: &StoreBatchCommitRef,
     ) -> Result<Self, crate::store_commit::StoreProtocolError> {
-        activating_commit.verify_commit(commit)?;
-        Ok(Self {
-            activating_commit: activating_commit.clone(),
-            activations: commit.stream_activations().to_vec(),
-        })
+        if commit.control().is_some() {
+            Self::from_verified_store_control(commit, activating_commit)
+        } else {
+            Self::none(commit, activating_commit)
+        }
     }
 
     pub(crate) fn from_verified_store_control(
@@ -60,44 +65,55 @@ impl VerifiedStreamActivations {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct VerifiedStreamActivationPrefix {
-    by_activation: BTreeMap<StreamActivationId, (StreamActivation, StoreBatchCommitRef)>,
+/// Accepted Circle activations verified earlier in the same pull but not yet
+/// installed, indexed by the Store commit that activated them.
+///
+/// An inherited Circle roster or metadata entry names the exact accepted Store
+/// commit that introduced it. A device replaying a batch of commits — a newly
+/// admitted device staging foreign history, or a pull applying several commits
+/// at once — has not installed the earlier commits yet, so this carries them
+/// for the introduction proof.
+#[derive(Debug, Clone, Default)]
+pub struct VerifiedCircleActivationPrefix {
+    by_commit: BTreeMap<StoreBatchCommitRef, Vec<VerifiedCircleReference>>,
 }
 
-impl VerifiedStreamActivationPrefix {
+impl VerifiedCircleActivationPrefix {
     pub fn empty() -> Self {
-        Self {
-            by_activation: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     pub fn include(
         &mut self,
-        verified: &VerifiedStreamActivations,
+        verified: &VerifiedCircleActivations,
     ) -> Result<(), crate::store_commit::StoreProtocolError> {
-        for activation in verified.as_slice() {
-            let value = (activation.clone(), verified.activating_commit().clone());
-            match self.by_activation.entry(activation.activation_id()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(value);
-                }
-                std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &value => {}
-                std::collections::btree_map::Entry::Occupied(_) => {
-                    return Err(crate::store_commit::StoreProtocolError::Malformed(
-                        "verified stream activation prefix contains conflicting activation authority".to_string(),
-                    ));
-                }
+        let circles = verified.circles().to_vec();
+        match self.by_commit.entry(verified.activating_commit().clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(circles);
+            }
+            std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &circles => {}
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(crate::store_commit::StoreProtocolError::Malformed(
+                    "verified Circle activation prefix contains conflicting activation authority"
+                        .to_string(),
+                ));
             }
         }
         Ok(())
     }
 
+    /// The activation `activating_commit` carries for `circle_id`, when this
+    /// prefix holds that commit.
     pub fn activation(
         &self,
-        activation_id: StreamActivationId,
-    ) -> Option<&(StreamActivation, StoreBatchCommitRef)> {
-        self.by_activation.get(&activation_id)
+        activating_commit: &StoreBatchCommitRef,
+        circle_id: CircleId,
+    ) -> Option<&VerifiedCircleReference> {
+        self.by_commit
+            .get(activating_commit)?
+            .iter()
+            .find(|activation| activation.circle_id == circle_id)
     }
 }
 
@@ -207,6 +223,11 @@ impl VerifiedCircleActivations {
 
     pub fn stream_activations(&self) -> &VerifiedStreamActivations {
         &self.stream_activations
+    }
+
+    /// The exact accepted Store commit these activations were verified against.
+    pub fn activating_commit(&self) -> &StoreBatchCommitRef {
+        self.stream_activations.activating_commit()
     }
 
     pub fn bootstraps(&self) -> &[VerifiedCircleImage] {
@@ -330,9 +351,7 @@ impl VerifiedCircleActivations {
         }
         Ok(Self {
             circles,
-            stream_activations: VerifiedStreamActivations::from_verified_circle_commit(
-                commit, commit_ref,
-            )?,
+            stream_activations: VerifiedStreamActivations::for_verified_commit(commit, commit_ref)?,
             bootstraps: retained.bootstraps,
             local_exclusions: Vec::new(),
             bootstrap_pending_exclusions: Vec::new(),

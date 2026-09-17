@@ -5,7 +5,7 @@ use crate::sync::store::pull::{LoadedCirclePackage, LocalStoreMembership};
 use coven_database::store::CirclePackageAccess;
 use coven_database::{DbError, StoreDatabase};
 use coven_protocol::circle_activation::{
-    VerifiedCircleActivations, VerifiedStreamActivationPrefix,
+    VerifiedCircleActivationPrefix, VerifiedCircleActivations,
 };
 use coven_protocol::objects::VerifiedObject;
 use coven_protocol::store_commit::{
@@ -179,10 +179,10 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
             .chain(snapshot_access.iter().map(|access| &access.activation))
             .cloned()
             .collect::<Vec<_>>();
-        let mut verified_prefix = VerifiedStreamActivationPrefix::empty();
+        let mut verified_prefix = VerifiedCircleActivationPrefix::empty();
         for group in prepared {
             verified_prefix
-                .include(group.stream_activations())
+                .include(group)
                 .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
         }
         let mut replay_epochs = self
@@ -261,10 +261,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                                         && activation.control.coord == reference.control
                                 })
                                 .map(|activation| {
-                                    (
-                                        activation.clone(),
-                                        group.stream_activations().activating_commit().clone(),
-                                    )
+                                    (activation.clone(), group.activating_commit().clone())
                                 })
                         })
                         .or_else(|| {

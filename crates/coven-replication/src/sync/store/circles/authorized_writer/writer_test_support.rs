@@ -28,12 +28,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     ) -> Result<(), CircleOperationError> {
         let old_commit = journal.commit()?;
         let coord = journal.operation().commit_ref().coord.clone();
-        let mut commit = self.local_writer.sign_circle_commit_for_test(
-            &old_commit,
-            coord.clone(),
-            reference,
-            old_commit.stream_activations().to_vec(),
-        )?;
+        let mut commit =
+            self.local_writer
+                .sign_circle_commit_for_test(&old_commit, coord.clone(), reference)?;
         mutate_commit(&mut commit);
         self.local_writer.resign_store_commit_for_test(&mut commit);
         let coven_protocol::store_commit::StoreCommitCoord { stream_id, .. } = coord.clone();
@@ -126,14 +123,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         old_commit: &coven_protocol::store_commit::StoreBatchCommit,
         coord: coven_protocol::store_commit::StoreCommitCoord,
         reference: coven_protocol::store_commit::CircleControlRef,
-        stream_activations: Vec<coven_protocol::store_commit::StreamActivation>,
     ) -> Result<coven_protocol::store_commit::StoreBatchCommit, CircleOperationError> {
-        self.local_writer.sign_circle_commit_for_test(
-            old_commit,
-            coord,
-            reference,
-            stream_activations,
-        )
+        self.local_writer
+            .sign_circle_commit_for_test(old_commit, coord, reference)
     }
 
     #[cfg(test)]
@@ -151,6 +143,25 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     > {
         self.load_complete_circle_epoch_close_responses(control)
             .await
+    }
+
+    /// The authoring context a command would sign a successor from right now.
+    /// Capturing it and authoring against it after the Circle has moved on is
+    /// how a test plays the one device this protocol cannot constrain: an Owner
+    /// that ignores its own durable operation journal.
+    #[cfg(test)]
+    pub(crate) async fn authoring_context_for_test(
+        &mut self,
+        circle_id: CircleId,
+    ) -> Result<
+        (
+            CircleAuthoringState,
+            coven_protocol::circle_journal::CircleControlActivation,
+        ),
+        CircleOperationError,
+    > {
+        let (current, _, activation) = self.current_authoring_context(circle_id).await?;
+        Ok((current, activation))
     }
 
     #[cfg(test)]

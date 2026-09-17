@@ -763,3 +763,130 @@ async fn discard_releases_its_payload_claims() {
         "discard must release every object payload it removed"
     );
 }
+
+/// A device that lost its database cannot equivocate at any position it already
+/// filled — not on its Store stream, and not at a Circle author-stream position.
+///
+/// Recovery does not resume the lost device. It mints a new `StoreDeviceId`
+/// from a create-once Owner recovery slot, and both stream identities are
+/// derived from the registration that device id carries: the Store announcement
+/// stream through `device_authorized_stream_id`, and every Circle roster,
+/// metadata, and control coordinate through the author stream key's
+/// `device_id`. So the recovered device authors at sequence 1 of streams nobody
+/// has written, whatever its restored database believes about the old ones —
+/// and the lost device's last accepted commit stays the tip of its stream.
+#[tokio::test]
+async fn a_recovered_owner_device_fills_no_position_its_lost_device_filled() {
+    let source_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(source_dir.clone());
+    let owner = UserKeypair::generate();
+    let store = TestStore::create(
+        &source,
+        source_dir.clone(),
+        "circle-recovery-positions",
+        owner.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create the Owner's Store");
+    let lost = store
+        .bind_device_in(&source, source_dir.clone(), &owner)
+        .await
+        .expect("bind the device that will be lost");
+    let circle_id = lost
+        .create_circle("0000000001000-0000-owner", "Household")
+        .await
+        .expect("publish a Circle-carrying commit before the loss");
+    let lost_device_id = source
+        .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read the lost device id")
+        .expect("the lost device is active");
+    let lost_stream = lost
+        .announcement_stream_id_for_test()
+        .await
+        .expect("read the lost device's Store stream");
+    let lost_tip = lost
+        .latest_local_store_position()
+        .await
+        .expect("read the lost device's Store tip")
+        .expect("the Circle commit is published");
+    let (lost_control, _) = StoreDatabase::new(&source)
+        .circle_authoring_context(circle_id, &keys::public_key_hex(&owner))
+        .await
+        .expect("read the Circle's founder control");
+    assert_eq!(
+        lost_control.control.coord.device_id, lost_device_id,
+        "the founder control sits on the lost device's Circle stream"
+    );
+
+    // The database is gone: a new one, and Owner recovery over it.
+    let target_dir = crate::sync::test_helpers::test_store_dir();
+    let target = crate::sync::test_helpers::open_test_db(target_dir.clone());
+    let target_device = store
+        .open_into(&target, target_dir.clone())
+        .await
+        .expect("open the replacement database");
+    let authority = store.founder_recovery_authority().await;
+    target_device
+        .owner_recovery_for_test()
+        .await
+        .expect("bind Owner recovery")
+        .recover_owner_device(&authority, None)
+        .await
+        .expect("recover the Owner device onto the replacement database");
+
+    let recovered = store
+        .bind_device_in(&target, target_dir.clone(), &owner)
+        .await
+        .expect("bind the recovered device");
+    let recovered_device_id = target
+        .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read the recovered device id")
+        .expect("the recovered device is active");
+    assert_ne!(
+        recovered_device_id, lost_device_id,
+        "recovery mints a new device id from its create-once recovery slot"
+    );
+    assert_ne!(
+        recovered
+            .announcement_stream_id_for_test()
+            .await
+            .expect("read the recovered device's Store stream"),
+        lost_stream,
+        "a new registration is a new Store announcement stream"
+    );
+
+    // Authoring over the recovered device lands on its own streams: the Circle
+    // successor's coordinate names the new device, and the lost device's Store
+    // tip is exactly where its last accepted commit left it.
+    recovered
+        .pull_store()
+        .await
+        .expect("install the history the lost device published");
+    recovered
+        .rename_circle("0000000002000-0000-owner", circle_id, "Cottage")
+        .await
+        .expect("author a Circle successor from the recovered device");
+    let (successor, _) = StoreDatabase::new(&target)
+        .circle_authoring_context(circle_id, &keys::public_key_hex(&owner))
+        .await
+        .expect("read the Circle's successor control");
+    assert_eq!(
+        successor.control.coord.device_id, recovered_device_id,
+        "the successor sits on the recovered device's own Circle stream"
+    );
+    assert_eq!(
+        successor.control.coord.seq, 1,
+        "which nobody has written, so it starts at its first position"
+    );
+    assert_eq!(
+        StoreDatabase::new(&target)
+            .latest_local_store_position(lost_stream)
+            .await
+            .expect("read the lost stream's installed tip"),
+        Some(lost_tip),
+        "the lost device's Store tip is untouched by the recovery"
+    );
+}

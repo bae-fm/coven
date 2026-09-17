@@ -3,7 +3,6 @@ use super::*;
 pub(crate) enum StoreOperationBatch {
     Circle {
         reference: super::store_commit::CircleControlRef,
-        stream_activations: Vec<super::store_commit::StreamActivation>,
     },
     Acknowledgement {
         reference: super::store_commit::StoreAckRef,

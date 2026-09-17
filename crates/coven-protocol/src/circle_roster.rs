@@ -5,14 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::causal_grants::{
-    self, AuthorStreamId, CausalAssignment, CausalChange, CausalCoordinate, CausalEntry,
-    CausalGrantConflict, CausalGrantError, CausalGrantStatus, GrantState, OwnerGrantBarrier,
+    self, CausalAssignment, CausalChange, CausalCoordinate, CausalEntry, CausalGrantConflict,
+    CausalGrantError, CausalGrantStatus, GrantState, OwnerGrantBarrier,
 };
 use super::circle::{CircleId, CircleRole};
 use super::membership::MembershipGrantId;
-use super::store_commit::{ObjectHash, Signed, SignedBody, StoreDeviceRegistration, SuccessorLink};
-use crate::objects::ExactObjectRef;
-use coven_keys::keys::{self, UserKeypair};
+use super::store_commit::{ObjectHash, Signed, SignedBody};
+use coven_keys::keys;
 
 mod chain;
 mod conflict;
@@ -24,14 +23,12 @@ pub use conflict::{
 };
 
 const ROSTER_DOMAIN: &[u8] = b"coven.circle-roster.v1\0";
-const ROSTER_HEAD_DOMAIN: &[u8] = b"coven.circle-roster-head.v1\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CircleRosterCoord {
     pub author_pubkey: String,
     pub device_id: String,
-    pub stream_id: AuthorStreamId,
     pub author_owner_grant: MembershipGrantId,
     pub seq: u64,
     pub entry_hash: ObjectHash,
@@ -42,7 +39,6 @@ impl CircleRosterCoord {
         CircleAuthorStreamKey {
             author_pubkey: self.author_pubkey.clone(),
             device_id: self.device_id.clone(),
-            stream_id: self.stream_id,
             author_owner_grant: self.author_owner_grant.clone(),
         }
     }
@@ -95,7 +91,6 @@ impl causal_grants::CausalHistoryEntry for CircleRosterEntry {
 pub struct CircleAuthorStreamKey {
     pub author_pubkey: String,
     pub device_id: String,
-    pub stream_id: AuthorStreamId,
     pub author_owner_grant: MembershipGrantId,
 }
 
@@ -134,7 +129,6 @@ pub struct CircleRosterEntryBody {
     pub circle_id: CircleId,
     pub author_pubkey: String,
     pub device_id: String,
-    pub stream_id: AuthorStreamId,
     pub author_owner_grant: MembershipGrantId,
     pub seq: u64,
     pub previous_hash: Option<ObjectHash>,
@@ -153,7 +147,6 @@ impl CircleRosterEntry {
         store_root_hash: ObjectHash,
         circle_id: CircleId,
         device_id: &str,
-        stream_id: AuthorStreamId,
         owner_grant: MembershipGrantId,
         signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Self {
@@ -164,7 +157,6 @@ impl CircleRosterEntry {
                 circle_id,
                 author_pubkey: author_pubkey.clone(),
                 device_id: device_id.to_string(),
-                stream_id,
                 author_owner_grant: owner_grant.clone(),
                 seq: 1,
                 previous_hash: None,
@@ -186,7 +178,6 @@ impl CircleRosterEntry {
         CircleRosterCoord {
             author_pubkey: self.author_pubkey.clone(),
             device_id: self.device_id.clone(),
-            stream_id: self.stream_id,
             author_owner_grant: self.author_owner_grant.clone(),
             seq: self.seq,
             entry_hash: self.entry_hash(),
@@ -240,122 +231,12 @@ impl CircleRosterEntry {
     }
 }
 
-/// The wire body of one Circle roster head. Every field here is signed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CircleRosterHeadBody {
-    pub store_root_hash: ObjectHash,
-    pub circle_id: CircleId,
-    pub author_pubkey: String,
-    pub device_id: String,
-    pub stream_id: AuthorStreamId,
-    pub author_owner_grant: MembershipGrantId,
-    pub seq: u64,
-    pub tip_hash: ObjectHash,
-    pub tip: ExactObjectRef,
-    pub successor: SuccessorLink,
-}
-
-impl SignedBody for CircleRosterHeadBody {
-    const DOMAIN: &'static [u8] = ROSTER_HEAD_DOMAIN;
-}
-
-pub type CircleRosterHead = Signed<CircleRosterHeadBody>;
-
-impl CircleRosterHead {
-    pub fn signed(
-        entry: &CircleRosterEntry,
-        tip: ExactObjectRef,
-        successor: SuccessorLink,
-        signer: &UserKeypair,
-    ) -> Self {
-        Signed::sign(
-            CircleRosterHeadBody {
-                store_root_hash: entry.store_root_hash,
-                circle_id: entry.circle_id,
-                author_pubkey: entry.author_pubkey.clone(),
-                device_id: entry.device_id.clone(),
-                stream_id: entry.stream_id,
-                author_owner_grant: entry.author_owner_grant.clone(),
-                seq: entry.seq,
-                tip_hash: entry.entry_hash(),
-                tip,
-                successor,
-            },
-            signer,
-        )
-    }
-
-    pub fn head_hash(&self) -> ObjectHash {
-        self.hash()
-    }
-
-    pub fn verify_for_registration(&self, registration: &StoreDeviceRegistration) -> bool {
-        self.seq > 0
-            && !self.device_id.is_empty()
-            && self.device_id == registration.device_id.to_string()
-            && self.verify_by(&registration.device_signing_pubkey).is_ok()
-    }
-    pub fn entry_coord(&self) -> CircleRosterCoord {
-        CircleRosterCoord {
-            author_pubkey: self.author_pubkey.clone(),
-            device_id: self.device_id.clone(),
-            stream_id: self.stream_id,
-            author_owner_grant: self.author_owner_grant.clone(),
-            seq: self.seq,
-            entry_hash: self.tip_hash,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CircleRosterHeadRef {
-    pub coord: CircleRosterCoord,
-    pub head_hash: ObjectHash,
-    pub object: ExactObjectRef,
-}
-
-impl CircleRosterHeadRef {
-    pub fn from_stored_head(head: &CircleRosterHead, object: ExactObjectRef) -> Self {
-        Self {
-            coord: head.entry_coord(),
-            head_hash: head.head_hash(),
-            object,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ExactCircleRosterHead {
-    head: CircleRosterHead,
-    reference: CircleRosterHeadRef,
-}
-
-impl ExactCircleRosterHead {
-    pub fn bind(
-        head: CircleRosterHead,
-        reference: CircleRosterHeadRef,
-    ) -> Result<Self, CircleRosterError> {
-        if CircleRosterHeadRef::from_stored_head(&head, reference.object.clone()) != reference {
-            return Err(CircleRosterError::HeadEntryMismatch);
-        }
-        Ok(Self { head, reference })
-    }
-
-    pub fn head(&self) -> &CircleRosterHead {
-        &self.head
-    }
-
-    pub fn reference(&self) -> &CircleRosterHeadRef {
-        &self.reference
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeCircleRosterStateRef {
-    pub heads: Vec<CircleRosterHeadRef>,
+    /// The raw author-stream frontier of the roster chain this control names:
+    /// one coordinate per author stream, canonical by stream key.
+    pub frontier: Vec<CircleRosterCoord>,
     pub state_hash: ObjectHash,
 }
 
@@ -390,14 +271,10 @@ pub enum CircleRosterError {
     SignerIsNotOwner(String),
     #[error("Circle roster member {0} has no active assignment")]
     NotAMember(String),
-    #[error("Circle roster author stream contains a pruned suffix and cannot be extended")]
-    PrunedAuthorStream,
     #[error("Circle roster sequence {current} has no representable successor")]
     SequenceExhausted { current: u64 },
     #[error("Circle roster has an unresolved semantic conflict")]
     Conflict,
-    #[error("Circle roster head does not match its exact entry")]
-    HeadEntryMismatch,
     #[error("Circle roster causal history is empty")]
     CausalEmpty,
     #[error("Circle roster stream {stream:?} has conflicting entries at sequence {seq}")]

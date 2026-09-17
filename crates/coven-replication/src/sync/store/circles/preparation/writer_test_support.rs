@@ -37,8 +37,6 @@ impl AuthorizedCircleWriter<'_, '_> {
             coven_protocol::circle::PreparedCircleTransition,
             coven_protocol::store_commit::CircleActivationObjects,
             std::collections::BTreeMap<String, coven_protocol::objects::PreparedExactObject>,
-            Option<coven_protocol::objects::ExactObjectRef>,
-            Vec<coven_protocol::store_commit::StreamActivation>,
         ),
         CircleOperationError,
     > {

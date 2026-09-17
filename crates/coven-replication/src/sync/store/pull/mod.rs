@@ -12,7 +12,7 @@ use coven_database::DbError;
 use coven_foundation::changeset::RowChange;
 use coven_protocol::audience_package::{AudiencePackage, PackageAudience};
 use coven_protocol::circle_activation::{
-    VerifiedCircleActivations, VerifiedStreamActivationPrefix,
+    VerifiedCircleActivationPrefix, VerifiedCircleActivations,
 };
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::objects::StorageError;

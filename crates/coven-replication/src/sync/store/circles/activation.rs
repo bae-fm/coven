@@ -9,15 +9,15 @@ use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::circle::{
     circle_epoch_close_intent_semantic_prefix, circle_semantic_prefix, recipient_slot_with_peer,
     verify_circle_semantic_prefix, CircleAccessDisposition, CircleAccessLeaf, CircleControl,
-    CircleControlCoord, CircleControlState, CircleEpochCloseId, CircleId, CircleMetadataHeadRef,
-    CircleRosterHeadRef, CircleSemanticSlot, MergeCircleOwnerAuthorityRef, PreparedAccessLeaf,
+    CircleControlCoord, CircleControlState, CircleEpochCloseId, CircleId, CircleMetadataCoord,
+    CircleRosterCoord, CircleSemanticSlot, MergeCircleOwnerAuthorityRef, PreparedAccessLeaf,
     PreparedCircleControl, ResolvedCircleRoster,
 };
-use coven_protocol::objects::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
-    CircleActivationObjects, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef, StreamActivation,
-    StreamActivationId, VerifiedStoreBatchCommit,
+    CircleActivationObjects, CircleEntryOrigin, CircleMetadataObjectRef, CircleRosterEntryRef,
+    StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    StoreRootRef, VerifiedStoreBatchCommit,
 };
 use coven_storage::CloudSyncObjectStorage;
 
@@ -26,9 +26,7 @@ mod roster;
 
 mod access;
 mod epoch_close;
-mod heads;
-
-use heads::{CircleHeadKind, CircleHeadValue};
+mod provenance;
 
 use super::exact_object::read_exact_circle_object;
 use coven_protocol::circle_activation::verify_control_context_for_verified_commit;
@@ -37,8 +35,8 @@ use coven_protocol::circle_activation::CircleCurrentControl;
 #[cfg(test)]
 use coven_protocol::circle_activation::CircleCurrentState;
 use coven_protocol::circle_activation::{
-    LocalCircleExclusion, VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive,
-    VerifiedCircleImage, VerifiedCircleReference, VerifiedStreamActivationPrefix,
+    LocalCircleExclusion, VerifiedCircleAccess, VerifiedCircleActivationPrefix,
+    VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleImage, VerifiedCircleReference,
     VerifiedStreamActivations,
 };
 
@@ -107,7 +105,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             reference,
             control,
             keyring,
-            &VerifiedStreamActivationPrefix::empty(),
+            &VerifiedCircleActivationPrefix::empty(),
         )
         .await
     }
@@ -118,22 +116,22 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         reference: &coven_protocol::store_commit::CircleControlRef,
         control: &PreparedCircleControl,
         keyring: &str,
-        verified_prefix: &VerifiedStreamActivationPrefix,
+        prefix: &VerifiedCircleActivationPrefix,
     ) -> Result<coven_protocol::circle::CircleRosterChain, CircleOperationError> {
         verify_control_context_for_verified_commit(reference, control, verified)?;
         let commit_ref = verified.reference();
         let commit = verified.value();
+        let author = verified.author().clone();
         let encryption = EncryptionService::from(MasterKeyring::from_serialized(keyring)?);
-        let mut consumed_stream_activations = BTreeSet::new();
         self.load_circle_roster_chain(
-            verified_prefix,
+            prefix,
             commit_ref,
             commit,
+            &author,
             reference.circle_id(),
             &control.value.state().access_epoch().roster,
             encryption,
             reference.objects(),
-            &mut consumed_stream_activations,
         )
         .await
     }

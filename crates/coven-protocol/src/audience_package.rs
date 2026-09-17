@@ -420,7 +420,6 @@ mod tests {
     fn circle_control_coord() -> CircleControlCoord {
         CircleControlCoord {
             device_id: "device-a".to_string(),
-            stream_id: AuthorStreamId::from_bytes([4; 32]),
             author_pubkey: "22".repeat(32),
             author_owner_grant: crate::causal_grants::MembershipGrantId::from_test_label(
                 "audience-package owner",

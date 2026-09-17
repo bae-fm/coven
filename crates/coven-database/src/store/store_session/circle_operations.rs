@@ -139,6 +139,14 @@ impl StoreSession<'_> {
             .and_then(|state| state.conflict_branches()))
     }
 
+    fn circle_deletion_branch(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle::CircleControlCoord>, DbError> {
+        Ok(circle_current_state_on(self.conn, circle_id)?
+            .and_then(|state| state.deletion_branch().cloned()))
+    }
+
     fn circle_is_deleted(
         &self,
         circle_id: coven_protocol::circle::CircleId,
@@ -378,6 +386,17 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<Vec<coven_protocol::circle::CircleControlCoord>>, DbError> {
         self.call_store(move |session| session.circle_control_conflict_branches(circle_id))
+            .await
+    }
+
+    /// The branch a terminal deletion of a conflicted Circle authors from, in
+    /// the canonical branch order every device reduces to. `None` unless the
+    /// Circle's control history is conflicted.
+    pub async fn circle_deletion_branch(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle::CircleControlCoord>, DbError> {
+        self.call_store(move |session| session.circle_deletion_branch(circle_id))
             .await
     }
 

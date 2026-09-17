@@ -6,20 +6,18 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use super::causal_grants::AuthorStreamId;
 use super::circle::CircleEpochCloseId;
 use super::circle::{generated_id_digest, CircleEpochId, CircleId};
 use super::circle_roster::{
-    CircleAuthorStreamKey, CircleMaterializedRoster, CircleRosterChain, CircleRosterEntry,
-    CircleRosterError, CircleRosterHead, CircleRosterHeadRef, CircleRosterStateRef,
-    MergeCircleRosterStateRef, ResolvedCircleRoster,
+    CircleAuthorStreamKey, CircleMaterializedRoster, CircleRosterChain, CircleRosterCoord,
+    CircleRosterEntry, CircleRosterError, CircleRosterStateRef, MergeCircleRosterStateRef,
+    ResolvedCircleRoster,
 };
 use super::membership::MembershipHeadRef;
 use super::membership::{MemberRole, MembershipCoord, MembershipGrantId};
 use super::store_commit::{
     CommitFrontier, ObjectHash, OwnerRecoveryCursor, Signed, SignedBody, SnapshotImageRef,
     StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef,
-    SuccessorLink,
 };
 use crate::objects::ExactObjectRef;
 use crate::objects::ObjectSlot;
@@ -28,10 +26,8 @@ use coven_keys::keys::{self, UserKeypair};
 
 const RECIPIENT_SLOT_DOMAIN: &[u8] = b"coven.circle-recipient-slot.v1\0";
 const METADATA_DOMAIN: &[u8] = b"coven.circle-metadata.v1\0";
-const METADATA_HEAD_DOMAIN: &[u8] = b"coven.circle-metadata-head.v1\0";
 const ACCESS_DOMAIN: &[u8] = b"coven.circle-access-leaf.v1\0";
 const CONTROL_DOMAIN: &[u8] = b"coven.circle-control.v1\0";
-const CONTROL_HEAD_DOMAIN: &[u8] = b"coven.circle-control-head.v1\0";
 const CLOSE_INTENT_DOMAIN: &[u8] = b"coven.circle-epoch-close-intent.v1\0";
 const CLOSE_RESPONSE_DOMAIN: &[u8] = b"coven.circle-epoch-close-response.v1\0";
 const CLOSE_EXCLUSION_DOMAIN: &[u8] = b"coven.circle-epoch-close-exclusion.v1\0";
@@ -55,8 +51,8 @@ pub use access::{
 };
 pub use access::{CircleBootstrapCoverageRef, CircleBootstrapRef};
 pub use control::{
-    merge_frontier_head, CircleControl, CircleControlBody, CircleControlHead, CircleControlState,
-    CircleControlValue, DeletedCircle, MergeCircleControlHeadRef, MergeCircleControlOrder,
+    merge_frontier_coord, CircleControl, CircleControlActivationRef, CircleControlBody,
+    CircleControlState, CircleControlValue, DeletedCircle, MergeCircleControlOrder,
     MergeCircleOwnerAuthorityRef, ResolvedConflictBranch,
 };
 #[cfg(any(test, feature = "test-utils"))]
@@ -76,15 +72,13 @@ pub use epoch_close::{
 pub use epoch_close::{
     CircleEpochCloseCancellationRef, CircleEpochCloseIntentRef, CircleEpochCloseOutcomeRef,
 };
-pub use metadata::CircleMetadataHeadRef;
 pub use metadata::{
-    CircleMetadata, CircleMetadataBody, CircleMetadataCoord, CircleMetadataHead,
-    CircleMetadataStateRef, MergeCircleMetadataStateRef,
+    CircleMetadata, CircleMetadataBody, CircleMetadataCoord, CircleMetadataStateRef,
+    MergeCircleMetadataStateRef,
 };
 pub use semantic_path::{
-    circle_control_head_prefix, circle_epoch_close_intent_semantic_prefix,
-    circle_epoch_close_outcome_semantic_prefix, circle_epoch_close_response_semantic_prefix,
-    circle_metadata_head_prefix, circle_roster_head_prefix, circle_semantic_prefix, recipient_slot,
+    circle_epoch_close_intent_semantic_prefix, circle_epoch_close_outcome_semantic_prefix,
+    circle_epoch_close_response_semantic_prefix, circle_semantic_prefix, recipient_slot,
     recipient_slot_with_peer, verify_circle_semantic_prefix, CircleSemanticSlot,
 };
 
@@ -93,7 +87,6 @@ pub use semantic_path::{
 #[serde(deny_unknown_fields)]
 pub struct CircleControlCoord {
     pub device_id: String,
-    pub stream_id: AuthorStreamId,
     pub author_pubkey: String,
     pub author_owner_grant: MembershipGrantId,
     pub seq: u64,
@@ -117,7 +110,6 @@ impl CircleControlCoord {
         CircleAuthorStreamKey {
             author_pubkey: self.author_pubkey.clone(),
             device_id: self.device_id.clone(),
-            stream_id: self.stream_id,
             author_owner_grant: self.author_owner_grant.clone(),
         }
     }
@@ -129,7 +121,6 @@ impl CircleControlCoord {
         let hash = ObjectHash::digest(&[seed]);
         Self {
             device_id: format!("device-{seed}"),
-            stream_id: AuthorStreamId::from_digest(hash),
             author_pubkey: format!("pubkey-{seed}"),
             author_owner_grant: MembershipGrantId(hash),
             seq: 1,

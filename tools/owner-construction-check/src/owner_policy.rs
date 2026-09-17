@@ -317,6 +317,21 @@ pub(super) const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "prepare",
     ),
     (
+        "crates/coven-replication/src/sync/store/circles/tests/provenance.rs",
+        "PreparedFounder",
+        "build",
+    ),
+    (
+        "crates/coven-replication/src/sync/store/circles/tests/provenance.rs",
+        "PreparedSuccessor",
+        "build",
+    ),
+    (
+        "crates/coven-replication/src/sync/store/circles/tests/provenance.rs",
+        "RenamedCircle",
+        "build",
+    ),
+    (
         "crates/coven-replication/src/sync/store/circles/tests/publication.rs",
         "ClosingFounderCircle",
         "build",
@@ -327,8 +342,18 @@ pub(super) const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build",
     ),
     (
-        "crates/coven-replication/src/sync/store/circles/tests/resolution.rs",
+        "crates/coven-replication/src/sync/store/circles/tests/conflict_fixture.rs",
         "ConflictFixture",
+        "build",
+    ),
+    (
+        "crates/coven-replication/src/sync/store/circles/tests/local_validation.rs",
+        "JournaledSuccessor",
+        "build",
+    ),
+    (
+        "crates/coven-replication/src/sync/store/snapshots/image_tests/provenance.rs",
+        "RenamedCircleSnapshot",
         "build",
     ),
     (

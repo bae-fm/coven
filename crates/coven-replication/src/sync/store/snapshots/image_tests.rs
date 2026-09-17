@@ -776,5 +776,7 @@ async fn captured_coverage(database: &StoreDatabase) -> CommitFrontier {
 
 #[path = "image_tests/circle.rs"]
 mod circle;
+#[path = "image_tests/provenance.rs"]
+mod provenance;
 #[path = "image_tests/scoped.rs"]
 mod scoped;

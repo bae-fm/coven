@@ -365,7 +365,6 @@ mod tests {
                 circle_id,
                 CircleControlCoord {
                     device_id: "01".repeat(32),
-                    stream_id: AuthorStreamId::from_bytes([5; 32]),
                     author_pubkey: "author-a".to_string(),
                     author_owner_grant: coven_protocol::causal_grants::MembershipGrantId(
                         ObjectHash::digest(b"outbound-graph owner grant"),

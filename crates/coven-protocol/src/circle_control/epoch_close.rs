@@ -29,7 +29,9 @@ pub struct MergeActiveCircleEpoch {
     pub metadata: MergeCircleMetadataStateRef,
     pub roster: MergeCircleRosterStateRef,
     pub store_membership: StoreMembershipStateRef,
-    pub covered_control_heads: Vec<MergeCircleControlHeadRef>,
+    /// Every Circle control this one observed, one per author stream, each
+    /// named with the exact accepted Store commit that activated it.
+    pub covered_controls: Vec<CircleControlActivationRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,5 +1,95 @@
 use super::*;
 
+/// Carry one inherited entry inventory forward: everything the predecessor
+/// introduced is now inherited from the commit that activated it, and
+/// everything it already inherited keeps the activation it named.
+fn inherited_origin(
+    activating_commit: &coven_protocol::store_commit::StoreBatchCommitRef,
+    origin: &CircleEntryOrigin,
+) -> CircleEntryOrigin {
+    match origin {
+        CircleEntryOrigin::Introduced => CircleEntryOrigin::Inherited {
+            activating_commit: activating_commit.clone(),
+        },
+        inherited @ CircleEntryOrigin::Inherited { .. } => inherited.clone(),
+    }
+}
+
+/// The author-stream frontier of an inherited entry inventory: the deepest
+/// position each stream reaches. A control's signed frontier is exactly this,
+/// because its inventory is exactly the history that frontier reaches.
+///
+/// `reduced` is whether the control being prepared will have this history
+/// reduced when it activates. Every control but a terminal deletion will: its
+/// verifier walks the frontier's closure and requires it to equal the
+/// inventory. Two entries at one author-stream position make that impossible —
+/// one frontier position cannot reach both — so a control that will be reduced
+/// refuses to carry them, here, at the device that authors it and before it
+/// publishes anything. A deletion's frozen frontier is never walked, so it
+/// carries the whole inherited inventory and is the one exit from a conflict
+/// that holds two entries at one position.
+fn inventory_frontier<C: Clone + std::fmt::Debug>(
+    kind: &str,
+    reduced: bool,
+    coords: impl Iterator<Item = C>,
+    stream_key: impl Fn(&C) -> coven_protocol::circle::CircleAuthorStreamKey,
+    seq: impl Fn(&C) -> u64,
+) -> Result<Vec<C>, CircleOperationError> {
+    let mut frontier: BTreeMap<coven_protocol::circle::CircleAuthorStreamKey, C> = BTreeMap::new();
+    for coord in coords {
+        match frontier.entry(stream_key(&coord)) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(coord);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                if reduced && seq(&coord) == seq(slot.get()) {
+                    return Err(CircleOperationError::InvalidState(format!(
+                        "Circle transition inherits two {kind} entries at one author stream \
+                         position"
+                    )));
+                }
+                if seq(&coord) > seq(slot.get()) {
+                    slot.insert(coord);
+                }
+            }
+        }
+    }
+    Ok(frontier.into_values().collect())
+}
+
+fn inherit_entries(
+    activation: &CircleControlActivation,
+    roster_entries: &mut BTreeMap<
+        coven_protocol::circle::CircleRosterCoord,
+        coven_protocol::store_commit::CircleRosterEntryRef,
+    >,
+    metadata_entries: &mut BTreeMap<
+        coven_protocol::circle::CircleMetadataCoord,
+        CircleMetadataObjectRef,
+    >,
+) {
+    let objects = activation.reference.objects();
+    for (coord, reference) in &objects.roster_entries {
+        roster_entries.insert(
+            coord.clone(),
+            coven_protocol::store_commit::CircleRosterEntryRef {
+                object: reference.object.clone(),
+                origin: inherited_origin(&activation.activating_commit, &reference.origin),
+            },
+        );
+    }
+    for (coord, reference) in &objects.metadata_entries {
+        metadata_entries.insert(
+            coord.clone(),
+            CircleMetadataObjectRef {
+                key_fingerprint: reference.key_fingerprint,
+                object: reference.object.clone(),
+                origin: inherited_origin(&activation.activating_commit, &reference.origin),
+            },
+        );
+    }
+}
+
 impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
     pub(super) async fn prepare_circle_object(
         &self,
@@ -33,22 +123,18 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         &self,
         mut draft: CircleTransitionDraft,
         history: &CircleTransitionHistory,
-        merged_branch_objects: &[CircleActivationObjects],
+        merged_branches: &[CircleControlActivation],
     ) -> Result<
         (
             PreparedCircleTransition,
             CircleActivationObjects,
             BTreeMap<String, PreparedExactObject>,
-            Option<ExactObjectRef>,
-            Vec<StreamActivation>,
         ),
         CircleOperationError,
     > {
-        let storage = self.storage.as_ref();
-        let root = &self.root;
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let identity_signer = local_writer.as_ref();
-        let store_root_hash = root.store_root_hash;
+        let store_root_hash = self.root.store_root_hash;
         let encryption = EncryptionService::from(
             MasterKeyring::from_serialized(&draft.keyring).map_err(CircleOperationError::from)?,
         );
@@ -65,95 +151,61 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         let roster_context = ProtocolObjectContext::circle(
             store_root_hash,
             ProtocolObjectDomain::CircleRoster,
-            encryption.clone(),
+            encryption,
         );
         let control_context = ProtocolObjectContext::store_encrypted(
             store_root_hash,
             ProtocolObjectDomain::CircleControl,
         );
-        let previous_control = match history {
+        let previous = match history {
             CircleTransitionHistory::Founder => None,
-            CircleTransitionHistory::Successor(reference) => Some(reference.as_ref()),
+            CircleTransitionHistory::Successor(activation) => Some(activation.as_ref()),
         };
-        let previous_objects =
-            previous_control.map(coven_protocol::store_commit::CircleControlRef::objects);
-        let mut roster_entries =
-            previous_objects.map_or_else(BTreeMap::new, |objects| objects.roster_entries.clone());
-        let mut roster_heads =
-            previous_objects.map_or_else(Vec::new, |objects| objects.roster_heads.clone());
-        let mut roster_frontier = if matches!(
-            &draft.policy.roster,
-            coven_protocol::circle::CircleRosterDraftPolicy::Founder { .. }
-        ) {
-            Vec::new()
-        } else {
-            draft.control.value.access_epoch().roster.heads.clone()
-        };
-        let mut metadata_entries =
-            previous_objects.map_or_else(BTreeMap::new, |objects| objects.metadata_entries.clone());
-        let mut metadata_heads =
-            previous_objects.map_or_else(Vec::new, |objects| objects.metadata_heads.clone());
-        // A control-conflict resolution covers the losing branches too: union their
-        // already-published objects into the seed so the resolution can verify both
-        // its merged current frontier and historical authority references. Roster
-        // heads are an object inventory: collapsing them by author stream would
-        // discard the older head that created an Owner grant. Metadata heads carry
-        // the current frontier because their signed predecessor links provide their
-        // history. The draft control separately carries the signed current
-        // frontiers that the resolution shaped.
-        for branch in merged_branch_objects {
-            roster_entries.extend(branch.roster_entries.clone());
-            metadata_entries.extend(branch.metadata_entries.clone());
-            roster_heads.extend(branch.roster_heads.iter().cloned());
-            for head in &branch.metadata_heads {
-                coven_protocol::circle::merge_frontier_head(
-                    &mut metadata_heads,
-                    head.clone(),
-                    |head| head.coord.stream_key(),
-                    |head| head.coord.seq,
-                );
-            }
+        let mut roster_entries = BTreeMap::new();
+        let mut metadata_entries = BTreeMap::new();
+        if let Some(previous) = previous {
+            inherit_entries(previous, &mut roster_entries, &mut metadata_entries);
         }
-        roster_heads.sort();
-        roster_heads.dedup();
-        metadata_heads.sort_by_key(|head| head.coord.stream_key());
+        // A control-conflict resolution covers the losing branches too: inherit
+        // their already-accepted entries under the activations that introduced
+        // them, so the resolution's own inventory still resolves every entry to
+        // its exact earlier accepted activation.
+        for branch in merged_branches {
+            inherit_entries(branch, &mut roster_entries, &mut metadata_entries);
+        }
+
+        // Both frontiers are derived from the inherited inventory, never from
+        // the draft's own control: the inventory is the accepted history, and a
+        // control's signed frontier is exactly the tips that history reaches.
+        let reduced = !draft.control.value.state().is_deleted();
+        let mut roster_frontier = inventory_frontier(
+            "roster",
+            reduced,
+            roster_entries.keys().cloned(),
+            coven_protocol::circle::CircleRosterCoord::stream_key,
+            |coord| coord.seq,
+        )?;
+        let mut metadata_frontier = inventory_frontier(
+            "metadata",
+            reduced,
+            metadata_entries.keys().cloned(),
+            coven_protocol::circle::CircleMetadataCoord::stream_key,
+            |coord| coord.seq,
+        )?;
         let mut prepared = BTreeMap::new();
-        let mut stream_activations = Vec::new();
         let mut close_outcome = None;
         let mut close_cancellation = None;
+        let mut introduced_metadata = None;
 
         let policy_objects = {
+            let device_id = local_writer.circle_device_id();
+            let author_pubkey = local_writer.author_pubkey();
             let owner_grant = draft.metadata.author_owner_grant.clone();
-            let roster_stream = local_writer.circle_grant_authorized_stream_id(
-                store_root_hash,
-                &owner_grant,
-                StreamAnchorDomain::CircleRoster {
-                    circle_id: draft.circle_id,
-                },
-            );
-            let metadata_stream = local_writer.circle_grant_authorized_stream_id(
-                store_root_hash,
-                &owner_grant,
-                StreamAnchorDomain::CircleMetadata {
-                    circle_id: draft.circle_id,
-                },
-            );
-            let control_stream = local_writer.circle_grant_authorized_stream_id(
-                store_root_hash,
-                &owner_grant,
-                StreamAnchorDomain::CircleControl {
-                    circle_id: draft.circle_id,
-                },
-            );
-            if roster_stream == metadata_stream
-                || roster_stream == control_stream
-                || metadata_stream == control_stream
-            {
-                return Err(CircleOperationError::InvalidState(
-                    "Circle control, roster, and metadata domains derived the same stream"
-                        .to_string(),
-                ));
-            }
+            let stream_key = coven_protocol::circle::CircleAuthorStreamKey {
+                author_pubkey: author_pubkey.clone(),
+                device_id: device_id.clone(),
+                author_owner_grant: owner_grant.clone(),
+            };
 
             let roster_policy = std::mem::replace(
                 &mut draft.policy.roster,
@@ -169,11 +221,9 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     entry,
                 } => Some((false, Some(predecessor), entry)),
             };
-            let prepared_roster = if let Some((founder, predecessor_chain, mut entry)) =
+            let prepared_roster = if let Some((founder, predecessor_chain, entry)) =
                 roster_successor
             {
-                entry.body_mut().stream_id = roster_stream;
-                entry.resign(identity_signer);
                 let entry_prefix = circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
                     circle_id: draft.circle_id,
                     coord: &entry.coord(),
@@ -188,223 +238,59 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     )
                     .await?;
                 prepared.insert("roster-entry".to_string(), entry_prepared.clone());
-                roster_entries.insert(entry.coord(), entry_prepared.reference().clone());
-
-                let stream_key = entry.coord().stream_key();
-                let prior_roster = roster_frontier
+                roster_entries.insert(
+                    entry.coord(),
+                    coven_protocol::store_commit::CircleRosterEntryRef {
+                        object: entry_prepared.reference().clone(),
+                        origin: CircleEntryOrigin::Introduced,
+                    },
+                );
+                let prior = roster_frontier
                     .iter()
-                    .find(|head| head.coord.stream_key() == stream_key)
+                    .find(|coord| coord.stream_key() == stream_key)
                     .cloned();
-                let (current_slot, seq, predecessor, activation_id, activation) =
-                    if let Some(reference) = &prior_roster {
-                        let prefix = circle_semantic_prefix(CircleSemanticSlot::RosterHead {
-                            circle_id: draft.circle_id,
-                            head: reference,
-                        });
-                        let bytes = read_exact_circle_object(
-                            storage,
-                            &roster_context,
-                            &reference.object,
-                            &prefix,
-                        )
-                        .await?;
-                        let head: coven_protocol::circle::CircleRosterHead =
-                            serde_json::from_slice(&bytes)?;
-                        if !local_writer.verify_circle_roster_head(&head)
-                            || head.entry_coord() != reference.coord
-                            || head.head_hash() != reference.head_hash
-                        {
-                            return Err(CircleOperationError::InvalidState(
-                                "Circle roster predecessor head failed verification".to_string(),
-                            ));
-                        }
-                        (
-                            head.successor.next_slot.clone(),
-                            head.seq.checked_add(1).ok_or_else(|| {
-                                CircleOperationError::InvalidState(
-                                    "Circle roster sequence overflow".to_string(),
-                                )
-                            })?,
-                            Some(reference.object.clone()),
-                            head.successor.activation,
-                            None,
-                        )
-                    } else {
-                        let current_prefix =
-                            circle_roster_head_prefix(draft.circle_id, &stream_key, 1);
-                        let current_slot = storage
-                            .allocate_protocol_slot(&roster_context, &current_prefix, ".json")
-                            .await
-                            .map_err(coven_protocol::objects::StoreObjectError::from)?;
-                        let activation = local_writer.circle_grant_authorized_activation(
-                            store_root_hash,
-                            owner_grant.clone(),
-                            GrantStreamAnchor::CircleRoster {
-                                circle_id: draft.circle_id,
-                                first_slot: current_slot.clone(),
-                            },
-                        );
-                        (
-                            current_slot,
-                            1,
-                            None,
-                            activation.activation_id(),
-                            Some(activation),
-                        )
-                    };
-                if entry.seq != seq
-                    || entry.previous_hash
-                        != prior_roster
-                            .as_ref()
-                            .map(|reference| reference.coord.entry_hash)
+                if entry.seq != prior.as_ref().map_or(1, |coord| coord.seq + 1)
+                    || entry.previous_hash != prior.as_ref().map(|coord| coord.entry_hash)
                 {
                     return Err(CircleOperationError::InvalidState(
                         "Circle roster successor differs from its exact author-stream predecessor"
                             .to_string(),
                     ));
                 }
-                let current_prefix = circle_roster_head_prefix(draft.circle_id, &stream_key, seq);
-                let next_slot = storage
-                    .allocate_protocol_slot(
-                        &roster_context,
-                        &circle_roster_head_prefix(
-                            draft.circle_id,
-                            &stream_key,
-                            seq.checked_add(1).ok_or_else(|| {
-                                CircleOperationError::InvalidState(
-                                    "Circle roster sequence overflow".to_string(),
-                                )
-                            })?,
-                        ),
-                        ".json",
-                    )
-                    .await
-                    .map_err(coven_protocol::objects::StoreObjectError::from)?;
-                let head = local_writer.sign_circle_roster_head(
-                    &entry,
-                    entry_prepared.reference().clone(),
-                    SuccessorLink {
-                        activation: activation_id,
-                        predecessor,
-                        next_slot,
-                    },
-                );
-                let head_prepared = self.prepare_circle_object_at(
-                    &roster_context,
-                    current_slot,
-                    &current_prefix,
-                    serde_json::to_vec(&head)
-                        .expect("Circle roster head serialization cannot fail"),
-                )?;
-                let head_ref =
-                    CircleRosterHeadRef::from_stored_head(&head, head_prepared.reference().clone());
-                prepared.insert("roster-head".to_string(), head_prepared);
-                roster_frontier.retain(|reference| reference.coord.stream_key() != stream_key);
-                roster_frontier.push(head_ref.clone());
-                roster_frontier.sort_by_key(|head| head.coord.stream_key());
-                roster_heads.push(head_ref.clone());
-                roster_heads.sort();
-                if let Some(activation) = activation {
-                    stream_activations.push(activation);
+                roster_frontier.retain(|coord| coord.stream_key() != stream_key);
+                roster_frontier.push(entry.coord());
+                roster_frontier.sort_by_key(coven_protocol::circle::CircleRosterCoord::stream_key);
+                let chain = match predecessor_chain {
+                    Some(predecessor) => predecessor.with_successor(entry.clone()),
+                    None => {
+                        coven_protocol::circle::CircleRosterChain::from_entries(vec![entry.clone()])
+                    }
                 }
-                Some((founder, predecessor_chain, entry, head, head_ref))
+                .map_err(CircleOperationError::from)?;
+                draft.roster = chain.try_resolved().map_err(CircleOperationError::from)?;
+                Some((founder, entry))
             } else {
                 None
             };
 
-            if let Some((_, predecessor_chain, entry, head, reference)) = &prepared_roster {
-                let exact_head = coven_protocol::circle::ExactCircleRosterHead::bind(
-                    head.clone(),
-                    reference.clone(),
-                )
-                .map_err(CircleOperationError::from)?;
-                let chain = match predecessor_chain {
-                    Some(predecessor) => {
-                        predecessor.with_exact_successor(entry.clone(), exact_head)
-                    }
-                    None => coven_protocol::circle::CircleRosterChain::from_entries_with_heads(
-                        vec![entry.clone()],
-                        vec![exact_head],
-                    ),
-                }
-                .map_err(CircleOperationError::from)?;
-                draft.roster = chain.try_resolved().map_err(CircleOperationError::from)?;
-            }
-
             let roster_state = coven_protocol::circle::MergeCircleRosterStateRef {
-                heads: roster_frontier,
+                frontier: roster_frontier,
                 state_hash: draft.roster.state_hash,
             };
-            let (metadata_state, metadata_head) = if draft.policy.metadata_successor {
+            let metadata_state = if draft.policy.metadata_successor {
                 let selects_authored_metadata =
                     draft.control.value.access_epoch().metadata.selected == draft.metadata.coord();
                 draft.metadata.body_mut().author_roster = roster_state.clone();
-                let prior_metadata = metadata_heads
+                let prior = metadata_frontier
                     .iter()
-                    .find(|head| head.coord.stream_id == metadata_stream)
+                    .find(|coord| coord.stream_key() == stream_key)
                     .cloned();
-                let (metadata_slot, metadata_seq, metadata_previous, metadata_activation) =
-                    if let Some(reference) = &prior_metadata {
-                        let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
-                            circle_id: draft.circle_id,
-                            head: reference,
-                        });
-                        let bytes = read_exact_circle_object(
-                            storage,
-                            &metadata_context,
-                            &reference.object,
-                            &prefix,
-                        )
-                        .await?;
-                        let head: coven_protocol::circle::CircleMetadataHead =
-                            serde_json::from_slice(&bytes)?;
-                        if !local_writer.verify_circle_metadata_head(&head)
-                            || head.coord() != reference.coord
-                        {
-                            return Err(CircleOperationError::InvalidState(
-                                "Circle metadata predecessor head failed verification".to_string(),
-                            ));
-                        }
-                        (
-                            head.successor.next_slot.clone(),
-                            head.seq.checked_add(1).ok_or_else(|| {
-                                CircleOperationError::InvalidState(
-                                    "Circle metadata sequence overflow".to_string(),
-                                )
-                            })?,
-                            Some(head.tip_hash),
-                            None,
-                        )
-                    } else {
-                        let stream_key = coven_protocol::circle::CircleAuthorStreamKey {
-                            author_pubkey: draft.metadata.author_pubkey.clone(),
-                            device_id: draft.metadata.device_id.clone(),
-                            stream_id: metadata_stream,
-                            author_owner_grant: owner_grant.clone(),
-                        };
-                        let prefix = circle_metadata_head_prefix(draft.circle_id, &stream_key, 1);
-                        let slot = storage
-                            .allocate_protocol_slot(&metadata_context, &prefix, ".json")
-                            .await
-                            .map_err(coven_protocol::objects::StoreObjectError::from)?;
-                        let activation = local_writer.circle_grant_authorized_activation(
-                            store_root_hash,
-                            owner_grant.clone(),
-                            GrantStreamAnchor::CircleMetadata {
-                                circle_id: draft.circle_id,
-                                first_slot: slot.clone(),
-                            },
-                        );
-                        (slot, 1, None, Some(activation))
-                    };
                 let metadata = draft.metadata.body_mut();
-                metadata.stream_id = metadata_stream;
-                metadata.seq = metadata_seq;
-                metadata.previous_hash = metadata_previous;
-                metadata.dependencies = metadata_heads
-                    .iter()
-                    .map(|head| head.coord.clone())
-                    .collect();
+                metadata.device_id = device_id.clone();
+                metadata.author_owner_grant = owner_grant.clone();
+                metadata.seq = prior.as_ref().map_or(1, |coord| coord.seq + 1);
+                metadata.previous_hash = prior.as_ref().map(|coord| coord.metadata_hash);
+                metadata.dependencies = metadata_frontier.clone();
                 draft.metadata.resign(identity_signer);
                 let metadata_prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataEntry {
                     circle_id: draft.circle_id,
@@ -420,118 +306,42 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     )
                     .await?;
                 prepared.insert("metadata".to_string(), metadata_prepared.clone());
+                introduced_metadata = Some(draft.metadata.clone());
                 metadata_entries.insert(
                     draft.metadata.coord(),
                     CircleMetadataObjectRef {
                         key_fingerprint: draft.metadata.key_fingerprint,
                         object: metadata_prepared.reference().clone(),
+                        origin: CircleEntryOrigin::Introduced,
                     },
                 );
-                let metadata_activation_id = match &metadata_activation {
-                    Some(activation) => activation.activation_id(),
-                    None => {
-                        let reference = prior_metadata.as_ref().expect("prior metadata head");
-                        let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
-                            circle_id: draft.circle_id,
-                            head: reference,
-                        });
-                        let bytes = read_exact_circle_object(
-                            storage,
-                            &metadata_context,
-                            &reference.object,
-                            &prefix,
-                        )
-                        .await?;
-                        let head: coven_protocol::circle::CircleMetadataHead =
-                            serde_json::from_slice(&bytes)?;
-                        head.successor.activation
-                    }
-                };
-                let metadata_stream_key = draft.metadata.coord().stream_key();
-                let metadata_next_slot = storage
-                    .allocate_protocol_slot(
-                        &metadata_context,
-                        &circle_metadata_head_prefix(
-                            draft.circle_id,
-                            &metadata_stream_key,
-                            metadata_seq.checked_add(1).ok_or_else(|| {
-                                CircleOperationError::InvalidState(
-                                    "Circle metadata sequence overflow".to_string(),
-                                )
-                            })?,
-                        ),
-                        ".json",
-                    )
-                    .await
-                    .map_err(coven_protocol::objects::StoreObjectError::from)?;
-                let metadata_head = local_writer.sign_circle_metadata_head(
-                    &draft.metadata,
-                    metadata_prepared.reference().clone(),
-                    SuccessorLink {
-                        activation: metadata_activation_id,
-                        predecessor: prior_metadata.as_ref().map(|head| head.object.clone()),
-                        next_slot: metadata_next_slot,
-                    },
-                );
-                let metadata_head_prefix = circle_metadata_head_prefix(
-                    draft.circle_id,
-                    &metadata_stream_key,
-                    metadata_seq,
-                );
-                let metadata_head_prepared = self.prepare_circle_object_at(
-                    &metadata_context,
-                    metadata_slot,
-                    &metadata_head_prefix,
-                    serde_json::to_vec(&metadata_head)
-                        .expect("Circle metadata head serialization cannot fail"),
-                )?;
-                let metadata_head_ref = CircleMetadataHeadRef::from_stored_head(
-                    &metadata_head,
-                    metadata_head_prepared.reference().clone(),
-                );
-                prepared.insert("metadata-head".to_string(), metadata_head_prepared);
-                metadata_heads.retain(|head| head.coord.stream_id != metadata_stream);
-                metadata_heads.push(metadata_head_ref);
-                metadata_heads.sort_by_key(|head| head.coord.stream_key());
-                if let Some(activation) = metadata_activation {
-                    stream_activations.push(activation);
-                }
+                metadata_frontier.retain(|coord| coord.stream_key() != stream_key);
+                metadata_frontier.push(draft.metadata.coord());
+                metadata_frontier
+                    .sort_by_key(coven_protocol::circle::CircleMetadataCoord::stream_key);
 
                 let selected = if selects_authored_metadata
                     || draft
                         .control
                         .value
-                        .value
-                        .state
                         .access_epoch()
                         .metadata
-                        .heads
+                        .frontier
                         .is_empty()
                 {
                     draft.metadata.coord()
                 } else {
-                    draft
-                        .control
-                        .value
-                        .value
-                        .state
-                        .access_epoch()
-                        .metadata
-                        .selected
-                        .clone()
+                    draft.control.value.access_epoch().metadata.selected.clone()
                 };
-                (
-                    coven_protocol::circle::MergeCircleMetadataStateRef {
-                        heads: metadata_heads.clone(),
-                        selected: selected.clone(),
-                        state_hash: if selected == draft.metadata.coord() {
-                            draft.metadata.metadata_hash()
-                        } else {
-                            draft.control.value.access_epoch().metadata.state_hash
-                        },
+                coven_protocol::circle::MergeCircleMetadataStateRef {
+                    frontier: metadata_frontier.clone(),
+                    state_hash: if selected == draft.metadata.coord() {
+                        draft.metadata.metadata_hash()
+                    } else {
+                        draft.control.value.access_epoch().metadata.state_hash
                     },
-                    Some(metadata_head),
-                )
+                    selected,
+                }
             } else {
                 let metadata_state = draft.control.value.access_epoch().metadata.clone();
                 if !draft.metadata.verify()
@@ -542,7 +352,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         "Circle transition inherited invalid selected metadata".to_string(),
                     ));
                 }
-                (metadata_state, None)
+                metadata_state
             };
 
             for access in &mut draft.access {
@@ -558,77 +368,21 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             // publishes no leaves.
             let access_map = CircleAccessMap::from_leaves(&draft.access)?;
 
-            let mut control_frontier = draft
-                .control
-                .value
-                .value
-                .state
-                .access_epoch()
-                .covered_control_heads
-                .clone();
-            if let Some(previous) = previous_control {
-                let head_hash = previous.head_hash();
-                let head_object = previous.head_object();
-                control_frontier
-                    .retain(|head| head.coord.stream_key() != previous.control().stream_key());
-                control_frontier.push(coven_protocol::circle::MergeCircleControlHeadRef {
-                    coord: previous.control().clone(),
-                    head_hash,
-                    object: head_object.clone(),
+            let mut covered_controls = draft.control.value.access_epoch().covered_controls.clone();
+            if let Some(previous) = previous {
+                covered_controls.retain(|covered| {
+                    covered.coord.stream_key() != previous.reference.control().stream_key()
+                });
+                covered_controls.push(coven_protocol::circle::CircleControlActivationRef {
+                    coord: previous.reference.control().clone(),
+                    activating_commit: previous.activating_commit.clone(),
                 });
             }
-            control_frontier.sort_by_key(|head| head.coord.stream_key());
-            let prior_control = control_frontier
+            covered_controls.sort_by_key(|covered| covered.coord.stream_key());
+            let prior_control = covered_controls
                 .iter()
-                .find(|head| head.coord.stream_key().stream_id == control_stream)
+                .find(|covered| covered.coord.stream_key() == stream_key)
                 .cloned();
-            let (control_slot, control_seq, control_previous, control_activation) =
-                if let Some(reference) = &prior_control {
-                    let prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
-                        circle_id: draft.circle_id,
-                        control: &reference.coord,
-                    });
-                    let bytes = read_exact_circle_object(
-                        storage,
-                        &control_context,
-                        &reference.object,
-                        &prefix,
-                    )
-                    .await?;
-                    let head: coven_protocol::circle::CircleControlHead =
-                        serde_json::from_slice(&bytes)?;
-                    (
-                        head.successor.next_slot.clone(),
-                        head.control.seq.checked_add(1).ok_or_else(|| {
-                            CircleOperationError::InvalidState(
-                                "Circle control sequence overflow".to_string(),
-                            )
-                        })?,
-                        Some(head.control.control_hash()),
-                        None,
-                    )
-                } else {
-                    let stream_key = coven_protocol::circle::CircleAuthorStreamKey {
-                        author_pubkey: draft.control.value.author_pubkey.clone(),
-                        device_id: local_writer.circle_device_id(),
-                        stream_id: control_stream,
-                        author_owner_grant: owner_grant.clone(),
-                    };
-                    let prefix = circle_control_head_prefix(draft.circle_id, &stream_key, 1);
-                    let slot = storage
-                        .allocate_protocol_slot(&control_context, &prefix, ".json")
-                        .await
-                        .map_err(coven_protocol::objects::StoreObjectError::from)?;
-                    let activation = local_writer.circle_grant_authorized_activation(
-                        store_root_hash,
-                        owner_grant.clone(),
-                        GrantStreamAnchor::CircleControl {
-                            circle_id: draft.circle_id,
-                            first_slot: slot.clone(),
-                        },
-                    );
-                    (slot, 1, None, Some(activation))
-                };
 
             let coven_protocol::circle::CircleControlValue {
                 order,
@@ -638,21 +392,24 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 membership_authority: _,
             } = &mut draft.control.value.body_mut().value;
             let access_epoch = state.access_epoch_mut();
-            order.device_id = local_writer.circle_device_id();
-            order.stream_id = control_stream;
-            order.author_owner_grant = owner_grant.clone();
-            order.seq = control_seq;
-            order.previous_control_hash = control_previous;
-            order.dependencies = control_frontier
+            order.device_id = device_id;
+            order.author_owner_grant = owner_grant;
+            order.seq = prior_control
+                .as_ref()
+                .map_or(1, |covered| covered.coord.seq + 1);
+            order.previous_control_hash = prior_control
+                .as_ref()
+                .map(|covered| covered.coord.control_hash);
+            order.dependencies = covered_controls
                 .iter()
-                .filter(|head| head.coord.stream_key().stream_id != control_stream)
-                .map(|head| head.coord.clone())
+                .filter(|covered| covered.coord.stream_key() != stream_key)
+                .map(|covered| covered.coord.clone())
                 .collect();
             access_epoch.roster = roster_state.clone();
             access_epoch.metadata = metadata_state;
             *access = access_map;
-            access_epoch.covered_control_heads = control_frontier;
-            if let Some((true, _, entry, _, _)) = &prepared_roster {
+            access_epoch.covered_controls = covered_controls;
+            if let Some((true, entry)) = &prepared_roster {
                 author_authority.roster = roster_state;
                 author_authority.created_at = entry.coord();
             }
@@ -760,72 +517,11 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 )
                 .await?;
             prepared.insert("control".to_string(), control_prepared.clone());
-            let control_activation_id = match &control_activation {
-                Some(activation) => activation.activation_id(),
-                None => {
-                    let reference = prior_control.as_ref().expect("prior control head");
-                    let prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
-                        circle_id: draft.circle_id,
-                        control: &reference.coord,
-                    });
-                    let bytes = read_exact_circle_object(
-                        storage,
-                        &control_context,
-                        &reference.object,
-                        &prefix,
-                    )
-                    .await?;
-                    let head: coven_protocol::circle::CircleControlHead =
-                        serde_json::from_slice(&bytes)?;
-                    head.successor.activation
-                }
-            };
-            let control_stream_key = draft.control.coord.stream_key();
-            let control_next_slot = storage
-                .allocate_protocol_slot(
-                    &control_context,
-                    &circle_control_head_prefix(
-                        draft.circle_id,
-                        &control_stream_key,
-                        control_seq.checked_add(1).ok_or_else(|| {
-                            CircleOperationError::InvalidState(
-                                "Circle control sequence overflow".to_string(),
-                            )
-                        })?,
-                    ),
-                    ".json",
-                )
-                .await
-                .map_err(coven_protocol::objects::StoreObjectError::from)?;
-            let control_head = local_writer.sign_circle_control_head(
-                &draft.control.value,
-                control_prepared.reference().clone(),
-                SuccessorLink {
-                    activation: control_activation_id,
-                    predecessor: prior_control.as_ref().map(|head| head.object.clone()),
-                    next_slot: control_next_slot,
-                },
-            );
-            let control_head_prefix =
-                circle_control_head_prefix(draft.circle_id, &control_stream_key, control_seq);
-            let control_head_prepared = self.prepare_circle_object_at(
-                &control_context,
-                control_slot,
-                &control_head_prefix,
-                serde_json::to_vec(&control_head)
-                    .expect("Circle control head serialization cannot fail"),
-            )?;
-            prepared.insert("control-head".to_string(), control_head_prepared.clone());
-            if let Some(activation) = control_activation {
-                stream_activations.push(activation);
-            }
 
             CircleTransitionPolicyObjects {
-                roster: prepared_roster.map(|(_, _, entry, head, _)| {
-                    coven_protocol::circle::CircleRosterPolicyObjects { entry, head }
-                }),
-                metadata_head,
-                control_head,
+                roster: prepared_roster
+                    .map(|(_, entry)| coven_protocol::circle::CircleRosterPolicyObjects { entry }),
+                metadata: introduced_metadata,
             }
         };
 
@@ -855,10 +551,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             })?
             .reference()
             .clone();
-        let control_head_object = prepared
-            .get("control-head")
-            .map(|object| object.reference().clone());
-        stream_activations.sort();
         let close_intent = match draft.control.value.state() {
             coven_protocol::circle::CircleControlState::ActiveEpoch(_)
             | coven_protocol::circle::CircleControlState::Deleted(_) => None,
@@ -889,14 +581,10 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 close_outcome: close_outcome.map(|(_, reference)| reference),
                 close_cancellation: close_cancellation.map(|(_, reference)| reference),
                 roster_entries,
-                roster_heads,
                 metadata_entries,
-                metadata_heads,
                 bootstraps,
             },
             prepared,
-            control_head_object,
-            stream_activations,
         ))
     }
 }

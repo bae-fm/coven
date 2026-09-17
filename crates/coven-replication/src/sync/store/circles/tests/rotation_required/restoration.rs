@@ -130,14 +130,14 @@ async fn publish_acknowledged_store_snapshot(
 
 /// The fresh directory a Store snapshot restores into. The temp dir must outlive
 /// the restore, and both the database path and the Store dir are read from it.
-struct RestoreTarget {
+pub(super) struct RestoreTarget {
     _temp: tempfile::TempDir,
     database_path: std::path::PathBuf,
     store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl RestoreTarget {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let temp = tempfile::tempdir().expect("restore destination");
         Self {
             database_path: temp.path().join("store.db"),
@@ -189,7 +189,7 @@ fn assert_restore_left_nothing(
 /// Restores the Store snapshot as `restorer` and installs it into `target`. The
 /// preparation is expected to verify; the install outcome is the caller's, since
 /// the failure cases are exactly what several of these tests assert on.
-async fn restore_store_snapshot<'a>(
+pub(super) async fn restore_store_snapshot<'a>(
     store: &'a TestStore,
     db: &Database,
     membership: &coven_protocol::membership::MembershipChain,
@@ -219,7 +219,7 @@ async fn restore_store_snapshot<'a>(
         .await
 }
 
-struct ActiveMemberCircleSnapshot {
+pub(super) struct ActiveMemberCircleSnapshot {
     db: Database,
     store: std::sync::Arc<TestStore>,
     home: Arc<coven_storage::InMemoryCloudHome>,
@@ -231,7 +231,7 @@ struct ActiveMemberCircleSnapshot {
 }
 
 /// How much Circle history the fixture builds before the Store snapshot cut.
-enum CircleFixtureMode {
+pub(super) enum CircleFixtureMode {
     /// Live Circle content, no epoch close — no image is reclaimed.
     Live,
     /// The epoch is closed by removing the member; the successor bootstrap covers
@@ -240,7 +240,7 @@ enum CircleFixtureMode {
 }
 
 impl ActiveMemberCircleSnapshot {
-    async fn build(name: &str, mode: CircleFixtureMode) -> Self {
+    pub(super) async fn build(name: &str, mode: CircleFixtureMode) -> Self {
         let routing = EncryptionService::from_key([42; 32]);
         let CircleWithOneMember {
             db,
@@ -305,6 +305,65 @@ impl ActiveMemberCircleSnapshot {
             circle_id,
             membership,
         }
+    }
+
+    /// The Circle's current control inherits a roster entry from an earlier
+    /// activation: its coordinate, the exact object it names, and the commit
+    /// that introduced it.
+    pub(super) async fn inherited_roster_entry(
+        &self,
+    ) -> (
+        coven_protocol::circle::CircleRosterCoord,
+        coven_protocol::objects::ExactObjectRef,
+        coven_protocol::store_commit::StoreBatchCommitRef,
+    ) {
+        let database = StoreDatabase::new(&self.db);
+        let (current, _) = database
+            .circle_authoring_context(self.circle_id, &keys::public_key_hex(&self.signer))
+            .await
+            .expect("read the Circle's current control");
+        let (activation, _) = database
+            .verified_circle_activation_context(
+                self.store.root().clone(),
+                self.circle_id,
+                current.control.coord.clone(),
+            )
+            .await
+            .expect("read the current activation")
+            .expect("the current control is retained");
+        let entries = activation.reference.objects().roster_entries.clone();
+        let (coord, entry) = entries
+            .iter()
+            .find(|(_, entry)| entry.origin.inherited_from().is_some())
+            .expect("the current control inherits an earlier roster entry");
+        let introduction = entry
+            .origin
+            .inherited_from()
+            .expect("an inherited roster entry names its introduction")
+            .clone();
+        (coord.clone(), entry.object.clone(), introduction)
+    }
+
+    pub(super) fn circle_id(&self) -> coven_protocol::circle::CircleId {
+        self.circle_id
+    }
+
+    /// Restore this snapshot into `target` as the Circle's member device.
+    pub(super) async fn restore_as_member<'a>(
+        &'a self,
+        target: &'a RestoreTarget,
+        device_id: &str,
+    ) -> crate::sync::store::RestoringStore<'a> {
+        restore_store_snapshot(
+            &self.store,
+            &self.db,
+            &self.membership,
+            &self.member,
+            target,
+            device_id,
+        )
+        .await
+        .expect("restore the member's Circle content")
     }
 }
 

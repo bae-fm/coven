@@ -450,10 +450,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
                     "circle creation Store commit is not an exact control-only batch".to_string(),
                 ));
             };
-            let expected_ref = creation.control_ref(
-                control_ref.objects().clone(),
-                Some(control_ref.head_object().clone()),
-            );
+            let expected_ref = creation.control_ref(control_ref.objects().clone());
             if control_ref != &expected_ref
                     || !commit.operations().is_some_and(
                         coven_protocol::store_commit::StoreCommitOperations::is_circle_control_activation_only,

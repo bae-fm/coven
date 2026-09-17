@@ -417,7 +417,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
 
     /// Load the reopening control's exact predecessor close coordinate. The reopen's
     /// same-stream predecessor is named by `previous_control_hash` and carried in the
-    /// covered control heads.
+    /// covered controls.
     pub(super) fn reopen_predecessor_coord(
         control: &PreparedCircleControl,
     ) -> Result<coven_protocol::circle::CircleControlCoord, CircleOperationError> {
@@ -430,14 +430,13 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             )
         })?;
         active
-            .covered_control_heads
+            .covered_controls
             .iter()
-            .find(|head| head.coord.control_hash == previous)
-            .map(|head| head.coord.clone())
+            .find(|covered| covered.coord.control_hash == previous)
+            .map(|covered| covered.coord.clone())
             .ok_or_else(|| {
                 CircleOperationError::InvalidState(
-                    "Circle successor predecessor is absent from its covered control heads"
-                        .to_string(),
+                    "Circle successor predecessor is absent from its covered controls".to_string(),
                 )
             })
     }

@@ -86,15 +86,15 @@ impl PreparedAccessLeaf {
 #[serde(deny_unknown_fields)]
 pub struct CircleRosterPolicyObjects {
     pub entry: CircleRosterEntry,
-    pub head: CircleRosterHead,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CircleTransitionPolicyObjects {
+    /// The roster entry this transition introduces, if it authors one.
     pub roster: Option<CircleRosterPolicyObjects>,
-    pub metadata_head: Option<CircleMetadataHead>,
-    pub control_head: CircleControlHead,
+    /// The metadata entry this transition introduces, if it authors one.
+    pub metadata: Option<CircleMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -233,15 +233,10 @@ impl PreparedCircleTransition {
     pub fn control_ref(
         &self,
         objects: crate::store_commit::CircleActivationObjects,
-        head_object: Option<ExactObjectRef>,
     ) -> crate::store_commit::CircleControlRef {
-        let head_object =
-            head_object.expect("prepared Circle transition must contain its stored head");
         crate::store_commit::CircleControlRef {
             circle_id: self.circle_id,
             control: self.control.coord.clone(),
-            head_hash: self.policy_objects.control_head.head_hash(),
-            head_object,
             objects,
         }
     }

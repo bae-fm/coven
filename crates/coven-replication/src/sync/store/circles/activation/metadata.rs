@@ -1,31 +1,30 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{
-    CircleActivationVerifier, CircleHeadKind, CircleHeadValue, VerifiedStreamActivationPrefix,
-};
+use super::provenance::CircleEntryProvenance;
+use super::{CircleActivationVerifier, VerifiedCircleActivationPrefix};
 use crate::sync::store::circles::CircleOperationError;
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::circle::{
     circle_semantic_prefix, verify_circle_semantic_prefix, CircleId, CircleMetadata,
-    CircleMetadataHeadRef, CircleSemanticSlot,
+    CircleSemanticSlot,
 };
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
-    CircleActivationObjects, GrantStreamAnchor, StoreBatchCommit, StoreBatchCommitRef,
-    StreamActivationId,
+    CircleActivationObjects, StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration,
 };
 
 impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn load_circle_metadata_state(
         &mut self,
-        verified_prefix: &VerifiedStreamActivationPrefix,
+        prefix: &VerifiedCircleActivationPrefix,
         commit: &StoreBatchCommit,
+        author: &StoreDeviceRegistration,
         circle_id: CircleId,
         state: &coven_protocol::circle::CircleMetadataStateRef,
         encryption: EncryptionService,
         objects: &CircleActivationObjects,
         commit_ref: &StoreBatchCommitRef,
-        consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
     ) -> Result<CircleMetadata, CircleOperationError> {
         let root = self.root().clone();
         commit_ref
@@ -37,127 +36,26 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             ));
         }
         let store_root_hash = commit.store_root_hash;
-        if state.heads.is_empty()
+        if state.frontier.is_empty()
             || !state
-                .heads
+                .frontier
                 .windows(2)
-                .all(|pair| pair[0].coord.stream_key() < pair[1].coord.stream_key())
+                .all(|pair| pair[0].stream_key() < pair[1].stream_key())
         {
             return Err(CircleOperationError::InvalidState(
-                "Circle metadata heads are not one canonical head per stream".to_string(),
+                "Circle metadata frontier is not one canonical position per stream".to_string(),
             ));
         }
-        let mut pending = BTreeSet::new();
-        for reference in &state.heads {
-            let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
-                circle_id,
-                head: reference,
-            });
-            let object = objects
-                .metadata_heads
-                .iter()
-                .find(|stored| *stored == reference)
-                .ok_or_else(|| {
-                    CircleOperationError::InvalidState(format!(
-                        "Circle activation omits exact metadata head {}",
-                        reference.head_hash
-                    ))
-                })?;
-            let tip_object = objects
-                .metadata_entries
-                .get(&reference.coord)
-                .ok_or_else(|| {
-                    CircleOperationError::InvalidState(format!(
-                        "Circle activation omits metadata head tip {}",
-                        reference.coord.metadata_hash
-                    ))
-                })?;
-            let head_encryption = encryption
-                .service_for_fingerprint(tip_object.key_fingerprint.as_bytes())
-                .map_err(CircleOperationError::Encryption)?;
-            let context = ProtocolObjectContext::circle(
-                store_root_hash,
-                ProtocolObjectDomain::CircleMetadata,
-                head_encryption,
-            );
-            let bytes = self
-                .storage
-                .read_protocol_object(&context, &object.object, &prefix)
-                .await
-                .map_err(coven_protocol::objects::StoreObjectError::from)?;
-            let head: coven_protocol::circle::CircleMetadataHead = serde_json::from_slice(&bytes)?;
-            let declared_ref =
-                CircleMetadataHeadRef::from_stored_head(&head, object.object.clone());
-            let authority = self
-                .resolve_circle_stream_authority(
-                    verified_prefix,
-                    commit_ref,
-                    commit,
-                    head.successor.activation,
-                    head.stream_id,
-                    circle_id,
-                    &head.author_owner_grant,
-                    |circle_id, first_slot| GrantStreamAnchor::CircleMetadata {
-                        circle_id,
-                        first_slot,
-                    },
-                )
-                .await?;
-            self.verify_circle_head_chain(
-                &ProtocolObjectContext::circle(
-                    store_root_hash,
-                    ProtocolObjectDomain::CircleMetadata,
-                    encryption.clone(),
-                ),
-                CircleHeadKind::Metadata,
-                CircleHeadValue::Metadata(head.clone()),
-                object.object.clone(),
-                &authority,
-            )
-            .await?;
-            if !head.verify_for_registration(&authority.registration)
-                || authority.registration.author_pubkey != head.author_pubkey
-                || (authority.activated_here && head.seq != 1)
-                || head.successor.activation != authority.activation_id
-                || (head.seq == 1
-                    && (head.successor.predecessor.is_some()
-                        || object.object.slot() != &authority.first_slot))
-                || head.head_hash() != reference.head_hash
-                || head.tip != tip_object.object
-                || verify_circle_semantic_prefix(
-                    &prefix,
-                    CircleSemanticSlot::MetadataHead {
-                        circle_id: head.circle_id,
-                        head: &declared_ref,
-                    },
-                )
-                .is_err()
-                || head.store_root_hash != store_root_hash
-                || head.circle_id != circle_id
-                || &declared_ref != reference
-            {
-                return Err(CircleOperationError::InvalidState(
-                    "Circle metadata head failed exact verification".to_string(),
-                ));
-            }
-            if authority.activated_here {
-                consumed_stream_activations.insert(authority.activation_id);
-            }
-            pending.insert(head.coord());
-        }
+        let mut pending = state.frontier.iter().cloned().collect::<BTreeSet<_>>();
         let selected = state.selected.clone();
-        let expected_heads = state
-            .heads
-            .iter()
-            .map(|reference| reference.coord.clone())
-            .collect::<Vec<_>>();
+        let expected_heads = state.frontier.clone();
 
         let mut entries = BTreeMap::new();
         while let Some(coord) = pending.pop_first() {
             if entries.contains_key(&coord) {
                 continue;
             }
-            let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataEntry {
+            let prefix_path = circle_semantic_prefix(CircleSemanticSlot::MetadataEntry {
                 circle_id,
                 coord: &coord,
             });
@@ -177,7 +75,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             );
             let bytes = self
                 .storage
-                .read_protocol_object(&exact_context, &object.object, &prefix)
+                .read_protocol_object(&exact_context, &object.object, &prefix_path)
                 .await
                 .map_err(coven_protocol::objects::StoreObjectError::from)?;
             let entry: CircleMetadata = serde_json::from_slice(&bytes)?;
@@ -189,7 +87,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             }
             if !entry.verify()
                 || verify_circle_semantic_prefix(
-                    &prefix,
+                    &prefix_path,
                     CircleSemanticSlot::MetadataEntry {
                         circle_id: entry.circle_id,
                         coord: &declared_coord,
@@ -205,16 +103,28 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     "Circle metadata entry failed exact verification".to_string(),
                 ));
             }
+            self.verify_circle_entry_origin(
+                prefix,
+                commit,
+                author,
+                circle_id,
+                CircleEntryProvenance::Metadata {
+                    coord: &coord,
+                    entry: &entry,
+                    reference: object,
+                },
+            )
+            .await?;
             let author_roster = self
                 .load_circle_roster_state(
-                    verified_prefix,
+                    prefix,
                     commit_ref,
                     commit,
+                    author,
                     circle_id,
                     &entry.author_roster,
                     encryption.clone(),
                     objects,
-                    consumed_stream_activations,
                 )
                 .await?;
             let author_is_owner = author_roster
@@ -229,6 +139,17 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             entries.insert(coord, entry);
         }
         verify_metadata_history(&entries, Some(&expected_heads))?;
+        // The inventory a control signs is exactly the history its frontier
+        // reaches: an entry the closure never visits would be an author-stream
+        // position carried outside the reduction that settles it.
+        if entries.keys().cloned().collect::<BTreeSet<_>>()
+            != objects.metadata_entries.keys().cloned().collect()
+        {
+            return Err(CircleOperationError::InvalidState(
+                "Circle metadata inventory differs from the history its frontier reaches"
+                    .to_string(),
+            ));
+        }
         let selected_entry = entries.get(&selected).ok_or_else(|| {
             CircleOperationError::InvalidState(
                 "selected Circle metadata coordinate is not in its covered history".to_string(),
@@ -322,7 +243,7 @@ fn verify_metadata_history(
     actual_heads.sort_by_key(|coord| coord.stream_key());
     if expected_heads.is_some_and(|expected| expected != actual_heads) {
         return Err(CircleOperationError::InvalidState(
-            "Circle metadata heads do not name its exact frontier".to_string(),
+            "Circle metadata entries do not reach its signed frontier".to_string(),
         ));
     }
     Ok(())

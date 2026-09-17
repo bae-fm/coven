@@ -102,27 +102,18 @@ fn every_protocol_domain_requires_its_exact_path_grammar() {
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::CircleControl,
-            valid: &[
-                "circle-control/circle/merge/entries/owner/device/grant/stream/1/hash",
-                "circle-control/circle/merge/heads/owner/device/grant/stream/1",
-            ],
-            cross_domain: "circles/circle/roster/entries/owner/device/grant/stream/1/hash",
+            valid: &["circle-control/circle/merge/entries/owner/device/grant/1/hash"],
+            cross_domain: "circles/circle/roster/entries/owner/device/grant/1/hash",
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::CircleRoster,
-            valid: &[
-                "circles/circle/roster/entries/owner/device/grant/stream/1/hash",
-                "circles/circle/roster/heads/owner/device/grant/stream/1",
-            ],
-            cross_domain: "circles/circle/metadata/entries/owner/device/grant/stream/1/hash",
+            valid: &["circles/circle/roster/entries/owner/device/grant/1/hash"],
+            cross_domain: "circles/circle/metadata/entries/owner/device/grant/1/hash",
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::CircleMetadata,
-            valid: &[
-                "circles/circle/metadata/entries/owner/device/grant/stream/1/hash",
-                "circles/circle/metadata/heads/owner/device/grant/stream/1",
-            ],
-            cross_domain: "circles/circle/roster/entries/owner/device/grant/stream/1/hash",
+            valid: &["circles/circle/metadata/entries/owner/device/grant/1/hash"],
+            cross_domain: "circles/circle/roster/entries/owner/device/grant/1/hash",
         },
         DomainPathCase {
             domain: ProtectedObjectDomain::CirclePackage,

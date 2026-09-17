@@ -307,10 +307,9 @@ impl StoreSession<'_> {
                 let dependencies = activation
                     .control
                     .value
-                    .access_epoch()
-                    .covered_control_heads
+                    .covered_controls()
                     .iter()
-                    .map(|head| &head.coord)
+                    .map(|covered| &covered.coord)
                     .filter(|coordinate| pending.contains_key(*coordinate))
                     .cloned()
                     .collect::<std::collections::BTreeSet<_>>();
@@ -710,6 +709,25 @@ impl StoreDatabase {
         .await
     }
 
+    /// See [`StoreDatabase::retained_circle_activation_on`].
+    pub async fn retained_circle_activation(
+        &self,
+        root: coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        activating_commit: StoreBatchCommitRef,
+    ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
+        self.call_store(move |session| {
+            Self::retained_circle_activation_on(
+                StoreRecords::new(session.conn, session.store_dir),
+                session.verified_store_authority,
+                &root,
+                circle_id,
+                &activating_commit,
+            )
+        })
+        .await
+    }
+
     pub async fn verified_circle_activation(
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
@@ -828,6 +846,47 @@ impl StoreDatabase {
         Ok(head)
     }
 
+    /// The accepted Circle activation `activating_commit` carries for
+    /// `circle_id`, when this device still retains that commit's
+    /// materialization.
+    ///
+    /// This is how an inherited Circle roster or metadata entry resolves to the
+    /// exact earlier accepted activation that introduced it without re-reading
+    /// the commit from storage — the path a recipient restoration and a
+    /// baseline-covered position both take. Absence is not an error: the caller
+    /// then proves the activation through the candidate's predecessor history.
+    pub(super) fn retained_circle_activation_on(
+        records: StoreRecords<'_>,
+        authority: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        activating_commit: &StoreBatchCommitRef,
+    ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
+        let stream_id = activating_commit.coord.stream_id.to_string();
+        let sequence = Database::sequence_to_sqlite(&stream_id, activating_commit.coord.sequence)?;
+        let Some(stored) = records.retained_materialization_ref_at(&stream_id, sequence)? else {
+            return Ok(None);
+        };
+        let expected = serde_json::to_string(activating_commit).map_err(|error| {
+            DbError::context("serialize Circle activating commit reference", error)
+        })?;
+        if stored != expected {
+            return Ok(None);
+        }
+        let retained = authority.retained_materialization_by_ref_on(records, activating_commit)?;
+        if retained.root() != root {
+            return Err(DbError::Message(
+                "Circle activation belongs to another Store root".to_string(),
+            ));
+        }
+        Ok(retained
+            .circle_activations()
+            .circles()
+            .iter()
+            .find(|activation| activation.circle_id == circle_id)
+            .cloned())
+    }
+
     pub(super) fn verified_circle_activation_on(
         records: StoreRecords<'_>,
         authority: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
@@ -931,10 +990,9 @@ fn verified_circle_control_covers_with_prefix_on(
     }
     let mut pending = current
         .value
-        .access_epoch()
-        .covered_control_heads
+        .covered_controls()
         .iter()
-        .map(|head| (current.clone(), head.coord.clone()))
+        .map(|covered| (current.clone(), covered.coord.clone()))
         .collect::<Vec<_>>();
     let mut visited = std::collections::BTreeSet::new();
     while let Some((successor, coordinate)) = pending.pop() {
@@ -966,10 +1024,9 @@ fn verified_circle_control_covers_with_prefix_on(
             predecessor
                 .control
                 .value
-                .access_epoch()
-                .covered_control_heads
+                .covered_controls()
                 .iter()
-                .map(|head| (predecessor.control.clone(), head.coord.clone())),
+                .map(|covered| (predecessor.control.clone(), covered.coord.clone())),
         );
     }
     Ok(false)

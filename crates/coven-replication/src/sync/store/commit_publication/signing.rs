@@ -54,34 +54,6 @@ impl LocalStoreWriter {
         self.registration.value().device_id.to_string()
     }
 
-    pub(crate) fn circle_grant_authorized_stream_id(
-        &self,
-        root_hash: coven_protocol::store_commit::ObjectHash,
-        owner_grant: &coven_protocol::membership::MembershipGrantId,
-        domain: coven_protocol::store_commit::StreamAnchorDomain,
-    ) -> coven_protocol::membership::AuthorStreamId {
-        coven_protocol::store_commit::StreamActivation::grant_authorized_stream_id(
-            root_hash,
-            self.registration.reference(),
-            owner_grant,
-            domain,
-        )
-    }
-
-    pub(crate) fn circle_grant_authorized_activation(
-        &self,
-        root_hash: coven_protocol::store_commit::ObjectHash,
-        owner_grant: coven_protocol::membership::MembershipGrantId,
-        anchor: coven_protocol::store_commit::GrantStreamAnchor,
-    ) -> coven_protocol::store_commit::StreamActivation {
-        coven_protocol::store_commit::StreamActivation::grant_authorized(
-            root_hash,
-            self.registration.reference().clone(),
-            owner_grant,
-            anchor,
-        )
-    }
-
     pub(super) fn device_id(&self) -> &coven_protocol::store_commit::StoreDeviceId {
         &self.registration.value().device_id
     }

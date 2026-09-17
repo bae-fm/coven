@@ -327,7 +327,6 @@ const VERIFICATION_ARTIFACT_HOMES: &[&str] = &[
     "crates/coven-replication/src/sync/store/authorization/keyring.rs",
     "crates/coven-replication/src/sync/store/circles/activation/access.rs",
     "crates/coven-replication/src/sync/store/circles/activation/epoch_close.rs",
-    "crates/coven-replication/src/sync/store/circles/activation/heads.rs",
     "crates/coven-replication/src/sync/store/circles/activation/metadata.rs",
     "crates/coven-replication/src/sync/store/circles/activation/roster.rs",
     "crates/coven-replication/src/sync/store/circles/authorized_writer/epoch_close.rs",

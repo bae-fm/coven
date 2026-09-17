@@ -456,6 +456,136 @@ async fn assert_staged_package_access(prepare_historical_control: bool) {
     );
 }
 
+/// A device that has installed nothing resolves an inherited entry's
+/// introduction through the activations staged earlier in the same pull.
+///
+/// The successor's roster entry names the founder's activating commit. The
+/// verifying device joined after that commit and has materialized no Circle
+/// activation at all, so its own retained accepted activations hold nothing to
+/// answer with — the staged prefix is what carries the introduction into the
+/// verification.
+#[tokio::test]
+async fn a_staged_prefix_resolves_an_inherited_entry_introduction() {
+    let name = "staged-inherited-entry-introduction";
+    let owner_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_db = open_scoped_database(owner_dir.clone());
+    let (store, _home, owner_identity, founder) =
+        persist_merge_operation(&owner_db, owner_dir.clone(), name).await;
+    let owner = store
+        .bind_device_in(&owner_db, owner_dir.clone(), &owner_identity)
+        .await
+        .expect("bind Circle owner");
+    owner
+        .resume_circle_operations()
+        .await
+        .expect("publish the founder Circle");
+    let _ = founder;
+
+    let recipient_identity = UserKeypair::generate();
+    store
+        .admit_member(
+            &owner_db,
+            owner_dir.clone(),
+            &owner_identity,
+            &keys::public_key_hex(&recipient_identity),
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            name,
+        )
+        .await
+        .expect("admit the recipient to the Store");
+    let recipient_dir = crate::sync::test_helpers::test_store_dir();
+    let recipient_db = open_scoped_database(recipient_dir.clone());
+    store
+        .activate_joined_device(
+            &owner_db,
+            owner_dir.clone(),
+            &recipient_db,
+            recipient_dir.clone(),
+            &recipient_identity,
+            "2026-07-24T01:00:00Z",
+        )
+        .await
+        .expect("activate the recipient device");
+    let recipient = store
+        .bind_device_in(&recipient_db, recipient_dir.clone(), &recipient_identity)
+        .await
+        .expect("bind the recipient device");
+    let recipient_store = store
+        .open_store_with_identity(&recipient_db, recipient_dir, &recipient_identity)
+        .await
+        .expect("open the recipient's activation reader");
+
+    // Both of this Circle's controls are published after the recipient joined
+    // and it never pulls, so neither is in its retained history.
+    let circle_id = owner
+        .create_circle(&StoreDatabase::new(&owner_db).stamp(), "Allotment")
+        .await
+        .expect("publish a Circle the recipient has never installed");
+    let founder_position = owner
+        .latest_local_store_position()
+        .await
+        .expect("read the founder position")
+        .expect("the founder Circle is published");
+    let founder_commit = owner
+        .load_commit_for_test(&founder_position)
+        .await
+        .expect("load the founder commit");
+    owner
+        .rename_circle(&StoreDatabase::new(&owner_db).stamp(), circle_id, "Cottage")
+        .await
+        .expect("publish a successor that inherits the founder's roster entry");
+    let successor_position = owner
+        .latest_local_store_position()
+        .await
+        .expect("read the successor position")
+        .expect("the successor is published");
+    let successor_commit = owner
+        .load_commit_for_test(&successor_position)
+        .await
+        .expect("load the successor commit");
+
+    assert!(
+        StoreDatabase::new(&recipient_db)
+            .retained_circle_activation(store.root().clone(), circle_id, founder_position.clone(),)
+            .await
+            .expect("read the recipient's retained activations")
+            .is_none(),
+        "the recipient has materialized no Circle activation"
+    );
+
+    let staged = recipient
+        .load_circle_activations(
+            &founder_position,
+            founder_commit.value(),
+            founder_commit.author(),
+        )
+        .await
+        .expect("stage the founder activation earlier in the same pull");
+    let verified = load_prepared_activations(
+        &recipient_store,
+        &successor_commit,
+        &recipient_identity,
+        &[&staged],
+    )
+    .await
+    .expect("the staged founder activation answers the successor's inherited entry");
+
+    let [circle] = verified.circles() else {
+        panic!("the successor commit activates one Circle")
+    };
+    let entries = circle.reference.objects().roster_entries.clone();
+    let inherited = entries.values().next().expect("one roster entry");
+    assert_eq!(
+        inherited.origin,
+        coven_protocol::store_commit::CircleEntryOrigin::Inherited {
+            activating_commit: founder_position,
+        },
+        "the verified entry names the staged commit as its introduction"
+    );
+}
+
 #[tokio::test]
 async fn concurrent_accepted_control_is_not_a_prepared_circle_predecessor() {
     let name = "concurrent-circle-predecessor";
@@ -593,9 +723,9 @@ async fn load_prepared_activations(
     let membership_prefix = history
         .verified_merge_membership_prefix_for_test(predecessors.clone(), predecessors)
         .await?;
-    let mut prefix = coven_protocol::circle_activation::VerifiedStreamActivationPrefix::empty();
+    let mut prefix = coven_protocol::circle_activation::VerifiedCircleActivationPrefix::empty();
     for group in prepared {
-        prefix.include(group.stream_activations())?;
+        prefix.include(group)?;
     }
     let routing = coven_protocol::circle::derive_row_routing_key(
         &EncryptionService::from_key([42; 32]),

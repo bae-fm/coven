@@ -329,44 +329,26 @@ impl ProtectedObjectDomain {
             },
             Self::CircleControl => ProtocolObjectMetadata {
                 aad_label: b"circle-control",
-                path: ProtocolPathRule::Exact(&[
-                    ExactPathShape {
-                        component_count: 10,
-                        fixed_components: &[(0, "circle-control"), (2, "merge"), (3, "entries")],
-                    },
-                    ExactPathShape {
-                        component_count: 9,
-                        fixed_components: &[(0, "circle-control"), (2, "merge"), (3, "heads")],
-                    },
-                ]),
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 9,
+                    fixed_components: &[(0, "circle-control"), (2, "merge"), (3, "entries")],
+                }]),
                 extension: ".json",
             },
             Self::CircleRoster => ProtocolObjectMetadata {
                 aad_label: b"circle-roster",
-                path: ProtocolPathRule::Exact(&[
-                    ExactPathShape {
-                        component_count: 10,
-                        fixed_components: &[(0, "circles"), (2, "roster"), (3, "entries")],
-                    },
-                    ExactPathShape {
-                        component_count: 9,
-                        fixed_components: &[(0, "circles"), (2, "roster"), (3, "heads")],
-                    },
-                ]),
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 9,
+                    fixed_components: &[(0, "circles"), (2, "roster"), (3, "entries")],
+                }]),
                 extension: ".json",
             },
             Self::CircleMetadata => ProtocolObjectMetadata {
                 aad_label: b"circle-metadata",
-                path: ProtocolPathRule::Exact(&[
-                    ExactPathShape {
-                        component_count: 10,
-                        fixed_components: &[(0, "circles"), (2, "metadata"), (3, "entries")],
-                    },
-                    ExactPathShape {
-                        component_count: 9,
-                        fixed_components: &[(0, "circles"), (2, "metadata"), (3, "heads")],
-                    },
-                ]),
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 9,
+                    fixed_components: &[(0, "circles"), (2, "metadata"), (3, "entries")],
+                }]),
                 extension: ".json",
             },
             Self::CirclePackage => ProtocolObjectMetadata {

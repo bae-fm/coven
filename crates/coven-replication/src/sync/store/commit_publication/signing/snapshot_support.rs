@@ -7,7 +7,6 @@ impl LocalStoreWriter {
         old_commit: &coven_protocol::store_commit::StoreBatchCommit,
         coord: coven_protocol::store_commit::StoreCommitCoord,
         reference: coven_protocol::store_commit::CircleControlRef,
-        stream_activations: Vec<coven_protocol::store_commit::StreamActivation>,
     ) -> Result<
         coven_protocol::store_commit::StoreBatchCommit,
         crate::sync::store::circles::CircleOperationError,
@@ -29,7 +28,6 @@ impl LocalStoreWriter {
             old_commit.device_state.clone(),
             old_commit.operations_membership_authority()?,
             reference,
-            stream_activations,
         )
     }
 

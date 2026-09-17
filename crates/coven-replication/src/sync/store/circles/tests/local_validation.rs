@@ -137,13 +137,16 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
             .metadata_entries
             .get_mut(&metadata_coord)
             .expect("load exact metadata edge");
-        let metadata_object = std::mem::replace(&mut metadata.object, roster);
-        objects.roster_entries.insert(roster_coord, metadata_object);
+        let metadata_object = std::mem::replace(&mut metadata.object, roster.object);
+        objects.roster_entries.insert(
+            roster_coord,
+            coven_protocol::store_commit::CircleRosterEntryRef {
+                object: metadata_object,
+                origin: roster.origin,
+            },
+        );
     }
-    let reference = journal
-        .operation()
-        .creation
-        .control_ref(objects, Some(old_reference.head_object().clone()));
+    let reference = journal.operation().creation.control_ref(objects);
     let device = store
         .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
@@ -186,115 +189,6 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
     );
     assert!(!_home.contains_exact_object(&store_commit));
     assert!(!_home.contains_exact_object(&publication));
-}
-
-#[tokio::test]
-async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
-    for wrong_grant in [false, true] {
-        let db_store_dir = crate::sync::test_helpers::test_store_dir();
-        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-        let label = if wrong_grant {
-            "circle-wrong-stream-grant"
-        } else {
-            "circle-wrong-stream-circle"
-        };
-        let (store, _home, signer, mut journal) =
-            persist_merge_operation(&db, db_store_dir.clone(), label).await;
-        let commit = journal.commit().expect("parse Circle commit");
-        let [reference] = commit.circle_controls() else {
-            panic!("Circle commit carries one control")
-        };
-        let device = store
-            .bind_device_in(&db, db_store_dir.clone(), &signer)
-            .await
-            .expect("bind substituted Circle object Store");
-        let mut writer = device
-            .authorize_writer()
-            .await
-            .expect("authorize substituted Circle object Store");
-        writer
-            .circles()
-            .resign_merge_journal_with_reference_for_test(
-                &mut journal,
-                reference.clone(),
-                move |commit| {
-                    let activations = match &mut commit.body_mut().body {
-                        coven_protocol::store_commit::StoreCommitBody::Operations(operations) => {
-                            &mut operations.stream_activations
-                        }
-                        _ => panic!("Circle commit body carries operations"),
-                    };
-                    let activation = activations
-                        .iter_mut()
-                        .find(|activation| {
-                            matches!(
-                                activation,
-                                StreamActivation::GrantAuthorized {
-                                    anchor: GrantStreamAnchor::CircleRoster { .. },
-                                    ..
-                                }
-                            )
-                        })
-                        .expect("founder Circle commit activates its roster stream");
-                    let StreamActivation::GrantAuthorized {
-                        grant_id, anchor, ..
-                    } = activation
-                    else {
-                        unreachable!()
-                    };
-                    if wrong_grant {
-                        *grant_id = coven_protocol::membership::MembershipGrantId(
-                            ObjectHash::digest(b"another Circle grant"),
-                        );
-                    } else {
-                        let GrantStreamAnchor::CircleRoster { circle_id, .. } = anchor else {
-                            unreachable!()
-                        };
-                        *circle_id = CircleId::from_bytes([99; 16]);
-                    }
-                    activations.sort();
-                },
-            )
-            .await
-            .expect("re-sign Circle commit with substituted stream authority");
-        let store_commit = journal.operation().commit_ref().object.clone();
-        let publication = journal
-            .operation()
-            .store_commit
-            .publication
-            .entry_object
-            .clone();
-        let StoreCommitCoord {
-            stream_id,
-            sequence,
-        } = journal.operation().commit_ref().coord;
-        coven_database::StoreDatabase::new(&db)
-            .substitute_circle_operation_for_test(journal.clone())
-            .await
-            .expect("persist Circle journal with substituted stream authority");
-
-        store
-            .bind_device_in(&db, db_store_dir.clone(), &signer)
-            .await
-            .expect("bind Circle test Store")
-            .resume_circle_operations()
-            .await
-            .expect_err("Circle stream activation must name its signed Circle and grant");
-        assert_eq!(
-            StoreDatabase::new(&db)
-                .circle_control_activation_count_for_test(journal.circle_id())
-                .await
-                .expect("count circle activations"),
-            0
-        );
-        assert!(coven_database::StoreDatabase::new(&db)
-            .exact_materialized_ref(&stream_id.to_string(), sequence)
-            .await
-            .expect("read rejected Circle Store position")
-            .is_none());
-        assert!(!_home.contains_exact_object(&store_commit));
-        assert!(!_home.contains_exact_object(&publication));
-    }
 }
 
 #[tokio::test]
@@ -395,139 +289,6 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
 }
 
 #[tokio::test]
-async fn local_successor_rejects_an_unreserved_circle_head_slot() {
-    let db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
-    let (store, _home, signer, founder) =
-        persist_merge_operation(&db, db_store_dir.clone(), "circle-unreserved-predecessor").await;
-    let circle_id = founder.circle_id();
-    store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
-        .await
-        .expect("bind Circle test Store")
-        .resume_circle_operations()
-        .await
-        .expect("publish founder Circle");
-    _home.fail_exact_create_before_call(1);
-    store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
-        .await
-        .expect("bind Circle rename Store")
-        .rename_circle("0000000002000-0000-creator", circle_id, "Renamed household")
-        .await
-        .expect_err("interrupt rename before its first exact upload");
-    let operation_id = coven_database::StoreDatabase::new(&db)
-        .get_circle_operations()
-        .await
-        .expect("list interrupted rename")
-        .into_iter()
-        .find(|operation| operation.circle_id == circle_id)
-        .expect("interrupted rename remains pending")
-        .operation_id;
-    let mut journal = coven_database::StoreDatabase::new(&db)
-        .circle_operation(&operation_id)
-        .await
-        .expect("read interrupted rename")
-        .expect("interrupted rename journal remains durable");
-    let commit = journal.commit().expect("parse rename commit");
-    let original_slot = journal
-        .operation()
-        .prepared_objects
-        .get("control-head")
-        .expect("rename carries a control head")
-        .slot()
-        .clone();
-    let substituted_slot = coven_protocol::objects::ObjectSlot::opaque(
-        original_slot.logical_key().to_string(),
-        "unreserved-circle-successor".to_string(),
-    )
-    .expect("construct an unreserved successor slot with the same semantic path");
-    // Keep the real, readable predecessor and signed head bytes. Only the
-    // successor's physical slot differs from the predecessor's reservation.
-    let creation = &journal.operation().creation;
-    let CircleTransitionPolicyObjects { control_head, .. } = &creation.policy_objects;
-    let head_prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
-        circle_id,
-        control: &control_head.control,
-    });
-    let forging_device = store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
-        .await
-        .expect("bind forged Circle object Store");
-    let prepared_head = forging_device
-        .prepare_circle_object_at(
-            &ProtocolObjectContext::store_encrypted(
-                commit.store_root_hash,
-                ProtocolObjectDomain::CircleControl,
-            ),
-            substituted_slot,
-            &head_prefix,
-            serde_json::to_vec(&control_head).expect("serialize the signed control head"),
-        )
-        .await
-        .expect("prepare the signed head at the unreserved slot");
-    install_substituted_object(&db, &prepared_head).await;
-    journal.operation_mut().prepared_objects.insert(
-        "control-head".to_string(),
-        prepared_head.reference().clone(),
-    );
-    let [old_reference] = commit.circle_controls() else {
-        panic!("rename commit carries one Circle reference")
-    };
-    let reference = journal.operation().creation.control_ref(
-        old_reference.objects().clone(),
-        Some(prepared_head.reference().clone()),
-    );
-    let device = store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
-        .await
-        .expect("bind substituted Circle object Store");
-    let mut writer = device
-        .authorize_writer()
-        .await
-        .expect("authorize substituted Circle object Store");
-    writer
-        .circles()
-        .resign_merge_journal_with_reference_for_test(&mut journal, reference, |_| {})
-        .await
-        .expect("re-sign Circle commit with an unreserved successor slot");
-    let store_commit = journal.operation().commit_ref().object.clone();
-    let publication = journal
-        .operation()
-        .store_commit
-        .publication
-        .entry_object
-        .clone();
-    coven_database::StoreDatabase::new(&db)
-        .substitute_circle_operation_for_test(journal)
-        .await
-        .expect("persist forged successor journal");
-
-    let error = store
-        .bind_device_in(&db, db_store_dir.clone(), &signer)
-        .await
-        .expect("bind Circle test Store")
-        .resume_circle_operations()
-        .await
-        .expect_err("common verifier must reject an unreserved Circle successor slot");
-    assert!(
-        error
-            .to_string()
-            .contains("Circle head does not occupy its predecessor-reserved successor slot"),
-        "{error}"
-    );
-    assert_eq!(
-        StoreDatabase::new(&db)
-            .circle_control_activation_count_for_test(circle_id)
-            .await
-            .expect("count circle activations"),
-        1
-    );
-    assert!(!_home.contains_exact_object(&store_commit));
-    assert!(!_home.contains_exact_object(&publication));
-}
-
-#[tokio::test]
 async fn local_publication_rejects_a_substituted_publication_entry_slot() {
     let db_store_dir = crate::sync::test_helpers::test_store_dir();
     let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
@@ -581,5 +342,229 @@ async fn local_publication_rejects_a_substituted_publication_entry_slot() {
             .await
             .expect("count circle activations"),
         0
+    );
+}
+
+/// A published founder Circle plus a rename journaled but not yet published, so
+/// a test can re-sign its signed object graph and watch the local candidate
+/// refuse it before anything reaches the cloud.
+///
+/// These two tests stand where the head-slot ones stood: a Circle successor
+/// used to be pinned to its stream by a predecessor-reserved create-once slot
+/// and by the Circle-and-grant anchor its stream activation named. Both are
+/// gone, and what pins a successor now is its entry provenance — it carries
+/// every entry each covered predecessor published, and every inherited entry
+/// names the exact accepted activation that introduced it.
+struct JournaledSuccessor {
+    db: Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
+    store: std::sync::Arc<TestStore>,
+    home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
+    signer: UserKeypair,
+    journal: CircleOperationJournal,
+    another_circles_activation: coven_protocol::store_commit::StoreBatchCommitRef,
+}
+
+impl JournaledSuccessor {
+    async fn build(label: &str) -> Self {
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+        let (store, home, signer, founder_journal) =
+            persist_merge_operation(&db, db_store_dir.clone(), label).await;
+        let circle_id = founder_journal.circle_id();
+        store
+            .bind_device_in(&db, db_store_dir.clone(), &signer)
+            .await
+            .expect("bind Circle publishing Store")
+            .resume_circle_operations()
+            .await
+            .expect("publish the founder Circle");
+        let device = store
+            .bind_device_in(&db, db_store_dir.clone(), &signer)
+            .await
+            .expect("bind Circle authoring Store");
+        let another_circle = device
+            .create_circle("0000000001500-0000-creator", "Allotment")
+            .await
+            .expect("create a second Circle in the same Store");
+        let identity_pubkey = keys::public_key_hex(&signer);
+        let database = StoreDatabase::new(&db);
+        let (_, another_circles_activation) = database
+            .circle_authoring_context(another_circle, &identity_pubkey)
+            .await
+            .expect("read the second Circle's authoring context");
+        let (current, activation_commit_ref) = database
+            .circle_authoring_context(circle_id, &identity_pubkey)
+            .await
+            .expect("read the founder authoring context");
+        let activation_commit = device
+            .load_commit_for_test(&activation_commit_ref)
+            .await
+            .expect("load the founder activating commit");
+        let previous_control = coven_protocol::circle_journal::CircleControlActivation {
+            reference: activation_commit
+                .value()
+                .circle_controls()
+                .iter()
+                .find(|reference| {
+                    reference.circle_id() == circle_id
+                        && reference.control() == &current.control.coord
+                })
+                .expect("the founder control is present in its activating commit")
+                .clone(),
+            activating_commit: activation_commit_ref,
+        };
+        let mut authority = device
+            .authorize_writer()
+            .await
+            .expect("authorize Circle successor writer");
+        let prepared = authority
+            .circles()
+            .preparer()
+            .prepare_request(CircleOperationRequest::Rename(Box::new(
+                super::commands::CircleRenameRequest {
+                    circle_id,
+                    name: "Cottage".to_string(),
+                    metadata_stamp: "0000000002000-0000-creator".to_string(),
+                    current,
+                    previous_control,
+                },
+            )))
+            .await
+            .expect("prepare the Circle rename");
+        drop(authority);
+        database
+            .insert_circle_operation(prepared.journal.clone(), prepared.prepared_objects)
+            .await
+            .expect("journal the rename before publication");
+        Self {
+            db,
+            db_store_dir,
+            store,
+            home,
+            signer,
+            journal: prepared.journal,
+            another_circles_activation,
+        }
+    }
+
+    /// Re-sign the journaled rename around a tampered object graph, resume it,
+    /// and report the local refusal together with what never reached the cloud.
+    async fn local_refusal(
+        mut self,
+        tamper: impl FnOnce(&mut coven_protocol::store_commit::CircleActivationObjects),
+    ) -> CircleOperationError {
+        let commit = self
+            .journal
+            .commit()
+            .expect("parse the prepared rename commit");
+        let [reference] = commit.circle_controls() else {
+            panic!("a Circle rename commit carries one control reference")
+        };
+        let mut objects = reference.objects().clone();
+        tamper(&mut objects);
+        let reference = self.journal.operation().creation.control_ref(objects);
+        let device = self
+            .store
+            .bind_device_in(&self.db, self.db_store_dir.clone(), &self.signer)
+            .await
+            .expect("bind tampered Circle object Store");
+        let mut writer = device
+            .authorize_writer()
+            .await
+            .expect("authorize tampered Circle object Store");
+        writer
+            .circles()
+            .resign_merge_journal_with_reference_for_test(&mut self.journal, reference, |_| {})
+            .await
+            .expect("re-sign the rename commit around the tampered graph");
+        drop(writer);
+        drop(device);
+        let store_commit = self.journal.operation().commit_ref().object.clone();
+        let publication = self
+            .journal
+            .operation()
+            .store_commit
+            .publication
+            .entry_object
+            .clone();
+        StoreDatabase::new(&self.db)
+            .substitute_circle_operation_for_test(self.journal.clone())
+            .await
+            .expect("persist the tampered signed Circle graph");
+
+        let error = self
+            .store
+            .bind_device_in(&self.db, self.db_store_dir.clone(), &self.signer)
+            .await
+            .expect("bind Circle test Store")
+            .resume_circle_operations()
+            .await
+            .expect_err("the local candidate must refuse its own tampered successor");
+        assert!(!self.home.contains_exact_object(&store_commit));
+        assert!(!self.home.contains_exact_object(&publication));
+        error
+    }
+}
+
+/// A successor that drops an entry its covered predecessor published is refused
+/// by the device that prepared it, before its commit is uploaded.
+#[tokio::test]
+async fn local_successor_rejects_a_graph_that_drops_a_covered_entry() {
+    let fixture = JournaledSuccessor::build("circle-local-successor-drops-entry").await;
+
+    let error = fixture
+        .local_refusal(|objects| {
+            let coord = objects
+                .roster_entries
+                .keys()
+                .next()
+                .cloned()
+                .expect("the rename inherits the founder roster entry");
+            objects.roster_entries.remove(&coord);
+        })
+        .await;
+
+    assert!(
+        error
+            .to_string()
+            .contains("Circle control drops or replaces an entry a covered predecessor published"),
+        "{error}"
+    );
+}
+
+/// The entry this successor introduces cannot be claimed as inherited from
+/// another Circle's activating commit: that commit activates no control for
+/// this Circle, so it introduced nothing the entry can rest on. This is what
+/// the stream activation's Circle-and-grant anchor used to say, now said about
+/// the entry's own place in accepted history.
+#[tokio::test]
+async fn local_successor_rejects_an_entry_inherited_from_another_circle() {
+    let fixture = JournaledSuccessor::build("circle-local-successor-foreign-origin").await;
+    let another = fixture.another_circles_activation.clone();
+
+    let error = fixture
+        .local_refusal(|objects| {
+            let introduced = objects
+                .metadata_entries
+                .iter()
+                .find(|(_, reference)| reference.origin.is_introduced())
+                .map(|(coord, _)| coord.clone())
+                .expect("the rename introduces its own metadata entry");
+            objects
+                .metadata_entries
+                .get_mut(&introduced)
+                .expect("the introduced metadata entry")
+                .origin = coven_protocol::store_commit::CircleEntryOrigin::Inherited {
+                activating_commit: another.clone(),
+            };
+        })
+        .await;
+
+    assert!(
+        error
+            .to_string()
+            .contains("which activates no control for it"),
+        "{error}"
     );
 }

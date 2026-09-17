@@ -11,7 +11,7 @@ use crate::circle_roster::CircleMaterializedRoster;
 use crate::store_commit::{
     CandidateFamilyId, CircleControlRef, CirclePackageRef, ObjectHash, StoreBatchCommit,
     StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StreamActivation,
-    StreamActivationId, VerifiedStoreBatchCommit,
+    VerifiedStoreBatchCommit,
 };
 use coven_keys::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 
@@ -60,7 +60,7 @@ pub use access::{
     VerifiedCircleImage, VerifiedCircleReference,
 };
 pub use activations::{
-    VerifiedCircleActivations, VerifiedStreamActivationPrefix, VerifiedStreamActivations,
+    VerifiedCircleActivationPrefix, VerifiedCircleActivations, VerifiedStreamActivations,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use current_state::CircleCurrentControl;

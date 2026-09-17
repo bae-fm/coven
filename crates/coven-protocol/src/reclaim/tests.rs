@@ -43,9 +43,6 @@ fn claim_registration(label: &str) -> crate::store_commit::StoreDeviceRegistrati
 fn claim_control(label: &str, seq: u64) -> CircleControlCoord {
     CircleControlCoord {
         device_id: label.to_string(),
-        stream_id: crate::causal_grants::AuthorStreamId::from_digest(ObjectHash::digest(
-            label.as_bytes(),
-        )),
         author_pubkey: format!("{label}-pubkey"),
         author_owner_grant: crate::causal_grants::MembershipGrantId::from_test_label(label),
         seq,

@@ -88,8 +88,8 @@ they are not in.
 not.** A Circle package is encrypted to that Circle's key, which a non-member
 never receives, so its rows, roster, and display name stay confidential. What a
 store member *does* see, because it is Store-encrypted control state they must be
-able to verify: that the Circle exists, the Owner public keys and head author
-coordinates that administer it, and — through the Store-visible routing mirror —
+able to verify: that the Circle exists, the Owner public keys and the roster and
+metadata author coordinates that administer it, and — through the Store-visible routing mirror —
 pseudonymous per-Circle row counts and the timing of every audience move. The
 administrator visibility is deliberate: verifying a Circle's close outcome,
 conflict resolution, or deletion requires reading the Owner authority that signed

@@ -119,7 +119,19 @@ impl PreparedCircleOperation {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleTransitionHistory {
     Founder,
-    Successor(Box<crate::store_commit::CircleControlRef>),
+    Successor(Box<CircleControlActivation>),
+}
+
+/// One accepted Circle control: the signed reference the activating Store
+/// commit carried, and that commit. A successor inherits its predecessor's
+/// entry inventory, and every entry the predecessor introduced is inherited
+/// under this commit, so the successor names the exact accepted activation each
+/// entry entered history at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleControlActivation {
+    pub reference: crate::store_commit::CircleControlRef,
+    pub activating_commit: StoreBatchCommitRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

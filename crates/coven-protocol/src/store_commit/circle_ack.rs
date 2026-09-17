@@ -184,9 +184,6 @@ mod tests {
     fn circle_ack_reference_names_its_encryption_control() {
         let control = CircleControlCoord {
             device_id: "circle-ack-author".to_string(),
-            stream_id: crate::causal_grants::AuthorStreamId::from_digest(ObjectHash::digest(
-                b"circle-ack-stream",
-            )),
             author_pubkey: "circle-ack-author-pubkey".to_string(),
             author_owner_grant: crate::causal_grants::MembershipGrantId::from_test_label(
                 "circle-ack-owner",

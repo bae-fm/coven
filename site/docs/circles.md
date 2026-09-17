@@ -225,9 +225,6 @@ operation id, its Circle, its
   [`AuthorityLost`](rustdoc:enum:coven::CircleOperationBlock) means the author's
   exact store grant no longer has current write authority; the initiator calls
   `circles.retry_operation(op_id).await?` once authority is restored.
-  `PositionLost` means another verified commit took the operation's immutable
-  device-stream position. Retrying rechecks that winner and remains blocked; the
-  initiator discards the operation and re-issues the command.
 - `Discarding` — Coven accepted a verified permanent-nonactivation proof and is
   exact-deleting the candidate's exclusive objects before clearing the durable
   operation.
@@ -240,10 +237,10 @@ circles.discard_operation(op_id).await?;
 ```
 
 Discard succeeds only after Coven verifies that the exact prepared Store commit
-can never activate: another verified commit owns its successor slot, the
-author's device was excluded before that slot, or an accepted Store commit
-revoked the exact Store membership grant that authorized it without covering
-the candidate in its predecessor history. Without one of those proofs,
+can never activate: another verified commit owns the device's Store stream
+position, the author's device was excluded before that position, or an accepted
+Store commit revoked the exact Store membership grant that authorized it
+without covering the candidate in its predecessor history. Without one of those proofs,
 [`discard_operation`](rustdoc:method:coven::Circles::discard_operation) returns
 `DiscardRequiresNonactivation` and leaves the durable operation unchanged.
 Discarding an ordinary *host write* that a Circle refused is separate, on
@@ -271,6 +268,24 @@ is the exit path out of a conflict, so it is callable regardless of
 rotation-required state; a branch discovered since the command resurfaces as a
 new conflict rather than being silently dropped.
 
+[`delete`](rustdoc:method:coven::Circles::delete) is the other exit, and it
+needs no chosen branch. A deletion authors from the first branch in the
+canonical branch order every device reduces to and covers the rest, so the
+conflict collapses to one terminal deletion everywhere. It also lands where a
+resolution cannot: a resolution carries its branches' roster and metadata
+history forward and must reduce it, while a deletion freezes the epoch and
+reduces nothing.
+
+One conflict has no exit at all. An author-stream position belongs to one
+`(identity, device, Owner grant)`, so two different entries at one position come
+from one device authoring twice from a Circle state it had already moved past —
+which its own durable operation journal exists to prevent. Both controls then
+sit at one position of that device's control stream, and a control covers one
+control per stream, so no successor can name both: every resolution is refused
+when it is authored, and a deletion covers one branch while the other outlives
+it. The Circle stays `ControlConflict` on every device. Nothing repairs it and
+nothing is silently dropped.
+
 An epoch-close branch cannot be chosen directly: participant responses bind to
 that closing control, and moving the close under a new control would strand
 responses already written to create-once slots. If every retained branch is an
@@ -279,6 +294,37 @@ epoch close, the device with a local waiting close first calls
 the other close branches. The Owner then calls `resolve` with the reopened
 active branch. Cancellation explicitly withdraws the local removal; resolution
 explicitly rejects the remaining close branches.
+
+### Roster and metadata provenance
+
+A Circle's roster and metadata are private: only effective members hold the key
+that opens their entries. Their *authority* is not private, because it is
+accepted Store history.
+
+Each entry is signed by its author and published exactly once, by the Store
+commit whose signing device authored it. That commit is the entry's
+device-authorship proof: a control may introduce an entry only when the entry
+names the same author and the same device as the commit carrying it. Every later
+control still holding the entry names the exact earlier accepted Store commit
+that introduced it, so an entry's origin never rests on a later Owner's say-so —
+a later control's signed object map is not evidence that anything was ever
+accepted.
+
+Inheritance is monotone. A successor may add entries; it may not drop one, swap
+its object, or re-publish a different entry at an author-stream position an
+earlier accepted control already filled. A verifier resolves each named
+activation through the activations it has already staged in the same batch, its
+own retained accepted activations, or the candidate commit's verified
+predecessor history — and refuses the control outright when none of them holds
+it. The historical Owner grant behind each entry is re-derived by the roster
+reduction itself, over the whole inherited entry set, exactly as it was when the
+entry was first accepted.
+
+A Store member outside the Circle verifies the public half of this — every
+predecessor control and the exact commit that activated it — without holding any
+Circle key. A recipient verifies the private half, the entries themselves, once
+its access is established; that is also what a recipient restoring from a
+snapshot re-verifies before the restored Circle becomes authoritative.
 
 ## Member removal and epoch close
 
@@ -448,7 +494,8 @@ properties, not gaps to close later:
 - **Store members can see which identities administer which Circles.** A
   Circle's public control state is encrypted to the store, not to the Circle, so
   every store member can verify a Circle's control history — and that state names
-  the Owner public keys and the roster/metadata head author coordinates. Store
+  the Owner public keys, the roster and metadata author coordinates, and the
+  exact accepted Store commit behind every predecessor control. Store
   members therefore learn which identities own and administer which Circles, even
   Circles they are not in. This is deliberate and load-bearing: verifying a close
   outcome, a conflict resolution, or a deletion requires reading the Owner

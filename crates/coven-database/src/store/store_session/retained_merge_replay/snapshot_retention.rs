@@ -268,6 +268,39 @@ impl StoreDatabase {
         // control whose activation is already gone is a superseded epoch and
         // stays gone.
         required.extend(records.circle_control_activation_refs()?);
+        // Every entry a retained Circle control still carries names the exact
+        // accepted activation that introduced it. Keeping those commits is what
+        // makes that claim resolvable after a baseline advance, so an inherited
+        // roster or metadata entry never loses its provenance to reclamation.
+        // In the ordinary case an introducing activation is itself an indexed
+        // control, so this adds nothing; stating it makes the closure true by
+        // construction rather than by coincidence.
+        for encoded in records.retained_materialization_refs()? {
+            let reference: StoreBatchCommitRef =
+                serde_json::from_str(&encoded).map_err(|error| {
+                    DbError::context("snapshot retained Circle activation commit", error)
+                })?;
+            let materialization =
+                authority.retained_materialization_by_ref_on(records, &reference)?;
+            for activation in materialization.circle_activations().circles() {
+                let objects = activation.reference.objects();
+                let introductions = objects
+                    .roster_entries
+                    .values()
+                    .filter_map(|entry| entry.origin.inherited_from())
+                    .chain(
+                        objects
+                            .metadata_entries
+                            .values()
+                            .filter_map(|entry| entry.origin.inherited_from()),
+                    );
+                for introduction in introductions {
+                    required.insert(serde_json::to_string(introduction).map_err(|error| {
+                        DbError::context("serialize Circle entry introduction commit", error)
+                    })?);
+                }
+            }
+        }
         let mut bootstrap_cuts = BTreeMap::new();
         for (circle_id, activation_commit, exact_cut) in rows.circle_bootstraps {
             let circle_id: coven_protocol::circle::CircleId = circle_id

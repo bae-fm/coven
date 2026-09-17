@@ -26,10 +26,6 @@ impl CircleTransitionDraft {
         }
         let owner_grant =
             MembershipGrantId(generated_id_digest(ids, OWNER_GRANT_ID_GENERATION_DOMAIN));
-        let author_stream_id = AuthorStreamId::from_digest(generated_id_digest(
-            ids,
-            b"coven.circle-transition-draft-stream.v1\0",
-        ));
         let circle_id = CircleId::founder(store_root_hash, &author_pubkey, &owner_grant);
         let epoch_id = CircleEpochId::generate(ids);
         let keyring = MasterKeyring::generate();
@@ -39,7 +35,6 @@ impl CircleTransitionDraft {
             store_root_hash,
             circle_id,
             device_id,
-            author_stream_id,
             owner_grant.clone(),
             signer,
         );
@@ -48,7 +43,7 @@ impl CircleTransitionDraft {
             entry,
         };
         let roster_state = MergeCircleRosterStateRef {
-            heads: Vec::new(),
+            frontier: Vec::new(),
             state_hash: roster_objects.resolved.state_hash,
         };
         let metadata = CircleMetadata::founder(
@@ -58,14 +53,13 @@ impl CircleTransitionDraft {
             name,
             metadata_stamp,
             device_id,
-            author_stream_id,
             owner_grant.clone(),
             roster_state.clone(),
             key_fingerprint,
             signer,
         )?;
         let metadata_state = MergeCircleMetadataStateRef {
-            heads: Vec::new(),
+            frontier: Vec::new(),
             selected: metadata.coord(),
             state_hash: metadata.metadata_hash(),
         };
@@ -93,7 +87,6 @@ impl CircleTransitionDraft {
         let value = CircleControlValue {
             order: MergeCircleControlOrder {
                 device_id: device_id.to_string(),
-                stream_id: author_stream_id,
                 author_owner_grant: owner_grant.clone(),
                 seq: 1,
                 previous_control_hash: None,
@@ -104,7 +97,7 @@ impl CircleTransitionDraft {
                 metadata: metadata_state,
                 roster: roster_state.clone(),
                 store_membership,
-                covered_control_heads: Vec::new(),
+                covered_controls: Vec::new(),
             }),
             access: access.map.clone(),
             author_authority: MergeCircleOwnerAuthorityRef {
@@ -160,7 +153,6 @@ impl CircleTransitionDraft {
         current_roster_chain: CircleRosterChain,
         current_metadata: &CircleMetadata,
         keyring: &str,
-        roster_stream: AuthorStreamId,
         member_pubkey: String,
         role: crate::circle::CircleRole,
         bootstrap: CircleBootstrapRef,
@@ -193,14 +185,13 @@ impl CircleTransitionDraft {
         }
         let entry = current_roster_chain.signed_set_member(
             device_id,
-            roster_stream,
             member_pubkey.clone(),
             role,
             signer,
         )?;
         let roster = current_roster_chain.resolved_with_successor(entry.clone())?;
         let roster_state = MergeCircleRosterStateRef {
-            heads: active_epoch.roster.heads.clone(),
+            frontier: active_epoch.roster.frontier.clone(),
             state_hash: roster.state_hash,
         };
         let store_root_hash = current_control.value.store_root_hash;
@@ -212,7 +203,6 @@ impl CircleTransitionDraft {
             value: CircleControlValue {
                 order: MergeCircleControlOrder {
                     device_id: device_id.to_string(),
-                    stream_id: roster_stream,
                     author_owner_grant: grant_id.clone(),
                     seq: current_control
                         .value
@@ -227,7 +217,7 @@ impl CircleTransitionDraft {
                     metadata: active_epoch.metadata.clone(),
                     roster: roster_state.clone(),
                     store_membership,
-                    covered_control_heads: active_epoch.covered_control_heads.clone(),
+                    covered_controls: active_epoch.covered_controls.clone(),
                 }),
                 access: CircleAccessMap::empty(),
                 author_authority,
@@ -298,7 +288,6 @@ impl CircleTransitionDraft {
         current_roster: &CircleMaterializedRoster,
         current_metadata: &CircleMetadata,
         keyring: &str,
-        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         if name.trim().is_empty() {
@@ -325,40 +314,24 @@ impl CircleTransitionDraft {
         let epoch_id = current_control.value.epoch_id();
         let roster_state = current_control.value.roster_state_ref();
 
-        let own_head = active_epoch.metadata.heads.iter().find(|head| {
-            head.coord.author_pubkey == author_pubkey
-                && head.coord.device_id == device_id
-                && head.coord.author_owner_grant == grant_id
+        let own_position = active_epoch.metadata.frontier.iter().find(|coord| {
+            coord.author_pubkey == author_pubkey
+                && coord.device_id == device_id
+                && coord.author_owner_grant == grant_id
         });
-        let author_stream_id = own_head.map_or_else(
-            || {
-                AuthorStreamId::from_digest(generated_id_digest(
-                    ids,
-                    b"coven.circle-transition-draft-stream.v1\0",
-                ))
-            },
-            |head| head.coord.stream_id,
-        );
-        let metadata_seq = match own_head {
-            Some(head) => head
-                .coord
+        let metadata_seq = match own_position {
+            Some(coord) => coord
                 .seq
                 .checked_add(1)
                 .ok_or(CircleTransitionError::SequenceOverflow)?,
             None => 1,
         };
-        let metadata_previous = own_head.map(|head| head.coord.metadata_hash);
-        let metadata_dependencies = active_epoch
-            .metadata
-            .heads
-            .iter()
-            .map(|head| head.coord.clone())
-            .collect::<Vec<_>>();
+        let metadata_previous = own_position.map(|coord| coord.metadata_hash);
+        let metadata_dependencies = active_epoch.metadata.frontier.clone();
         let metadata_state = active_epoch.metadata.clone();
         let mut control_value = CircleControlValue {
             order: MergeCircleControlOrder {
                 device_id: device_id.to_string(),
-                stream_id: author_stream_id,
                 author_owner_grant: grant_id.clone(),
                 seq: current_control
                     .value
@@ -373,7 +346,7 @@ impl CircleTransitionDraft {
                 metadata: active_epoch.metadata.clone(),
                 roster: active_epoch.roster.clone(),
                 store_membership,
-                covered_control_heads: active_epoch.covered_control_heads.clone(),
+                covered_controls: active_epoch.covered_controls.clone(),
             }),
             access: CircleAccessMap::empty(),
             author_authority,
@@ -393,7 +366,6 @@ impl CircleTransitionDraft {
                 metadata_stamp: metadata_stamp.to_string(),
                 author_pubkey: author_pubkey.clone(),
                 device_id: device_id.to_string(),
-                stream_id: author_stream_id,
                 author_owner_grant,
                 author_roster: roster_state.clone(),
                 key_fingerprint,
@@ -498,7 +470,6 @@ impl CircleTransitionDraft {
         chosen_metadata: &CircleMetadata,
         keyring: &str,
         losing_branches: Vec<ResolvedConflictBranch>,
-        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let context = circle_successor_context(
@@ -529,36 +500,38 @@ impl CircleTransitionDraft {
         // conflict collapses. Preparation adds the chosen branch head and derives
         // the predecessor and dependencies from the control frontier, so the
         // resolved control directly names every branch.
-        let mut covered_control_heads = active_epoch.covered_control_heads.clone();
+        let mut covered_controls = active_epoch.covered_controls.clone();
         let mut metadata = active_epoch.metadata.clone();
         let mut roster = active_epoch.roster.clone();
         for branch in &losing_branches {
-            merge_frontier_head(
-                &mut covered_control_heads,
-                branch.control_head.clone(),
-                |head| head.coord.stream_key(),
-                |head| head.coord.seq,
+            merge_frontier_coord(
+                &mut covered_controls,
+                branch.control.clone(),
+                |covered| covered.coord.stream_key(),
+                |covered| covered.coord.seq,
             );
-            for head in &branch.metadata_heads {
-                merge_frontier_head(
-                    &mut metadata.heads,
-                    head.clone(),
-                    |head| head.coord.stream_key(),
-                    |head| head.coord.seq,
+            for coord in &branch.metadata_frontier {
+                merge_frontier_coord(
+                    &mut metadata.frontier,
+                    coord.clone(),
+                    CircleMetadataCoord::stream_key,
+                    |coord| coord.seq,
                 );
             }
-            for head in &branch.roster_heads {
-                merge_frontier_head(
-                    &mut roster.heads,
-                    head.clone(),
-                    |head| head.coord.stream_key(),
-                    |head| head.coord.seq,
+            for coord in &branch.roster_frontier {
+                merge_frontier_coord(
+                    &mut roster.frontier,
+                    coord.clone(),
+                    CircleRosterCoord::stream_key,
+                    |coord| coord.seq,
                 );
             }
         }
-        covered_control_heads.sort_by_key(|head| head.coord.stream_key());
-        metadata.heads.sort_by_key(|head| head.coord.stream_key());
-        roster.heads.sort_by_key(|head| head.coord.stream_key());
+        covered_controls.sort_by_key(|covered| covered.coord.stream_key());
+        metadata
+            .frontier
+            .sort_by_key(CircleMetadataCoord::stream_key);
+        roster.frontier.sort_by_key(CircleRosterCoord::stream_key);
 
         // The name is the deterministic metadata selection across the merged
         // frontier. Each branch's selected metadata is already the canonical
@@ -589,19 +562,6 @@ impl CircleTransitionDraft {
             value: CircleControlValue {
                 order: MergeCircleControlOrder {
                     device_id: device_id.to_string(),
-                    stream_id: active_epoch
-                        .covered_control_heads
-                        .iter()
-                        .find(|head| head.coord.stream_key().author_pubkey == author_pubkey)
-                        .map_or_else(
-                            || {
-                                AuthorStreamId::from_digest(generated_id_digest(
-                                    ids,
-                                    b"coven.circle-transition-draft-stream.v1\0",
-                                ))
-                            },
-                            |head| head.coord.stream_id,
-                        ),
                     author_owner_grant: chosen_metadata.author_owner_grant.clone(),
                     seq: chosen_control
                         .value
@@ -616,7 +576,7 @@ impl CircleTransitionDraft {
                     metadata,
                     roster,
                     store_membership,
-                    covered_control_heads,
+                    covered_controls,
                 }),
                 access: CircleAccessMap::empty(),
                 author_authority,
@@ -674,6 +634,16 @@ impl CircleTransitionDraft {
     /// and reclamation. It publishes no roster successor, metadata successor,
     /// access material, or bootstraps — its control carries an empty access
     /// map.
+    ///
+    /// `covered_branches` are the retained conflicting branches other than the
+    /// one this deletion authors from: the frozen epoch covers them, so the
+    /// deletion's inventory inherits every entry every branch published and the
+    /// conflict collapses to this one terminal state on every device. It
+    /// reduces none of those entry streams — a deleted control carries no
+    /// roster or metadata chain — so it lands where a resolution cannot. What
+    /// it cannot do is cover two branches on one author stream, because the
+    /// covered set holds one control per stream; one device racing itself
+    /// leaves a conflict no control can collapse.
     #[allow(clippy::too_many_arguments)]
     pub fn delete(
         device_id: &str,
@@ -684,7 +654,7 @@ impl CircleTransitionDraft {
         current_roster: &CircleMaterializedRoster,
         current_metadata: &CircleMetadata,
         keyring: &str,
-        ids: &dyn coven_foundation::id_provider::IdProvider,
+        covered_branches: Vec<ResolvedConflictBranch>,
         signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let context = circle_delete_successor_context(
@@ -706,33 +676,55 @@ impl CircleTransitionDraft {
         let store_root_hash = current_control.value.store_root_hash;
         let circle_id = current_control.value.circle_id;
         let epoch_id = current_control.value.epoch_id();
+        let mut covered_controls = epoch.covered_controls.clone();
+        let mut metadata = epoch.metadata.clone();
+        let mut roster = epoch.roster.clone();
+        for branch in &covered_branches {
+            merge_frontier_coord(
+                &mut covered_controls,
+                branch.control.clone(),
+                |covered| covered.coord.stream_key(),
+                |covered| covered.coord.seq,
+            );
+            for coord in &branch.metadata_frontier {
+                merge_frontier_coord(
+                    &mut metadata.frontier,
+                    coord.clone(),
+                    CircleMetadataCoord::stream_key,
+                    |coord| coord.seq,
+                );
+            }
+            for coord in &branch.roster_frontier {
+                merge_frontier_coord(
+                    &mut roster.frontier,
+                    coord.clone(),
+                    CircleRosterCoord::stream_key,
+                    |coord| coord.seq,
+                );
+            }
+        }
+        covered_controls.sort_by_key(|covered| covered.coord.stream_key());
+        metadata
+            .frontier
+            .sort_by_key(CircleMetadataCoord::stream_key);
+        roster.frontier.sort_by_key(CircleRosterCoord::stream_key);
+        // The deletion keeps the authoring branch's metadata selection. Nothing
+        // reads a deleted control's selection to resolve a name — verification
+        // stops at the frozen epoch — and re-deriving one across branches would
+        // claim a resolution this deletion is precisely not performing.
         let frozen_epoch = MergeActiveCircleEpoch {
             common: epoch.common.clone(),
-            metadata: epoch.metadata.clone(),
-            roster: epoch.roster.clone(),
+            metadata,
+            roster,
             store_membership,
-            covered_control_heads: epoch.covered_control_heads.clone(),
+            covered_controls,
         };
-        let stream_id = epoch
-            .covered_control_heads
-            .iter()
-            .find(|head| head.coord.stream_key().author_pubkey == author_pubkey)
-            .map_or_else(
-                || {
-                    AuthorStreamId::from_digest(generated_id_digest(
-                        ids,
-                        b"coven.circle-transition-draft-stream.v1\0",
-                    ))
-                },
-                |head| head.coord.stream_id,
-            );
         let control_value = CircleControlBody {
             store_root_hash,
             circle_id,
             value: CircleControlValue {
                 order: MergeCircleControlOrder {
                     device_id: device_id.to_string(),
-                    stream_id,
                     author_owner_grant: grant_id,
                     seq: current_control
                         .value

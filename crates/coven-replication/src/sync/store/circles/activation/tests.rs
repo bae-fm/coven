@@ -1,21 +1,32 @@
 use super::*;
-use coven_protocol::causal_grants::AuthorStreamId;
 use coven_protocol::circle::{
     CircleControlValue, CircleRole, CircleRosterChain, CircleRosterEntry,
     MergeCircleOwnerAuthorityRef,
 };
 use coven_protocol::membership::MembershipGrantId;
+use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreCommitCoord};
 
-fn exact_ref(label: &str) -> ExactObjectRef {
+/// A well-formed commit reference for a label. The current-state reducer never
+/// resolves it; only the coordinates it carries are compared.
+fn test_commit_ref(label: &str) -> StoreBatchCommitRef {
     let bytes = label.as_bytes();
-    ExactObjectRef::new(
-        coven_protocol::objects::ObjectSlot::logical(format!(
-            "store-v1/test-circle-objects/{label}.json"
-        ))
-        .unwrap(),
-        bytes.len() as u64,
-        ObjectHash::digest(bytes),
-    )
+    StoreBatchCommitRef {
+        coord: StoreCommitCoord {
+            stream_id: coven_protocol::membership::AuthorStreamId::from_digest(ObjectHash::digest(
+                bytes,
+            )),
+            sequence: 1,
+        },
+        commit_hash: ObjectHash::digest(bytes),
+        object: coven_protocol::objects::ExactObjectRef::new(
+            coven_protocol::objects::ObjectSlot::logical(format!(
+                "store-v1/test-circle-objects/{label}.json"
+            ))
+            .expect("valid test commit slot"),
+            bytes.len() as u64,
+            ObjectHash::digest(bytes),
+        ),
+    }
 }
 
 #[test]
@@ -26,12 +37,10 @@ fn control_authority_uses_the_pre_transition_roster_for_self_demotion() {
     let author_grant = MembershipGrantId(ObjectHash::digest(b"self-demotion grant"));
     let store_root_hash = ObjectHash::digest(b"self-demotion Store");
     let circle_id = CircleId::founder(store_root_hash, &author_pubkey, &author_grant);
-    let stream_id = AuthorStreamId::from_bytes([21; 32]);
     let founder = CircleRosterEntry::founder(
         store_root_hash,
         circle_id,
         "author-device",
-        stream_id,
         author_grant.clone(),
         &author,
     );
@@ -41,7 +50,6 @@ fn control_authority_uses_the_pre_transition_roster_for_self_demotion() {
         .expect("load founder roster")
         .signed_set_member(
             "author-device",
-            stream_id,
             keys::public_key_hex(&second_owner),
             CircleRole::Owner,
             &author,
@@ -55,7 +63,6 @@ fn control_authority_uses_the_pre_transition_roster_for_self_demotion() {
         .expect("load pre-demotion roster")
         .signed_set_member(
             "author-device",
-            stream_id,
             author_pubkey.clone(),
             CircleRole::Member,
             &author,
@@ -67,7 +74,7 @@ fn control_authority_uses_the_pre_transition_roster_for_self_demotion() {
         .resolved();
     let authority = MergeCircleOwnerAuthorityRef {
         roster: coven_protocol::circle::MergeCircleRosterStateRef {
-            heads: Vec::new(),
+            frontier: Vec::new(),
             state_hash: before.state_hash,
         },
         grant_id: author_grant,
@@ -88,14 +95,13 @@ fn control_authority_uses_the_pre_transition_roster_for_self_demotion() {
 
 #[tokio::test]
 async fn current_state_reducer_retains_each_concurrent_control_branch() {
-    fn control_head_ref(
+    fn covered_ref(
         label: &str,
         control: &CircleCurrentControl,
-    ) -> coven_protocol::circle::MergeCircleControlHeadRef {
-        coven_protocol::circle::MergeCircleControlHeadRef {
+    ) -> coven_protocol::circle::CircleControlActivationRef {
+        coven_protocol::circle::CircleControlActivationRef {
             coord: control.coordinate().clone(),
-            head_hash: ObjectHash::digest(format!("{label}-head").as_bytes()),
-            object: exact_ref(&format!("{label}-head")),
+            activating_commit: test_commit_ref(label),
         }
     }
 
@@ -103,7 +109,6 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         mut state: CircleCurrentState,
         owner: &UserKeypair,
         device_id: &str,
-        stream_id: AuthorStreamId,
     ) -> CircleCurrentState {
         let current = state
             .active_current_mut_for_test()
@@ -119,11 +124,10 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
             .active_epoch_mut()
             .expect("test branch has an active epoch");
         order.device_id = device_id.to_string();
-        order.stream_id = stream_id;
         order.seq = 1;
         order.previous_control_hash = None;
         order.dependencies = vec![predecessor.coordinate().clone()];
-        active_epoch.covered_control_heads = vec![control_head_ref(device_id, &predecessor)];
+        active_epoch.covered_controls = vec![covered_ref(device_id, &predecessor)];
         current.value.resign(owner);
         current.coord = current.value.coord();
         current.bytes = serde_json::to_vec(&current.value).expect("serialize branch control");
@@ -150,26 +154,26 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         let active_epoch = control_state
             .active_epoch_mut()
             .expect("test successor has an active epoch");
-        let mut frontier = active_epoch.covered_control_heads.clone();
-        frontier.retain(|head| head.coord.stream_key() != predecessor_stream);
-        frontier.push(control_head_ref("own-predecessor", &predecessor));
+        let mut frontier = active_epoch.covered_controls.clone();
+        frontier.retain(|covered| covered.coord.stream_key() != predecessor_stream);
+        frontier.push(covered_ref("own-predecessor", &predecessor));
         for (label, observed) in observed {
             let observed = observed
                 .resolved_control()
                 .expect("observed control is resolved");
             let stream = observed.coordinate().stream_key();
-            frontier.retain(|head| head.coord.stream_key() != stream);
-            frontier.push(control_head_ref(label, observed));
+            frontier.retain(|covered| covered.coord.stream_key() != stream);
+            frontier.push(covered_ref(label, observed));
         }
-        frontier.sort_by_key(|head| head.coord.stream_key());
+        frontier.sort_by_key(|covered| covered.coord.stream_key());
         order.seq = order.seq.checked_add(1).expect("control sequence fits u64");
         order.previous_control_hash = Some(predecessor.control_hash_for_test());
         order.dependencies = frontier
             .iter()
-            .filter(|head| head.coord.stream_key() != predecessor_stream)
-            .map(|head| head.coord.clone())
+            .filter(|covered| covered.coord.stream_key() != predecessor_stream)
+            .map(|covered| covered.coord.clone())
             .collect();
-        active_epoch.covered_control_heads = frontier;
+        active_epoch.covered_controls = frontier;
         current.value.resign(owner);
         current.coord = current.value.coord();
         current.bytes = serde_json::to_vec(&current.value).expect("serialize successor control");
@@ -189,18 +193,8 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         .expect("load founder current state")
         .expect("test Circle current state exists");
     let owner = coven_protocol::circle_activation_test_fixtures::test_circle_owner_keypair();
-    let first = branch(
-        founder.clone(),
-        &owner,
-        "first-successor-device",
-        AuthorStreamId::from_bytes([41; 32]),
-    );
-    let second = branch(
-        founder,
-        &owner,
-        "second-successor-device",
-        AuthorStreamId::from_bytes([42; 32]),
-    );
+    let first = branch(founder.clone(), &owner, "first-successor-device");
+    let second = branch(founder, &owner, "second-successor-device");
     let first_current = first
         .clone()
         .advance(first.clone())

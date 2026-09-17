@@ -256,15 +256,6 @@ impl RegisteredStreamActivation {
 pub enum StreamAnchorDomain {
     StoreMembership,
     OwnerRecovery,
-    CircleControl {
-        circle_id: CircleId,
-    },
-    CircleRoster {
-        circle_id: CircleId,
-    },
-    CircleMetadata {
-        circle_id: CircleId,
-    },
     CircleAcknowledgements {
         circle_id: CircleId,
     },
@@ -282,15 +273,6 @@ impl GrantStreamAnchor {
         match self {
             Self::StoreMembership { .. } => StreamAnchorDomain::StoreMembership,
             Self::OwnerRecovery { .. } => StreamAnchorDomain::OwnerRecovery,
-            Self::CircleControl { circle_id, .. } => StreamAnchorDomain::CircleControl {
-                circle_id: *circle_id,
-            },
-            Self::CircleRoster { circle_id, .. } => StreamAnchorDomain::CircleRoster {
-                circle_id: *circle_id,
-            },
-            Self::CircleMetadata { circle_id, .. } => StreamAnchorDomain::CircleMetadata {
-                circle_id: *circle_id,
-            },
         }
     }
 }

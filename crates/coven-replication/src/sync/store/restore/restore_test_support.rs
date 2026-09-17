@@ -93,6 +93,24 @@ impl<'storage> RestoringStore<'storage> {
             .await
     }
 
+    /// The retained accepted activation this restored device holds for one
+    /// Circle at one Store commit — the source an inherited entry's origin
+    /// resolves through once a restore has replaced the predecessor history it
+    /// could have walked.
+    #[cfg(test)]
+    pub(crate) async fn retained_circle_activation_for_test(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+        activating_commit: coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<
+        Option<coven_protocol::circle_activation::VerifiedCircleReference>,
+        coven_database::DbError,
+    > {
+        self.database
+            .retained_circle_activation(self.root.clone(), circle_id, activating_commit)
+            .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn circle_bootstrap_replay_inputs_for_test(
         &self,

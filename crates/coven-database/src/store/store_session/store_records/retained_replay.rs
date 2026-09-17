@@ -204,6 +204,28 @@ impl StoreRecords<'_> {
             .map_err(DbError::from)
     }
 
+    /// The retained materialization commit reference at one stream position, or
+    /// `None` when this device keeps none there. Absence is an answer, not a
+    /// failure: a caller resolving an accepted activation falls back to the
+    /// candidate's own predecessor history.
+    pub(crate) fn retained_materialization_ref_at(
+        self,
+        stream_id: &str,
+        sequence: i64,
+    ) -> Result<Option<String>, DbError> {
+        use rusqlite::OptionalExtension;
+
+        self.conn
+            .query_row(
+                "SELECT commit_ref FROM retained_merge_materializations
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id, sequence],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DbError::from)
+    }
+
     pub(crate) fn retained_materialization_identity(
         self,
         stream_id: &str,

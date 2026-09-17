@@ -337,10 +337,7 @@ impl LocalStoreWriter {
                 )
             }
 
-            StoreOperationBatch::Circle {
-                reference,
-                stream_activations,
-            } => sign_ops(
+            StoreOperationBatch::Circle { reference } => sign_ops(
                 context,
                 write_id,
                 registration_ref,
@@ -348,7 +345,6 @@ impl LocalStoreWriter {
                 signer,
                 StoreCommitOperationsInput {
                     circle_controls: vec![reference],
-                    stream_activations,
                     ..StoreCommitOperationsInput::empty()
                 },
             ),

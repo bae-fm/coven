@@ -31,19 +31,17 @@ pub fn test_circle_activation(label: &str, active: bool) -> TestCircleActivation
     use std::collections::BTreeMap;
 
     use crate::circle::{
-        CircleMetadataHead, CircleRole, CircleRosterDraftPolicy, CircleRosterHead,
-        CircleRosterPolicyObjects, CircleTransitionDraft, CircleTransitionPolicyObjects,
-        PreparedCircleTransition, StoreMembershipStateRef,
+        CircleRole, CircleRosterDraftPolicy, CircleRosterPolicyObjects, CircleTransitionDraft,
+        CircleTransitionPolicyObjects, PreparedCircleTransition, StoreMembershipStateRef,
     };
     use crate::circle_activation::{VerifiedCircleAccess, VerifiedCircleActive};
     use crate::membership::{MemberRole, MembershipChain, MembershipHeadRef};
     use crate::objects::ExactObjectRef;
     use crate::objects::ObjectSlot;
     use crate::store_commit::{
-        CandidateFamilyId, CircleActivationObjects, CircleMetadataObjectRef, DeviceStreamAnchor,
-        GrantStreamAnchor, ObjectHash, StoreCreationId, StoreDeviceRegistration,
-        StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreRootRef, StreamActivation,
-        SuccessorLink,
+        CandidateFamilyId, CircleActivationObjects, CircleEntryOrigin, CircleMetadataObjectRef,
+        CircleRosterEntryRef, DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, StoreCreationId,
+        StoreDeviceRegistration, StoreDeviceRegistrationOrigin, StoreRootRef,
     };
 
     fn exact_object(label: &str, bytes: &[u8]) -> ExactObjectRef {
@@ -88,14 +86,6 @@ pub fn test_circle_activation(label: &str, active: bool) -> TestCircleActivation
         &owner,
     )
     .expect("sign test Store device registration");
-    let registration_bytes = registration.to_bytes();
-    let author_registration = StoreDeviceRegistrationRef::from_registration(
-        &registration,
-        exact_object(&format!("{label}/registration"), &registration_bytes),
-    );
-    let device_signer = registration
-        .device_signer(&owner)
-        .expect("derive test Store device signer");
     let membership_anchor = GrantStreamAnchor::StoreMembership {
         first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/membership/1.json"))
             .expect("valid test membership slot"),
@@ -142,16 +132,15 @@ pub fn test_circle_activation(label: &str, active: bool) -> TestCircleActivation
     let metadata_bytes = serde_json::to_vec(&draft.metadata).expect("serialize test metadata");
     let metadata_object = exact_object(&format!("{label}/metadata"), &metadata_bytes);
     let mut roster_entries = BTreeMap::new();
-    let mut roster_heads = Vec::new();
     let metadata_entries = BTreeMap::from([(
         draft.metadata.coord(),
         CircleMetadataObjectRef {
             key_fingerprint: draft.metadata.key_fingerprint,
             object: metadata_object.clone(),
+            origin: CircleEntryOrigin::Introduced,
         },
     )]);
-    let mut metadata_heads = Vec::new();
-    let (policy_objects, head_object) = {
+    let policy_objects = {
         let CircleRosterDraftPolicy::Founder {
             entry: roster_entry,
         } = &draft.policy.roster
@@ -162,125 +151,19 @@ pub fn test_circle_activation(label: &str, active: bool) -> TestCircleActivation
         let roster_bytes =
             serde_json::to_vec(&roster_entry).expect("serialize test Circle roster entry");
         let roster_object = exact_object(&format!("{label}/roster-entry"), &roster_bytes);
-        roster_entries.insert(roster_entry.coord(), roster_object.clone());
-
-        let roster_head_slot =
-            ObjectSlot::logical(format!("store-v1/test/{label}/circle-roster-head/1.json"))
-                .expect("valid test Circle roster-head slot");
-        let roster_activation = StreamActivation::grant_authorized(
-            store_root_hash,
-            author_registration.clone(),
-            roster_entry.author_owner_grant.clone(),
-            GrantStreamAnchor::CircleRoster {
-                circle_id: draft.circle_id,
-                first_slot: roster_head_slot.clone(),
+        roster_entries.insert(
+            roster_entry.coord(),
+            CircleRosterEntryRef {
+                object: roster_object,
+                origin: CircleEntryOrigin::Introduced,
             },
         );
-        let roster_head = CircleRosterHead::signed(
-            &roster_entry,
-            roster_object,
-            SuccessorLink {
-                activation: roster_activation.activation_id(),
-                predecessor: None,
-                next_slot: ObjectSlot::logical(format!(
-                    "store-v1/test/{label}/circle-roster-head/2.json"
-                ))
-                .expect("valid next test Circle roster-head slot"),
-            },
-            &device_signer,
-        );
-        let roster_head_bytes =
-            serde_json::to_vec(&roster_head).expect("serialize test Circle roster head");
-        let roster_head_object = ExactObjectRef::new(
-            roster_head_slot,
-            roster_head_bytes.len() as u64,
-            ObjectHash::digest(&roster_head_bytes),
-        );
-        roster_heads.push(crate::circle::CircleRosterHeadRef::from_stored_head(
-            &roster_head,
-            roster_head_object,
-        ));
-
-        let metadata_head_slot =
-            ObjectSlot::logical(format!("store-v1/test/{label}/circle-metadata-head/1.json"))
-                .expect("valid test Circle metadata-head slot");
-        let metadata_activation = StreamActivation::grant_authorized(
-            store_root_hash,
-            author_registration.clone(),
-            draft.metadata.author_owner_grant.clone(),
-            GrantStreamAnchor::CircleMetadata {
-                circle_id: draft.circle_id,
-                first_slot: metadata_head_slot.clone(),
-            },
-        );
-        let metadata_head = CircleMetadataHead::signed(
-            &draft.metadata,
-            metadata_object,
-            SuccessorLink {
-                activation: metadata_activation.activation_id(),
-                predecessor: None,
-                next_slot: ObjectSlot::logical(format!(
-                    "store-v1/test/{label}/circle-metadata-head/2.json"
-                ))
-                .expect("valid next test Circle metadata-head slot"),
-            },
-            &device_signer,
-        );
-        let metadata_head_bytes =
-            serde_json::to_vec(&metadata_head).expect("serialize test Circle metadata head");
-        let metadata_head_object = ExactObjectRef::new(
-            metadata_head_slot,
-            metadata_head_bytes.len() as u64,
-            ObjectHash::digest(&metadata_head_bytes),
-        );
-        metadata_heads.push(crate::circle::CircleMetadataHeadRef::from_stored_head(
-            &metadata_head,
-            metadata_head_object,
-        ));
-
-        let control_head_slot =
-            ObjectSlot::logical(format!("store-v1/test/{label}/circle-control-head/1.json"))
-                .expect("valid test Circle control-head slot");
-        let control_activation = StreamActivation::grant_authorized(
-            store_root_hash,
-            author_registration.clone(),
-            draft.metadata.author_owner_grant.clone(),
-            GrantStreamAnchor::CircleControl {
-                circle_id: draft.circle_id,
-                first_slot: control_head_slot.clone(),
-            },
-        );
-        let control_head = crate::circle::CircleControlHead::signed(
-            &draft.control.value,
-            control_object.clone(),
-            SuccessorLink {
-                activation: control_activation.activation_id(),
-                predecessor: None,
-                next_slot: ObjectSlot::logical(format!(
-                    "store-v1/test/{label}/circle-control-head/2.json"
-                ))
-                .expect("valid next test Circle control-head slot"),
-            },
-            &device_signer,
-        );
-        let control_head_bytes =
-            serde_json::to_vec(&control_head).expect("serialize test Circle control head");
-        let control_head_object = ExactObjectRef::new(
-            control_head_slot,
-            control_head_bytes.len() as u64,
-            ObjectHash::digest(&control_head_bytes),
-        );
-        (
-            CircleTransitionPolicyObjects {
-                roster: Some(CircleRosterPolicyObjects {
-                    entry: roster_entry,
-                    head: roster_head,
-                }),
-                metadata_head: Some(metadata_head),
-                control_head,
-            },
-            Some(control_head_object),
-        )
+        CircleTransitionPolicyObjects {
+            roster: Some(CircleRosterPolicyObjects {
+                entry: roster_entry,
+            }),
+            metadata: Some(draft.metadata.clone()),
+        }
     };
     let creation = PreparedCircleTransition {
         circle_id: draft.circle_id,
@@ -301,12 +184,10 @@ pub fn test_circle_activation(label: &str, active: bool) -> TestCircleActivation
         close_outcome: None,
         close_cancellation: None,
         roster_entries,
-        roster_heads,
         metadata_entries,
-        metadata_heads,
         bootstraps: Vec::new(),
     };
-    let reference = creation.control_ref(objects, head_object);
+    let reference = creation.control_ref(objects);
     let control = creation.control.clone();
     let own_access = creation
         .access

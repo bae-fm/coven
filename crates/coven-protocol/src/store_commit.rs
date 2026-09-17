@@ -13,7 +13,7 @@ use super::membership::{
 };
 use crate::circle::{
     CircleBootstrapCoverageRef, CircleBootstrapRef, CircleControlCoord, CircleEpochId, CircleId,
-    CircleMetadataCoord, CircleMetadataHeadRef, CircleRosterCoord, CircleRosterHeadRef,
+    CircleMetadataCoord, CircleRosterCoord,
 };
 use crate::circle_control::StoreMembershipStateRef;
 use crate::objects::ObjectSlot;

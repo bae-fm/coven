@@ -2926,15 +2926,18 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         .expect("authorize Circle writer");
     let author = activation_commit.author();
     let activation_commit = activation_commit.value();
-    let previous_control = activation_commit
-        .circle_controls()
-        .iter()
-        .find(|reference| {
-            reference.circle_id() == fixture.circle_id
-                && reference.control() == &current.control.coord
-        })
-        .expect("closing control is present in its activating commit")
-        .clone();
+    let previous_control = coven_protocol::circle_journal::CircleControlActivation {
+        reference: activation_commit
+            .circle_controls()
+            .iter()
+            .find(|reference| {
+                reference.circle_id() == fixture.circle_id
+                    && reference.control() == &current.control.coord
+            })
+            .expect("closing control is present in its activating commit")
+            .clone(),
+        activating_commit: activation_commit_ref.clone(),
+    };
     let prepared = authority
         .circles()
         .preparer()
@@ -2975,10 +2978,7 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     );
     objects.close_cancellation = None;
     let mut journal = prepared.journal;
-    let forged_reference = journal.operation().creation.control_ref(
-        objects,
-        Some(old_commit.circle_controls()[0].head_object().clone()),
-    );
+    let forged_reference = journal.operation().creation.control_ref(objects);
     let device = fixture
         .store
         .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
@@ -3112,9 +3112,9 @@ async fn interrupted_cancellation_flow() {
         .circle_control_activation_count_for_test(after_commit_upload.circle_id)
         .await
         .expect("count circle activations");
-    // A cancellation uploads its cancellation object, the control, the control
-    // head and the Store commit; its publication entry is the fifth exact create.
-    let publication_entry_create_call = 5;
+    // A cancellation uploads its cancellation object, the control and the Store
+    // commit; its publication entry is the fourth exact create.
+    let publication_entry_create_call = 4;
     after_commit_upload
         .home
         .fail_exact_create_before_call(publication_entry_create_call);

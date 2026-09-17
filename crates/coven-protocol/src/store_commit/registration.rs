@@ -193,34 +193,14 @@ impl DeviceStreamAnchor {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrantStreamAnchor {
-    StoreMembership {
-        first_slot: ObjectSlot,
-    },
-    OwnerRecovery {
-        first_slot: ObjectSlot,
-    },
-    CircleControl {
-        circle_id: CircleId,
-        first_slot: ObjectSlot,
-    },
-    CircleRoster {
-        circle_id: CircleId,
-        first_slot: ObjectSlot,
-    },
-    CircleMetadata {
-        circle_id: CircleId,
-        first_slot: ObjectSlot,
-    },
+    StoreMembership { first_slot: ObjectSlot },
+    OwnerRecovery { first_slot: ObjectSlot },
 }
 
 impl GrantStreamAnchor {
     pub fn first_slot(&self) -> &ObjectSlot {
         match self {
-            Self::StoreMembership { first_slot }
-            | Self::OwnerRecovery { first_slot }
-            | Self::CircleControl { first_slot, .. }
-            | Self::CircleRoster { first_slot, .. }
-            | Self::CircleMetadata { first_slot, .. } => first_slot,
+            Self::StoreMembership { first_slot } | Self::OwnerRecovery { first_slot } => first_slot,
         }
     }
 }

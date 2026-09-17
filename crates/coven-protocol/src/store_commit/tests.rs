@@ -23,7 +23,6 @@ impl Fixture {
     fn circle_control_coord(&self, control_hash: ObjectHash) -> CircleControlCoord {
         CircleControlCoord {
             device_id: self.registration.device_id.to_string(),
-            stream_id: self.commit_ref.coord.stream_id,
             author_pubkey: keys::public_key_hex(&self.signer),
             author_owner_grant: self.root.descriptor.founder_grant.clone(),
             seq: 1,
@@ -251,19 +250,81 @@ fn exact(key: String, bytes: &[u8]) -> ExactObjectRef {
     ExactObjectRef::new(slot(key), bytes.len() as u64, ObjectHash::digest(bytes))
 }
 
-fn circle_activation(
+fn grant_activation(
     fixture: &Fixture,
-    circle_id: CircleId,
     grant_id: MembershipGrantId,
-    anchor: fn(CircleId, ObjectSlot) -> GrantStreamAnchor,
+    anchor: fn(ObjectSlot) -> GrantStreamAnchor,
     first_slot: ObjectSlot,
 ) -> StreamActivation {
     StreamActivation::grant_authorized(
         fixture.root_ref.store_root_hash,
         fixture.registration_ref.clone(),
         grant_id,
-        anchor(circle_id, first_slot),
+        anchor(first_slot),
     )
+}
+
+/// A Store membership control, the only commit shape that may carry
+/// grant-authorized stream activations.
+fn membership_control(fixture: &Fixture) -> StoreControl {
+    let entry: MembershipEntry = Signed::sign(
+        crate::membership::MembershipEntryBody {
+            store_id: fixture.root_ref.store_root_id.to_string(),
+            author_pubkey: keys::public_key_hex(&fixture.signer),
+            author_owner_grant: fixture.root.descriptor.founder_grant.clone(),
+            stream_id: AuthorStreamId::from_bytes([7; 32]),
+            seq: 2,
+            previous_hash: None,
+            dependencies: Vec::new(),
+            created_at: "0000000002000-0000-device-a".to_string(),
+            change: StoreAuthorityChange::TransferProviderAdministration {
+                administrator: fixture.registration_ref.clone(),
+            },
+        },
+        &fixture.signer,
+    );
+    let coord = entry.coord();
+    let entry_bytes = serde_json::to_vec(&entry).expect("serialize control entry");
+    StoreControl {
+        transition: crate::membership::MergeMembershipHeadTransition {
+            body: crate::membership::MembershipHeadBody {
+                author_registration: fixture.registration_ref.clone(),
+                entry: MembershipEntryRef {
+                    coord: coord.clone(),
+                    object: exact(
+                        format!(
+                            "{}.json",
+                            membership_entry_semantic_prefix(
+                                &coord.author_pubkey,
+                                &coord.author_owner_grant,
+                                coord.stream_id,
+                                coord.seq,
+                                coord.entry_hash,
+                            )
+                        ),
+                        &entry_bytes,
+                    ),
+                },
+                predecessor: None,
+                successor: SuccessorLink {
+                    activation: StreamActivation::grant_authorized(
+                        fixture.root_ref.store_root_hash,
+                        fixture.registration_ref.clone(),
+                        fixture.root.descriptor.founder_grant.clone(),
+                        GrantStreamAnchor::StoreMembership {
+                            first_slot: slot(
+                                "store-v1/membership/heads/control/1.json".to_string(),
+                            ),
+                        },
+                    )
+                    .activation_id(),
+                    predecessor: None,
+                    next_slot: slot("store-v1/membership/heads/control/2.json".to_string()),
+                },
+            },
+            head_slot: slot("store-v1/membership/heads/control/head.json".to_string()),
+        },
+    }
 }
 
 #[test]
@@ -404,26 +465,20 @@ fn owner_promotion_request_and_acceptance_bind_both_exact_devices() {
 #[test]
 fn stream_activation_descriptor_and_locator_derivations_are_identical() {
     let fixture = fixture();
-    let circle_id = CircleId::from_bytes([4; 16]);
-    let other_circle = CircleId::from_bytes([5; 16]);
-    let grant = MembershipGrantId(ObjectHash::digest(b"Circle activation grant"));
-    let other_grant = MembershipGrantId(ObjectHash::digest(b"other Circle activation grant"));
-    let first_slot = slot("store-v1/circles/stream/first.json".to_string());
-    let activation = circle_activation(
+    let grant = MembershipGrantId(ObjectHash::digest(b"membership activation grant"));
+    let other_grant = MembershipGrantId(ObjectHash::digest(b"other membership activation grant"));
+    let first_slot = slot("store-v1/membership/stream/first.json".to_string());
+    let activation = grant_activation(
         &fixture,
-        circle_id,
         grant.clone(),
-        |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
-            circle_id,
-            first_slot,
-        },
+        |first_slot| GrantStreamAnchor::StoreMembership { first_slot },
         first_slot.clone(),
     );
     let locator = StreamActivation::grant_authorized_stream_id(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
         &grant,
-        StreamAnchorDomain::CircleRoster { circle_id },
+        StreamAnchorDomain::StoreMembership,
     );
     assert_eq!(activation.author_stream_id(), locator);
     let locator_text = locator.to_string();
@@ -432,56 +487,32 @@ fn stream_activation_descriptor_and_locator_derivations_are_identical() {
         .bytes()
         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
 
-    let other_slot = circle_activation(
+    // The first slot names the activation, not the stream: two activations of
+    // the same stream at different slots share one author stream id.
+    let other_slot = grant_activation(
         &fixture,
-        circle_id,
         grant.clone(),
-        |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
-            circle_id,
-            first_slot,
-        },
-        slot("store-v1/circles/stream/other-first.json".to_string()),
+        |first_slot| GrantStreamAnchor::StoreMembership { first_slot },
+        slot("store-v1/membership/stream/other-first.json".to_string()),
     );
     assert_eq!(activation.author_stream_id(), other_slot.author_stream_id());
     assert_ne!(activation.activation_id(), other_slot.activation_id());
 
-    let other_domain = circle_activation(
+    let other_domain = grant_activation(
         &fixture,
-        circle_id,
-        grant.clone(),
-        |circle_id, first_slot| GrantStreamAnchor::CircleMetadata {
-            circle_id,
-            first_slot,
-        },
-        first_slot.clone(),
-    );
-    let other_circle = circle_activation(
-        &fixture,
-        other_circle,
         grant,
-        |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
-            circle_id,
-            first_slot,
-        },
+        |first_slot| GrantStreamAnchor::OwnerRecovery { first_slot },
         first_slot.clone(),
     );
-    let other_grant = circle_activation(
+    let other_grant = grant_activation(
         &fixture,
-        circle_id,
         other_grant,
-        |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
-            circle_id,
-            first_slot,
-        },
+        |first_slot| GrantStreamAnchor::StoreMembership { first_slot },
         first_slot,
     );
     assert_ne!(
         activation.author_stream_id(),
         other_domain.author_stream_id()
-    );
-    assert_ne!(
-        activation.author_stream_id(),
-        other_circle.author_stream_id()
     );
     assert_ne!(
         activation.author_stream_id(),
@@ -492,19 +523,27 @@ fn stream_activation_descriptor_and_locator_derivations_are_identical() {
 #[test]
 fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identity_collisions() {
     let (fixture, other_fixture) = (fixture(), fixture());
-    let circle_id = CircleId::from_bytes([6; 16]);
-    let grant = MembershipGrantId(ObjectHash::digest(b"validation Circle grant"));
-    let control = circle_activation(
+    let control = membership_control(&fixture);
+    let grant = MembershipGrantId(ObjectHash::digest(b"validation membership grant"));
+    let membership = grant_activation(
         &fixture,
-        circle_id,
         grant.clone(),
-        |circle_id, first_slot| GrantStreamAnchor::CircleControl {
-            circle_id,
-            first_slot,
-        },
-        slot("store-v1/circles/validation/control.json".to_string()),
+        |first_slot| GrantStreamAnchor::StoreMembership { first_slot },
+        slot("store-v1/membership/validation/membership.json".to_string()),
     );
-    let mut wrong_root = control.clone();
+
+    // A commit that carries no Store membership control carries no
+    // grant-authorized stream activation either. Circle operations commits are
+    // exactly that shape: their controls, rosters and metadata own no streams.
+    assert!(validate_stream_activations(
+        fixture.root_ref.store_root_hash,
+        &fixture.registration_ref,
+        None,
+        std::slice::from_ref(&membership),
+    )
+    .is_err());
+
+    let mut wrong_root = membership.clone();
     let StreamActivation::GrantAuthorized {
         store_root_hash, ..
     } = &mut wrong_root
@@ -515,12 +554,12 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        None,
+        Some(&control),
         &[wrong_root],
     )
     .is_err());
 
-    let mut wrong_registration = control.clone();
+    let mut wrong_registration = membership.clone();
     let StreamActivation::GrantAuthorized {
         author_registration,
         ..
@@ -529,98 +568,69 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
         unreachable!()
     };
     *author_registration = other_fixture.registration_ref;
+    // A promotion commit activates the promoted device's streams, so a
+    // registration other than the commit author's is accepted only under a
+    // control; without one it is refused above.
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        None,
+        Some(&control),
         &[wrong_registration],
     )
-    .is_err());
+    .is_ok());
 
-    let non_circle = StreamActivation::grant_authorized(
-        fixture.root_ref.store_root_hash,
-        fixture.registration_ref.clone(),
-        grant.clone(),
-        GrantStreamAnchor::StoreMembership {
-            first_slot: slot("store-v1/membership/non-circle.json".to_string()),
-        },
-    );
-    assert!(validate_stream_activations(
-        fixture.root_ref.store_root_hash,
-        &fixture.registration_ref,
-        None,
-        &[non_circle],
-    )
-    .is_err());
-
-    let roster = circle_activation(
+    let recovery = grant_activation(
         &fixture,
-        circle_id,
         grant.clone(),
-        |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
-            circle_id,
-            first_slot,
-        },
-        slot("store-v1/circles/validation/roster.json".to_string()),
+        |first_slot| GrantStreamAnchor::OwnerRecovery { first_slot },
+        slot("store-v1/membership/validation/recovery.json".to_string()),
     );
-    let mut unsorted = vec![control.clone(), roster.clone()];
+    let mut unsorted = vec![membership.clone(), recovery.clone()];
     unsorted.sort();
     unsorted.reverse();
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        None,
+        Some(&control),
         &unsorted,
     )
     .is_err());
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        None,
-        &[control.clone(), control.clone()],
+        Some(&control),
+        &[membership.clone(), membership.clone()],
     )
     .is_err());
 
-    let same_stream = circle_activation(
+    let same_stream = grant_activation(
         &fixture,
-        circle_id,
         grant.clone(),
-        |circle_id, first_slot| GrantStreamAnchor::CircleControl {
-            circle_id,
-            first_slot,
-        },
-        slot("store-v1/circles/validation/control-other.json".to_string()),
+        |first_slot| GrantStreamAnchor::StoreMembership { first_slot },
+        slot("store-v1/membership/validation/membership-other.json".to_string()),
     );
-    let mut duplicate_stream = vec![control.clone(), same_stream];
+    let mut duplicate_stream = vec![membership.clone(), same_stream];
     duplicate_stream.sort();
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        None,
+        Some(&control),
         &duplicate_stream,
     )
     .is_err());
 
-    let shared_slot = slot("store-v1/circles/validation/shared.json".to_string());
+    let shared_slot = slot("store-v1/membership/validation/shared.json".to_string());
     let mut duplicate_slot = vec![
-        circle_activation(
+        grant_activation(
             &fixture,
-            circle_id,
             grant.clone(),
-            |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
-                circle_id,
-                first_slot,
-            },
+            |first_slot| GrantStreamAnchor::StoreMembership { first_slot },
             shared_slot.clone(),
         ),
-        circle_activation(
+        grant_activation(
             &fixture,
-            circle_id,
             grant,
-            |circle_id, first_slot| GrantStreamAnchor::CircleMetadata {
-                circle_id,
-                first_slot,
-            },
+            |first_slot| GrantStreamAnchor::OwnerRecovery { first_slot },
             shared_slot,
         ),
     ];
@@ -628,7 +638,7 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        None,
+        Some(&control),
         &duplicate_slot,
     )
     .is_err());
@@ -1363,20 +1373,13 @@ fn candidate_manifest_rejects_duplicate_circle_bootstraps_with_distinct_provider
     operations.circle_controls.push(CircleControlRef {
         circle_id,
         control,
-        head_hash: ObjectHash::digest(b"duplicate Circle access head"),
-        head_object: exact(
-            "circle-control-head.json".to_string(),
-            b"duplicate Circle access head",
-        ),
         objects: CircleActivationObjects {
             control: exact("circle-control.json".to_string(), b"control"),
             close_intent: None,
             close_outcome: None,
             close_cancellation: None,
             roster_entries: BTreeMap::new(),
-            roster_heads: Vec::new(),
             metadata_entries: BTreeMap::new(),
-            metadata_heads: Vec::new(),
             bootstraps: vec![bootstrap("drive-file-a"), bootstrap("drive-file-b")],
         },
     });

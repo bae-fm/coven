@@ -20,7 +20,6 @@ impl CircleTransitionDraft {
         participants: Vec<CircleEpochCloseParticipant>,
         provisional_frontier: CommitFrontier,
         outcome_slot: ObjectSlot,
-        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let context = circle_successor_context(
@@ -56,23 +55,6 @@ impl CircleTransitionDraft {
             value: CircleControlValue {
                 order: MergeCircleControlOrder {
                     device_id: device_id.to_string(),
-                    stream_id: active_epoch
-                        .covered_control_heads
-                        .iter()
-                        .find(|head| {
-                            head.coord.author_pubkey == author_pubkey
-                                && head.coord.device_id == device_id
-                                && head.coord.author_owner_grant == grant_id
-                        })
-                        .map_or_else(
-                            || {
-                                AuthorStreamId::from_digest(generated_id_digest(
-                                    ids,
-                                    b"coven.circle-transition-draft-stream.v1\0",
-                                ))
-                            },
-                            |head| head.coord.stream_id,
-                        ),
                     author_owner_grant: grant_id,
                     seq: current_control
                         .value
@@ -89,7 +71,7 @@ impl CircleTransitionDraft {
                         metadata: active_epoch.metadata.clone(),
                         roster: roster_state.clone(),
                         store_membership,
-                        covered_control_heads: active_epoch.covered_control_heads.clone(),
+                        covered_controls: active_epoch.covered_controls.clone(),
                     },
                     intent,
                     frozen_device_state,
@@ -147,7 +129,6 @@ impl CircleTransitionDraft {
     pub fn finalize_epoch_close(
         candidate_family: crate::store_commit::CandidateFamilyId,
         device_id: &str,
-        author_registration: &StoreDeviceRegistrationRef,
         metadata_stamp: &str,
         store_membership: StoreMembershipStateRef,
         membership_authority: MembershipCoord,
@@ -234,49 +215,33 @@ impl CircleTransitionDraft {
             return Err(CircleTransitionError::InvalidCurrentState);
         }
         let roster_state = MergeCircleRosterStateRef {
-            heads: close.frozen_epoch.roster.heads.clone(),
+            frontier: close.frozen_epoch.roster.frontier.clone(),
             state_hash: roster.state_hash(),
         };
-        let metadata_stream = crate::store_commit::StreamActivation::grant_authorized_stream_id(
-            close_control.value.store_root_hash,
-            author_registration,
-            grant_id,
-            crate::store_commit::StreamAnchorDomain::CircleMetadata {
-                circle_id: close_control.value.circle_id,
-            },
-        );
-        let prior_metadata = close
-            .frozen_epoch
-            .metadata
-            .heads
-            .iter()
-            .find(|head| head.coord.stream_id == metadata_stream);
+        let prior_metadata = close.frozen_epoch.metadata.frontier.iter().find(|coord| {
+            coord.author_pubkey == author_pubkey
+                && coord.device_id == device_id
+                && coord.author_owner_grant == *grant_id
+        });
         let mut metadata = current_metadata.body().clone();
         metadata.epoch_id = epoch_id;
         metadata.metadata_stamp = metadata_stamp.to_string();
         metadata.author_pubkey = author_pubkey.clone();
         metadata.device_id = device_id.to_string();
-        metadata.stream_id = metadata_stream;
         metadata.author_owner_grant = grant_id.clone();
-        metadata.seq = prior_metadata.map_or(Ok(1), |head| {
-            head.coord
+        metadata.seq = prior_metadata.map_or(Ok(1), |coord| {
+            coord
                 .seq
                 .checked_add(1)
                 .ok_or(CircleTransitionError::SequenceOverflow)
         })?;
-        metadata.previous_hash = prior_metadata.map(|head| head.coord.metadata_hash);
-        metadata.dependencies = close
-            .frozen_epoch
-            .metadata
-            .heads
-            .iter()
-            .map(|head| head.coord.clone())
-            .collect();
+        metadata.previous_hash = prior_metadata.map(|coord| coord.metadata_hash);
+        metadata.dependencies = close.frozen_epoch.metadata.frontier.clone();
         metadata.author_roster = roster_state.clone();
         metadata.key_fingerprint = key_fingerprint;
         let metadata = Signed::sign(metadata, signer);
         let metadata_state = MergeCircleMetadataStateRef {
-            heads: close.frozen_epoch.metadata.heads.clone(),
+            frontier: close.frozen_epoch.metadata.frontier.clone(),
             selected: metadata.coord(),
             state_hash: metadata.metadata_hash(),
         };
@@ -286,7 +251,6 @@ impl CircleTransitionDraft {
             value: CircleControlValue {
                 order: MergeCircleControlOrder {
                     device_id: device_id.to_string(),
-                    stream_id: close_control.value.value.order.stream_id,
                     author_owner_grant: grant_id.clone(),
                     seq: close_control
                         .value
@@ -306,7 +270,7 @@ impl CircleTransitionDraft {
                     metadata: metadata_state,
                     roster: roster_state.clone(),
                     store_membership,
-                    covered_control_heads: close.frozen_epoch.covered_control_heads.clone(),
+                    covered_controls: close.frozen_epoch.covered_controls.clone(),
                 }),
                 access: CircleAccessMap::empty(),
                 author_authority,
@@ -428,7 +392,6 @@ impl CircleTransitionDraft {
             value: CircleControlValue {
                 order: MergeCircleControlOrder {
                     device_id: device_id.to_string(),
-                    stream_id: close_control.value.value.order.stream_id,
                     author_owner_grant: grant_id.clone(),
                     seq: close_control
                         .value
@@ -448,7 +411,7 @@ impl CircleTransitionDraft {
                     metadata: frozen.metadata.clone(),
                     roster: roster_state.clone(),
                     store_membership,
-                    covered_control_heads: frozen.covered_control_heads.clone(),
+                    covered_controls: frozen.covered_controls.clone(),
                 }),
                 access: CircleAccessMap::empty(),
                 author_authority,

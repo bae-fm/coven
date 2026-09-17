@@ -247,6 +247,10 @@ impl<'a> Circles<'a> {
     }
 
     /// Delete a Circle with an Owner-signed terminal control transition.
+    ///
+    /// A conflicted Circle accepts this without a resolution first: the
+    /// deletion authors from the first branch in the canonical branch order and
+    /// covers the rest, so every device reduces to the same terminal state.
     pub async fn delete(&self, circle_id: CircleId) -> Result<(), CircleError> {
         self.owner.delete(circle_id).await
     }

@@ -2534,8 +2534,6 @@ mod test_device {
                 coven_protocol::circle::PreparedCircleTransition,
                 coven_protocol::store_commit::CircleActivationObjects,
                 std::collections::BTreeMap<String, coven_protocol::objects::PreparedExactObject>,
-                Option<coven_protocol::objects::ExactObjectRef>,
-                Vec<coven_protocol::store_commit::StreamActivation>,
             ),
             crate::sync::store::CircleOperationError,
         > {
@@ -2551,7 +2549,6 @@ mod test_device {
             old_commit: &coven_protocol::store_commit::StoreBatchCommit,
             coord: coven_protocol::store_commit::StoreCommitCoord,
             reference: coven_protocol::store_commit::CircleControlRef,
-            stream_activations: Vec<coven_protocol::store_commit::StreamActivation>,
         ) -> Result<
             coven_protocol::store_commit::StoreBatchCommit,
             crate::sync::store::CircleOperationError,
@@ -2559,7 +2556,7 @@ mod test_device {
             self.circle_writer()
                 .await?
                 .circles()
-                .sign_circle_commit_for_test(old_commit, coord, reference, stream_activations)
+                .sign_circle_commit_for_test(old_commit, coord, reference)
         }
 
         pub async fn rename_circle(

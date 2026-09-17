@@ -83,7 +83,12 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         let roster_chain = self
             .history()
             .activations()
-            .load_control_roster_chain(&activation_commit, &reference, &current.control, keyring)
+            .load_control_roster_chain(
+                &activation_commit,
+                &reference.reference,
+                &current.control,
+                keyring,
+            )
             .await?;
         let plan = self.writer.prepare_plan().await?;
         let journal = self
@@ -149,47 +154,14 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         conflicting_branches: Vec<coven_protocol::circle::CircleControlCoord>,
     ) -> Result<CircleOperationRequest, CircleOperationError> {
         self.ensure_not_deleted(circle_id).await?;
-        if !retained_branches.contains(chosen) {
-            return Err(CircleOperationError::ChosenBranchNotRetained { circle_id });
-        }
-        let identity_pubkey = self.local_writer.author_pubkey();
-        let chosen_activation = self
-            .database
-            .verified_circle_activation(self.root.clone(), circle_id, chosen.clone())
-            .await?
-            .ok_or_else(|| {
-                CircleOperationError::InvalidState(format!(
-                    "Circle {circle_id} conflict omits retained authority for the chosen branch"
-                ))
-            })?;
+        let (chosen_state, previous_control, losing_branches) = self
+            .conflict_branch_context(circle_id, chosen, retained_branches)
+            .await?;
         if matches!(
-            chosen_activation.control.value.state(),
+            chosen_state.control.value.state(),
             CircleControlState::EpochClose(_)
         ) {
             return Err(CircleOperationError::ResolveToClosingBranch { circle_id });
-        }
-        let chosen_state =
-            retained_branch_authoring_state(circle_id, &identity_pubkey, &chosen_activation)?;
-        let previous_control = chosen_activation.reference.clone();
-        let mut losing_branches = Vec::new();
-        for branch in retained_branches {
-            if branch == chosen {
-                continue;
-            }
-            let activation = self
-                .database
-                .verified_circle_activation(self.root.clone(), circle_id, branch.clone())
-                .await?
-                .ok_or_else(|| {
-                    CircleOperationError::InvalidState(format!(
-                        "Circle {circle_id} conflict omits retained authority for a losing branch"
-                    ))
-                })?;
-            let selected_metadata = losing_branch_selected_metadata(circle_id, &activation)?;
-            losing_branches.push(CircleResolveLosingBranch {
-                reference: activation.reference.clone(),
-                selected_metadata,
-            });
         }
         Ok(CircleOperationRequest::ResolveControl(Box::new(
             CircleResolveControlRequest {
@@ -200,6 +172,75 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 conflicting_branches,
             },
         )))
+    }
+
+    /// Load one retained conflicting branch as the context an operation authors
+    /// from, together with every other retained branch as a covered branch.
+    ///
+    /// Both exits from a control conflict take this shape: a resolution authors
+    /// from the branch the Owner picked, a deletion from the branch
+    /// [`CircleCurrentState::deletion_branch`] names. A conflicted state keeps
+    /// only the branch controls, so each branch's roster, metadata, and access
+    /// come from its retained accepted activation.
+    async fn conflict_branch_context(
+        &self,
+        circle_id: CircleId,
+        chosen: &coven_protocol::circle::CircleControlCoord,
+        retained_branches: &[coven_protocol::circle::CircleControlCoord],
+    ) -> Result<
+        (
+            CircleAuthoringState,
+            coven_protocol::circle_journal::CircleControlActivation,
+            Vec<CircleResolveLosingBranch>,
+        ),
+        CircleOperationError,
+    > {
+        if !retained_branches.contains(chosen) {
+            return Err(CircleOperationError::ChosenBranchNotRetained { circle_id });
+        }
+        let identity_pubkey = self.local_writer.author_pubkey();
+        let (chosen_activation, chosen_commit) = self
+            .database
+            .verified_circle_activation_context(self.root.clone(), circle_id, chosen.clone())
+            .await?
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle {circle_id} conflict omits retained authority for the chosen branch"
+                ))
+            })?;
+        let chosen_state =
+            retained_branch_authoring_state(circle_id, &identity_pubkey, &chosen_activation)?;
+        let previous_control = coven_protocol::circle_journal::CircleControlActivation {
+            reference: chosen_activation.reference.clone(),
+            activating_commit: chosen_commit,
+        };
+        let mut covered_branches = Vec::new();
+        for branch in retained_branches {
+            if branch == chosen {
+                continue;
+            }
+            let (activation, activating_commit) = self
+                .database
+                .verified_circle_activation_context(self.root.clone(), circle_id, branch.clone())
+                .await?
+                .ok_or_else(|| {
+                    CircleOperationError::InvalidState(format!(
+                        "Circle {circle_id} conflict omits retained authority for a covered branch"
+                    ))
+                })?;
+            let selected_metadata = losing_branch_selected_metadata(circle_id, &activation)?;
+            let epoch = activation.control.value.access_epoch();
+            covered_branches.push(CircleResolveLosingBranch {
+                roster_frontier: epoch.roster.frontier.clone(),
+                metadata_frontier: epoch.metadata.frontier.clone(),
+                activation: coven_protocol::circle_journal::CircleControlActivation {
+                    reference: activation.reference.clone(),
+                    activating_commit,
+                },
+                selected_metadata,
+            });
+        }
+        Ok((chosen_state, previous_control, covered_branches))
     }
 
     pub(crate) async fn cancel_circle_epoch_close(
@@ -258,9 +299,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                         journal.operation_id
                     )));
                 }
-                let activation = self
+                let (activation, activating_commit) = self
                     .database
-                    .verified_circle_activation(
+                    .verified_circle_activation_context(
                         self.root.clone(),
                         circle_id,
                         current.control.coord.clone(),
@@ -276,14 +317,20 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                         "Circle {circle_id} closing state differs from its retained activation"
                     )));
                 }
-                (current, activation.reference)
+                (
+                    current,
+                    coven_protocol::circle_journal::CircleControlActivation {
+                        reference: activation.reference,
+                        activating_commit,
+                    },
+                )
             }
             Some(branches) => {
                 let mut selected = None;
                 for branch in branches {
-                    let activation = self
+                    let (activation, activating_commit) = self
                         .database
-                        .verified_circle_activation(self.root.clone(), circle_id, branch)
+                        .verified_circle_activation_context(self.root.clone(), circle_id, branch)
                         .await?
                         .ok_or_else(|| {
                             CircleOperationError::InvalidState(format!(
@@ -300,7 +347,13 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     let current =
                         retained_branch_authoring_state(circle_id, &identity_pubkey, &activation)?;
                     if selected
-                        .replace((current, activation.reference.clone()))
+                        .replace((
+                            current,
+                            coven_protocol::circle_journal::CircleControlActivation {
+                                reference: activation.reference.clone(),
+                                activating_commit,
+                            },
+                        ))
                         .is_some()
                     {
                         return Err(CircleOperationError::InvalidState(format!(
@@ -500,29 +553,50 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         circle_id: CircleId,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<(), CircleOperationError> {
-        if self
-            .database
-            .circle_control_conflict_branches(circle_id)
-            .await?
-            .is_some()
-        {
-            return Err(CircleOperationError::Conflicted { circle_id });
-        }
         if self.database.circle_is_deleted(circle_id).await? {
             return Err(CircleOperationError::Deleted { circle_id });
         }
-        let (current, reference) = self.current_delete_context(circle_id).await?;
+        // Deletion is the one operation a control conflict does not block. It
+        // authors from the branch every device picks by the same canonical
+        // order and covers the rest, so the conflict collapses to one terminal
+        // deletion everywhere — including conflicts no resolution can reduce.
+        let request = match self
+            .database
+            .circle_control_conflict_branches(circle_id)
+            .await?
+        {
+            Some(branches) => {
+                let chosen = self
+                    .database
+                    .circle_deletion_branch(circle_id)
+                    .await?
+                    .ok_or(CircleOperationError::NotConflicted { circle_id })?;
+                let (current, previous_control, covered_branches) = self
+                    .conflict_branch_context(circle_id, &chosen, &branches)
+                    .await?;
+                CircleDeleteRequest {
+                    circle_id,
+                    current,
+                    previous_control,
+                    covered_branches,
+                    conflicting_branches: branches,
+                }
+            }
+            None => {
+                let (current, previous_control) = self.current_delete_context(circle_id).await?;
+                CircleDeleteRequest {
+                    circle_id,
+                    current,
+                    previous_control,
+                    covered_branches: Vec::new(),
+                    conflicting_branches: Vec::new(),
+                }
+            }
+        };
         let plan = self.writer.prepare_plan().await?;
         let journal = self
             .preparer()
-            .prepare_from_plan(
-                &plan,
-                CircleOperationRequest::Delete(Box::new(CircleDeleteRequest {
-                    circle_id,
-                    current,
-                    previous_control: reference,
-                })),
-            )
+            .prepare_from_plan(&plan, CircleOperationRequest::Delete(Box::new(request)))
             .await?;
         if journal.journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
@@ -594,7 +668,12 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         let roster_chain = self
             .history()
             .activations()
-            .load_control_roster_chain(&activation_commit, &reference, &current.control, keyring)
+            .load_control_roster_chain(
+                &activation_commit,
+                &reference.reference,
+                &current.control,
+                keyring,
+            )
             .await?;
         let plan = self.writer.prepare_plan().await?;
         let journal = self

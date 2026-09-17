@@ -7,7 +7,6 @@ use coven_protocol::circle_journal::{
     CircleOperationIntent, CircleOperationJournal, CircleTransitionHistory, PreparedCircleOperation,
 };
 pub use error::CircleOperationError;
-use exact_object::read_exact_circle_object;
 
 pub(super) mod activation;
 mod authorized_writer;

@@ -572,35 +572,3 @@ pub(crate) enum CausalGrantError<C: CausalCoordinate> {
 
 #[cfg(test)]
 mod tests;
-
-/// The head references matching `coords` exactly — every coordinate has one
-/// reference and nothing else is included — in canonical order. `None` when a
-/// coordinate is missing or an extra reference remains.
-pub(crate) fn exact_head_refs<H, C>(
-    head_refs: &[H],
-    coords: &[C],
-    coord_of: impl Fn(&H) -> &C,
-) -> Option<Vec<H>>
-where
-    H: Clone + Ord,
-    C: Clone + Ord,
-{
-    let expected = coords
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut references = head_refs
-        .iter()
-        .filter(|reference| expected.contains(coord_of(reference)))
-        .cloned()
-        .collect::<Vec<_>>();
-    let actual = references
-        .iter()
-        .map(|reference| coord_of(reference).clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    if expected != actual || references.len() != expected.len() {
-        return None;
-    }
-    references.sort();
-    Some(references)
-}

@@ -1,57 +1,6 @@
 use super::*;
 
 impl LocalStoreWriter {
-    pub(crate) fn verify_circle_roster_head(
-        &self,
-        head: &coven_protocol::circle::CircleRosterHead,
-    ) -> bool {
-        head.verify_for_registration(self.registration.value())
-    }
-
-    pub(crate) fn verify_circle_metadata_head(
-        &self,
-        head: &coven_protocol::circle::CircleMetadataHead,
-    ) -> bool {
-        head.verify_for_registration(self.registration.value())
-    }
-
-    pub(crate) fn sign_circle_roster_head(
-        &self,
-        entry: &coven_protocol::circle::CircleRosterEntry,
-        tip: coven_protocol::objects::ExactObjectRef,
-        successor: coven_protocol::store_commit::SuccessorLink,
-    ) -> coven_protocol::circle::CircleRosterHead {
-        coven_protocol::circle::CircleRosterHead::signed(entry, tip, successor, &self.device_signer)
-    }
-
-    pub(crate) fn sign_circle_metadata_head(
-        &self,
-        metadata: &coven_protocol::circle::CircleMetadata,
-        tip: coven_protocol::objects::ExactObjectRef,
-        successor: coven_protocol::store_commit::SuccessorLink,
-    ) -> coven_protocol::circle::CircleMetadataHead {
-        coven_protocol::circle::CircleMetadataHead::signed(
-            metadata,
-            tip,
-            successor,
-            &self.device_signer,
-        )
-    }
-
-    pub(crate) fn sign_circle_control_head(
-        &self,
-        control: &coven_protocol::circle::CircleControl,
-        entry: coven_protocol::objects::ExactObjectRef,
-        successor: coven_protocol::store_commit::SuccessorLink,
-    ) -> coven_protocol::circle::CircleControlHead {
-        coven_protocol::circle::CircleControlHead::signed(
-            control,
-            entry,
-            successor,
-            &self.device_signer,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn finalize_circle_epoch_close(
         &self,
@@ -75,7 +24,6 @@ impl LocalStoreWriter {
         coven_protocol::circle::CircleTransitionDraft::finalize_epoch_close(
             candidate_family,
             &self.circle_device_id(),
-            self.registration.reference(),
             metadata_stamp,
             store_membership,
             membership_authority,
@@ -297,7 +245,6 @@ impl LocalStoreWriter {
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
         membership_authority: coven_protocol::membership::MembershipCoord,
         circle_reference: coven_protocol::store_commit::CircleControlRef,
-        stream_activations: Vec<coven_protocol::store_commit::StreamActivation>,
     ) -> Result<
         coven_protocol::store_commit::StoreBatchCommit,
         crate::sync::store::circles::CircleOperationError,
@@ -312,7 +259,6 @@ impl LocalStoreWriter {
             device_state,
             membership_authority,
             coven_protocol::store_commit::StoreCommitOperationsInput {
-                stream_activations,
                 circle_controls: vec![circle_reference],
                 ..coven_protocol::store_commit::StoreCommitOperationsInput::empty()
             },

@@ -6,110 +6,44 @@ pub enum CircleSemanticSlot<'a> {
         circle_id: CircleId,
         control: &'a CircleControlCoord,
     },
-    ControlHead {
-        circle_id: CircleId,
-        control: &'a CircleControlCoord,
-    },
     RosterEntry {
         circle_id: CircleId,
         coord: &'a crate::circle_roster::CircleRosterCoord,
     },
-    RosterHead {
-        circle_id: CircleId,
-        head: &'a CircleRosterHeadRef,
-    },
     MetadataEntry {
         circle_id: CircleId,
         coord: &'a CircleMetadataCoord,
-    },
-    MetadataHead {
-        circle_id: CircleId,
-        head: &'a CircleMetadataHeadRef,
     },
 }
 
 pub fn circle_semantic_prefix(slot: CircleSemanticSlot<'_>) -> String {
     match slot {
         CircleSemanticSlot::Control { circle_id, control } => format!(
-            "circle-control/{}/merge/entries/{author_pubkey}/{device_id}/{author_owner_grant}/{stream_id}/{seq}/{control_hash}",
+            "circle-control/{}/merge/entries/{author_pubkey}/{device_id}/{author_owner_grant}/{seq}/{control_hash}",
             circle_id,
             author_pubkey = control.author_pubkey,
             device_id = control.device_id,
             author_owner_grant = control.author_owner_grant,
-            stream_id = control.stream_id,
             seq = control.seq,
             control_hash = control.control_hash,
         ),
-        CircleSemanticSlot::ControlHead { circle_id, control } => {
-            circle_control_head_prefix(
-                circle_id,
-                &CircleAuthorStreamKey {
-                    author_pubkey: control.author_pubkey.clone(),
-                    device_id: control.device_id.clone(),
-                    stream_id: control.stream_id,
-                    author_owner_grant: control.author_owner_grant.clone(),
-                },
-                control.seq,
-            )
-        }
         CircleSemanticSlot::RosterEntry { circle_id, coord } => format!(
-            "circles/{circle_id}/roster/entries/{}/{}/{}/{}/{}/{}",
+            "circles/{circle_id}/roster/entries/{}/{}/{}/{}/{}",
             coord.author_pubkey,
             coord.device_id,
             coord.author_owner_grant,
-            coord.stream_id,
             coord.seq,
             coord.entry_hash
         ),
-        CircleSemanticSlot::RosterHead { circle_id, head } => {
-            circle_roster_head_prefix(circle_id, &head.coord.stream_key(), head.coord.seq)
-        }
         CircleSemanticSlot::MetadataEntry { circle_id, coord } => format!(
-            "circles/{circle_id}/metadata/entries/{}/{}/{}/{}/{}/{}",
+            "circles/{circle_id}/metadata/entries/{}/{}/{}/{}/{}",
             coord.author_pubkey,
             coord.device_id,
             coord.author_owner_grant,
-            coord.stream_id,
             coord.seq,
             coord.metadata_hash
         ),
-        CircleSemanticSlot::MetadataHead { circle_id, head } => {
-            circle_metadata_head_prefix(circle_id, &head.coord.stream_key(), head.coord.seq)
-        }
     }
-}
-
-pub fn circle_control_head_prefix(
-    circle_id: CircleId,
-    stream: &CircleAuthorStreamKey,
-    seq: u64,
-) -> String {
-    format!(
-        "circle-control/{circle_id}/merge/heads/{}/{}/{}/{}/{seq}",
-        stream.author_pubkey, stream.device_id, stream.author_owner_grant, stream.stream_id
-    )
-}
-
-pub fn circle_roster_head_prefix(
-    circle_id: CircleId,
-    stream: &CircleAuthorStreamKey,
-    seq: u64,
-) -> String {
-    format!(
-        "circles/{circle_id}/roster/heads/{}/{}/{}/{}/{seq}",
-        stream.author_pubkey, stream.device_id, stream.author_owner_grant, stream.stream_id
-    )
-}
-
-pub fn circle_metadata_head_prefix(
-    circle_id: CircleId,
-    stream: &CircleAuthorStreamKey,
-    seq: u64,
-) -> String {
-    format!(
-        "circles/{circle_id}/metadata/heads/{}/{}/{}/{}/{seq}",
-        stream.author_pubkey, stream.device_id, stream.author_owner_grant, stream.stream_id
-    )
 }
 
 pub fn circle_epoch_close_outcome_semantic_prefix(

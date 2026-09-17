@@ -115,14 +115,10 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             .validate_closed_shape()
             .map_err(coven_protocol::circle_journal::CircleJournalError::from)?;
 
-        let CircleTransitionPolicyObjects {
-            roster,
-            metadata_head,
-            ..
-        } = &creation.policy_objects;
-        if let Some(metadata_head) = metadata_head {
+        let CircleTransitionPolicyObjects { roster, metadata } = &creation.policy_objects;
+        if let Some(metadata) = metadata {
             let metadata_encryption = circle_encryption
-                .service_for_fingerprint(creation.metadata.key_fingerprint.as_bytes())
+                .service_for_fingerprint(metadata.key_fingerprint.as_bytes())
                 .map_err(CircleOperationError::Encryption)?;
             self.append_step(
                 &mut journal,
@@ -134,36 +130,9 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 ),
                 &circle_semantic_prefix(CircleSemanticSlot::MetadataEntry {
                     circle_id: creation.circle_id,
-                    coord: &creation.metadata.coord(),
+                    coord: &metadata.coord(),
                 }),
-                &serde_json::to_vec(&creation.metadata)
-                    .expect("circle metadata serialization cannot fail"),
-            )
-            .await?;
-            self.append_step(
-                &mut journal,
-                "metadata-head",
-                &ProtocolObjectContext::circle(
-                    store_root_hash,
-                    ProtocolObjectDomain::CircleMetadata,
-                    circle_encryption.clone(),
-                ),
-                &circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
-                    circle_id: creation.circle_id,
-                    head: reference
-                        .objects()
-                        .metadata_heads
-                        .iter()
-                        .find(|head| head.coord == metadata_head.coord())
-                        .ok_or_else(|| {
-                            CircleOperationError::JournalState(
-                                "prepared metadata head is absent from its signed object graph"
-                                    .to_string(),
-                            )
-                        })?,
-                }),
-                &serde_json::to_vec(&metadata_head)
-                    .expect("circle metadata head serialization cannot fail"),
+                &serde_json::to_vec(metadata).expect("circle metadata serialization cannot fail"),
             )
             .await?;
         }
@@ -183,28 +152,6 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 }),
                 &serde_json::to_vec(&roster.entry)
                     .expect("circle roster entry serialization cannot fail"),
-            )
-            .await?;
-            self.append_step(
-                &mut journal,
-                "roster-head",
-                &roster_context,
-                &circle_semantic_prefix(CircleSemanticSlot::RosterHead {
-                    circle_id: creation.circle_id,
-                    head: reference
-                        .objects()
-                        .roster_heads
-                        .iter()
-                        .find(|head| head.coord == roster.head.entry_coord())
-                        .ok_or_else(|| {
-                            CircleOperationError::JournalState(
-                                "prepared roster head is absent from its signed object graph"
-                                    .to_string(),
-                            )
-                        })?,
-                }),
-                &serde_json::to_vec(&roster.head)
-                    .expect("circle roster head serialization cannot fail"),
             )
             .await?;
         }
@@ -382,22 +329,6 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 control: &creation.control.coord,
             }),
             &creation.control.bytes,
-        )
-        .await?;
-        let control_head = &creation.policy_objects.control_head;
-        self.append_step(
-            &mut journal,
-            "control-head",
-            &ProtocolObjectContext::store_encrypted(
-                store_root_hash,
-                ProtocolObjectDomain::CircleControl,
-            ),
-            &circle_semantic_prefix(CircleSemanticSlot::ControlHead {
-                circle_id: creation.circle_id,
-                control: &control_head.control,
-            }),
-            &serde_json::to_vec(control_head)
-                .expect("circle control head serialization cannot fail"),
         )
         .await?;
         let verified = self
@@ -603,20 +534,17 @@ fn verify_prepared_objects_are_signed(
         operation.commit_ref().object.clone(),
         objects.control.clone(),
     ]);
-    signed.insert(reference.head_object().clone());
-    signed.extend(objects.roster_entries.values().cloned());
-    signed.extend(objects.roster_heads.iter().map(|head| head.object.clone()));
+    signed.extend(
+        objects
+            .roster_entries
+            .values()
+            .map(|entry| entry.object.clone()),
+    );
     signed.extend(
         objects
             .metadata_entries
             .values()
             .map(|metadata| metadata.object.clone()),
-    );
-    signed.extend(
-        objects
-            .metadata_heads
-            .iter()
-            .map(|head| head.object.clone()),
     );
     if let Some(intent) = &objects.close_intent {
         signed.insert(intent.object.clone());

@@ -1,94 +1,9 @@
 use super::reduction::*;
 use super::*;
-use crate::store_commit;
+use coven_keys::keys::UserKeypair;
 
 fn grant(label: &[u8]) -> MembershipGrantId {
     MembershipGrantId(ObjectHash::digest(label))
-}
-
-fn exact_object(logical_key: String, bytes: &[u8]) -> crate::objects::ExactObjectRef {
-    crate::objects::ExactObjectRef::new(
-        crate::objects::ObjectSlot::logical(logical_key).expect("valid test Circle roster slot"),
-        bytes.len() as u64,
-        ObjectHash::digest(bytes),
-    )
-}
-
-fn signed_exact_head(
-    entry: &CircleRosterEntry,
-    device_signer: &UserKeypair,
-) -> ExactCircleRosterHead {
-    let (head, reference) = signed_head_pair(entry, device_signer);
-    ExactCircleRosterHead::bind(head, reference).expect("bind test Circle roster head")
-}
-
-fn signed_head_pair(
-    entry: &CircleRosterEntry,
-    device_signer: &UserKeypair,
-) -> (CircleRosterHead, CircleRosterHeadRef) {
-    let entry_bytes = serde_json::to_vec(entry).expect("serialize test Circle roster entry");
-    let tip = exact_object(
-        format!(
-            "store-v1/test/circle-roster/{}/entry.json",
-            entry.entry_hash()
-        ),
-        &entry_bytes,
-    );
-    let head_slot = crate::objects::ObjectSlot::logical(format!(
-        "store-v1/test/circle-roster/{}/{}/head.json",
-        entry.stream_id, entry.seq
-    ))
-    .expect("valid test Circle roster-head slot");
-    let registration_bytes = format!("{} registration", entry.device_id);
-    let registration = store_commit::StoreDeviceRegistrationRef {
-        device_id: ObjectHash::digest(entry.device_id.as_bytes())
-            .to_string()
-            .parse()
-            .expect("valid test Circle device id"),
-        registration_hash: ObjectHash::digest(registration_bytes.as_bytes()),
-        object: exact_object(
-            format!(
-                "store-v1/test/circle-roster/{}/registration.json",
-                entry.device_id
-            ),
-            registration_bytes.as_bytes(),
-        ),
-    };
-    let activation = store_commit::StreamActivation::grant_authorized(
-        entry.store_root_hash,
-        registration,
-        entry.author_owner_grant.clone(),
-        store_commit::GrantStreamAnchor::CircleRoster {
-            circle_id: entry.circle_id,
-            first_slot: head_slot.clone(),
-        },
-    );
-    let head = CircleRosterHead::signed(
-        entry,
-        tip,
-        SuccessorLink {
-            activation: activation.activation_id(),
-            predecessor: None,
-            next_slot: crate::objects::ObjectSlot::logical(format!(
-                "store-v1/test/circle-roster/{}/{}/next-head.json",
-                entry.stream_id,
-                entry
-                    .seq
-                    .checked_add(1)
-                    .expect("test Circle roster sequence remains representable")
-            ))
-            .expect("valid next test Circle roster-head slot"),
-        },
-        device_signer,
-    );
-    let head_bytes = serde_json::to_vec(&head).expect("serialize test Circle roster head");
-    let object = crate::objects::ExactObjectRef::new(
-        head_slot,
-        head_bytes.len() as u64,
-        ObjectHash::digest(&head_bytes),
-    );
-    let reference = CircleRosterHeadRef::from_stored_head(&head, object);
-    (head, reference)
 }
 
 #[test]
@@ -98,12 +13,10 @@ fn roster_sequence_exhaustion_fails_instead_of_reusing_the_last_sequence() {
     let owner_grant = grant(b"sequence-exhaustion-owner-grant");
     let store_root_hash = ObjectHash::digest(b"sequence-exhaustion-store");
     let circle_id = CircleId::founder(store_root_hash, &owner_pubkey, &owner_grant);
-    let stream_id = AuthorStreamId::from_bytes([122; 32]);
     let founder = CircleRosterEntry::founder(
         store_root_hash,
         circle_id,
         "owner-device",
-        stream_id,
         owner_grant,
         &owner,
     );
@@ -131,7 +44,6 @@ fn roster_sequence_exhaustion_fails_instead_of_reusing_the_last_sequence() {
 struct ThreeOwnerCycle {
     third: UserKeypair,
     chain: CircleRosterChain,
-    heads: Vec<CircleRosterHeadRef>,
     removals: Vec<CircleRosterCoord>,
     revoked_owner_grants: BTreeSet<MembershipGrantId>,
 }
@@ -146,12 +58,10 @@ fn three_owner_cycle() -> ThreeOwnerCycle {
     let store_root_hash = ObjectHash::digest(b"three-owner Circle conflict Store");
     let founder_grant = grant(b"three-owner Circle founder grant");
     let circle_id = CircleId::founder(store_root_hash, &first_pubkey, &founder_grant);
-    let first_stream = AuthorStreamId::from_bytes([81; 32]);
     let founder = CircleRosterEntry::founder(
         store_root_hash,
         circle_id,
         "first-device",
-        first_stream,
         founder_grant.clone(),
         &first,
     );
@@ -160,7 +70,6 @@ fn three_owner_cycle() -> ThreeOwnerCycle {
         .expect("founder roster")
         .signed_set_member(
             "first-device",
-            first_stream,
             second_pubkey.clone(),
             CircleRole::Owner,
             &first,
@@ -177,45 +86,24 @@ fn three_owner_cycle() -> ThreeOwnerCycle {
     base.push(add_second);
     let add_third = CircleRosterChain::from_entries(base.clone())
         .expect("two-Owner roster")
-        .signed_set_member(
-            "first-device",
-            first_stream,
-            third_pubkey,
-            CircleRole::Owner,
-            &first,
-        )
+        .signed_set_member("first-device", third_pubkey, CircleRole::Owner, &first)
         .expect("add third Owner");
     base.push(add_third);
     let remove_second = CircleRosterChain::from_entries(base.clone())
         .expect("three-Owner roster")
-        .signed_remove_member("first-device", first_stream, second_pubkey, &first)
+        .signed_remove_member("first-device", second_pubkey, &first)
         .expect("first branch");
     let remove_first = CircleRosterChain::from_entries(base.clone())
         .expect("three-Owner roster")
-        .signed_remove_member(
-            "second-device",
-            AuthorStreamId::from_bytes([82; 32]),
-            first_pubkey,
-            &second,
-        )
+        .signed_remove_member("second-device", first_pubkey, &second)
         .expect("second branch");
     base.extend([remove_second.clone(), remove_first.clone()]);
-    let exact_heads = vec![
-        signed_exact_head(&remove_second, &first),
-        signed_exact_head(&remove_first, &second),
-    ];
-    let heads = exact_heads
-        .iter()
-        .map(|head| head.reference().clone())
-        .collect::<Vec<_>>();
     let mut removals = vec![remove_second.coord(), remove_first.coord()];
     removals.sort();
-    let chain = CircleRosterChain::from_entries_with_heads(base, exact_heads)
-        .expect("three-Owner revocation conflict");
+    let chain = CircleRosterChain::from_entries(base).expect("three-Owner revocation conflict");
     ThreeOwnerCycle {
         third,
         chain,
-        heads,
         removals,
         revoked_owner_grants: BTreeSet::from([founder_grant, second_grant]),
     }
@@ -226,21 +114,22 @@ fn a_revocation_cycle_is_a_terminal_roster_conflict() {
     let ThreeOwnerCycle {
         third,
         chain,
-        mut heads,
         removals,
         revoked_owner_grants,
     } = three_owner_cycle();
-    heads.sort();
 
     let CircleRosterStatus::Conflict(CircleRosterConflict::RevocationCycle {
-        heads: conflict_heads,
+        raw_frontier,
         cyclic_sources,
         involved_owner_grants,
     }) = chain.status()
     else {
         panic!("concurrent Owner revocations are a revocation cycle")
     };
-    assert_eq!(conflict_heads, &heads);
+    // The conflict reports the raw author-stream frontier the branches reached,
+    // which is what an Owner resolves the cycle against.
+    assert_eq!(raw_frontier, &chain.author_heads());
+    assert_eq!(raw_frontier.len(), 2);
     assert_eq!(cyclic_sources, &removals);
     assert_eq!(involved_owner_grants, &revoked_owner_grants);
     assert!(matches!(
@@ -250,39 +139,11 @@ fn a_revocation_cycle_is_a_terminal_roster_conflict() {
     assert!(matches!(
         chain.signed_set_member(
             "third-device",
-            AuthorStreamId::from_bytes([83; 32]),
             keys::public_key_hex(&UserKeypair::generate()),
             CircleRole::Member,
             &third,
         ),
         Err(CircleRosterError::Conflict)
-    ));
-}
-
-#[test]
-fn a_bound_head_must_match_its_exact_entry() {
-    let owner = UserKeypair::generate();
-    let owner_pubkey = keys::public_key_hex(&owner);
-    let store_root_hash = ObjectHash::digest(b"Circle head-binding Store");
-    let owner_grant = grant(b"Circle head-binding grant");
-    let circle_id = CircleId::founder(store_root_hash, &owner_pubkey, &owner_grant);
-    let entry = CircleRosterEntry::founder(
-        store_root_hash,
-        circle_id,
-        "owner-device",
-        AuthorStreamId::from_bytes([99; 32]),
-        owner_grant,
-        &owner,
-    );
-    let (head, reference) = signed_head_pair(&entry, &owner);
-    let altered = CircleRosterHeadRef {
-        head_hash: ObjectHash::digest(b"another Circle roster head"),
-        ..reference
-    };
-
-    assert!(matches!(
-        ExactCircleRosterHead::bind(head, altered),
-        Err(CircleRosterError::HeadEntryMismatch)
     ));
 }
 
@@ -299,7 +160,6 @@ fn historical_roster_authorizes_the_exact_grant_at_its_creation_coordinate() {
             &owner_grant,
         ),
         "owner-device",
-        AuthorStreamId::from_bytes([1; 32]),
         owner_grant.clone(),
         &owner,
     );
@@ -320,13 +180,10 @@ fn removed_owner_grant_stays_unauthorized_after_the_identity_is_readded() {
     let first_grant = grant(b"first-owner-grant");
     let store_root_hash = ObjectHash::digest(b"remove-readd-store");
     let circle_id = CircleId::founder(store_root_hash, &first_pubkey, &first_grant);
-    let first_stream = AuthorStreamId::from_bytes([2; 32]);
-    let second_stream = AuthorStreamId::from_bytes([3; 32]);
     let founder = CircleRosterEntry::founder(
         store_root_hash,
         circle_id,
         "first-device",
-        first_stream,
         first_grant.clone(),
         &first_owner,
     );
@@ -336,7 +193,6 @@ fn removed_owner_grant_stays_unauthorized_after_the_identity_is_readded() {
         .expect("load founder roster")
         .signed_set_member(
             "first-device",
-            first_stream,
             second_pubkey.clone(),
             CircleRole::Owner,
             &first_owner,
@@ -345,12 +201,7 @@ fn removed_owner_grant_stays_unauthorized_after_the_identity_is_readded() {
     entries.push(add_second);
     let remove_first = CircleRosterChain::from_entries(entries.clone())
         .expect("load two-Owner roster")
-        .signed_remove_member(
-            "second-device",
-            second_stream,
-            first_pubkey.clone(),
-            &second_owner,
-        )
+        .signed_remove_member("second-device", first_pubkey.clone(), &second_owner)
         .expect("remove first Owner");
     let retirement_authority = remove_first.coord();
     let CircleRosterChange::RemoveMember { owner_barriers, .. } = &remove_first.change else {
@@ -362,7 +213,6 @@ fn removed_owner_grant_stays_unauthorized_after_the_identity_is_readded() {
         .expect("load removed-Owner roster")
         .signed_set_member(
             "second-device",
-            second_stream,
             first_pubkey.clone(),
             CircleRole::Owner,
             &second_owner,
@@ -415,13 +265,12 @@ fn roster_state_hash_changes_when_only_the_active_grant_identity_changes() {
     let owner = UserKeypair::generate();
     let owner_pubkey = keys::public_key_hex(&owner);
     let store_root_hash = ObjectHash::digest(b"grant-hash-store");
-    let build = |grant_id: MembershipGrantId, stream_byte| {
+    let build = |grant_id: MembershipGrantId| {
         let circle_id = CircleId::founder(store_root_hash, &owner_pubkey, &grant_id);
         CircleRosterChain::from_entries(vec![CircleRosterEntry::founder(
             store_root_hash,
             circle_id,
             "owner-device",
-            AuthorStreamId::from_bytes([stream_byte; 32]),
             grant_id,
             &owner,
         )])
@@ -429,8 +278,63 @@ fn roster_state_hash_changes_when_only_the_active_grant_identity_changes() {
         .resolved()
     };
 
-    let first = build(grant(b"state-hash-grant-a"), 4);
-    let second = build(grant(b"state-hash-grant-b"), 5);
+    let first = build(grant(b"state-hash-grant-a"));
+    let second = build(grant(b"state-hash-grant-b"));
 
     assert_ne!(first.state_hash, second.state_hash);
+}
+
+/// Two entries at one author-stream position are the equivocation the removed
+/// create-once successor slot used to make impossible. The reduction refuses
+/// them loudly rather than picking one, and it refuses identically wherever the
+/// pair is assembled, so every device reaches the same answer.
+#[test]
+fn two_entries_at_one_author_stream_position_are_a_loud_reduction_failure() {
+    let owner = UserKeypair::generate();
+    let owner_pubkey = keys::public_key_hex(&owner);
+    let member = keys::public_key_hex(&UserKeypair::generate());
+    let other = keys::public_key_hex(&UserKeypair::generate());
+    let owner_grant = grant(b"equivocation-owner-grant");
+    let store_root_hash = ObjectHash::digest(b"equivocation-store");
+    let circle_id = CircleId::founder(store_root_hash, &owner_pubkey, &owner_grant);
+    let founder = CircleRosterEntry::founder(
+        store_root_hash,
+        circle_id,
+        "owner-device",
+        owner_grant,
+        &owner,
+    );
+    let base = vec![founder];
+    let chain = CircleRosterChain::from_entries(base.clone()).expect("founder roster");
+    let first = chain
+        .signed_set_member("owner-device", member, CircleRole::Member, &owner)
+        .expect("add one member at sequence two");
+    let second = chain
+        .signed_set_member("owner-device", other, CircleRole::Member, &owner)
+        .expect("add another member at the same sequence");
+    assert_eq!(first.coord().stream_key(), second.coord().stream_key());
+    assert_eq!(first.seq, second.seq);
+    assert_ne!(first.entry_hash(), second.entry_hash());
+
+    let stream = first.coord().stream_key();
+    let expected = |result: Result<CircleRosterChain, CircleRosterError>| match result {
+        Err(CircleRosterError::CausalConflictingSequence { stream: s, seq }) => (s, seq),
+        other => panic!("two entries at one position must be a conflicting sequence: {other:?}"),
+    };
+    let forward = {
+        let mut entries = base.clone();
+        entries.extend([first.clone(), second.clone()]);
+        expected(CircleRosterChain::from_entries(entries))
+    };
+    let reverse = {
+        let mut entries = base;
+        entries.extend([second, first]);
+        expected(CircleRosterChain::from_entries(entries))
+    };
+
+    assert_eq!(
+        forward, reverse,
+        "the refusal does not depend on arrival order"
+    );
+    assert_eq!(forward, (stream, 2));
 }

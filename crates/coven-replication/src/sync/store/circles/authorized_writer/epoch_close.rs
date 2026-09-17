@@ -156,19 +156,23 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     journal.circle_id
                 )));
             }
-            let reference = activation_commit
-                .circle_controls()
-                .iter()
-                .find(|reference| {
-                    reference.circle_id() == journal.circle_id
-                        && reference.control() == &current.control.coord
-                })
-                .ok_or_else(|| {
-                    CircleOperationError::InvalidState(format!(
-                        "Circle {} closing control is absent from its activating Store commit",
-                        journal.circle_id
-                    ))
-                })?;
+            let reference = coven_protocol::circle_journal::CircleControlActivation {
+                reference: activation_commit
+                    .circle_controls()
+                    .iter()
+                    .find(|reference| {
+                        reference.circle_id() == journal.circle_id
+                            && reference.control() == &current.control.coord
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        CircleOperationError::InvalidState(format!(
+                            "Circle {} closing control is absent from its activating Store commit",
+                            journal.circle_id
+                        ))
+                    })?,
+                activating_commit: activation_commit_ref.clone(),
+            };
             let keyring = match &current.access.disposition {
                 coven_protocol::circle::CircleAccessDisposition::Active { keyring, .. } => keyring,
                 coven_protocol::circle::CircleAccessDisposition::Inactive => {
@@ -180,7 +184,12 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             let roster_chain = self
                 .history()
                 .activations()
-                .load_control_roster_chain(&activation, reference, &current.control, keyring)
+                .load_control_roster_chain(
+                    &activation,
+                    &reference.reference,
+                    &current.control,
+                    keyring,
+                )
                 .await?;
             let intent = journal
                 .operation()

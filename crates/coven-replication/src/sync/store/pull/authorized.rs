@@ -282,7 +282,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         let receiver_wall_ms = self.history.receive_wall_ms();
         let mut prepared_materializations = Vec::new();
         let mut prepared_references = Vec::new();
-        let mut verified_prefix = VerifiedStreamActivationPrefix::empty();
+        let mut verified_prefix = VerifiedCircleActivationPrefix::empty();
 
         loop {
             let mut progressed = false;
@@ -364,8 +364,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                         .await?
                         {
                             Ok(prepared) => {
-                                verified_prefix
-                                    .include(prepared.circle_activations.stream_activations())?;
+                                verified_prefix.include(&prepared.circle_activations)?;
                                 let stream_id =
                                     commit_stream_id(&candidate.candidate.commit_ref().coord);
                                 frontier.insert(
@@ -483,7 +482,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         &mut self,
         merge_candidate: &MergeCandidate,
         prepared: &[PreparedMergeMaterialization],
-        verified_prefix: &VerifiedStreamActivationPrefix,
+        verified_prefix: &VerifiedCircleActivationPrefix,
         latest_membership: &mut MembershipChain,
         routing_key: Option<&super::circle::RowRoutingKey>,
         receiver_wall_ms: u64,

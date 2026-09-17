@@ -90,6 +90,22 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         Ok(())
     }
 
+    /// A conflicted Circle has no single current control to author a successor
+    /// from, so every command that extends its history refuses it with a typed
+    /// reason. The two exits are not routed through here: a resolution picks a
+    /// branch, and a deletion covers them all.
+    async fn ensure_not_conflicted(&self, circle_id: CircleId) -> Result<(), CircleOperationError> {
+        if self
+            .database
+            .circle_control_conflict_branches(circle_id)
+            .await?
+            .is_some()
+        {
+            return Err(CircleOperationError::Conflicted { circle_id });
+        }
+        Ok(())
+    }
+
     async fn current_authoring_context(
         &mut self,
         circle_id: CircleId,
@@ -97,11 +113,12 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         (
             CircleAuthoringState,
             coven_protocol::store_commit::VerifiedStoreBatchCommit,
-            coven_protocol::store_commit::CircleControlRef,
+            coven_protocol::circle_journal::CircleControlActivation,
         ),
         CircleOperationError,
     > {
         self.ensure_not_deleted(circle_id).await?;
+        self.ensure_not_conflicted(circle_id).await?;
         let identity_pubkey = self.local_writer.author_pubkey();
         let (current, activation_commit_ref) = self
             .database
@@ -119,7 +136,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     ) -> Result<
         (
             CircleAuthoringState,
-            coven_protocol::store_commit::CircleControlRef,
+            coven_protocol::circle_journal::CircleControlActivation,
         ),
         CircleOperationError,
     > {
@@ -145,7 +162,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     ) -> Result<
         (
             coven_protocol::store_commit::VerifiedStoreBatchCommit,
-            coven_protocol::store_commit::CircleControlRef,
+            coven_protocol::circle_journal::CircleControlActivation,
         ),
         CircleOperationError,
     > {
@@ -172,7 +189,13 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     "Circle {circle_id} current control is absent from its activating Store commit"
                 ))
             })?;
-        Ok((activation_commit, reference))
+        Ok((
+            activation_commit,
+            coven_protocol::circle_journal::CircleControlActivation {
+                reference,
+                activating_commit: activation_commit_ref.clone(),
+            },
+        ))
     }
 }
 

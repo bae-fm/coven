@@ -47,14 +47,6 @@ pub(super) fn circle_roster_state_hash(
     )
 }
 
-pub(super) fn exact_circle_head_refs(
-    head_refs: &[CircleRosterHeadRef],
-    coords: &[CircleRosterCoord],
-) -> Result<Vec<CircleRosterHeadRef>, CircleRosterError> {
-    crate::causal_grants::exact_head_refs(head_refs, coords, |reference| &reference.coord)
-        .ok_or(CircleRosterError::HeadEntryMismatch)
-}
-
 pub(super) fn map_circle_grants(
     grants: BTreeMap<MembershipGrantId, causal_grants::GrantRecord<CircleRosterCoord, CircleRole>>,
 ) -> BTreeMap<MembershipGrantId, CircleGrantRecord> {

@@ -30,7 +30,6 @@ fn circle_epoch_cutoff_accepts_exact_history_and_omits_later_packages() {
     let circle_id = CircleId::from_bytes([7; 16]);
     let control = CircleControlCoord {
         device_id: "cutoff-device".to_string(),
-        stream_id: AuthorStreamId::from_digest(ObjectHash::digest(b"control stream")),
         author_pubkey: "cutoff-author".to_string(),
         author_owner_grant: MembershipGrantId(ObjectHash::digest(b"owner grant")),
         seq: 1,
@@ -61,7 +60,6 @@ fn circle_epoch_cutoff_rejects_another_commit_at_the_accepted_coordinate() {
     let circle_id = CircleId::from_bytes([8; 16]);
     let control = CircleControlCoord {
         device_id: "collision-device".to_string(),
-        stream_id: AuthorStreamId::from_digest(ObjectHash::digest(b"collision control")),
         author_pubkey: "collision-author".to_string(),
         author_owner_grant: MembershipGrantId(ObjectHash::digest(b"collision owner grant")),
         seq: 1,

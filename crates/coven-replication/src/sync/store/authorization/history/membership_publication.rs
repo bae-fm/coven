@@ -236,12 +236,7 @@ impl AuthorizedStoreHistory<'_> {
                 Some(store_commit::GrantStreamAnchor::StoreMembership { first_slot }) => {
                     first_slot.clone()
                 }
-                Some(
-                    store_commit::GrantStreamAnchor::OwnerRecovery { .. }
-                    | store_commit::GrantStreamAnchor::CircleControl { .. }
-                    | store_commit::GrantStreamAnchor::CircleRoster { .. }
-                    | store_commit::GrantStreamAnchor::CircleMetadata { .. },
-                ) => {
+                Some(store_commit::GrantStreamAnchor::OwnerRecovery { .. }) => {
                     return Err(MembershipMutationError::InvalidDurableMutation(format!(
                         "Owner grant {} uses another domain's anchor as its membership stream",
                         coord.author_owner_grant

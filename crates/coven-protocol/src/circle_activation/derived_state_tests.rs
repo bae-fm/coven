@@ -93,3 +93,34 @@ fn control_conflict_maps_to_its_retained_branches() {
     );
     assert_eq!(conflict.display("anyone"), (None, None));
 }
+
+/// A conflicted control projects no authoring state: the reduction keeps the
+/// branch controls and drops each branch's access material, so every exit —
+/// resolution and deletion alike — loads the branch it authors from out of that
+/// branch's retained accepted activation. What the conflicted state does name
+/// is which branch a deletion takes, so every device takes the same one.
+#[test]
+fn a_conflicted_control_names_its_deletion_branch_and_no_authoring_state() {
+    let active = active_state();
+    let current = accessible(&active).current.clone();
+    let expected = current.coordinate().clone();
+    let conflict = CircleCurrentState::ControlConflict {
+        branches: vec![current],
+    };
+
+    assert!(conflict.authoring_state().is_none());
+    assert!(conflict.closing_authoring_state().is_none());
+    assert!(
+        conflict.deletable_authoring_state().is_none(),
+        "a conflicted branch's access material is not in the projected state"
+    );
+    assert_eq!(
+        conflict.deletion_branch(),
+        Some(&expected),
+        "the deletion authors from the first branch in canonical order"
+    );
+    assert!(
+        active.deletion_branch().is_none(),
+        "a resolved state names no deletion branch"
+    );
+}

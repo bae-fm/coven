@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::circle::{CircleControlHead, PreparedCircleControl};
+use crate::circle::PreparedCircleControl;
 use crate::circle_control::StoreMembershipStateRef;
 use crate::store_commit::ObjectHash;
 use crate::{membership, store_commit};
@@ -156,54 +156,18 @@ impl MergeDeviceAuthority {
         label: &str,
     ) -> store_commit::CircleControlRef {
         let control_object = exact_object(&format!("{label}/control"), &control.bytes);
-        let head_slot = crate::objects::ObjectSlot::logical(format!(
-            "store-v1/test/{label}/control-head/1.json"
-        ))
-        .expect("valid test Circle control-head slot");
-        let activation = store_commit::StreamActivation::grant_authorized(
-            control.value.store_root_hash,
-            self.reference.clone(),
-            control.value.author_grant_id(),
-            store_commit::GrantStreamAnchor::CircleControl {
-                circle_id: control.value.circle_id,
-                first_slot: head_slot.clone(),
-            },
-        );
-        let head = CircleControlHead::signed(
-            &control.value,
-            control_object.clone(),
-            store_commit::SuccessorLink {
-                activation: activation.activation_id(),
-                predecessor: None,
-                next_slot: crate::objects::ObjectSlot::logical(format!(
-                    "store-v1/test/{label}/control-head/2.json"
-                ))
-                .expect("valid next test Circle control-head slot"),
-            },
-            &self.device_signer,
-        );
-        let head_bytes = serde_json::to_vec(&head).expect("serialize test Circle control head");
-        let head_object = crate::objects::ExactObjectRef::new(
-            head_slot,
-            head_bytes.len() as u64,
-            ObjectHash::digest(&head_bytes),
-        );
         let objects = store_commit::CircleActivationObjects {
             control: control_object,
             close_intent: None,
             close_outcome: None,
             close_cancellation: None,
             roster_entries: BTreeMap::new(),
-            roster_heads: Vec::new(),
             metadata_entries: BTreeMap::new(),
-            metadata_heads: Vec::new(),
             bootstraps: Vec::new(),
         };
         store_commit::CircleControlRef {
             circle_id: control.value.circle_id,
             control: control.coord.clone(),
-            head_hash: head.head_hash(),
-            head_object,
             objects,
         }
     }

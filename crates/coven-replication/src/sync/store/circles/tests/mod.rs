@@ -10,18 +10,16 @@ use coven_database::{Database, DbError};
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::circle::{
-    circle_semantic_prefix, CircleAccessDisposition, CircleAccessMap, CircleId, CircleOperationId,
-    CircleOperationKind, CircleOperationState, CircleRole, CircleRosterDraftPolicy,
-    CircleSemanticSlot, CircleTransitionDraft, CircleTransitionDraftPolicy,
-    CircleTransitionPolicyObjects, PreparedAccessLeaf, PreparedCircleTransition,
+    CircleAccessDisposition, CircleAccessMap, CircleId, CircleOperationId, CircleOperationKind,
+    CircleOperationState, CircleRole, CircleRosterDraftPolicy, CircleTransitionDraft,
+    CircleTransitionDraftPolicy, PreparedAccessLeaf, PreparedCircleTransition,
 };
 use coven_protocol::membership::MemberRole;
 use coven_protocol::objects::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
 };
 use coven_protocol::store_commit::{
-    commit_semantic_prefix, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
-    StoreCommitCoord, StreamActivation,
+    commit_semantic_prefix, ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
 };
 use coven_storage::CloudSyncObjectStorage;
 
@@ -302,7 +300,7 @@ fn draft_from_transition(creation: &PreparedCircleTransition) -> CircleTransitio
     );
     let policy = CircleTransitionDraftPolicy {
         roster,
-        metadata_successor: creation.policy_objects.metadata_head.is_some(),
+        metadata_successor: creation.policy_objects.metadata.is_some(),
     };
     CircleTransitionDraft {
         circle_id: creation.circle_id,
@@ -331,9 +329,12 @@ fn assert_exact_operation(expected: &CircleOperationJournal, actual: &CircleOper
 }
 
 mod bootstrap_discard;
+mod conflict_fixture;
+mod deletion;
 mod journal;
 mod local_validation;
 mod metadata_clock;
+mod provenance;
 mod publication;
 mod recovery;
 mod remote_validation;

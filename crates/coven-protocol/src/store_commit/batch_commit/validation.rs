@@ -126,14 +126,6 @@ pub(crate) fn validate_stream_activations(
                         | GrantStreamAnchor::OwnerRecovery { .. },
                     ..
                 }
-            ) | (
-                _,
-                StreamActivation::GrantAuthorized {
-                    anchor: GrantStreamAnchor::CircleControl { .. }
-                        | GrantStreamAnchor::CircleRoster { .. }
-                        | GrantStreamAnchor::CircleMetadata { .. },
-                    ..
-                }
             )
         );
         if !allowed_anchor {

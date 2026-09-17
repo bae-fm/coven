@@ -148,7 +148,7 @@ impl PullHistory<'_, '_> {
         inner: &mut StageTimings,
     ) -> Result<BTreeMap<StoreBatchCommitRef, DeviceJoinBootstrapRowData>, StorePullError> {
         let mut row_data = BTreeMap::new();
-        let mut verified_prefix = VerifiedStreamActivationPrefix::empty();
+        let mut verified_prefix = VerifiedCircleActivationPrefix::empty();
         for reference in unrepresented {
             let prepared = plan
                 .commits
@@ -182,7 +182,7 @@ impl PullHistory<'_, '_> {
                     )),
                 )
                 .await?;
-            verified_prefix.include(resolved.circle_activations.stream_activations())?;
+            verified_prefix.include(&resolved.circle_activations)?;
             row_data.insert(reference, resolved);
         }
         Ok(row_data)
@@ -193,7 +193,7 @@ impl PullHistory<'_, '_> {
         candidate: Candidate,
         prepared: &BTreeMap<StoreBatchCommitRef, DeviceJoinBootstrapRowData>,
         snapshot_circles: &coven_database::StagedCircleRestore,
-        verified_prefix: &VerifiedStreamActivationPrefix,
+        verified_prefix: &VerifiedCircleActivationPrefix,
         local_store_membership: LocalStoreMembership,
         identity: &UserKeypair,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,

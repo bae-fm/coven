@@ -117,6 +117,54 @@ impl StoreDatabase {
         .await
     }
 
+    /// The retention rule keeps the Store commit every inherited Circle entry
+    /// names as its introduction, so a restored device can still prove where
+    /// that entry entered accepted history. Drop that commit's retained
+    /// materialization from the image and `validate_snapshot_retained_inputs_on`
+    /// refuses the image: the inherited entry would have no introduction to
+    /// resolve.
+    pub async fn assert_replay_baseline_requires_an_entry_introduction_for_test(
+        &self,
+        introduction: StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| {
+            let baseline = crate::StoreDatabase::load_replay_baseline_on(StoreRecords::new(
+                session.conn,
+                session.store_dir,
+            ))?;
+            let original = baseline.image_bytes(session.conn, session.store_dir)?;
+            let encoded = serde_json::to_string(&introduction)?;
+            let mut image = Connection::open_in_memory()?;
+            crate::connection_io::deserialize_database_image_into(&mut image, &original)?;
+            image.pragma_update(None, "defer_foreign_keys", "ON")?;
+            assert_eq!(
+                image.execute(
+                    "DELETE FROM retained_merge_materializations WHERE commit_ref = ?1",
+                    [&encoded],
+                )?,
+                1,
+                "the image carries the introducing commit before the edit"
+            );
+            image.execute(
+                "DELETE FROM retained_replay_objects WHERE commit_ref = ?1",
+                [&encoded],
+            )?;
+            let bytes = crate::connection_io::serialize_database_image(&image)?;
+            let mut altered = baseline.clone();
+            altered.image_payload_hash = session.install_payload_for_test(&bytes)?;
+            let error = altered
+                .validate_image(session.conn, session.store_dir)
+                .expect_err("an image missing an entry introduction must be refused");
+            assert!(
+                matches!(&error, DbError::Message(message)
+                    if message == "snapshot retained inputs differ from the retention rule"),
+                "{error}"
+            );
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn assert_installed_baseline_rejects_altered_coverage_for_test(
         &self,
     ) -> Result<(), DbError> {

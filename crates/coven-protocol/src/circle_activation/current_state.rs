@@ -449,8 +449,14 @@ impl CircleCurrentState {
     /// The authoring state a terminal deletion signs from. Deletion is the one
     /// command that authors from a closing epoch, so it accepts any state whose
     /// local device holds owner access — `Active` or `Closing` — and reads the
-    /// frozen epoch spine through the control's `access_epoch`. `Inactive`,
-    /// `Deleted`, and `ControlConflict` hold no owner access to sign a successor.
+    /// frozen epoch spine through the control's `access_epoch`. `Inactive` and
+    /// `Deleted` hold no owner access to sign a successor.
+    ///
+    /// A conflicted Circle is deletable too, but not from here: the reduction
+    /// keeps only the branch controls and drops each branch's access material,
+    /// so the deletion authors from the branch [`Self::deletion_branch`] names
+    /// and loads that branch's access, roster, and metadata from its retained
+    /// activation, exactly as a resolution does.
     pub fn deletable_authoring_state(&self) -> Option<CircleAuthoringState> {
         match self {
             Self::Active(accessible) | Self::Closing(accessible) => Some(CircleAuthoringState {
@@ -502,6 +508,25 @@ impl CircleCurrentState {
     /// Whether this Circle's control history has terminated in a deletion.
     pub fn is_deleted(&self) -> bool {
         matches!(self, Self::Deleted(_))
+    }
+
+    /// The branch a terminal deletion of a conflicted Circle authors from: the
+    /// first in the canonical order `canonicalize_control_branches` imposes,
+    /// which is the lowest control hash. Every device reduces to the same
+    /// branch list in the same order, so every device that deletes a conflicted
+    /// Circle authors from the same branch.
+    ///
+    /// Deletion is the exit a conflict always offers, where a resolution is
+    /// conditional: a resolution must pick a branch whose roster and metadata
+    /// history still reduces, and a deletion reduces neither. It collapses the
+    /// conflict wherever the branches sit on distinct author streams, which is
+    /// every conflict but one device racing itself. `None` for every resolved
+    /// state.
+    pub fn deletion_branch(&self) -> Option<&CircleControlCoord> {
+        match self {
+            Self::ControlConflict { branches } => Some(branches[0].coordinate()),
+            Self::Active(_) | Self::Closing(_) | Self::Inactive(_) | Self::Deleted(_) => None,
+        }
     }
 
     /// The retained conflicting branch coordinates, in canonical order, when
