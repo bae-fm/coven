@@ -352,6 +352,11 @@ pub(super) const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build",
     ),
     (
+        "crates/coven-replication/src/sync/store/circles/tests/stale_backup.rs",
+        "BackedUpDevice",
+        "build",
+    ),
+    (
         "crates/coven-replication/src/sync/store/snapshots/image_tests/provenance.rs",
         "RenamedCircleSnapshot",
         "build",

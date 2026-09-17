@@ -344,3 +344,4 @@ mod rotation_required;
 mod snapshot_restore;
 mod snapshot_row_clock;
 mod staged_packages;
+mod stale_backup;
