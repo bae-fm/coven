@@ -337,10 +337,7 @@ impl MergeHistoryVerifier<'_> {
             }
         }
         let snapshot = baseline.snapshot().cloned();
-        self.admit_installed_baseline(baseline)?;
-        self.admit_retained_history(&retained)?;
-        self.verify_refs(retained.iter().map(|input| input.commit_ref().clone()))
-            .await?;
+        self.admit_retained_replay(baseline, &retained).await?;
         let Some(observed) = observed else {
             let publication = self.load_publication_from_genesis(current, version).await?;
             let accepted = coven_database::AcceptedStorePublicationInterval::from_verified(

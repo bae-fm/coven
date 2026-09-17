@@ -256,14 +256,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 }
 
-/// Seed a history verifier from the history this device already holds.
-///
-/// The baseline is admitted before the retained rows because it is the floor
-/// every later history walk stops at.
-///
-/// Getting the order wrong is not a slow path, it is a walk to genesis: a
-/// verifier that does not know where its baseline is asks the provider for
-/// every commit under it, once per commit standing above it, on every cycle.
+/// Seed a history verifier from the history a database already holds.
 pub(crate) async fn seed_verifier_from_retained_history(
     database: &StoreDatabase,
     history: &mut MergeHistoryVerifier<'_>,
@@ -278,7 +271,6 @@ pub(crate) async fn seed_verifier_from_retained_history(
                 error,
             ))
         })?;
-    history.admit_installed_baseline(baseline)?;
     let retained = database
         .retained_merge_replay_inputs(root)
         .await
@@ -288,15 +280,7 @@ pub(crate) async fn seed_verifier_from_retained_history(
                 error,
             ))
         })?;
-    history.admit_retained_history(&retained)?;
-    history
-        .verify_refs(
-            retained
-                .iter()
-                .map(|materialization| materialization.commit_ref().clone())
-                .collect::<Vec<_>>(),
-        )
-        .await?;
+    history.admit_retained_replay(baseline, &retained).await?;
     Ok(retained)
 }
 

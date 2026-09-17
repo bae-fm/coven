@@ -454,6 +454,29 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(())
     }
 
+    /// Stand on `baseline` and the retained history above it, verified.
+    ///
+    /// The baseline is admitted before the retained rows because it is the
+    /// floor every later history walk stops at. Getting that order wrong is not
+    /// a slow path, it is a walk to genesis: a verifier that does not know
+    /// where its baseline is asks the provider for every commit under it, once
+    /// per commit standing above it, on every cycle.
+    pub(crate) async fn admit_retained_replay(
+        &mut self,
+        baseline: coven_database::InstalledReplayBaseline,
+        retained: &[coven_database::OwnedVerifiedMergeMaterialization],
+    ) -> Result<(), StorePullError> {
+        self.admit_installed_baseline(baseline)?;
+        self.admit_retained_history(retained)?;
+        self.verify_refs(
+            retained
+                .iter()
+                .map(|materialization| materialization.commit_ref().clone())
+                .collect::<Vec<_>>(),
+        )
+        .await
+    }
+
     pub(crate) async fn retain_local_same_principal_join_activation(
         &mut self,
         materialization: coven_database::OwnedVerifiedMergeMaterialization,
