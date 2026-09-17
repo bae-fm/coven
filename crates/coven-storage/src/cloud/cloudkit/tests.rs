@@ -27,6 +27,7 @@ struct MockCloudKitOps {
     versions: Mutex<HashMap<(CloudKitScope, String), u64>>,
     calls: Mutex<Vec<MockCall>>,
     fail_deletes: Mutex<HashSet<String>>,
+    retain_on_delete: Mutex<HashSet<String>>,
     fail_delete_once: Mutex<HashMap<String, usize>>,
     fail_writes: Mutex<HashSet<String>>,
     staged_batches: Mutex<HashMap<String, Vec<CloudKitRecordCreate>>>,
@@ -60,6 +61,7 @@ impl MockCloudKitOps {
             versions: Mutex::new(HashMap::new()),
             calls: Mutex::new(Vec::new()),
             fail_deletes: Mutex::new(HashSet::new()),
+            retain_on_delete: Mutex::new(HashSet::new()),
             fail_delete_once: Mutex::new(HashMap::new()),
             fail_writes: Mutex::new(HashSet::new()),
             staged_batches: Mutex::new(HashMap::new()),
@@ -94,6 +96,16 @@ impl MockCloudKitOps {
 
     fn return_wrong_commit_keys(&self) {
         self.return_wrong_commit_keys.store(true, Ordering::SeqCst);
+    }
+
+    /// Acknowledge deletion of `key` without performing it — a provider that
+    /// reports success and keeps the record. Proving a slot absent exists to
+    /// catch exactly this, and nothing else can produce it.
+    fn retain_on_delete(&self, key: &str) {
+        self.retain_on_delete
+            .lock()
+            .unwrap()
+            .insert(key.to_string());
     }
 
     /// Put a record in the zone behind the adapter's back, so a test can drive
@@ -196,6 +208,9 @@ impl CloudKitOps for MockCloudKitOps {
                 *remaining -= 1;
                 return Err(CloudHomeError::Transport(format!("delete {key} failed")));
             }
+        }
+        if self.retain_on_delete.lock().unwrap().contains(key) {
+            return Ok(());
         }
         self.store
             .lock()
@@ -424,7 +439,11 @@ impl CloudKitOps for MockCloudKitOps {
                 return Err(CloudHomeError::NotFound(record.key.clone()));
             }
         }
+        let retained = self.retain_on_delete.lock().unwrap();
         for record in records {
+            if retained.contains(&record.key) {
+                continue;
+            }
             let storage_key = (scope.clone(), record.key.clone());
             store.remove(&storage_key);
             versions.remove(&storage_key);
@@ -1037,6 +1056,112 @@ async fn exact_delete_removes_the_manifest_and_every_part() {
     ] {
         assert!(!ops.record_exists(&CloudKitScope::Private, &key).unwrap());
     }
+}
+
+/// Proving a slot absent must work on whatever kind of record occupies it. A
+/// bounded versioned record has no manifest and no parts, so a deletion that
+/// first opened the slot as an exact object would refuse to clean up a record
+/// that is plainly there.
+#[tokio::test]
+async fn a_versioned_record_is_deleted_and_verified_absent() {
+    let (home, ops) = make_cloud_home_with_ops();
+    let slot = exact_slot("publication/retired");
+    let bytes = b"current publication".to_vec();
+    let object = coven_protocol::objects::ExactObjectRef::new(
+        slot.clone(),
+        bytes.len() as u64,
+        coven_protocol::store_commit::ObjectHash::digest(&bytes),
+    );
+    ExactSlotStorage::create_versioned_at(
+        &home,
+        &ExactUpload::from_bytes(&object, &bytes).expect("versioned upload"),
+        &UploadControl::running(no_progress()),
+    )
+    .await
+    .expect("create the versioned record");
+
+    ExactSlotStorage::delete_and_verify_absent(&home, &slot)
+        .await
+        .expect("a versioned record is deleted and proven absent");
+
+    assert!(!ops
+        .record_exists(&CloudKitScope::Private, "publication/retired")
+        .unwrap());
+}
+
+/// The other shape a slot can hold, through the same method: a manifest and
+/// every part it names go in one deletion, and the base record answers whether
+/// the slot is empty afterwards.
+#[tokio::test]
+async fn a_multi_part_exact_object_is_deleted_and_verified_absent() {
+    let (home, ops) = make_cloud_home_with_ops();
+    let slot = exact_slot("copies/retired");
+    crate::cloud::create_exact_bytes(&home, &slot, &vec![9u8; CHUNK_SIZE + 1], &no_progress())
+        .await
+        .expect("create the exact object");
+
+    ExactSlotStorage::delete_and_verify_absent(&home, &slot)
+        .await
+        .expect("an exact object is deleted and proven absent");
+
+    for key in [
+        "copies/retired".to_string(),
+        exact_part_key("copies/retired", 0),
+        exact_part_key("copies/retired", 1),
+    ] {
+        assert!(!ops.record_exists(&CloudKitScope::Private, &key).unwrap());
+    }
+}
+
+/// An empty slot is already absent, so proving it so asks nothing of the
+/// provider beyond looking.
+#[tokio::test]
+async fn an_empty_slot_is_already_absent() {
+    let (home, ops) = make_cloud_home_with_ops();
+
+    ExactSlotStorage::delete_and_verify_absent(&home, &exact_slot("publication/never-written"))
+        .await
+        .expect("an empty slot needs no deletion");
+
+    assert!(!ops
+        .calls()
+        .iter()
+        .any(|call| matches!(call, MockCall::Delete(_) | MockCall::DeleteVersions(_))));
+}
+
+/// A provider that reports a successful deletion and keeps the record leaves
+/// the slot occupied. The caller asked for proof of absence, so this fails
+/// rather than reporting the deletion it was told about.
+#[tokio::test]
+async fn a_record_surviving_its_deletion_fails_the_absence_proof() {
+    let (home, ops) = make_cloud_home_with_ops();
+    let slot = exact_slot("publication/stubborn");
+    let bytes = b"will not go".to_vec();
+    let object = coven_protocol::objects::ExactObjectRef::new(
+        slot.clone(),
+        bytes.len() as u64,
+        coven_protocol::store_commit::ObjectHash::digest(&bytes),
+    );
+    ExactSlotStorage::create_versioned_at(
+        &home,
+        &ExactUpload::from_bytes(&object, &bytes).expect("versioned upload"),
+        &UploadControl::running(no_progress()),
+    )
+    .await
+    .expect("create the versioned record");
+    ops.retain_on_delete("publication/stubborn");
+
+    let error = ExactSlotStorage::delete_and_verify_absent(&home, &slot)
+        .await
+        .expect_err("a record that survives deletion must not pass as absent");
+
+    assert!(
+        error.to_string().contains("publication/stubborn"),
+        "{error}"
+    );
+    assert!(ops
+        .record_exists(&CloudKitScope::Private, "publication/stubborn")
+        .unwrap());
 }
 
 #[tokio::test]

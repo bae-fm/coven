@@ -303,10 +303,9 @@ impl CloudKitCloudHome {
                 let ops = self.ops.clone();
                 let scope = self.scope.clone();
                 let key = upload.object().slot().logical_key().to_string();
-                let bytes = blocking(move || {
-                    exact::read_exact_cloudkit_object(&*ops, &scope, &key).map(|value| value.0)
-                })
-                .await?;
+                let bytes =
+                    blocking(move || exact::read_exact_cloudkit_object(&*ops, &scope, &key))
+                        .await?;
                 upload.verify_stored_bytes(&bytes)
             }
             ExactUploadVerification::Unchecked => {

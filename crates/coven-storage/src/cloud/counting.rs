@@ -171,6 +171,10 @@ impl ExactSlotStorage for CountingCloudHome {
         self.counted().delete_versioned_at(slot).await
     }
 
+    async fn occupied_at(&self, slot: &ObjectSlot) -> Result<bool, CloudHomeError> {
+        self.counted().occupied_at(slot).await
+    }
+
     async fn delete_and_verify_absent(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         self.counted().delete_and_verify_absent(slot).await
     }

@@ -37,6 +37,16 @@ pub(crate) fn encode_exact_manifest(manifest: ExactManifest) -> Vec<u8> {
     bytes
 }
 
+/// Whether a base record holds an exact object's manifest rather than a bounded
+/// versioned record's body. The magic is the first thing an exact create
+/// writes, so its presence — not whether the rest parses — is what says which
+/// kind of record occupies a slot. A record carrying the magic but nothing
+/// decodable is a broken exact object, which its reader reports rather than
+/// mistaking for a versioned record.
+pub(crate) fn is_exact_manifest(bytes: &[u8]) -> bool {
+    bytes.starts_with(EXACT_MANIFEST_MAGIC)
+}
+
 pub(crate) fn decode_exact_manifest(bytes: &[u8]) -> Result<ExactManifest, CloudHomeError> {
     let text = std::str::from_utf8(bytes.strip_prefix(EXACT_MANIFEST_MAGIC).ok_or_else(|| {
         CloudHomeError::Transport("CloudKit exact object has an invalid manifest".to_string())
@@ -86,15 +96,10 @@ pub(crate) fn read_exact_cloudkit_object(
     ops: &dyn CloudKitOps,
     scope: &CloudKitScope,
     logical_key: &str,
-) -> Result<(Vec<u8>, Vec<CloudKitRecordVersion>), CloudHomeError> {
+) -> Result<Vec<u8>, CloudHomeError> {
     let manifest = ops.read_versioned_record(scope, logical_key)?;
     let manifest_data = decode_exact_manifest(&manifest.bytes)?;
     let mut bytes = Vec::with_capacity(manifest_data.total_len);
-    let mut records = Vec::with_capacity(manifest_data.part_count + 1);
-    records.push(CloudKitRecordVersion {
-        key: logical_key.to_string(),
-        version: manifest.version,
-    });
     for index in 0..manifest_data.part_count {
         let key = exact_part_key(logical_key, index);
         let part = read_exact_part(
@@ -107,12 +112,55 @@ pub(crate) fn read_exact_cloudkit_object(
             &key,
         )?;
         bytes.extend_from_slice(&part.bytes);
+    }
+    Ok(bytes)
+}
+
+/// Every record that makes up whatever occupies `logical_key`, at the versions
+/// just observed, or `None` when nothing does.
+///
+/// An exact object is its manifest and each part the manifest names, which go
+/// together in one atomic deletion or not at all. A bounded versioned record is
+/// the single record at the slot, with no parts. Which one is there is read
+/// rather than assumed, so emptying a slot does not require the caller to know
+/// how it was filled.
+pub(crate) fn occupying_records(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    logical_key: &str,
+) -> Result<Option<Vec<CloudKitRecordVersion>>, CloudHomeError> {
+    let base = match ops.read_versioned_record(scope, logical_key) {
+        Ok(base) => base,
+        Err(CloudHomeError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let base_record = CloudKitRecordVersion {
+        key: logical_key.to_string(),
+        version: base.version,
+    };
+    if !is_exact_manifest(&base.bytes) {
+        return Ok(Some(vec![base_record]));
+    }
+    let manifest = decode_exact_manifest(&base.bytes)?;
+    let mut records = Vec::with_capacity(manifest.part_count + 1);
+    records.push(base_record);
+    for index in 0..manifest.part_count {
+        let key = exact_part_key(logical_key, index);
+        let part = read_exact_part(
+            ops,
+            scope,
+            logical_key,
+            manifest.part_count,
+            manifest.total_len,
+            index,
+            &key,
+        )?;
         records.push(CloudKitRecordVersion {
             key,
             version: part.version,
         });
     }
-    Ok((bytes, records))
+    Ok(Some(records))
 }
 
 /// The plaintext length part `index` of an exact object carries: a full chunk
@@ -557,10 +605,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
         let ops = self.ops.clone();
         let scope = self.scope.clone();
         let logical_key = slot.logical_key().to_string();
-        blocking(move || {
-            read_exact_cloudkit_object(&*ops, &scope, &logical_key).map(|value| value.0)
-        })
-        .await
+        blocking(move || read_exact_cloudkit_object(&*ops, &scope, &logical_key)).await
     }
 
     async fn read_versioned_at(
@@ -694,14 +739,24 @@ impl ExactSlotStorage for CloudKitCloudHome {
         let ops = self.ops.clone();
         let scope = self.scope.clone();
         let logical_key = slot.logical_key().to_string();
-        blocking(move || {
-            let records = match read_exact_cloudkit_object(&*ops, &scope, &logical_key) {
-                Ok((_, records)) => records,
-                Err(CloudHomeError::NotFound(_)) => return Ok(()),
-                Err(error) => return Err(error),
-            };
-            ops.delete_record_versions(&scope, &records)
-        })
+        blocking(
+            move || match occupying_records(&*ops, &scope, &logical_key)? {
+                None => Ok(()),
+                Some(records) => ops.delete_record_versions(&scope, &records),
+            },
+        )
         .await
+    }
+
+    /// The base record is the slot; an exact object's parts hang off it and are
+    /// deleted with it in one zone modification, so whether that record is
+    /// there is the whole answer, and CloudKit can give it without fetching the
+    /// object.
+    async fn occupied_at(&self, slot: &ObjectSlot) -> Result<bool, CloudHomeError> {
+        slot.require_logical_key_for("CloudKit")?;
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let logical_key = slot.logical_key().to_string();
+        blocking(move || ops.record_exists(&scope, &logical_key)).await
     }
 }

@@ -568,22 +568,38 @@ pub trait ExactSlotStorage: Send + Sync {
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError>;
 
-    async fn delete_and_verify_absent(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+    /// Whether anything occupies `slot`, without opening what is there.
+    ///
+    /// A slot is occupied by whatever record sits in it, which is not the same
+    /// question as whether those bytes open as the object a reader expected —
+    /// a provider that keeps both immutable objects and bounded mutable
+    /// records at its slots can hold either. Emptying a slot must not be
+    /// refused because what occupies it is the other kind, so deletion asks
+    /// this rather than [`read_at`](Self::read_at).
+    ///
+    /// The default answers by reading, which is all a provider that stores one
+    /// whole object per slot has; one that can see a slot's occupancy without
+    /// fetching it overrides this.
+    async fn occupied_at(&self, slot: &ObjectSlot) -> Result<bool, CloudHomeError> {
         match self.read_at(slot).await {
-            Err(CloudHomeError::NotFound(_)) => Ok(()),
-            Ok(_) => {
-                self.delete_at(slot).await?;
-                match self.read_at(slot).await {
-                    Err(CloudHomeError::NotFound(_)) => Ok(()),
-                    Ok(_) => Err(CloudHomeError::Configuration(format!(
-                        "exact-slot adapter left {} present after deletion",
-                        slot.logical_key()
-                    ))),
-                    Err(error) => Err(error),
-                }
-            }
+            Ok(_) => Ok(true),
+            Err(CloudHomeError::NotFound(_)) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    async fn delete_and_verify_absent(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        if !self.occupied_at(slot).await? {
+            return Ok(());
+        }
+        self.delete_at(slot).await?;
+        if self.occupied_at(slot).await? {
+            return Err(CloudHomeError::Configuration(format!(
+                "exact-slot adapter left {} present after deletion",
+                slot.logical_key()
+            )));
+        }
+        Ok(())
     }
 }
 
