@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::commands::CircleOperationRequest;
+use super::STORE_COMMIT_STEP;
 use super::{
     CircleOperationError, CircleOperationJournal, CircleTransitionHistory, PreparedCircleOperation,
 };
@@ -677,7 +678,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 write_id,
             ).await?;
             prepared_objects.insert(
-                "store-commit".to_string(),
+                STORE_COMMIT_STEP.to_string(),
                 store_commit
                     .prepared_commit()
                     .map_err(crate::sync::store::StoreError::from)?,

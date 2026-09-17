@@ -453,6 +453,18 @@ impl ConflictFixture {
         }
     }
 
+    /// Discard a refused operation on device 1, as its initiator would.
+    pub(super) async fn discard_device1(
+        &self,
+        operation_id: &CircleOperationId,
+    ) -> Result<(), CircleOperationError> {
+        self.store1()
+            .await
+            .circles()
+            .discard_circle_operation(operation_id)
+            .await
+    }
+
     /// Put the refused commit in front of device 2, which never ran device 1's
     /// local check: publish every object the operation owns, then verify the
     /// commit as device 2 does when it pulls.

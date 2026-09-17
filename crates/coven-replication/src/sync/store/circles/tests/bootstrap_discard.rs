@@ -261,8 +261,10 @@ async fn check_bootstrap_discard(operation: BootstrapOperation, authority: Disca
         database
             .begin_circle_operation_discard(
                 journal.clone(),
-                membership,
-                boundary.record().accepted().unwrap().clone(),
+                coven_database::CircleDiscardGround::AuthorityRetirement {
+                    membership,
+                    publication: boundary.record().accepted().unwrap().clone(),
+                },
             )
             .await
             .expect_err("signed unaccepted retirement cannot authorize candidate deletion");

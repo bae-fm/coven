@@ -229,7 +229,11 @@ operation id, its Circle, its
   no retry of it can be accepted — a device authoring from state it has already
   moved past reaches this. The refusal releases the Store publication
   reservation the operation held, so the device's other work publishes; the
-  operation stays here, with its reason, until the initiator discards it.
+  operation stays here, with its reason, until the initiator calls
+  `circles.discard_operation(op_id).await?`. That discard is accepted because a
+  refused candidate is provably unable to activate: either its commit never
+  reached the provider, which its own journal records, or another accepted
+  commit already holds its author-stream coordinate.
 - `Discarding` — Coven accepted a verified permanent-nonactivation proof and is
   exact-deleting the candidate's exclusive objects before clearing the durable
   operation.
@@ -242,10 +246,14 @@ circles.discard_operation(op_id).await?;
 ```
 
 Discard succeeds only after Coven verifies that the exact prepared Store commit
-can never activate: another verified commit owns the device's Store stream
-position, the author's device was excluded before that position, or an accepted
-Store commit revoked the exact Store membership grant that authorized it
-without covering the candidate in its predecessor history. Without one of those proofs,
+can never activate. Four grounds settle that, cheapest first: the candidate's
+commit never reached the provider, which the operation's own record of completed
+uploads states; another accepted commit already holds the candidate's exact
+author-stream coordinate, which a coordinate carries only once; the author's
+device was excluded before that position; or an accepted Store commit revoked
+the exact Store membership grant that authorized it without covering the
+candidate in its predecessor history. When the outcome is genuinely unknown —
+the commit is out there and nothing has taken its place —
 [`discard_operation`](rustdoc:method:coven::Circles::discard_operation) returns
 `DiscardRequiresNonactivation` and leaves the durable operation unchanged.
 Discarding an ordinary *host write* that a Circle refused is separate, on

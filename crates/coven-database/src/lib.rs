@@ -274,7 +274,7 @@ pub use store::{
     projection_table_names, AcceptedStoreCommitEvidence, AcceptedStoreCommitPublication,
     AcceptedStorePublicationInterval, AdvancedReplayBaseline, BlobTransitionRoot,
     BlobUploadDrainPermit, BlockedWriteDiscard, CandidateCleanupObject, CircleAckPublicationInput,
-    CreatedCircleSnapshot, CreatedSnapshot, DeviceJoinJournalStore,
+    CircleDiscardGround, CreatedCircleSnapshot, CreatedSnapshot, DeviceJoinJournalStore,
     DurableStoreReclaimAuthorization, DurableStoreReclaimOperation, HostWriteBlobTransaction,
     HostWriteError, HostWriteOperation, IncomingTimestampPolicy, InstalledReplayBaseline,
     LocalBlobCleanup, MakeRemoteAdmission, MaterializedLocalBlob, ObservedStorePublication,

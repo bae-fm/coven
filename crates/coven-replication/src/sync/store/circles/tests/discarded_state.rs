@@ -34,6 +34,21 @@ async fn a_second_entry_at_one_position_is_refused_by_its_own_device() {
         fixture.retained_conflict_device1().await.is_none(),
         "no fork enters accepted history"
     );
+
+    // Nothing of this candidate reached the provider, which its own journal
+    // records, so the initiator can discard it without a remote proof — and
+    // the Circle takes commands again.
+    fixture
+        .discard_device1(&attempt.journal.operation_id)
+        .await
+        .expect("an unpublished candidate is discardable on its own journal");
+    fixture
+        .store1()
+        .await
+        .circles()
+        .rename_circle("0000000001900-0000-device1", fixture.circle_id(), "Gamma")
+        .await
+        .expect("the Circle takes commands again once the refusal is discarded");
 }
 
 /// And a peer holds it too. Device 2 never ran device 1's local check, so this

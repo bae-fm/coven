@@ -1,6 +1,10 @@
 use super::*;
 use coven_database::Database;
 
+/// Which exact-object create publishes a founder Circle operation's publication
+/// entry: its control, roster entry, metadata and commit go up first.
+const PUBLICATION_ENTRY_CREATE_CALL: usize = 5;
+
 /// Prepare a founder Circle operation on a member device, then revoke that
 /// member's grant so publishing it blocks under lost authority.
 struct RevokedOperation {
@@ -379,9 +383,9 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     );
 }
 
-/// Discard refuses an operation with no verified nonactivation proof: an
-/// unpublished founder operation whose author is still authorized and whose
-/// successor slot is empty. It never assumes the unseen candidate failed to
+/// Discard refuses an operation whose outcome is genuinely unknown: its commit
+/// reached the provider, nothing has taken its coordinate, and its author is
+/// still authorized. Coven never assumes the unseen candidate failed to
 /// activate — the journal row stays durable.
 #[tokio::test]
 async fn discard_without_nonactivation_proof_is_refused() {
@@ -390,6 +394,28 @@ async fn discard_without_nonactivation_proof_is_refused() {
     let (store, _home, signer, journal) =
         persist_merge_operation(&db, db_store_dir.clone(), "recovery-discard-refusal").await;
     let operation_id = journal.operation_id.clone();
+
+    // Interrupt after the commit object is uploaded and before its publication
+    // is accepted, which is the state whose outcome cannot be read off the
+    // journal.
+    _home.fail_exact_create_before_call(PUBLICATION_ENTRY_CREATE_CALL);
+    store
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
+        .await
+        .expect("bind Circle publishing Store")
+        .resume_circle_operations()
+        .await
+        .expect_err("the publication entry create fails after the commit is uploaded");
+    assert!(
+        coven_database::StoreDatabase::new(&db)
+            .circle_operation(&operation_id)
+            .await
+            .expect("read the interrupted operation")
+            .expect("the interrupted operation is durable")
+            .uploaded
+            .contains("store-commit"),
+        "the candidate's commit reached the provider, so its outcome is unknown"
+    );
 
     let refusal = store
         .bind_device_in(&db, db_store_dir.clone(), &signer)

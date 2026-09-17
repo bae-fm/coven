@@ -1,5 +1,8 @@
+use super::STORE_COMMIT_STEP;
 use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
+use crate::sync::store::CircleOperationError;
 use coven_database::StoreDatabase;
+use coven_protocol::circle_journal::CircleOperationJournal;
 use coven_storage::CloudSyncObjectStorage;
 
 /// The reads and history compositions the Circle subsystem performs, over the
@@ -96,15 +99,14 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
                     &journal.operation().commit().to_bytes(),
                 )
                 .await?;
-            let (membership, publication) = self
-                .history
-                .candidate_grant_retirement(&self.database, &commit)
+            let ground = self
+                .discard_ground(&journal, &commit)
                 .await?
                 .ok_or_else(|| CircleOperationError::DiscardRequiresNonactivation {
                     operation_id: operation_id.clone(),
                 })?;
             self.database
-                .begin_circle_operation_discard(journal.clone(), membership, publication)
+                .begin_circle_operation_discard(journal.clone(), ground)
                 .await?;
             journal.begin_discard()?;
         }
@@ -120,6 +122,65 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
             .complete_circle_operation_discard(journal)
             .await?;
         Ok(())
+    }
+
+    /// What establishes that this candidate can never activate, or `None` when
+    /// the outcome is genuinely unknown and the operation must stay durable.
+    ///
+    /// Three grounds, cheapest first. A candidate whose commit object never
+    /// reached the provider cannot be named by any publication entry, and the
+    /// journal records which uploads completed. A candidate whose own
+    /// coordinate is held by a different accepted commit can never take that
+    /// coordinate — the fact that refused it at publication. Otherwise the
+    /// author's write grant must have been retired.
+    async fn discard_ground(
+        &mut self,
+        journal: &CircleOperationJournal,
+        commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+    ) -> Result<Option<coven_database::CircleDiscardGround>, CircleOperationError> {
+        if !journal.uploaded.contains(STORE_COMMIT_STEP) {
+            return Ok(Some(coven_database::CircleDiscardGround::Unpublished));
+        }
+        let candidate = commit.reference();
+        if let Some(accepted) = self
+            .database
+            .accepted_commit_at(candidate.coord.clone())
+            .await?
+        {
+            if &accepted != candidate {
+                let publication = self
+                    .database
+                    .store_current_publication()
+                    .await?
+                    .record()
+                    .accepted()
+                    .cloned()
+                    .ok_or_else(|| {
+                        CircleOperationError::InvalidState(
+                            "accepted Store history has no publication boundary".to_string(),
+                        )
+                    })?;
+                let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+                    self.database.materialized_frontier().await?,
+                )
+                .map_err(CircleOperationError::from)?;
+                return Ok(Some(coven_database::CircleDiscardGround::PositionTaken {
+                    publication,
+                    coverage,
+                    accepted,
+                }));
+            }
+        }
+        Ok(self
+            .history
+            .candidate_grant_retirement(&self.database, commit)
+            .await?
+            .map(|(membership, publication)| {
+                coven_database::CircleDiscardGround::AuthorityRetirement {
+                    membership,
+                    publication,
+                }
+            }))
     }
 
     pub(crate) fn snapshots(

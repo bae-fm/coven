@@ -77,7 +77,7 @@ pub use circle_authority::CirclePackageAccess;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use circle_bootstrap_rows::changeset_rows;
 pub(crate) use circle_bootstrap_rows::verify_circle_bootstrap_rows;
-pub use circle_controls::PreparedCircleObjects;
+pub use circle_controls::{CircleDiscardGround, PreparedCircleObjects};
 pub use device_join::DeviceJoinJournalStore;
 pub use host_sql::{SqlContext, SqlReadContext};
 pub(crate) use host_write_capture::remove_created_payload_files;

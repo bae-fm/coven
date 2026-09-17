@@ -1,4 +1,5 @@
 use super::error::CircleOperationError;
+use super::STORE_COMMIT_STEP;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_protocol::circle::{
@@ -366,7 +367,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             let stream_id = journal.operation().commit_ref().coord.stream_id;
             self.append_step(
                 &mut journal,
-                "store-commit",
+                STORE_COMMIT_STEP,
                 &ProtocolObjectContext::signed_plaintext(
                     store_root_hash,
                     ProtocolObjectDomain::StoreCommit,

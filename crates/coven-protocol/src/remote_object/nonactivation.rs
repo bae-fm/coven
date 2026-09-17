@@ -108,6 +108,24 @@ pub enum CandidateNonactivationProof {
         snapshot: crate::store_commit::AcceptedStoreSnapshotRef,
         coverage: crate::store_commit::CommitFrontier,
     },
+    /// Accepted history holds a different exact commit at the candidate's own
+    /// author-stream coordinate. A coordinate carries one accepted commit, so
+    /// this candidate can never be accepted — the same fact that refused it at
+    /// publication, stated as a receipt.
+    PositionTaken {
+        publication: crate::store_commit::StorePublicationRef,
+        coverage: crate::store_commit::CommitFrontier,
+        accepted: StoreBatchCommitRef,
+    },
+    /// The candidate's own commit object never reached the provider, so no
+    /// publication entry can name it.
+    ///
+    /// Unlike every other ground this one is not verifiable by anyone else: it
+    /// rests on the preparing device's durable record of which upload steps
+    /// completed. That is sound for exactly this use — a device deleting the
+    /// objects of its own candidate that it never published — and for nothing
+    /// else.
+    Unpublished,
 }
 
 impl CandidateNonactivationProof {
@@ -124,6 +142,17 @@ impl CandidateNonactivationProof {
                 )?;
                 Ok(())
             }
+            Self::PositionTaken { coverage, .. } => {
+                crate::store_commit::CommitFrontier::from_refs(
+                    coverage
+                        .commits()
+                        .iter()
+                        .map(|(stream, commit)| (stream.to_string(), commit.clone()))
+                        .collect(),
+                )?;
+                Ok(())
+            }
+            Self::Unpublished => Ok(()),
             Self::AcceptedAbandonment { abandonment } => {
                 let value: crate::store_commit::StoreBatchCommit =
                     serde_json::from_slice(&abandonment.canonical_signed_bytes)?;
@@ -154,6 +183,30 @@ impl CandidateNonactivationProof {
     ) -> Result<(), RemoteObjectRecordError> {
         self.validate()?;
         match self {
+            Self::PositionTaken {
+                publication,
+                coverage,
+                accepted,
+            } => {
+                publication.validate_slot()?;
+                let reached = coverage
+                    .commits()
+                    .get(&candidate.coord.stream_id)
+                    .is_some_and(|tip| tip.coord.sequence() >= accepted.coord.sequence());
+                if publication.store_root_hash != commit.store_root_hash
+                    || accepted.coord != candidate.coord
+                    || accepted == candidate
+                    || !reached
+                {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "accepted history does not hold another commit at the candidate's \
+                         coordinate"
+                            .to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            Self::Unpublished => Ok(()),
             Self::AcceptedAbandonment { abandonment } => {
                 let value: crate::store_commit::StoreBatchCommit =
                     serde_json::from_slice(&abandonment.canonical_signed_bytes)?;

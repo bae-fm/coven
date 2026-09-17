@@ -55,6 +55,13 @@ impl BackedUpDevice {
         open_file_backed(&self.dir)
     }
 
+    async fn store(&self, db: &Database) -> crate::sync::test_helpers::TestDevice {
+        self.store
+            .bind_device_in(db, self.dir.clone(), &self.signer)
+            .await
+            .expect("bind the device")
+    }
+
     async fn build(label: &str) -> Self {
         let dir = crate::sync::test_helpers::test_store_dir();
         let signer = UserKeypair::generate();
@@ -242,6 +249,17 @@ async fn a_stale_backup_cannot_fill_a_circle_position_the_live_history_filled() 
         .await
         .expect("the device publishes again once the refusal releases its reservation");
 
+    // The coordinate that refused it is also what settles it: accepted history
+    // holds a different commit there, so the operation is discardable and the
+    // Circle takes commands again.
+    let refused_operation = StoreDatabase::new(&db)
+        .blocked_circle_operation_ids()
+        .await
+        .expect("read the blocked Circle operations")
+        .into_iter()
+        .next()
+        .expect("the refused operation is journaled");
+
     // And the refused operation is still there to report, blocked with why.
     let blocked = StoreDatabase::new(&db)
         .blocked_circle_operations()
@@ -258,4 +276,19 @@ async fn a_stale_backup_cannot_fill_a_circle_position_the_live_history_filled() 
         ),
         "{blocked:?}"
     );
+
+    fixture
+        .store(&db)
+        .await
+        .circles()
+        .discard_circle_operation(&refused_operation)
+        .await
+        .expect("a candidate whose coordinate is taken is discardable");
+    fixture
+        .store(&db)
+        .await
+        .circles()
+        .rename_circle("0000000005000-0000-owner", fixture.circle_id, "Delta")
+        .await
+        .expect("the Circle takes commands again once the refusal is discarded");
 }

@@ -1,6 +1,7 @@
 use rusqlite::Connection;
 
 mod discard;
+pub use discard::CircleDiscardGround;
 
 use super::{
     MergeMaterializationTransaction, StoreDatabase, StoreSession, StoreTransactionOutcome,
@@ -218,6 +219,22 @@ impl StoreSession<'_> {
                 })
             })
             .collect()
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn blocked_circle_operation_ids(
+        &mut self,
+    ) -> Result<Vec<coven_protocol::circle::CircleOperationId>, DbError> {
+        Ok(circle_operation_ids_in_phase_on(self.conn, |progress| {
+            matches!(progress, CircleOperationProgress::Blocked { .. })
+        })?
+        .into_iter()
+        .map(|operation_id| {
+            coven_protocol::circle::CircleOperationId::from_write_id(
+                coven_protocol::write::WriteId::from_generated(operation_id),
+            )
+        })
+        .collect())
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -682,6 +699,15 @@ impl StoreDatabase {
         &self,
     ) -> Result<Option<CircleOperationJournal>, DbError> {
         self.call_store(|session| session.oldest_pending_circle_operation())
+            .await
+    }
+
+    /// The ids of every operation a refusal has blocked.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn blocked_circle_operation_ids(
+        &self,
+    ) -> Result<Vec<coven_protocol::circle::CircleOperationId>, DbError> {
+        self.call_store(|session| session.blocked_circle_operation_ids())
             .await
     }
 

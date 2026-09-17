@@ -19,6 +19,11 @@ pub(super) mod packages;
 mod preparation;
 mod publication;
 
+/// The upload step that puts a Circle operation's Store commit in front of the
+/// provider. Its presence among a journal's completed steps is what says the
+/// candidate left this device.
+pub(super) const STORE_COMMIT_STEP: &str = "store-commit";
+
 pub(super) use authorized_writer::AuthorizedCircleWriter;
 pub use commands::StoreCircleCommands;
 pub(crate) use history::VerifiedCircleHistory;
