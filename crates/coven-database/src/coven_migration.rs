@@ -412,13 +412,13 @@ pub(crate) fn run_coven_migrations_in_transaction(
 ) -> Result<(), CovenMigrationError> {
     let migrations = migration_ladder(include_routing)?;
     let v0 = expected_coven_schema_v0_manifest(include_routing)?;
-    let recover = matches!(classify_schema(conn, v0, &migrations)?, CovenSchemaState::Pending { current } if current < 3);
+    let prior_version = match classify_schema(conn, v0, &migrations)? {
+        CovenSchemaState::Current => LATEST_COVEN_SCHEMA_VERSION,
+        CovenSchemaState::Pending { current } => current,
+        CovenSchemaState::PendingLedgerInstallation { version } => version,
+    };
     run_coven_migrations_with_ladder(conn, policy, v0, &migrations)?;
-    if recover {
-        crate::store::recover_store_write_schemas(conn, store_dir, host_migrations)?;
-    }
-    crate::store::validate_store_write_schemas(conn)?;
-    Ok(())
+    finish_store_write_schema_migration(conn, prior_version, store_dir, host_migrations)
 }
 
 pub(crate) fn run_uninitialized_snapshot_coven_migrations_in_transaction(
@@ -433,10 +433,20 @@ pub(crate) fn run_uninitialized_snapshot_coven_migrations_in_transaction(
     let current = ledgerless_version(&live_coven_schema_manifest(conn)?, v0, &migrations)
         .ok_or(CovenMigrationError::UnknownUnversionedSchema)?;
     run_uninitialized_snapshot_migrations_with_ladder(conn, policy, v0, &migrations)?;
-    if current < 3 {
+    finish_store_write_schema_migration(conn, current, store_dir, host_migrations)
+}
+
+fn finish_store_write_schema_migration(
+    conn: &Connection,
+    prior_version: u32,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    host_migrations: &[crate::Migration],
+) -> Result<(), CovenMigrationError> {
+    if prior_version < 3 {
         crate::store::recover_store_write_schemas(conn, store_dir, host_migrations)?;
+    } else {
+        crate::store::validate_store_write_schemas(conn)?;
     }
-    crate::store::validate_store_write_schemas(conn)?;
     Ok(())
 }
 

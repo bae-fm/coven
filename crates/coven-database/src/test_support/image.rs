@@ -51,7 +51,7 @@ impl DatabaseImageTest {
         crate::apply_coven_schema(&self.connection).map_err(DbError::from)
     }
 
-    pub fn downgrade_coven_schema_to_v2(&self, include_routing: bool) -> Result<(), DbError> {
+    pub fn downgrade_coven_schema_to_v2(&self) -> Result<(), DbError> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute_batch(
             "UPDATE store_writes SET rebased=json_remove(rebased, '$.schema_version') WHERE rebased IS NOT NULL;
@@ -61,7 +61,7 @@ impl DatabaseImageTest {
             &transaction,
             crate::COVEN_SCHEMA_MANIFEST_STATE_KEY,
             &serde_json::to_string(crate::coven_schema::expected_coven_schema_v2_manifest(
-                include_routing,
+                false,
             )?)?,
         )?;
         crate::set_protocol_state_on(&transaction, crate::COVEN_SCHEMA_VERSION_STATE_KEY, "2")?;

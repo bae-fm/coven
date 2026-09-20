@@ -51,20 +51,17 @@ pub(crate) fn recover_store_write_schemas(
                 let root = authority.required_root_authority_on(records)?;
                 let commit =
                     verify_prepared_store_commit_on(&mut authority, records, &root, &prepared)?;
-                let version = package_schema_version(&commit, &write_id)?;
                 let packages =
                     crate::load_prepared_audience_objects_on(conn, store_dir, &commit.write_id)?;
-                let partitions = records.store_write_partitions(&write_id)?;
-                super::preparation::validate_write_partitions(
+                Some(authenticated_write_schema_version(
+                    records,
+                    &write_id,
                     &commit,
-                    version,
-                    &partitions,
                     packages
                         .packages
                         .iter()
                         .map(crate::PreparedAudiencePackage::package),
-                )?;
-                Some(version)
+                )?)
             }
             None => match serde_json::from_str::<coven_protocol::write::WriteStatus>(&status)? {
                 coven_protocol::write::WriteStatus::Published(published) => match *published {
@@ -78,18 +75,12 @@ pub(crate) fn recover_store_write_schemas(
                         if retained {
                             let materialization =
                                 authority.retained_materialization_by_ref_on(records, reference)?;
-                            let version = package_schema_version(
-                                materialization.verified_commit(),
+                            Some(authenticated_write_schema_version(
+                                records,
                                 &write_id,
-                            )?;
-                            let partitions = records.store_write_partitions(&write_id)?;
-                            super::preparation::validate_write_partitions(
                                 materialization.verified_commit(),
-                                version,
-                                &partitions,
                                 materialization.packages().iter(),
-                            )?;
-                            Some(version)
+                            )?)
                         } else {
                             None
                         }
@@ -145,9 +136,11 @@ struct UnversionedRebasedStoreWrite {
     blob_facts: crate::StoreWriteBlobFacts,
 }
 
-fn package_schema_version(
-    commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+fn authenticated_write_schema_version<'a>(
+    records: StoreRecords<'_>,
     write_id: &str,
+    commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+    packages: impl ExactSizeIterator<Item = &'a coven_protocol::audience_package::AudiencePackage>,
 ) -> Result<u32, DbError> {
     if commit.write_id.as_str() != write_id {
         return Err(DbError::Message(
@@ -172,5 +165,7 @@ fn package_schema_version(
             "authenticated write packages have different schema versions".into(),
         ));
     }
+    let partitions = records.store_write_partitions(write_id)?;
+    super::preparation::validate_write_partitions(commit, version, &partitions, packages)?;
     Ok(version)
 }

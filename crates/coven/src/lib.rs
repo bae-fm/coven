@@ -58,8 +58,8 @@ pub use coven_database::{
     QueuedUpload, QueuedUploadPhase, SqlContext, SqlReadContext, StuckReclaimOperation, WriteBatch,
 };
 pub use coven_database::{
-    ChangesetColumn, ChangesetMigrationError, ChangesetRow, Migration, MigrationContext,
-    MigrationError, MigrationStep, TableChangesetMigration,
+    ChangesetColumn, ChangesetMigrationError, ChangesetOperation, ChangesetRow, ChangesetUpdate,
+    Migration, MigrationContext, MigrationError, MigrationStep, TableChangesetMigration,
 };
 pub use coven_database::{CovenMigrationError, CovenMigrationPolicy};
 pub use coven_domain::joining::{join_with_device_pairing, DeviceJoinTransportOutcome};

@@ -1,6 +1,8 @@
 use crate::sync::test_helpers::*;
-use coven_database::{ChangesetColumn, DbError, Migration, TableChangesetMigration};
-use coven_foundation::changeset::ChangeOp;
+use coven_database::{
+    ChangesetColumn, ChangesetOperation, ChangesetUpdate, DbError, Migration,
+    TableChangesetMigration,
+};
 use coven_protocol::synced_schema::{RowIdentity, SyncedTable};
 use rusqlite::types::Value;
 
@@ -16,7 +18,7 @@ fn migrations(reject_update: std::sync::Arc<std::sync::atomic::AtomicBool>) -> V
         ),
         Migration::sql(2, "remove_origin", "ALTER TABLE notes DROP COLUMN origin").changesets(
             vec![TableChangesetMigration::new("notes", &[], |row, _| {
-                row.columns.retain(|column| column.name != "origin");
+                row.change.retain_columns(|name| name != "origin");
                 Ok(())
             })],
         ),
@@ -29,7 +31,7 @@ fn migrations(reject_update: std::sync::Arc<std::sync::atomic::AtomicBool>) -> V
             "notes",
             &["created_at"],
             move |row, context| {
-                if row.operation == ChangeOp::Update
+                if matches!(&row.change, ChangesetOperation::Update(_))
                     && reject_update.load(std::sync::atomic::Ordering::SeqCst)
                 {
                     return Err(DbError::Message("rejected historical update".into()));
@@ -38,12 +40,25 @@ fn migrations(reject_update: std::sync::Arc<std::sync::atomic::AtomicBool>) -> V
                     context.get("created_at"),
                     Some(&Value::Text("2026-01-01".into()))
                 );
-                row.columns.push(ChangesetColumn {
-                    name: "kind".into(),
-                    primary_key: false,
-                    old: (row.operation == ChangeOp::Delete).then(|| Value::Text("note".into())),
-                    new: (row.operation == ChangeOp::Insert).then(|| Value::Text("note".into())),
-                });
+                match &mut row.change {
+                    ChangesetOperation::Insert(columns) | ChangesetOperation::Delete(columns) => {
+                        columns.push(ChangesetColumn {
+                            name: "kind".into(),
+                            primary_key: false,
+                            value: Value::Text("note".into()),
+                        });
+                    }
+                    ChangesetOperation::Update(columns) => {
+                        columns.push(ChangesetColumn {
+                            name: "kind".into(),
+                            primary_key: false,
+                            value: ChangesetUpdate {
+                                old: None,
+                                new: None,
+                            },
+                        });
+                    }
+                }
                 Ok(())
             },
         )]),

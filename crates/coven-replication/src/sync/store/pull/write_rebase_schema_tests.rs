@@ -1,5 +1,8 @@
 use super::*;
-use coven_database::{Migration, TableChangesetMigration};
+use coven_database::{
+    ChangesetColumn, ChangesetOperation, ChangesetRow, ChangesetUpdate, Migration,
+    TableChangesetMigration,
+};
 use coven_protocol::write::{WriteBlock, WriteStatus};
 
 #[tokio::test]
@@ -50,21 +53,13 @@ async fn discard_after_value_migration(rebase: bool, fail_before_retry: bool) {
             &[],
             move |row, _| {
                 if reject_conversion.load(std::sync::atomic::Ordering::SeqCst)
-                    && row.operation == coven_foundation::changeset::ChangeOp::Update
+                    && matches!(&row.change, ChangesetOperation::Update(_))
                 {
                     return Err(coven_database::DbError::Message(
                         "refuse inverse conversion".into(),
                     ));
                 }
-                for column in &mut row.columns {
-                    if column.name == "title" {
-                        for value in [&mut column.old, &mut column.new] {
-                            if let Some(rusqlite::types::Value::Text(text)) = value {
-                                *text = format!("migrated:{text}");
-                            }
-                        }
-                    }
-                }
+                qualify_title(row);
                 Ok(())
             },
         )]),
@@ -161,14 +156,25 @@ async fn discard_effect_rebased_under_new_schema(legacy: bool) {
             "notes",
             &[],
             |row, _| {
-                row.columns.push(coven_database::ChangesetColumn {
-                    name: "category".into(),
-                    old: (row.operation == coven_foundation::changeset::ChangeOp::Delete)
-                        .then(|| rusqlite::types::Value::Text("note".into())),
-                    new: (row.operation == coven_foundation::changeset::ChangeOp::Insert)
-                        .then(|| rusqlite::types::Value::Text("note".into())),
-                    primary_key: false,
-                });
+                match &mut row.change {
+                    ChangesetOperation::Insert(columns) | ChangesetOperation::Delete(columns) => {
+                        columns.push(ChangesetColumn {
+                            name: "category".into(),
+                            primary_key: false,
+                            value: rusqlite::types::Value::Text("note".into()),
+                        });
+                    }
+                    ChangesetOperation::Update(columns) => {
+                        columns.push(ChangesetColumn {
+                            name: "category".into(),
+                            primary_key: false,
+                            value: ChangesetUpdate {
+                                old: None,
+                                new: None,
+                            },
+                        });
+                    }
+                }
                 Ok(())
             },
         )]),
@@ -199,7 +205,7 @@ async fn discard_effect_rebased_under_new_schema(legacy: bool) {
     drop(upgraded);
     if legacy {
         let image = coven_database::DatabaseImageTest::open(&fixture.path).unwrap();
-        image.downgrade_coven_schema_to_v2(false).unwrap();
+        image.downgrade_coven_schema_to_v2().unwrap();
     }
     migrations.push(
         Migration::sql(
@@ -211,15 +217,7 @@ async fn discard_effect_rebased_under_new_schema(legacy: bool) {
             "notes",
             &[],
             |row, _| {
-                for column in &mut row.columns {
-                    if column.name == "title" {
-                        for value in [&mut column.old, &mut column.new] {
-                            if let Some(rusqlite::types::Value::Text(text)) = value {
-                                *text = format!("migrated:{text}");
-                            }
-                        }
-                    }
-                }
+                qualify_title(row);
                 Ok(())
             },
         )]),
@@ -260,4 +258,25 @@ async fn discard_effect_rebased_under_new_schema(legacy: bool) {
 #[tokio::test]
 async fn failed_inverse_conversion_rolls_back_the_discarded_suffix_then_retries() {
     discard_after_value_migration(false, true).await;
+}
+
+fn qualify_title(row: &mut ChangesetRow) {
+    match &mut row.change {
+        ChangesetOperation::Insert(columns) | ChangesetOperation::Delete(columns) => {
+            for column in columns.iter_mut().filter(|column| column.name == "title") {
+                if let rusqlite::types::Value::Text(text) = &mut column.value {
+                    *text = format!("migrated:{text}");
+                }
+            }
+        }
+        ChangesetOperation::Update(columns) => {
+            for column in columns.iter_mut().filter(|column| column.name == "title") {
+                for value in [&mut column.value.old, &mut column.value.new] {
+                    if let Some(rusqlite::types::Value::Text(text)) = value {
+                        *text = format!("migrated:{text}");
+                    }
+                }
+            }
+        }
+    }
 }

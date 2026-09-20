@@ -504,7 +504,7 @@ fn an_older_bootstrap_is_transformed_before_current_schema_validation() {
             "documents",
             &[],
             |row, _| {
-                row.columns.retain(|column| column.name != "origin");
+                row.change.retain_columns(|name| name != "origin");
                 Ok(())
             },
         )]),

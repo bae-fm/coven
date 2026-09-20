@@ -7,17 +7,19 @@ fn historical_insert_survives_a_removed_column_and_a_required_derived_column() {
         Migration::sql(1, "records", "CREATE TABLE records (id TEXT PRIMARY KEY, value TEXT, origin TEXT, _updated_at TEXT NOT NULL)"),
         Migration::sql(2, "remove_origin", "ALTER TABLE records DROP COLUMN origin")
             .changesets(vec![TableChangesetMigration::new("records", &[], |row, _| {
-                row.columns.retain(|column| column.name != "origin");
+                row.change.retain_columns(|name| name != "origin");
                 Ok(())
             })]),
         Migration::sql(3, "record_kind", "ALTER TABLE records ADD COLUMN kind TEXT NOT NULL DEFAULT 'record'")
             .changesets(vec![TableChangesetMigration::new("records", &[], |row, _| {
-                row.columns.push(ChangesetColumn {
-                    name: "kind".into(),
-                    old: (row.operation == ChangeOp::Delete).then(|| Value::Text("record".into())),
-                    new: (row.operation == ChangeOp::Insert).then(|| Value::Text("record".into())),
-                    primary_key: false,
-                });
+                match &mut row.change {
+                    ChangesetOperation::Insert(columns) | ChangesetOperation::Delete(columns) => columns.push(ChangesetColumn {
+                        name: "kind".into(), value: Value::Text("record".into()), primary_key: false,
+                    }),
+                    ChangesetOperation::Update(columns) => columns.push(ChangesetColumn {
+                        name: "kind".into(), value: ChangesetUpdate { old: None, new: None }, primary_key: false,
+                    }),
+                }
                 Ok(())
             })]),
     ];
@@ -57,10 +59,18 @@ fn identity_migrations() -> Vec<Migration> {
         Migration::sql(2, "known_parent", "ALTER TABLE records RENAME COLUMN parent TO album")
             .changesets(vec![TableChangesetMigration::new("records", &["catalog", "external_key"], |row, identity| {
                 let external_key = identity.get("external_key").expect("declared identity");
-                let parent = row.columns.iter_mut().find(|column| column.name == "parent").expect("registered column");
-                parent.name = "album".into();
-                for value in [&mut parent.old, &mut parent.new] {
-                    if value.as_ref() == Some(external_key) { *value = Some(Value::Null); }
+                let normalize = |value: &mut Value| { if value == external_key { *value = Value::Null; } };
+                match &mut row.change {
+                    ChangesetOperation::Insert(columns) | ChangesetOperation::Delete(columns) => {
+                        let parent = columns.iter_mut().find(|column| column.name == "parent").expect("registered column");
+                        parent.name = "album".into();
+                        normalize(&mut parent.value);
+                    }
+                    ChangesetOperation::Update(columns) => {
+                        let parent = columns.iter_mut().find(|column| column.name == "parent").expect("registered column");
+                        parent.name = "album".into();
+                        for value in parent.value.old.iter_mut().chain(parent.value.new.iter_mut()) { normalize(value); }
+                    }
                 }
                 Ok(())
             })]),
@@ -102,10 +112,13 @@ fn sparse_update_uses_immutable_identity_and_preserves_null_blob_and_indirect_ce
     let converted = history.migrate(&receiver, 1, &original).unwrap();
     let rows = history.decode(&receiver, 2, &converted).unwrap();
     assert!(rows[0].indirect);
-    assert_eq!(rows[0].columns[1].new, None);
-    assert_eq!(rows[0].columns[3].new, Some(Value::Null));
-    assert_eq!(rows[0].columns[4].old, Some(Value::Blob(vec![0, 1, 255])));
-    assert_eq!(rows[0].columns[4].new, Some(Value::Null));
+    let ChangesetOperation::Update(columns) = &rows[0].change else {
+        panic!("captured UPDATE");
+    };
+    assert_eq!(columns[1].value.new, None);
+    assert_eq!(columns[3].value.new, Some(Value::Null));
+    assert_eq!(columns[4].value.old, Some(Value::Blob(vec![0, 1, 255])));
+    assert_eq!(columns[4].value.new, Some(Value::Null));
     receiver
         .apply_strm(&mut &converted[..], None::<fn(&str) -> bool>, |_, _| {
             ConflictAction::SQLITE_CHANGESET_ABORT
@@ -117,10 +130,11 @@ fn sparse_update_uses_immutable_identity_and_preserves_null_blob_and_indirect_ce
         })
         .unwrap();
     assert_eq!(values, (None, None, "after".into()));
-    assert_eq!(
-        history.decode(&receiver, 1, &original).unwrap()[0].columns[3].new,
-        Some(Value::Text("key".into()))
-    );
+    let original_rows = history.decode(&receiver, 1, &original).unwrap();
+    let ChangesetOperation::Update(columns) = &original_rows[0].change else {
+        panic!("original UPDATE");
+    };
+    assert_eq!(columns[3].value.new, Some(Value::Text("key".into())));
 }
 
 #[test]
@@ -228,10 +242,13 @@ fn host_transformations_cannot_change_authenticated_row_identity_or_ordering() {
                     "records",
                     &[],
                     move |row, _| {
+                        let ChangesetOperation::Insert(columns) = &mut row.change else {
+                            panic!("captured INSERT");
+                        };
                         match mutation {
-                            "primary key" => row.columns[0].new = Some(Value::Text("other".into())),
-                            "row clock" => row.columns[2].new = Some(Value::Text("later".into())),
-                            "operation" => row.operation = ChangeOp::Delete,
+                            "primary key" => columns[0].value = Value::Text("other".into()),
+                            "row clock" => columns[2].value = Value::Text("later".into()),
+                            "operation" => row.change = ChangesetOperation::Delete(columns.clone()),
                             "indirect" => row.indirect = true,
                             _ => unreachable!(),
                         }

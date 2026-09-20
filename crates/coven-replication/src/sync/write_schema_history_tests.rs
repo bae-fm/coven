@@ -1,36 +1,46 @@
 use crate::sync::test_helpers::{
     test_cloud_home, test_migrations, test_store_dir, test_synced_tables, TestStore,
 };
-use coven_database::{CovenMigrationPolicy, Database, Migration, StoreDatabase};
+use coven_database::{
+    ChangesetOperation, CovenMigrationPolicy, Database, Migration, StoreDatabase,
+};
 use coven_keys::keys::UserKeypair;
 
 #[tokio::test]
 async fn pending_write_publication_keeps_its_captured_schema_after_upgrade() {
-    assert_publication_schema_after_upgrade(false, JournalState::Pending, false).await;
+    assert_publication_schema_after_upgrade(false, JournalState::Pending).await;
 }
 
 #[tokio::test]
 async fn unversioned_pending_write_recovers_capture_schema_before_publication() {
-    assert_publication_schema_after_upgrade(true, JournalState::Pending, false).await;
+    assert_publication_schema_after_upgrade(true, JournalState::Pending).await;
 }
 
 #[tokio::test]
 async fn unversioned_prepared_write_recovers_signed_schema_and_preserves_candidate() {
-    assert_publication_schema_after_upgrade(true, JournalState::Prepared, false).await;
+    assert_publication_schema_after_upgrade(
+        true,
+        JournalState::Prepared {
+            mismatched_partition: false,
+        },
+    )
+    .await;
 }
 
 #[derive(Clone, Copy)]
 enum JournalState {
     Pending,
-    Prepared,
+    Prepared { mismatched_partition: bool },
     Published,
 }
 
-async fn assert_publication_schema_after_upgrade(
-    legacy_journal: bool,
-    state: JournalState,
-    mismatched_partition: bool,
-) {
+async fn assert_publication_schema_after_upgrade(legacy_journal: bool, state: JournalState) {
+    let mismatched_partition = matches!(
+        state,
+        JournalState::Prepared {
+            mismatched_partition: true
+        }
+    );
     let prepare_before_upgrade = !matches!(state, JournalState::Pending);
     let publish_before_upgrade = matches!(state, JournalState::Published);
     let directory = test_store_dir();
@@ -115,11 +125,23 @@ async fn assert_publication_schema_after_upgrade(
                 "notes",
                 &[],
                 |row, _| {
-                    for column in &mut row.columns {
-                        if column.name == "title" {
-                            for value in [&mut column.old, &mut column.new] {
-                                if let Some(rusqlite::types::Value::Text(text)) = value {
+                    match &mut row.change {
+                        ChangesetOperation::Insert(columns)
+                        | ChangesetOperation::Delete(columns) => {
+                            for column in columns.iter_mut().filter(|column| column.name == "title")
+                            {
+                                if let rusqlite::types::Value::Text(text) = &mut column.value {
                                     *text = format!("migrated:{text}");
+                                }
+                            }
+                        }
+                        ChangesetOperation::Update(columns) => {
+                            for column in columns.iter_mut().filter(|column| column.name == "title")
+                            {
+                                for value in [&mut column.value.old, &mut column.value.new] {
+                                    if let Some(rusqlite::types::Value::Text(text)) = value {
+                                        *text = format!("migrated:{text}");
+                                    }
                                 }
                             }
                         }
@@ -147,7 +169,7 @@ async fn assert_publication_schema_after_upgrade(
     if legacy_journal {
         coven_database::DatabaseImageTest::open(&path)
             .unwrap()
-            .downgrade_coven_schema_to_v2(false)
+            .downgrade_coven_schema_to_v2()
             .unwrap();
     }
     if mismatched_partition {
@@ -226,10 +248,16 @@ async fn assert_publication_schema_after_upgrade(
 
 #[tokio::test]
 async fn unversioned_prepared_write_rejects_mismatched_captured_partition() {
-    assert_publication_schema_after_upgrade(true, JournalState::Prepared, true).await;
+    assert_publication_schema_after_upgrade(
+        true,
+        JournalState::Prepared {
+            mismatched_partition: true,
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn legacy_published_write_recovers_signed_schema_after_same_layout_value_migration() {
-    assert_publication_schema_after_upgrade(true, JournalState::Published, false).await;
+    assert_publication_schema_after_upgrade(true, JournalState::Published).await;
 }

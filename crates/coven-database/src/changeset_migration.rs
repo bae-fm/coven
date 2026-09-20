@@ -5,23 +5,72 @@ use coven_foundation::changeset::ChangeOp;
 use rusqlite::{types::Value, Connection};
 use std::{collections::BTreeMap, sync::Arc};
 
-/// The two sides of a changed column. An absent cell is unchanged; SQL NULL is
-/// represented by `Some(Value::Null)`.
+/// One named column and the cells carried by its row operation.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ChangesetColumn {
+pub struct ChangesetColumn<T> {
     pub name: String,
+    pub value: T,
+    pub primary_key: bool,
+}
+
+/// A sparse UPDATE cell. Absence means unchanged; SQL NULL remains a value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangesetUpdate {
     pub old: Option<Value>,
     pub new: Option<Value>,
-    pub primary_key: bool,
+}
+
+/// The cells actually present in each SQLite row operation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChangesetOperation {
+    Insert(Vec<ChangesetColumn<Value>>),
+    Update(Vec<ChangesetColumn<ChangesetUpdate>>),
+    Delete(Vec<ChangesetColumn<Value>>),
 }
 
 /// One operation whose cells retain their SQLite types and update presence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChangesetRow {
     pub table: String,
-    pub operation: ChangeOp,
-    pub columns: Vec<ChangesetColumn>,
+    pub change: ChangesetOperation,
     pub indirect: bool,
+}
+
+impl ChangesetOperation {
+    fn operation(&self) -> ChangeOp {
+        match self {
+            Self::Insert(_) => ChangeOp::Insert,
+            Self::Update(_) => ChangeOp::Update,
+            Self::Delete(_) => ChangeOp::Delete,
+        }
+    }
+
+    pub fn retain_columns(&mut self, mut retain: impl FnMut(&str) -> bool) {
+        match self {
+            Self::Insert(columns) | Self::Delete(columns) => {
+                columns.retain(|column| retain(&column.name));
+            }
+            Self::Update(columns) => columns.retain(|column| retain(&column.name)),
+        }
+    }
+
+    fn selected_columns(&self, retain: impl Fn(&str, bool) -> bool) -> Self {
+        fn selected<T: Clone>(
+            columns: &[ChangesetColumn<T>],
+            retain: impl Fn(&str, bool) -> bool,
+        ) -> Vec<ChangesetColumn<T>> {
+            columns
+                .iter()
+                .filter(|column| retain(&column.name, column.primary_key))
+                .cloned()
+                .collect()
+        }
+        match self {
+            Self::Insert(columns) => Self::Insert(selected(columns, retain)),
+            Self::Update(columns) => Self::Update(selected(columns, retain)),
+            Self::Delete(columns) => Self::Delete(selected(columns, retain)),
+        }
+    }
 }
 
 type Transform =
@@ -84,13 +133,10 @@ pub(crate) struct ApplicationSchemaHistory {
 impl ApplicationSchemaHistory {
     pub(crate) fn new(migrations: Arc<[Migration]>) -> Result<Self, DbError> {
         let database = Connection::open_in_memory()?;
+        crate::ensure_schema_supported(&database, &migrations)
+            .map_err(|error| DbError::Message(error.to_string()))?;
         let mut layouts = vec![Layout::new()];
-        for (position, migration) in migrations.iter().enumerate() {
-            if migration.version as usize != position + 1 {
-                return Err(DbError::Message(
-                    "application migration ladder is not contiguous".into(),
-                ));
-            }
+        for migration in migrations.iter() {
             migration.up.apply(&database)?;
             database.pragma_update(None, "user_version", migration.version)?;
             layouts.push(read_layout(&database)?);
@@ -133,20 +179,11 @@ impl ApplicationSchemaHistory {
         let mut rows = self.decode(connection, source_version, bytes)?;
         let mut converted = Vec::with_capacity(rows.len());
         for mut row in rows.drain(..) {
-            let identity = row
-                .columns
-                .iter()
-                .filter(|column| column.primary_key)
-                .cloned()
-                .collect::<Vec<_>>();
-            let operation = row.operation;
+            let identity = row.change.selected_columns(|_, primary_key| primary_key);
+            let operation = row.change.operation();
             let table_name = row.table.clone();
             let indirect = row.indirect;
-            let clock = row
-                .columns
-                .iter()
-                .find(|column| column.name == "_updated_at")
-                .cloned();
+            let clock = row.change.selected_columns(|name, _| name == "_updated_at");
             let mut available = true;
             for migration in self.migrations.iter().skip(source_version as usize) {
                 let table = row.table.clone();
@@ -171,12 +208,15 @@ impl ApplicationSchemaHistory {
                 }
             }
             if available {
-                let actual_identity = row
-                    .columns
-                    .iter()
-                    .filter(|column| column.primary_key)
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let actual_identity = row.change.selected_columns(|_, primary_key| primary_key);
+                if row.change.operation() != operation
+                    || row.table != table_name
+                    || row.indirect != indirect
+                {
+                    return Err(DbError::Message(format!(
+                        "changeset migration altered operation, table or indirect flag for {table_name}"
+                    )));
+                }
                 if actual_identity != identity {
                     return Err(ChangesetMigrationError::MutableIdentity {
                         table: row.table,
@@ -184,15 +224,7 @@ impl ApplicationSchemaHistory {
                     }
                     .into());
                 }
-                if row.operation != operation
-                    || row.table != table_name
-                    || row.indirect != indirect
-                    || row
-                        .columns
-                        .iter()
-                        .find(|column| column.name == "_updated_at")
-                        != clock.as_ref()
-                {
+                if row.change.selected_columns(|name, _| name == "_updated_at") != clock {
                     return Err(DbError::Message(format!(
                         "changeset migration altered operation, table, indirect flag or row clock for {table_name}"
                     )));
@@ -250,33 +282,46 @@ impl ApplicationSchemaHistory {
                 }
                 .into());
             }
-            let operation = match op.code() {
-                Action::SQLITE_INSERT => ChangeOp::Insert,
-                Action::SQLITE_UPDATE => ChangeOp::Update,
-                Action::SQLITE_DELETE => ChangeOp::Delete,
+            fn read_columns<T>(
+                layout: &[ColumnLayout],
+                mut read: impl FnMut(usize) -> Result<T, DbError>,
+            ) -> Result<Vec<ChangesetColumn<T>>, DbError> {
+                layout
+                    .iter()
+                    .enumerate()
+                    .map(|(index, column)| {
+                        Ok(ChangesetColumn {
+                            name: column.name.clone(),
+                            primary_key: column.primary_key,
+                            value: read(index)?,
+                        })
+                    })
+                    .collect()
+            }
+            let change = match op.code() {
+                Action::SQLITE_INSERT => {
+                    ChangesetOperation::Insert(read_columns(columns, |index| {
+                        required_cell(item.new_value(index), index, "new")
+                    })?)
+                }
+                Action::SQLITE_DELETE => {
+                    ChangesetOperation::Delete(read_columns(columns, |index| {
+                        required_cell(item.old_value(index), index, "old")
+                    })?)
+                }
+                Action::SQLITE_UPDATE => {
+                    ChangesetOperation::Update(read_columns(columns, |index| {
+                        Ok(ChangesetUpdate {
+                            old: owned_cell(item.old_value(index), index, "old")?,
+                            new: owned_cell(item.new_value(index), index, "new")?,
+                        })
+                    })?)
+                }
                 _ => return Err(DbError::Message("unsupported changeset operation".into())),
             };
-            let mut values = Vec::with_capacity(columns.len());
-            for (index, column) in columns.iter().enumerate() {
-                values.push(ChangesetColumn {
-                    name: column.name.clone(),
-                    primary_key: column.primary_key,
-                    old: if operation == ChangeOp::Insert {
-                        None
-                    } else {
-                        owned_cell(item.old_value(index), index, "old")?
-                    },
-                    new: if operation == ChangeOp::Delete {
-                        None
-                    } else {
-                        owned_cell(item.new_value(index), index, "new")?
-                    },
-                });
-            }
             rows.push(ChangesetRow {
                 table: table.into(),
-                operation,
-                columns: values,
+                change,
                 indirect: op.indirect(),
             });
         }
@@ -376,6 +421,20 @@ fn owned_cell(
     }
 }
 
+fn required_cell(
+    value: rusqlite::Result<rusqlite::types::ValueRef<'_>>,
+    column: usize,
+    side: &'static str,
+) -> Result<Value, DbError> {
+    owned_cell(value, column, side)?.ok_or_else(|| {
+        DbError::Changeset(crate::ChangesetError::Value {
+            side,
+            column,
+            source: rusqlite::Error::InvalidColumnIndex(column),
+        })
+    })
+}
+
 fn read_layout(connection: &Connection) -> Result<Layout, DbError> {
     let names = crate::query_mapped_rows(
         connection,
@@ -399,15 +458,20 @@ fn read_layout(connection: &Connection) -> Result<Layout, DbError> {
 }
 
 fn validate_layout(row: &ChangesetRow, layout: &Layout, version: u32) -> Result<(), DbError> {
-    let columns = row
-        .columns
-        .iter()
-        .map(|column| ColumnLayout {
-            name: column.name.clone(),
-            primary_key: column.primary_key,
-        })
-        .collect::<Vec<_>>();
-    if layout.get(&row.table) != Some(&columns) {
+    fn columns<T>(values: &[ChangesetColumn<T>]) -> Vec<ColumnLayout> {
+        values
+            .iter()
+            .map(|column| ColumnLayout {
+                name: column.name.clone(),
+                primary_key: column.primary_key,
+            })
+            .collect()
+    }
+    let actual = match &row.change {
+        ChangesetOperation::Insert(values) | ChangesetOperation::Delete(values) => columns(values),
+        ChangesetOperation::Update(values) => columns(values),
+    };
+    if layout.get(&row.table) != Some(&actual) {
         return Err(ChangesetMigrationError::Layout {
             table: row.table.clone(),
             version,
@@ -423,56 +487,77 @@ fn immutable_context(
     row: &ChangesetRow,
     names: &[&str],
 ) -> Result<Option<BTreeMap<String, Value>>, DbError> {
+    match &row.change {
+        ChangesetOperation::Insert(columns) | ChangesetOperation::Delete(columns) => {
+            immutable_column_context(connection, &row.table, columns, names, |value| {
+                Ok(Some(value))
+            })
+        }
+        ChangesetOperation::Update(columns) => {
+            immutable_column_context(connection, &row.table, columns, names, |value| {
+                if value.new.is_some() && value.old != value.new {
+                    return Err(());
+                }
+                Ok(value.old.as_ref().or(value.new.as_ref()))
+            })
+        }
+    }
+}
+
+fn immutable_column_context<'a, T>(
+    connection: &Connection,
+    table: &str,
+    columns: &'a [ChangesetColumn<T>],
+    names: &[&str],
+    cell: impl Fn(&'a T) -> Result<Option<&'a Value>, ()>,
+) -> Result<Option<BTreeMap<String, Value>>, DbError> {
     use rusqlite::OptionalExtension;
-    let columns = names
+    let identity_value = |column: &'a ChangesetColumn<T>| {
+        cell(&column.value).map_err(|()| {
+            DbError::from(ChangesetMigrationError::MutableIdentity {
+                table: table.into(),
+                column: column.name.clone(),
+            })
+        })
+    };
+    let declared = names
         .iter()
         .map(|name| {
-            let column = row
-                .columns
+            let column = columns
                 .iter()
                 .find(|column| column.name == *name)
                 .ok_or_else(|| {
-                    DbError::Message(format!("immutable column {}.{name} is absent", row.table))
+                    DbError::Message(format!("immutable column {table}.{name} is absent"))
                 })?;
-            if row.operation == ChangeOp::Update && column.new.is_some() && column.old != column.new
-            {
-                return Err(ChangesetMigrationError::MutableIdentity {
-                    table: row.table.clone(),
-                    column: (*name).into(),
-                }
-                .into());
-            }
-            Ok((*name, column))
+            Ok((*name, identity_value(column)?))
         })
         .collect::<Result<Vec<_>, DbError>>()?;
     let mut context = BTreeMap::new();
-    for (name, column) in columns {
-        if let Some(value) = column.old.as_ref().or(column.new.as_ref()) {
+    for (name, value) in declared {
+        if let Some(value) = value {
             context.insert(name.into(), value.clone());
             continue;
         }
-        let keys = row
-            .columns
+        let keys = columns
             .iter()
             .filter(|column| column.primary_key)
             .collect::<Vec<_>>();
         let predicates = keys
             .iter()
-            .map(|key| format!("{} = ?", crate::quote_ident(&key.name)))
+            .map(|column| format!("{} = ?", crate::quote_ident(&column.name)))
             .collect::<Vec<_>>()
             .join(" AND ");
-        let values =
-            keys.iter()
-                .map(|key| {
-                    key.old.as_ref().or(key.new.as_ref()).ok_or_else(|| {
-                        DbError::Message("changeset primary key has no value".into())
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+        let values = keys
+            .iter()
+            .map(|column| {
+                identity_value(column)?
+                    .ok_or_else(|| DbError::Message("changeset primary key has no value".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let sql = format!(
             "SELECT {} FROM {} WHERE {predicates}",
             crate::quote_ident(name),
-            crate::quote_ident(&row.table)
+            crate::quote_ident(table)
         );
         let value = connection
             .query_row(&sql, rusqlite::params_from_iter(values), |record| {
@@ -497,21 +582,35 @@ fn encode(connection: &Connection, rows: &[ChangesetRow]) -> Result<Vec<u8>, DbE
         group.set_schema(connection.handle())?;
     }
     for row in rows {
-        let operation = match row.operation {
-            ChangeOp::Insert => ffi::SQLITE_INSERT,
-            ChangeOp::Update => ffi::SQLITE_UPDATE,
-            ChangeOp::Delete => ffi::SQLITE_DELETE,
+        let (operation, old, new) = match &row.change {
+            ChangesetOperation::Insert(columns) => (
+                ffi::SQLITE_INSERT,
+                vec![None; columns.len()],
+                columns
+                    .iter()
+                    .map(|column| Some(column.value.clone()))
+                    .collect(),
+            ),
+            ChangesetOperation::Delete(columns) => (
+                ffi::SQLITE_DELETE,
+                columns
+                    .iter()
+                    .map(|column| Some(column.value.clone()))
+                    .collect(),
+                vec![None; columns.len()],
+            ),
+            ChangesetOperation::Update(columns) => (
+                ffi::SQLITE_UPDATE,
+                columns
+                    .iter()
+                    .map(|column| column.value.old.clone())
+                    .collect(),
+                columns
+                    .iter()
+                    .map(|column| column.value.new.clone())
+                    .collect(),
+            ),
         };
-        let old = row
-            .columns
-            .iter()
-            .map(|column| column.old.clone())
-            .collect::<Vec<_>>();
-        let new = row
-            .columns
-            .iter()
-            .map(|column| column.new.clone())
-            .collect::<Vec<_>>();
         group.add_typed_change(&row.table, operation, &old, &new, row.indirect)?;
     }
     Ok(group.output()?)

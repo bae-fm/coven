@@ -134,7 +134,8 @@ mod migration;
 #[cfg(any(test, feature = "test-utils"))]
 pub use changeset_migration::resolve_and_apply_historical_changeset;
 pub use changeset_migration::{
-    ChangesetColumn, ChangesetMigrationError, ChangesetRow, TableChangesetMigration,
+    ChangesetColumn, ChangesetMigrationError, ChangesetOperation, ChangesetRow, ChangesetUpdate,
+    TableChangesetMigration,
 };
 mod operation_models;
 pub use operation_models::{
