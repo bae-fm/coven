@@ -1,9 +1,7 @@
 use crate::sync::test_helpers::{
-    test_cloud_home, test_migrations, test_store_dir, test_synced_tables, TestStore,
+    qualify_title, test_cloud_home, test_migrations, test_store_dir, test_synced_tables, TestStore,
 };
-use coven_database::{
-    ChangesetOperation, CovenMigrationPolicy, Database, Migration, StoreDatabase,
-};
+use coven_database::{CovenMigrationPolicy, Database, Migration, StoreDatabase};
 use coven_keys::keys::UserKeypair;
 
 #[tokio::test]
@@ -125,27 +123,7 @@ async fn assert_publication_schema_after_upgrade(legacy_journal: bool, state: Jo
                 "notes",
                 &[],
                 |row, _| {
-                    match &mut row.change {
-                        ChangesetOperation::Insert(columns)
-                        | ChangesetOperation::Delete(columns) => {
-                            for column in columns.iter_mut().filter(|column| column.name == "title")
-                            {
-                                if let rusqlite::types::Value::Text(text) = &mut column.value {
-                                    *text = format!("migrated:{text}");
-                                }
-                            }
-                        }
-                        ChangesetOperation::Update(columns) => {
-                            for column in columns.iter_mut().filter(|column| column.name == "title")
-                            {
-                                for value in [&mut column.value.old, &mut column.value.new] {
-                                    if let Some(rusqlite::types::Value::Text(text)) = value {
-                                        *text = format!("migrated:{text}");
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    qualify_title(row);
                     Ok(())
                 },
             )]),

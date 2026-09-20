@@ -15,6 +15,11 @@ use coven_protocol::store_commit::ObjectHash;
 use coven_storage::CloudSyncObjectStorage;
 
 #[cfg(test)]
+mod changeset_titles;
+#[cfg(test)]
+pub(crate) use changeset_titles::qualify_title;
+
+#[cfg(test)]
 mod uploaded_changeset;
 
 /// The synthetic store's schema and `Database` constructors, which the database
