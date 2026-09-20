@@ -246,6 +246,10 @@ impl StoreTransaction<'_, '_> {
                 [write_id.as_str()],
             )
             .map_err(DbError::from)?;
+            conn.execute(
+                "DELETE FROM store_write_schemas WHERE write_id = ?1",
+                [write_id.as_str()],
+            )?;
             let statement = if matches!(
                 settled.status,
                 coven_protocol::write::WriteStatus::LocalOnly

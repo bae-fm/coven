@@ -69,6 +69,7 @@ pub(crate) mod test_support;
 pub(crate) mod verified_store_authority;
 pub(crate) mod write_lifecycle;
 mod write_rebase;
+pub(crate) mod write_schema;
 
 /// One Store transaction and its matching row-and-payload capability.
 ///
@@ -92,6 +93,7 @@ struct VerifiedStoreTransaction<'transaction, 'connection, 'authority, 'clock> {
     gates: &'authority crate::Gates,
     synced_tables: &'authority [coven_protocol::synced_schema::SyncedTable],
     blob_decls: &'authority crate::BlobDecls,
+    schema_history: &'authority crate::changeset_migration::ApplicationSchemaHistory,
     clock_floor: Option<coven_protocol::hlc::Timestamp>,
     clock: &'authority mut coven_protocol::hlc::HlcTransaction<'clock>,
     #[cfg(any(test, feature = "test-utils"))]
@@ -119,6 +121,7 @@ pub(crate) struct StoreSession<'session> {
     sync_routing_hash: coven_protocol::store_commit::ObjectHash,
     hlc: &'session std::sync::Arc<coven_protocol::hlc::Hlc>,
     blob_decls: &'session crate::BlobDecls,
+    schema_history: &'session crate::changeset_migration::ApplicationSchemaHistory,
     #[cfg(any(test, feature = "test-utils"))]
     merge_materialization_failure:
         &'session std::sync::Mutex<Option<crate::MergeMaterializationFailurePoint>>,
@@ -176,6 +179,7 @@ impl<'session> StoreSession<'session> {
         sync_routing_hash: coven_protocol::store_commit::ObjectHash,
         hlc: &'session std::sync::Arc<coven_protocol::hlc::Hlc>,
         blob_decls: &'session crate::BlobDecls,
+        schema_history: &'session crate::changeset_migration::ApplicationSchemaHistory,
         #[cfg(any(test, feature = "test-utils"))]
         merge_materialization_failure: &'session std::sync::Mutex<
             Option<crate::MergeMaterializationFailurePoint>,
@@ -191,6 +195,7 @@ impl<'session> StoreSession<'session> {
             sync_routing_hash,
             hlc,
             blob_decls,
+            schema_history,
             #[cfg(any(test, feature = "test-utils"))]
             merge_materialization_failure,
         }
@@ -252,6 +257,7 @@ impl<'session> StoreSession<'session> {
                 gates: self.gates,
                 synced_tables: self.synced_tables,
                 blob_decls: self.blob_decls,
+                schema_history: self.schema_history,
                 clock_floor: None,
                 clock: &mut clock,
                 #[cfg(any(test, feature = "test-utils"))]
@@ -276,6 +282,15 @@ impl<'session> StoreSession<'session> {
             clock.commit();
         }
         Ok(value)
+    }
+
+    pub(crate) fn validate_source_changeset(
+        &self,
+        version: u32,
+        bytes: &[u8],
+    ) -> Result<(), DbError> {
+        self.schema_history
+            .validate_source(self.conn, version, bytes)
     }
 
     pub(crate) fn read<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>

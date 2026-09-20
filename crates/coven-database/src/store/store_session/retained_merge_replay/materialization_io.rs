@@ -433,6 +433,7 @@ impl StoreDatabase {
         records: StoreRecords<'_>,
         write_id: WriteId,
         base: &str,
+        schema_version: u32,
         changeset_hash: &str,
         local_only: bool,
     ) -> Result<(MergeReplayWriteEffect, CommitFrontier), DbError> {
@@ -448,6 +449,7 @@ impl StoreDatabase {
         }
         Ok((
             MergeReplayWriteEffect {
+                schema_version,
                 write_id,
                 partitions,
             },
@@ -495,6 +497,7 @@ impl StoreDatabase {
                         records,
                         settled.write_id.clone(),
                         &row.base,
+                        row.schema_version,
                         &row.changeset_hash,
                         true,
                     )?;
@@ -505,6 +508,7 @@ impl StoreDatabase {
                         records,
                         settled.write_id.clone(),
                         &row.base,
+                        row.schema_version,
                         &row.changeset_hash,
                         matches!(published.as_ref(), PublishedWrite::Snapshot(_)),
                     )?;
@@ -561,6 +565,7 @@ impl StoreDatabase {
                     records,
                     write_id,
                     &row.base,
+                    row.schema_version,
                     &row.changeset_hash,
                     false,
                 )?;
@@ -599,6 +604,7 @@ impl StoreDatabase {
                         records,
                         write_id,
                         &row.base,
+                        row.schema_version,
                         &row.changeset_hash,
                         false,
                     )?;
@@ -614,6 +620,7 @@ impl StoreDatabase {
                         records,
                         write_id,
                         &row.base,
+                        row.schema_version,
                         &row.changeset_hash,
                         false,
                     )?;
@@ -652,6 +659,7 @@ impl StoreDatabase {
                         records,
                         write_id,
                         &row.base,
+                        row.schema_version,
                         &row.changeset_hash,
                         covered,
                     )?;
@@ -695,6 +703,7 @@ impl StoreDatabase {
                                 records,
                                 write_id,
                                 &row.base,
+                                row.schema_version,
                                 &row.changeset_hash,
                                 true,
                             )?;
@@ -708,6 +717,7 @@ impl StoreDatabase {
                                     records,
                                     write_id,
                                     &row.base,
+                                    row.schema_version,
                                     &row.changeset_hash,
                                     true,
                                 )?;
@@ -727,6 +737,7 @@ impl StoreDatabase {
                                     records,
                                     write_id,
                                     &row.base,
+                                    row.schema_version,
                                     &row.changeset_hash,
                                     false,
                                 )?;

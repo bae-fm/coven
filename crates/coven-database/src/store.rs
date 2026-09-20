@@ -46,6 +46,9 @@ pub(crate) use store_device_state::{
     prune_unreferenced_store_device_states_on, record_store_device_snapshot_on,
 };
 mod store_session;
+pub(crate) use store_session::write_schema::{
+    recover_store_write_schemas, validate_store_write_schemas,
+};
 pub use store_session::PreparedStoreSnapshot;
 pub(crate) use store_session::{SnapshotPreparationDirectory, StoreSession};
 pub(crate) use verified_store_authority::VerifiedStoreAuthority;

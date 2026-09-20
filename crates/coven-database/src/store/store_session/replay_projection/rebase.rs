@@ -29,6 +29,7 @@ impl ReplayProjection {
         )?;
         let schema = self.table_schema(live.synced_tables, live.gates)?;
         let tx = self.connection.unchecked_transaction()?;
+        let schema_version = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         tx.pragma_update(None, "defer_foreign_keys", "ON")?;
         ReplaySql::begin(&tx)?.run(|| {
             let mut authority = VerifiedStoreAuthority::for_replay_baseline(self.baseline.clone());
@@ -48,6 +49,7 @@ impl ReplayProjection {
                 &mut authority,
                 live.authority.root(),
                 effect.clone(),
+                live.schema_history,
                 schema,
                 live.gates,
                 routing_key,
@@ -98,6 +100,7 @@ impl ReplayProjection {
                 dependencies: self.materialized_frontier()?.into_refs(),
             };
             let rebased = crate::write_models::RebasedStoreWrite {
+                schema_version,
                 base: current_base,
                 publication_base: publication_base.clone(),
                 changeset_hash,

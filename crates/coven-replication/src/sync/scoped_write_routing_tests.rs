@@ -13,6 +13,11 @@ use coven_protocol::synced_schema::SyncedTable;
 use coven_protocol::write::WriteStatus;
 use std::path::Path;
 
+#[path = "remote_schema_history_tests.rs"]
+mod remote_schema_history_tests;
+#[path = "write_schema_history_tests.rs"]
+mod write_schema_history_tests;
+
 async fn capture_scoped_write_then_reopen(
     name: &str,
 ) -> (

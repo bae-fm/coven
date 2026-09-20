@@ -14,7 +14,8 @@ use crate::{
     coven_schema::{
         apply_coven_schema, downgrade_coven_schema_to_v0_for_test,
         downgrade_coven_schema_to_v1_for_test, expected_coven_schema_manifest,
-        expected_coven_schema_v1_manifest, live_coven_schema_manifest,
+        expected_coven_schema_v1_manifest, expected_coven_schema_v2_manifest,
+        live_coven_schema_manifest,
     },
     CovenMigrationError, CovenMigrationPolicy, Database, Migration, OpenError,
     COVEN_SCHEMA_MANIFEST_STATE_KEY, COVEN_SCHEMA_VERSION_STATE_KEY,
@@ -156,7 +157,7 @@ fn refuse_pending_preserves_v0() {
         error,
         OpenError::CovenMigration(CovenMigrationError::Pending {
             current: 0,
-            target: 2
+            target: 3
         })
     ));
     assert_eq!(stored_state(&path), before);
@@ -171,7 +172,7 @@ fn apply_pending_migrates_empty_v0_and_refuse_reopens_it() {
 
     drop(open_writer(&path, CovenMigrationPolicy::ApplyPending).expect("migrate v0"));
     let (version, _, outbox_has_label, intent_has_label) = stored_state(&path);
-    assert_eq!(version.as_deref(), Some("2"));
+    assert_eq!(version.as_deref(), Some("3"));
     assert!(outbox_has_label);
     assert!(intent_has_label);
     assert_derived_columns_present(&path, false);
@@ -206,14 +207,19 @@ fn apply_pending_migrates_v1_keeping_its_rows() {
     let before = stored_state(&path);
 
     let conn = Connection::open(&path).expect("open version 1 store");
-    let error =
-        run_coven_migrations_in_transaction(&conn, false, CovenMigrationPolicy::RefusePending)
-            .expect_err("pending Coven migration must be refused");
+    let error = run_coven_migrations_in_transaction(
+        &conn,
+        false,
+        CovenMigrationPolicy::RefusePending,
+        &coven_foundation::store_dir::StoreDir::new(directory.path()),
+        &[notes_migration()],
+    )
+    .expect_err("pending Coven migration must be refused");
     assert!(matches!(
         error,
         CovenMigrationError::Pending {
             current: 1,
-            target: 2
+            target: 3
         }
     ));
     drop(conn);
@@ -222,11 +228,17 @@ fn apply_pending_migrates_v1_keeping_its_rows() {
 
     let conn = Connection::open(&path).expect("open version 1 store");
     let tx = conn.unchecked_transaction().expect("begin migration");
-    run_coven_migrations_in_transaction(&tx, false, CovenMigrationPolicy::ApplyPending)
-        .expect("migrate v1");
+    run_coven_migrations_in_transaction(
+        &tx,
+        false,
+        CovenMigrationPolicy::ApplyPending,
+        &coven_foundation::store_dir::StoreDir::new(directory.path()),
+        &[notes_migration()],
+    )
+    .expect("migrate v1");
     tx.commit().expect("commit migration");
     drop(conn);
-    assert_eq!(stored_state(&path).0.as_deref(), Some("2"));
+    assert_eq!(stored_state(&path).0.as_deref(), Some("3"));
     assert_derived_columns_present(&path, false);
     let conn = Connection::open(&path).expect("inspect migrated rows");
     let baseline: (i64, String) = conn
@@ -374,7 +386,7 @@ fn read_only_refuses_v0_without_writing() {
         error,
         OpenError::CovenMigration(CovenMigrationError::Pending {
             current: 0,
-            target: 2
+            target: 3
         })
     ));
     assert_eq!(stored_state(&path), before);
@@ -386,7 +398,7 @@ fn fresh_refuse_initializes_latest_coven_schema() {
     let path = directory.path().join("fresh-refuse.sqlite");
     drop(open_writer(&path, CovenMigrationPolicy::RefusePending).expect("open fresh store"));
     let (version, _, outbox_has_label, intent_has_label) = stored_state(&path);
-    assert_eq!(version.as_deref(), Some("2"));
+    assert_eq!(version.as_deref(), Some("3"));
     assert!(outbox_has_label);
     assert!(intent_has_label);
     assert_derived_columns_present(&path, false);
@@ -416,13 +428,13 @@ fn ledgerless_v1_schema_advances_to_current() {
         error,
         OpenError::CovenMigration(CovenMigrationError::Pending {
             current: 1,
-            target: 2
+            target: 3
         })
     ));
     assert_eq!(stored_state(&path), before);
 
     drop(open_writer(&path, CovenMigrationPolicy::ApplyPending).expect("advance ledgerless v1"));
-    assert_eq!(stored_state(&path).0.as_deref(), Some("2"));
+    assert_eq!(stored_state(&path).0.as_deref(), Some("3"));
     assert_derived_columns_present(&path, false);
 }
 
@@ -448,22 +460,22 @@ fn apply_pending_installs_missing_ledger_on_exact_current_schema() {
     };
     assert!(matches!(
         error,
-        OpenError::CovenMigration(CovenMigrationError::PendingLedgerInstallation { version: 2 })
+        OpenError::CovenMigration(CovenMigrationError::PendingLedgerInstallation { version: 3 })
     ));
     assert_eq!(stored_state(&path).0, None);
 
     drop(open_writer(&path, CovenMigrationPolicy::ApplyPending).expect("install schema ledger"));
-    assert_eq!(stored_state(&path).0.as_deref(), Some("2"));
+    assert_eq!(stored_state(&path).0.as_deref(), Some("3"));
 }
 
-fn synthetic_v3_migration(conn: &Connection) -> Result<(), CovenMigrationError> {
+fn synthetic_v4_migration(conn: &Connection) -> Result<(), CovenMigrationError> {
     conn.execute_batch(
         "CREATE INDEX cloud_outbox_root_label_test_idx ON cloud_outbox(root_label);",
     )?;
     Ok(())
 }
 
-fn synthetic_v4_migration(conn: &Connection) -> Result<(), CovenMigrationError> {
+fn synthetic_v5_migration(conn: &Connection) -> Result<(), CovenMigrationError> {
     conn.execute_batch(
         "CREATE INDEX blob_make_remote_intents_root_label_test_idx
          ON blob_make_remote_intents(root_label);",
@@ -476,14 +488,18 @@ fn skipped_migration(_: &Connection) -> Result<(), CovenMigrationError> {
 }
 
 /// The real ladder's rungs, as the synthetic rungs below extend them.
-fn shipped_rungs() -> [CovenMigrationStep<'static>; 2] {
+fn shipped_rungs() -> [CovenMigrationStep<'static>; 3] {
     [
         CovenMigrationStep::new_for_test(
             expected_coven_schema_v1_manifest(false).expect("version 1 manifest"),
             skipped_migration,
         ),
         CovenMigrationStep::new_for_test(
-            expected_coven_schema_manifest(false).expect("version 2 manifest"),
+            expected_coven_schema_v2_manifest(false).expect("version 2 manifest"),
+            skipped_migration,
+        ),
+        CovenMigrationStep::new_for_test(
+            expected_coven_schema_manifest(false).expect("version 3 manifest"),
             skipped_migration,
         ),
     ]
@@ -492,28 +508,29 @@ fn shipped_rungs() -> [CovenMigrationStep<'static>; 2] {
 #[test]
 fn generic_ladder_advances_a_known_version_through_an_additional_test_rung() {
     let directory = tempfile::tempdir().expect("temp dir");
-    let path = directory.path().join("synthetic-v3.sqlite");
-    drop(open_writer(&path, CovenMigrationPolicy::ApplyPending).expect("create version 2 store"));
+    let path = directory.path().join("synthetic-v4.sqlite");
+    drop(open_writer(&path, CovenMigrationPolicy::ApplyPending).expect("create version 3 store"));
 
     let expected = Connection::open_in_memory().expect("open expected schema database");
-    apply_coven_schema(&expected).expect("apply version 2 schema");
-    synthetic_v3_migration(&expected).expect("apply synthetic version 3 schema");
-    let version_3_manifest = live_coven_schema_manifest(&expected).expect("version 3 manifest");
-    let [rung_1, rung_2] = shipped_rungs();
+    apply_coven_schema(&expected).expect("apply version 3 schema");
+    synthetic_v4_migration(&expected).expect("apply synthetic version 4 schema");
+    let version_4_manifest = live_coven_schema_manifest(&expected).expect("version 4 manifest");
+    let [rung_1, rung_2, rung_3] = shipped_rungs();
     let ladder = [
         rung_1,
         rung_2,
-        CovenMigrationStep::new_for_test(&version_3_manifest, synthetic_v3_migration),
+        rung_3,
+        CovenMigrationStep::new_for_test(&version_4_manifest, synthetic_v4_migration),
     ];
 
-    let conn = Connection::open(&path).expect("open version 2 store");
+    let conn = Connection::open(&path).expect("open version 3 store");
     run_coven_migrations_with_ladder_for_test(
         &conn,
         false,
         CovenMigrationPolicy::ApplyPending,
         &ladder,
     )
-    .expect("advance version 2 through synthetic rung");
+    .expect("advance version 3 through synthetic rung");
 
     assert_eq!(
         conn.query_row(
@@ -522,11 +539,11 @@ fn generic_ladder_advances_a_known_version_through_an_additional_test_rung() {
             |row| row.get::<_, String>(0),
         )
         .expect("read synthetic schema version"),
-        "3"
+        "4"
     );
     assert_eq!(
         live_coven_schema_manifest(&conn).expect("read migrated schema"),
-        version_3_manifest
+        version_4_manifest
     );
 }
 
@@ -536,28 +553,29 @@ fn generic_ladder_advances_a_known_version_through_an_additional_test_rung() {
 #[test]
 fn ledgerless_schema_at_a_later_version_installs_its_ledger() {
     let directory = tempfile::tempdir().expect("temp dir");
-    let path = directory.path().join("ledgerless-synthetic-v3.sqlite");
-    drop(open_writer(&path, CovenMigrationPolicy::ApplyPending).expect("create version 2 store"));
+    let path = directory.path().join("ledgerless-synthetic-v4.sqlite");
+    drop(open_writer(&path, CovenMigrationPolicy::ApplyPending).expect("create version 3 store"));
 
     let expected = Connection::open_in_memory().expect("open expected schema database");
-    apply_coven_schema(&expected).expect("apply version 2 schema");
-    synthetic_v3_migration(&expected).expect("apply synthetic version 3 schema");
-    let version_3_manifest = live_coven_schema_manifest(&expected).expect("version 3 manifest");
-    let [rung_1, rung_2] = shipped_rungs();
+    apply_coven_schema(&expected).expect("apply version 3 schema");
+    synthetic_v4_migration(&expected).expect("apply synthetic version 4 schema");
+    let version_4_manifest = live_coven_schema_manifest(&expected).expect("version 4 manifest");
+    let [rung_1, rung_2, rung_3] = shipped_rungs();
     let ladder = [
         rung_1,
         rung_2,
-        CovenMigrationStep::new_for_test(&version_3_manifest, synthetic_v3_migration),
+        rung_3,
+        CovenMigrationStep::new_for_test(&version_4_manifest, synthetic_v4_migration),
     ];
 
-    let conn = Connection::open(&path).expect("open version 2 store");
+    let conn = Connection::open(&path).expect("open version 3 store");
     run_coven_migrations_with_ladder_for_test(
         &conn,
         false,
         CovenMigrationPolicy::ApplyPending,
         &ladder,
     )
-    .expect("advance version 2 through synthetic rung");
+    .expect("advance version 3 through synthetic rung");
     conn.execute(
         "DELETE FROM protocol_state WHERE key = ?1",
         [COVEN_SCHEMA_VERSION_STATE_KEY],
@@ -570,10 +588,10 @@ fn ledgerless_schema_at_a_later_version_installs_its_ledger() {
         CovenMigrationPolicy::RefusePending,
         &ladder,
     )
-    .expect_err("ledgerless synthetic version 3 must be refused by a reader");
+    .expect_err("ledgerless synthetic version 4 must be refused by a reader");
     assert!(matches!(
         error,
-        CovenMigrationError::PendingLedgerInstallation { version: 3 }
+        CovenMigrationError::PendingLedgerInstallation { version: 4 }
     ));
     run_coven_migrations_with_ladder_for_test(
         &conn,
@@ -581,7 +599,7 @@ fn ledgerless_schema_at_a_later_version_installs_its_ledger() {
         CovenMigrationPolicy::ApplyPending,
         &ladder,
     )
-    .expect("install the ledger at synthetic version 3");
+    .expect("install the ledger at synthetic version 4");
     assert_eq!(
         conn.query_row(
             "SELECT value FROM protocol_state WHERE key = ?1",
@@ -589,34 +607,35 @@ fn ledgerless_schema_at_a_later_version_installs_its_ledger() {
             |row| row.get::<_, String>(0),
         )
         .expect("read installed schema version"),
-        "3"
+        "4"
     );
     assert_eq!(
         live_coven_schema_manifest(&conn).expect("read unchanged synthetic schema"),
-        version_3_manifest
+        version_4_manifest
     );
 }
 
 #[test]
 fn exact_uninitialized_snapshot_advances_from_every_known_rung() {
     let conn = Connection::open_in_memory().expect("open synthetic snapshot database");
-    apply_coven_schema(&conn).expect("apply version 2 schema");
-    synthetic_v3_migration(&conn).expect("apply synthetic version 3 schema");
-    let version_3_manifest =
-        live_coven_schema_manifest(&conn).expect("read version 3 snapshot manifest");
+    apply_coven_schema(&conn).expect("apply version 3 schema");
+    synthetic_v4_migration(&conn).expect("apply synthetic version 4 schema");
+    let version_4_manifest =
+        live_coven_schema_manifest(&conn).expect("read version 4 snapshot manifest");
 
     let expected = Connection::open_in_memory().expect("open expected schema database");
-    apply_coven_schema(&expected).expect("apply version 2 expected schema");
-    synthetic_v3_migration(&expected).expect("apply synthetic version 3 expected schema");
+    apply_coven_schema(&expected).expect("apply version 3 expected schema");
     synthetic_v4_migration(&expected).expect("apply synthetic version 4 expected schema");
-    let version_4_manifest =
-        live_coven_schema_manifest(&expected).expect("read version 4 manifest");
-    let [rung_1, rung_2] = shipped_rungs();
+    synthetic_v5_migration(&expected).expect("apply synthetic version 5 expected schema");
+    let version_5_manifest =
+        live_coven_schema_manifest(&expected).expect("read version 5 manifest");
+    let [rung_1, rung_2, rung_3] = shipped_rungs();
     let ladder = [
         rung_1,
         rung_2,
-        CovenMigrationStep::new_for_test(&version_3_manifest, skipped_migration),
-        CovenMigrationStep::new_for_test(&version_4_manifest, synthetic_v4_migration),
+        rung_3,
+        CovenMigrationStep::new_for_test(&version_4_manifest, skipped_migration),
+        CovenMigrationStep::new_for_test(&version_5_manifest, synthetic_v5_migration),
     ];
 
     let error = run_uninitialized_snapshot_migrations_with_ladder_for_test(
@@ -625,17 +644,17 @@ fn exact_uninitialized_snapshot_advances_from_every_known_rung() {
         CovenMigrationPolicy::RefusePending,
         &ladder,
     )
-    .expect_err("refuse exact version 3 snapshot with pending version 4");
+    .expect_err("refuse exact version 4 snapshot with pending version 5");
     assert!(matches!(
         error,
         CovenMigrationError::Pending {
-            current: 3,
-            target: 4
+            current: 4,
+            target: 5
         }
     ));
     assert_eq!(
         live_coven_schema_manifest(&conn).expect("read refused snapshot manifest"),
-        version_3_manifest
+        version_4_manifest
     );
 
     run_uninitialized_snapshot_migrations_with_ladder_for_test(
@@ -644,9 +663,12 @@ fn exact_uninitialized_snapshot_advances_from_every_known_rung() {
         CovenMigrationPolicy::ApplyPending,
         &ladder,
     )
-    .expect("advance exact version 3 snapshot through version 4 only");
+    .expect("advance exact version 4 snapshot through version 5 only");
     assert_eq!(
         live_coven_schema_manifest(&conn).expect("read migrated snapshot manifest"),
-        version_4_manifest
+        version_5_manifest
     );
 }
+
+#[path = "store_write_schema.rs"]
+mod store_write_schema;

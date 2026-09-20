@@ -206,7 +206,8 @@ impl StoreSession<'_> {
 
         let mut statement = tx
             .prepare(
-                "SELECT write_id, status, changeset_hash FROM store_writes
+                "SELECT write_id, status, changeset_hash,
+                        (SELECT schema_version FROM store_write_schemas s WHERE s.write_id = store_writes.write_id) FROM store_writes
                  WHERE ordinal >= ?1
                    AND json_extract(status, '$.published') IS NULL
                    AND json_extract(status, '$.resolved') IS NULL
@@ -219,12 +220,14 @@ impl StoreSession<'_> {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, u32>(3)?,
                 ))
             })
             .map_err(DbError::from)?;
         let mut discarded = Vec::new();
         for row in rows {
-            let (stored_id, raw_status, changeset_hash) = row.map_err(DbError::from)?;
+            let (stored_id, raw_status, changeset_hash, captured_version) =
+                row.map_err(DbError::from)?;
             // The changeset is what reversing an unpublished write needs, and
             // only a folded write is without one. The fold stops at the first
             // unsettled write, so no write in this suffix can have been folded.
@@ -245,20 +248,23 @@ impl StoreSession<'_> {
                 )));
             }
             let discarded_id = WriteId::from_generated(stored_id);
-            let actual_hash =
+            let (actual_hash, actual_version) =
                 match StoreRecords::new(&tx, self.store_dir).rebased_store_write(&discarded_id)? {
-                    Some(rebased) => rebased.changeset_hash,
-                    None => changeset_hash.parse::<coven_protocol::store_commit::ObjectHash>()?,
+                    Some(rebased) => (rebased.changeset_hash, rebased.schema_version),
+                    None => (
+                        changeset_hash.parse::<coven_protocol::store_commit::ObjectHash>()?,
+                        captured_version,
+                    ),
                 };
-            discarded.push((discarded_id, actual_hash));
+            discarded.push((discarded_id, actual_hash, actual_version));
         }
         drop(statement);
-        if discarded.first().map(|(stored_id, _)| stored_id) != Some(&write_id) {
+        if discarded.first().map(|(stored_id, _, _)| stored_id) != Some(&write_id) {
             return Err(DbError::Message(format!(
                 "blocked write {write_id} is absent from its unpublished suffix"
             )));
         }
-        for (discarded_id, _) in &discarded {
+        for (discarded_id, _, _) in &discarded {
             if !crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
                 .unpublished_write_cleanup_is_complete(
                     self.verified_store_authority,
@@ -275,11 +281,14 @@ impl StoreSession<'_> {
         )?);
         let store_transaction =
             crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
-        let mut inverses = Vec::with_capacity(discarded.len());
-        let mut restored_blobs = Vec::new();
-        for (_, changeset_hash) in discarded.iter().rev() {
+        let mut suspended_cleanups = Vec::with_capacity(discarded.len());
+        for (_, changeset_hash, schema_version) in discarded.iter().rev() {
             let changeset = store_transaction.payload(*changeset_hash)?;
             let inverse = StoreDatabase::invert_changeset(&changeset)?;
+            let inverse = self
+                .schema_history
+                .migrate(&tx, *schema_version, &inverse)?;
+            let mut restored_blobs = Vec::new();
             for change in crate::walk_changeset(&inverse).map_err(DbError::Changeset)? {
                 if let Some(blob) = self
                     .blob_decls
@@ -291,28 +300,28 @@ impl StoreSession<'_> {
             }
             let inverse = crate::ValidatedChangeset::new(inverse, schema.clone())
                 .map_err(|error| DbError::context("invalid blocked-write inverse", error))?;
-            inverses.push(inverse);
-        }
-        let suspended_cleanup =
-            super::local_blob_cleanup::suspend_leased_blob_cleanup_for_restoration_on(
-                &tx,
-                &restored_blobs,
-            )?;
-        for inverse in inverses {
+            suspended_cleanups.push(
+                super::local_blob_cleanup::suspend_leased_blob_cleanup_for_restoration_on(
+                    &tx,
+                    &restored_blobs,
+                )?,
+            );
             MergeMaterializationTransaction::from_store(
                 crate::store::store_session::StoreTransaction::new(&tx, self.store_dir),
             )
             .apply_changeset_strict(inverse, self.blob_decls)
             .map_err(|error| DbError::context("reverse blocked-write suffix", error))?;
         }
-        super::local_blob_cleanup::reevaluate_suspended_blob_cleanup_on(
-            &tx,
-            self.blob_decls,
-            &suspended_cleanup,
-        )?;
+        for cleanup in &suspended_cleanups {
+            super::local_blob_cleanup::reevaluate_suspended_blob_cleanup_on(
+                &tx,
+                self.blob_decls,
+                cleanup,
+            )?;
+        }
         let discarded_ids: Vec<_> = discarded
             .into_iter()
-            .map(|(write_id, _)| write_id)
+            .map(|(write_id, _, _)| write_id)
             .collect();
         let resolution = WriteResolution::Discarded;
         crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)

@@ -51,6 +51,59 @@ impl DatabaseImageTest {
         crate::apply_coven_schema(&self.connection).map_err(DbError::from)
     }
 
+    pub fn downgrade_coven_schema_to_v2(&self, include_routing: bool) -> Result<(), DbError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute_batch(
+            "UPDATE store_writes SET rebased=json_remove(rebased, '$.schema_version') WHERE rebased IS NOT NULL;
+             DROP TABLE store_write_schemas",
+        )?;
+        crate::set_protocol_state_on(
+            &transaction,
+            crate::COVEN_SCHEMA_MANIFEST_STATE_KEY,
+            &serde_json::to_string(crate::coven_schema::expected_coven_schema_v2_manifest(
+                include_routing,
+            )?)?,
+        )?;
+        crate::set_protocol_state_on(&transaction, crate::COVEN_SCHEMA_VERSION_STATE_KEY, "2")?;
+        transaction.commit().map_err(DbError::from)
+    }
+
+    /// Replace one captured partition with another write's valid payload.
+    pub fn corrupt_first_write_partition_from_last(&self) -> Result<(), DbError> {
+        let changed = self.connection.execute(
+            "UPDATE store_write_partitions SET changeset_hash = (
+                SELECT p.changeset_hash FROM store_write_partitions p
+                JOIN store_writes w USING(write_id) ORDER BY w.ordinal DESC LIMIT 1
+             ) WHERE write_id = (SELECT write_id FROM store_writes ORDER BY ordinal LIMIT 1)",
+            [],
+        )?;
+        if changed != 1 {
+            return Err(DbError::Message(
+                "expected one captured partition to corrupt".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn store_write_schema_versions(
+        &self,
+        write_id: &coven_protocol::write::WriteId,
+    ) -> Result<(u32, Option<u32>), DbError> {
+        let (captured, rebased): (u32, Option<String>) = self.connection.query_row(
+            "SELECT schema_version, rebased FROM store_writes
+             JOIN store_write_schemas USING(write_id) WHERE write_id = ?1",
+            [write_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let actual = rebased
+            .map(|encoded| {
+                serde_json::from_str::<crate::write_models::RebasedStoreWrite>(&encoded)
+                    .map(|effect| effect.schema_version)
+            })
+            .transpose()?;
+        Ok((captured, actual))
+    }
+
     pub fn downgrade_coven_schema_to_v0(&self, include_routing: bool) -> Result<(), DbError> {
         crate::coven_schema::downgrade_coven_schema_to_v0_for_test(
             &self.connection,

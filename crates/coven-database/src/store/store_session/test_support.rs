@@ -5,6 +5,7 @@ use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
 
 struct PreparedWriteTransfer {
+    schema_version: u32,
     write: (String, String, String, String, String, String),
     partitions: Vec<(String, Option<String>, String)>,
     packages: Vec<(String, String)>,
@@ -33,6 +34,7 @@ impl StoreSession<'_> {
                     rusqlite::params![write_id.as_str(), changeset_hash.to_string(), base],
                 )
                 .map_err(DbError::from)?;
+            transaction.execute("INSERT INTO store_write_schemas (write_id, schema_version) SELECT ?1, user_version FROM pragma_user_version", [write_id.as_str()])?;
             transaction.set_payload_owner_claims(
                 &crate::payload_store::store_write_owner_key(write_id),
                 &BTreeSet::from([changeset_hash]),
@@ -208,7 +210,13 @@ impl StoreSession<'_> {
                 ))
             })
             .collect::<Result<Vec<_>, DbError>>()?;
+        let schema_version = connection.query_row(
+            "SELECT schema_version FROM store_write_schemas WHERE write_id = ?1",
+            [write_id.as_str()],
+            |row| row.get(0),
+        )?;
         Ok(PreparedWriteTransfer {
+            schema_version,
             write,
             partitions,
             packages,
@@ -270,6 +278,10 @@ impl StoreSession<'_> {
                 ],
             )
             .map_err(DbError::from)?;
+        transaction.execute(
+            "INSERT INTO store_write_schemas (write_id, schema_version) VALUES (?1, ?2)",
+            rusqlite::params![write_id.as_str(), transfer.schema_version],
+        )?;
         for (audience, control, changeset_hash) in transfer.partitions {
             transaction
                 .execute(
@@ -439,6 +451,7 @@ impl StoreSession<'_> {
                 (write_id.as_str(), status, changeset_hash.to_string(), base),
             )
             .map_err(DbError::from)?;
+        transaction.execute("INSERT INTO store_write_schemas (write_id, schema_version) SELECT ?1, user_version FROM pragma_user_version", [write_id.as_str()])?;
         crate::payload_store::set_payload_owner_claims_on(
             &transaction,
             &owner_key,
@@ -563,6 +576,7 @@ impl StoreSession<'_> {
                     self.blob_decls,
                     self.gates,
                     self.synced_tables,
+                    self.schema_history,
                     None,
                     &BTreeSet::new(),
                     None,
@@ -590,6 +604,7 @@ impl StoreSession<'_> {
                     self.blob_decls,
                     self.gates,
                     self.synced_tables,
+                    self.schema_history,
                     Some(routing_key),
                     &BTreeSet::new(),
                     None,
@@ -609,6 +624,7 @@ impl StoreSession<'_> {
                     self.blob_decls,
                     self.gates,
                     self.synced_tables,
+                    self.schema_history,
                     Some(routing_key),
                     &BTreeSet::new(),
                     None,

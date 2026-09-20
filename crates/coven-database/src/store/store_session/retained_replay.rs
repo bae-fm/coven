@@ -50,7 +50,13 @@ pub(crate) fn migrate_retained_replay_schema_on(
     )?
     .is_some();
     let transaction = image.unchecked_transaction().map_err(DbError::from)?;
-    crate::run_coven_migrations_in_transaction(&transaction, routing.has_scoped_graph(), policy)?;
+    crate::run_coven_migrations_in_transaction(
+        &transaction,
+        routing.has_scoped_graph(),
+        policy,
+        store_dir,
+        migrations,
+    )?;
     let migrated_host_schema_version =
         crate::run_migrations_in_transaction(&transaction, migrations)?;
     if !had_schema_version {
@@ -340,6 +346,7 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
     ("store_write_packages", ReplayTableDisposition::Preserve),
     ("store_write_partitions", ReplayTableDisposition::Preserve),
     ("store_writes", ReplayTableDisposition::Preserve),
+    ("store_write_schemas", ReplayTableDisposition::Preserve),
     ("stream_activations", ReplayTableDisposition::Replace),
     (
         "_coven_audience",

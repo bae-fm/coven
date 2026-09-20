@@ -127,6 +127,11 @@ impl StoreSession<'_> {
                 stage.write_id
             ))
         })?;
+        let captured_schema: u32 = tx.query_row(
+            "SELECT schema_version FROM store_write_schemas WHERE write_id = ?1",
+            [stage.write_id.as_str()],
+            |row| row.get(0),
+        )?;
         let partitions = crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
             .store_write_partitions(stage.write_id.as_str())?;
         let records = super::StoreRecords::new(&tx, self.store_dir);
@@ -246,72 +251,22 @@ impl StoreSession<'_> {
         )
         .map_err(|error| DbError::context("prepared candidate commit", error))?;
         persist_exact_remote_object_on(&tx, self.store_dir, &commit_remote, "candidate commit")?;
-        let expected_partition_count = usize::from(partitions.store.is_some())
-            .checked_add(partitions.circles.len())
-            .ok_or_else(|| DbError::Message("audience partition count overflow".to_string()))?;
-        if stage.audiences.packages.len() != expected_partition_count {
-            return Err(DbError::Message(
-                "prepared audience packages do not cover every write partition".to_string(),
-            ));
-        }
-        let mut indexed = std::collections::BTreeSet::new();
-        for package in &stage.audiences.packages {
-            let value = package.package();
-            if value.store_root_hash() != stage.root.store_root_hash
-                || value.write_id() != &stage.write_id
-                || value.commit_coord() != &commit_ref.coord
-                || value.candidate_family() != stage.commit.value.candidate_family()
-            {
-                return Err(DbError::Message(
-                    "prepared audience package differs from its exact Store commit".to_string(),
-                ));
-            }
-            match value.audience() {
-                coven_protocol::audience_package::PackageAudience::Store => {
-                    let partition = partitions.store.as_ref().ok_or_else(|| {
-                        DbError::Message(
-                            "prepared Store package has no Store partition".to_string(),
-                        )
-                    })?;
-                    if value.changeset() != partition.changeset {
-                        return Err(DbError::Message(
-                            "prepared Store package changeset differs from its partition"
-                                .to_string(),
-                        ));
-                    }
-                    stage
-                        .commit
-                        .value
-                        .verify_store_package(package.semantic_bytes())
-                        .map_err(DbError::from)?;
-                }
-                coven_protocol::audience_package::PackageAudience::Circle { circle_id, .. } => {
-                    let partition = partitions
-                        .circles
-                        .iter()
-                        .find(|partition| {
-                            partition.audience
-                                == coven_protocol::circle::Audience::Circle(*circle_id)
-                        })
-                        .ok_or_else(|| {
-                            DbError::Message(format!(
-                                "prepared Circle package {circle_id} has no partition"
-                            ))
-                        })?;
-                    if value.changeset() != partition.changeset {
-                        return Err(DbError::Message(format!(
-                            "prepared Circle package {circle_id} changeset differs from its partition"
-                        )));
-                    }
-                    stage
-                        .commit
-                        .value
-                        .verify_circle_package(*circle_id, package.semantic_bytes())
-                        .map_err(DbError::from)?;
-                }
-            }
-            indexed.insert(package.remote_object_id());
-        }
+        validate_write_partitions(
+            &stage.commit.value,
+            captured_schema,
+            &partitions,
+            stage
+                .audiences
+                .packages
+                .iter()
+                .map(crate::PreparedAudiencePackage::package),
+        )?;
+        let mut indexed = stage
+            .audiences
+            .packages
+            .iter()
+            .map(crate::PreparedAudiencePackage::remote_object_id)
+            .collect::<std::collections::BTreeSet<_>>();
         indexed.extend(
             stage
                 .audiences
@@ -374,6 +329,7 @@ impl StoreSession<'_> {
         changeset: Vec<u8>,
     ) -> Result<(), DbError> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let schema_version = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let changeset = self.blob_decls.complete_blob_changeset(&tx, &changeset)?;
         let base = StoreWriteBase {
             dependencies: crate::store::materialized_commit_index::materialized_frontier_on(
@@ -397,7 +353,14 @@ impl StoreSession<'_> {
             crate::payload_store::CreatedPayloadFiles::untracked(),
         )?;
         crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
-            .insert_store_write(&write_id, &partitions, changeset_hash, &base, &blob_facts)?;
+            .insert_store_write(
+                &write_id,
+                schema_version,
+                &partitions,
+                changeset_hash,
+                &base,
+                &blob_facts,
+            )?;
         tx.commit().map_err(DbError::from)
     }
 }
@@ -430,4 +393,63 @@ impl StoreDatabase {
         })
         .await
     }
+}
+
+/// Bind each captured remote partition to the canonical package its signed commit names.
+pub(super) fn validate_write_partitions<'a>(
+    commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+    schema_version: u32,
+    partitions: &crate::PreparedStoreWritePartitions,
+    packages: impl ExactSizeIterator<Item = &'a coven_protocol::audience_package::AudiencePackage>,
+) -> Result<(), DbError> {
+    let expected = usize::from(partitions.store.is_some())
+        .checked_add(partitions.circles.len())
+        .ok_or_else(|| DbError::Message("audience partition count overflow".into()))?;
+    if packages.len() != expected {
+        return Err(DbError::Message(
+            "authenticated packages do not cover every write partition".into(),
+        ));
+    }
+    let mut audiences = std::collections::BTreeSet::new();
+    for package in packages {
+        if package.schema_version() != schema_version
+            || package.store_root_hash() != commit.store_root_hash()
+            || package.write_id() != &commit.write_id
+            || package.commit_coord() != &commit.reference().coord
+            || package.candidate_family() != commit.candidate_family()
+        {
+            return Err(DbError::Message(
+                "authenticated package differs from its exact Store commit".into(),
+            ));
+        }
+        let (audience, partition) = match package.audience() {
+            coven_protocol::audience_package::PackageAudience::Store => {
+                commit.verify_store_package(&package.to_bytes())?;
+                (None, partitions.store.as_ref())
+            }
+            coven_protocol::audience_package::PackageAudience::Circle { circle_id, .. } => {
+                commit.verify_circle_package(*circle_id, &package.to_bytes())?;
+                (
+                    Some(*circle_id),
+                    partitions.circles.iter().find(|partition| {
+                        partition.audience == coven_protocol::circle::Audience::Circle(*circle_id)
+                    }),
+                )
+            }
+        };
+        if !audiences.insert(audience) {
+            return Err(DbError::Message(
+                "authenticated write repeats an audience partition".into(),
+            ));
+        }
+        let partition = partition.ok_or_else(|| {
+            DbError::Message("authenticated package has no captured partition".into())
+        })?;
+        if package.changeset() != partition.changeset {
+            return Err(DbError::Message(
+                "authenticated package changeset differs from its captured partition".into(),
+            ));
+        }
+    }
+    Ok(())
 }

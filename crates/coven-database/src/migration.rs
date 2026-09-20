@@ -3,7 +3,7 @@
 //! `user_version` is a SQLite header field, so it travels inside a snapshot's
 //! byte-for-byte DB image (`VACUUM INTO`/`VACUUM` preserve it): a device that
 //! bootstraps from a snapshot inherits the writer's applied version directly, and
-//! that same number is the wire `schema_version` every changeset is stamped with.
+//! each captured changeset retains that authoring version through publication and replay.
 //! Bumping the schema is therefore adding a migration — a device cannot stamp a
 //! version it has not migrated to.
 //!
@@ -70,6 +70,7 @@ pub struct Migration {
     /// Recorded in logs, e.g. "initial", "add_album_disc_count".
     pub name: &'static str,
     pub up: MigrationStep,
+    pub(crate) changesets: Vec<crate::TableChangesetMigration>,
 }
 
 /// The shared closure a [`MigrationStep::Run`] holds. The database retains the
@@ -94,7 +95,7 @@ pub enum MigrationStep {
 }
 
 impl MigrationStep {
-    fn apply(&self, conn: &Connection) -> Result<(), DbError> {
+    pub(crate) fn apply(&self, conn: &Connection) -> Result<(), DbError> {
         match self {
             Self::Sql(sql) => conn.execute_batch(sql.as_ref()).map_err(DbError::from),
             Self::Run(run) => run(&MigrationContext::new(conn)),
@@ -103,12 +104,19 @@ impl MigrationStep {
 }
 
 impl Migration {
+    /// Transform historical row changes alongside this schema step.
+    pub fn changesets(mut self, changesets: Vec<crate::TableChangesetMigration>) -> Self {
+        self.changesets = changesets;
+        self
+    }
+
     /// A migration whose `up` is a static DDL batch.
     pub fn sql(version: u32, name: &'static str, sql: &'static str) -> Self {
         Migration {
             version,
             name,
             up: MigrationStep::Sql(sql),
+            changesets: Vec::new(),
         }
     }
 
@@ -125,6 +133,7 @@ impl Migration {
             version,
             name,
             up: MigrationStep::Run(std::sync::Arc::new(f)),
+            changesets: Vec::new(),
         }
     }
 }

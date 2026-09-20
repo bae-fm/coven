@@ -2,6 +2,7 @@ use super::*;
 use coven_protocol::store_commit::VerifiedStoreBatchCommit;
 
 pub struct PreparedStoreWrite {
+    pub schema_version: u32,
     pub write_id: WriteId,
     pub partitions: PreparedStoreWritePartitions,
     pub base: StoreWriteBase,
@@ -17,6 +18,7 @@ pub struct PreparedStoreWritePartitions {
 
 #[derive(Clone)]
 pub(crate) struct MergeReplayWriteEffect {
+    pub schema_version: u32,
     pub write_id: WriteId,
     pub partitions: PreparedStoreWritePartitions,
 }
@@ -84,6 +86,7 @@ pub(crate) struct SettledStoreWrite {
 }
 
 pub(crate) struct RetainedStoreWriteManifest {
+    pub schema_version: u32,
     pub ordinal: i64,
     pub write_id: String,
     pub status: String,
@@ -124,6 +127,7 @@ pub struct StoreWriteBase {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RebasedStoreWrite {
+    pub schema_version: u32,
     pub base: StoreWriteBase,
     pub publication_base: coven_protocol::store_commit::StorePublicationBase,
     pub changeset_hash: ObjectHash,

@@ -161,7 +161,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 })?;
                 let inbound = crate::normalize_inbound_store_changeset(
                     conn,
-                    package.changeset(),
+                    changeset.bytes(),
                     &held_rows,
                     gates,
                     routing_key,
@@ -222,7 +222,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     blob_decls,
                     schema,
                     private_rows,
-                    package.changeset(),
+                    changeset.bytes(),
                     package,
                     commit,
                     own_publication,
@@ -235,7 +235,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     gates,
                     None,
                     changeset,
-                    package.changeset().to_vec(),
+                    changeset.bytes().to_vec(),
                     None,
                     timestamp_policy,
                     changeset_max,
@@ -250,7 +250,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 })?;
                 let rows = crate::filter_inbound_circle_changeset(
                     conn,
-                    package.changeset(),
+                    changeset.bytes(),
                     *circle_id,
                     store_audience_transitions,
                     &held_rows,
@@ -304,6 +304,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         >,
         materialization: PreparedMergeMaterialization,
         local_effect: Option<crate::MergeReplayWriteEffect>,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
         schema: std::sync::Arc<TableSchema>,
         private_rows: &mut ReplayRows,
     ) -> Result<AppliedMergeMaterialization, DbError> {
@@ -341,23 +342,46 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 inactive_circles.insert(activation.circle_id);
             }
         }
-        let store_audience_transitions = materialization
+        let store_package = materialization
             .packages
             .iter()
-            .find(|prepared| matches!(prepared.package.audience(), PackageAudience::Store))
-            .map(|prepared| crate::store_audience_transitions(prepared.package.changeset()))
-            .transpose()
-            .map_err(DbError::from)?
-            .unwrap_or_default();
+            .find(|prepared| matches!(prepared.package.audience(), PackageAudience::Store));
+        let store_changeset = store_package
+            .map(|prepared| {
+                schema_history.migrate(
+                    conn,
+                    prepared.package.schema_version(),
+                    prepared.package.changeset(),
+                )
+            })
+            .transpose()?;
+        let store_audience_transitions = match &store_changeset {
+            Some(bytes) => crate::store_audience_transitions(bytes).map_err(DbError::from)?,
+            None => crate::StoreAudienceTransitions::default(),
+        };
         for prepared in &materialization.packages {
             let package = &prepared.package;
-            let changeset = &prepared.changeset;
+            let bytes = match package.audience() {
+                PackageAudience::Store => store_changeset
+                    .as_ref()
+                    .ok_or_else(|| {
+                        DbError::Message("Store package lost its converted changeset".into())
+                    })?
+                    .clone(),
+                PackageAudience::Circle { .. } => {
+                    schema_history.migrate(conn, package.schema_version(), package.changeset())?
+                }
+            };
+            let changeset = prepared
+                .changeset
+                .validate_subset(bytes)
+                .map_err(DbError::from)?;
             let winning_rows = match self.apply_merge_package(
                 blob_decls,
                 gates,
                 routing_key,
                 package,
-                changeset,
+                &changeset,
                 &store_audience_transitions,
                 timestamp_policy,
                 &mut changeset_max,
@@ -430,6 +454,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         if let Some(effect) = local_effect {
             if let Some(hold) = self.apply_local_replay_effect(
                 effect,
+                schema_history,
                 schema.clone(),
                 gates,
                 routing_key,

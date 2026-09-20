@@ -230,6 +230,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
                 self.blob_decls,
                 gates,
                 synced_tables,
+                self.schema_history,
                 routing_key.as_ref(),
                 &std::collections::BTreeSet::new(),
                 crate::ReplayJournal::Owed,

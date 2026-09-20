@@ -13,6 +13,7 @@ use crate::coven_schema_definitions::{
     BLOB_MAKE_REMOTE_INTENTS_COLUMNS, BLOB_MAKE_REMOTE_INTENTS_V0_COLUMNS, CLOUD_OUTBOX_COLUMNS,
     CLOUD_OUTBOX_V0_COLUMNS, OBJECT_OWNERSHIP_TRIGGERS, OUTBOUND_CIRCLE_SNAPSHOT_V1_COLUMNS,
     OUTBOUND_STORE_SNAPSHOT_V1_COLUMNS, RETAINED_REPLAY_BASELINES_V1_COLUMNS,
+    STORE_WRITE_SCHEMAS_COLUMNS,
 };
 use crate::schema_introspection::normalize_schema_sql;
 use crate::{query_mapped_rows, DbError};
@@ -185,6 +186,7 @@ macro_rules! coven_tables {
     prepared TEXT CHECK (prepared IS NULL OR json_valid(prepared))
 "
         );
+        $visit!(store_write_schemas, STORE_WRITE_SCHEMAS_COLUMNS);
         $visit!(
             store_write_blob_leases,
             "
@@ -768,6 +770,18 @@ fn recreate_version_0_transition_tables(conn: &rusqlite::Connection) -> rusqlite
     )
 }
 
+fn build_expected_coven_schema_v2_manifest(
+    include_routing: bool,
+) -> rusqlite::Result<CovenSchemaManifest> {
+    let conn = rusqlite::Connection::open_in_memory()?;
+    apply_coven_schema(&conn)?;
+    if include_routing {
+        apply_coven_routing_schema(&conn)?;
+    }
+    conn.execute_batch("DROP TABLE store_write_schemas")?;
+    live_coven_schema_manifest(&conn)
+}
+
 fn build_expected_coven_schema_v1_manifest(
     include_routing: bool,
 ) -> rusqlite::Result<CovenSchemaManifest> {
@@ -776,6 +790,7 @@ fn build_expected_coven_schema_v1_manifest(
     if include_routing {
         apply_coven_routing_schema(&conn)?;
     }
+    conn.execute_batch("DROP TABLE store_write_schemas")?;
     recreate_version_1_tables(&conn)?;
     live_coven_schema_manifest(&conn)
 }
@@ -788,6 +803,7 @@ fn build_expected_coven_schema_v0_manifest(
     if include_routing {
         apply_coven_routing_schema(&conn)?;
     }
+    conn.execute_batch("DROP TABLE store_write_schemas")?;
     recreate_version_1_tables(&conn)?;
     recreate_version_0_transition_tables(&conn)?;
     live_coven_schema_manifest(&conn)
@@ -798,6 +814,23 @@ static EXPECTED_COVEN_SCHEMA: std::sync::LazyLock<Result<CovenSchemaManifest, ru
 static EXPECTED_ROUTED_COVEN_SCHEMA: std::sync::LazyLock<
     Result<CovenSchemaManifest, rusqlite::Error>,
 > = std::sync::LazyLock::new(|| build_expected_coven_schema_manifest(true));
+static EXPECTED_COVEN_SCHEMA_V2: std::sync::LazyLock<Result<CovenSchemaManifest, rusqlite::Error>> =
+    std::sync::LazyLock::new(|| build_expected_coven_schema_v2_manifest(false));
+static EXPECTED_ROUTED_COVEN_SCHEMA_V2: std::sync::LazyLock<
+    Result<CovenSchemaManifest, rusqlite::Error>,
+> = std::sync::LazyLock::new(|| build_expected_coven_schema_v2_manifest(true));
+
+pub(crate) fn expected_coven_schema_v2_manifest(
+    include_routing: bool,
+) -> Result<&'static CovenSchemaManifest, DbError> {
+    let expected = if include_routing {
+        &*EXPECTED_ROUTED_COVEN_SCHEMA_V2
+    } else {
+        &*EXPECTED_COVEN_SCHEMA_V2
+    };
+    expected.as_ref().map_err(DbError::ExpectedSchema)
+}
+
 static EXPECTED_COVEN_SCHEMA_V1: std::sync::LazyLock<Result<CovenSchemaManifest, rusqlite::Error>> =
     std::sync::LazyLock::new(|| build_expected_coven_schema_v1_manifest(false));
 static EXPECTED_ROUTED_COVEN_SCHEMA_V1: std::sync::LazyLock<
@@ -864,6 +897,7 @@ pub(crate) fn downgrade_coven_schema_to_v1_for_test(
     include_routing: bool,
 ) -> Result<(), DbError> {
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+    tx.execute_batch("DROP TABLE store_write_schemas")?;
     recreate_version_1_tables(&tx).map_err(DbError::from)?;
     let manifest = serde_json::to_string(expected_coven_schema_v1_manifest(include_routing)?)
         .map_err(DbError::from)?;
@@ -888,6 +922,7 @@ pub(crate) fn downgrade_coven_schema_to_v0_for_test(
     include_routing: bool,
 ) -> Result<(), DbError> {
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+    tx.execute_batch("DROP TABLE store_write_schemas")?;
     recreate_version_1_tables(&tx).map_err(DbError::from)?;
     recreate_version_0_transition_tables(&tx).map_err(DbError::from)?;
     let manifest = serde_json::to_string(expected_coven_schema_v0_manifest(include_routing)?)

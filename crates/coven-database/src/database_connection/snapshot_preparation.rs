@@ -494,7 +494,7 @@ impl DatabaseConnection {
                             .expect("transfer limits mutex poisoned"),
                         receiver.context.hlc.clone(),
                         receiver.context.coven_migration_policy,
-                        &receiver.context.migrations,
+                        receiver.context.schema_history.migrations(),
                         crate::database_open::CovenMetadataOpen::VerifiedSnapshot(&install),
                         false,
                     )

@@ -12,6 +12,7 @@ impl StoreTransaction<'_, '_> {
         authority: &mut crate::store::VerifiedStoreAuthority,
         tables: &[SyncedTable],
         receiver_wall_ms: u64,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
     ) -> Result<(), DbError> {
         let records = self.records();
         let baseline = authority.retained_replay_baseline_on(records)?.clone();
@@ -128,11 +129,15 @@ impl StoreTransaction<'_, '_> {
                     ));
                 };
                 materialization.record_package_activation(&next, &retained)?;
-                let source =
-                    crate::ValidatedChangeset::new(package.changeset().to_vec(), schema.clone())?;
+                let converted = schema_history.migrate(
+                    self.transaction,
+                    package.schema_version(),
+                    package.changeset(),
+                )?;
+                let source = crate::ValidatedChangeset::new(converted, schema.clone())?;
                 let rows = crate::gate::filter_snapshot_circle_changeset(
                     self.transaction,
-                    package.changeset(),
+                    source.bytes(),
                     *circle_id,
                     &gates,
                     &staged.routing_key,

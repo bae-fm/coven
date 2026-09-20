@@ -144,3 +144,9 @@ pub(crate) const OUTBOUND_CIRCLE_SNAPSHOT_V1_COLUMNS: &str = "
     image_ref TEXT NOT NULL CHECK (json_valid(image_ref)),
     meta_bytes BLOB NOT NULL
 ";
+
+pub(crate) const STORE_WRITE_SCHEMAS_COLUMNS: &str = "
+    write_id TEXT PRIMARY KEY,
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 0),
+    FOREIGN KEY (write_id) REFERENCES store_writes(write_id) ON DELETE CASCADE
+";

@@ -191,6 +191,7 @@ impl StoreTransaction<'_, '_> {
         synced_tables: &[SyncedTable],
         blob_decls: &crate::BlobDecls,
         receiver_wall_ms: u64,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
     ) -> Result<Option<coven_protocol::hlc::Timestamp>, DbError> {
         let baseline = self.load_replay_baseline()?;
         if !matches!(&baseline.authority, crate::RetainedReplayAuthority::InstalledSnapshot(authority) if &authority.store_root == root)
@@ -217,6 +218,7 @@ impl StoreTransaction<'_, '_> {
             &mut authority,
             synced_tables,
             receiver_wall_ms,
+            schema_history,
         )?;
         self.records().replace_retained_replay_image(
             &baseline,
@@ -234,6 +236,7 @@ impl StoreTransaction<'_, '_> {
         verified_authority: &mut crate::store::VerifiedStoreAuthority,
         synced_tables: &[SyncedTable],
         receiver_wall_ms: u64,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
     ) -> Result<Option<coven_protocol::hlc::Timestamp>, DbError> {
         self.restore_snapshot_circle_access(verified_authority, root, &circle_installs.access)?;
         let mut floor = None;
@@ -313,6 +316,7 @@ impl StoreTransaction<'_, '_> {
                 synced_tables,
                 &selected.activation_commit,
                 &selected.image,
+                schema_history,
             )?;
             self.record_one_circle_bootstrap_coverage(
                 verified_authority,
@@ -328,6 +332,7 @@ impl StoreTransaction<'_, '_> {
             verified_authority,
             synced_tables,
             receiver_wall_ms,
+            schema_history,
         )?;
         // Circle images arrive after the Store database's open-time clock seed.
         // Their row registers must join the same atomic floor as their metadata.

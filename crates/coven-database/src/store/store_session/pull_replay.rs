@@ -17,9 +17,16 @@ pub(crate) fn install_circle_bootstrap_image_on(
     synced_tables: &[SyncedTable],
     activation_commit: &StoreBatchCommitRef,
     bootstrap: &VerifiedCircleImage,
+    schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
 ) -> Result<(), DbError> {
-    let staged = StagedCircleRows::stage(conn, bootstrap.image_bytes(), synced_tables)
-        .map_err(|error| DbError::context("stage retained Circle bootstrap rows", error))?;
+    let staged = StagedCircleRows::stage_historical(
+        conn,
+        bootstrap.image_bytes(),
+        synced_tables,
+        bootstrap.reference().schema_version,
+        schema_history,
+    )
+    .map_err(|error| DbError::context("stage retained Circle bootstrap rows", error))?;
     staged.install_on(
         conn,
         synced_tables,

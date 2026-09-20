@@ -138,6 +138,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
             self.blob_decls,
             self.gates,
             self.synced_tables,
+            self.schema_history,
             routing_key,
             &BTreeSet::new(),
             crate::ReplayJournal::Owed,
@@ -624,6 +625,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
             synced_tables,
             blob_decls,
             receiver_wall_ms,
+            self.schema_history,
         )?;
         if snapshot_floor > self.clock_floor {
             self.clock_floor = snapshot_floor;
@@ -760,6 +762,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
             blob_decls,
             gates,
             synced_tables,
+            self.schema_history,
             routing_key.as_ref(),
             None,
             crate::ReplayJournal::Owed,

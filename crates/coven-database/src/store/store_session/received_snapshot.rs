@@ -23,6 +23,7 @@ impl StoreSession<'_> {
             self.synced_tables,
             self.blob_decls,
             receiver_wall_ms,
+            self.schema_history,
         )?;
         transaction.commit()?;
         self.verified_store_authority

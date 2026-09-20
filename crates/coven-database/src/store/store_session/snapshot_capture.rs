@@ -60,6 +60,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
             self.blob_decls,
             self.gates,
             self.synced_tables,
+            self.schema_history,
             routing_key.as_ref(),
             Some(current_cut),
             crate::ReplayJournal::Omit,
@@ -85,6 +86,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
             self.blob_decls,
             self.gates,
             self.synced_tables,
+            self.schema_history,
             routing_key.as_ref(),
             Some(cut),
             crate::ReplayJournal::Folded(&folded),
@@ -205,6 +207,7 @@ impl StoreSession<'_> {
                 transaction.blob_decls,
                 transaction.gates,
                 transaction.synced_tables,
+                transaction.schema_history,
                 routing_key.as_ref(),
                 Some(&coverage),
                 crate::ReplayJournal::Omit,
@@ -238,6 +241,7 @@ impl StoreSession<'_> {
                     self.blob_decls,
                     self.gates,
                     self.synced_tables,
+                    self.schema_history,
                     Some(routing_key),
                     &std::collections::BTreeSet::new(),
                     Some(cutoff),
@@ -372,6 +376,7 @@ impl StoreDatabase {
                 circle_id,
                 session.synced_tables,
                 routing_key.as_ref(),
+                session.schema_history,
             );
             Ok(verification.map(|()| image))
         })

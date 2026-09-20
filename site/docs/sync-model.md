@@ -342,29 +342,21 @@ stamps, as it lands during pull.
 
 ## Schema versioning
 
-Devices upgrade at different times, so two schema versions are routinely live
-against one store; the version stamp is what lets them coexist instead of
-corrupting each other. Every outgoing Store commit carries the device's schema
-version: the top rung of
-the host's [migration ladder](/docs/schema-evolution), reported by
-`Database::schema_version`.
-Pull enforces it two ways:
+Every retained write carries the schema version under which its changeset was
+captured. Publication preserves that version even after the producer upgrades.
+A package newer than the receiver is held with
+`HeldStorePositionReason::NewerSchema`; its materialized position and dependent
+work wait until the app supports it.
 
-- **Hard floor.** If the local version is below storage's
-  `min_schema_version`, pull returns
-  `PullError::SchemaVersionTooOld`
-  and syncs nothing. Its `Display` is the message shown to the user: update the
-  app to keep syncing. This is permanent until the user upgrades. The floor
-  object is untrusted input, so it is honored only when signed by a current
-  Owner; anything else is a freeze or downgrade attempt and is ignored.
-- **Per-package hold.** A Store package whose `schema_version` is above the
-  local one produces `HeldStorePositionReason::NewerSchema` in the pull's
-  `held_positions`. Its materialized position does not advance, and dependent
-  work waits. After an app upgrade, pull can prepare and apply the package.
+For supported historical versions, the registered migration ladder translates
+typed old/new cells before current-schema checks and conflict resolution.
+Conversion occurs in ordered transactional application, so preceding writes
+are visible when a sparse UPDATE needs declared immutable identity context.
+The signed original package and version stay unchanged. A failed conversion
+rolls back its installation, including rows and materialized positions.
 
-How migrations, this version number, the `min_schema_version` floor, and
-snapshots fit together, with worked examples for additive vs. structural changes,
-is its own page: [Schema evolution](/docs/schema-evolution).
+Image migrations, changeset transformations, captured journal versions, and
+snapshot tails are described in [Schema evolution](/docs/schema-evolution).
 
 ## Lifecycle
 
@@ -431,5 +423,5 @@ errors are not connectivity failures; they remain typed failed or held work. A
 write whose own package, blob state, or Store protocol state is invalid is
 durable `Blocked` and requires `retry_blocked_write` after repair or
 `discard_blocked_write`; reconnect does not silently requeue it. The
-schema-too-old floor requires an app upgrade, and membership rejection means the
-device is no longer a write-capable member.
+newer-schema package hold requires an app upgrade, and membership rejection means
+the device is no longer a write-capable member.

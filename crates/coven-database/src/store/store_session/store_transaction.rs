@@ -237,6 +237,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
     pub(crate) fn insert_store_write(
         self,
         write_id: &WriteId,
+        schema_version: u32,
         partitions: &[AudiencePartition],
         changeset_hash: ObjectHash,
         base: &StoreWriteBase,
@@ -303,6 +304,10 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             ],
         )
         .map_err(DbError::from)?;
+        tx.execute(
+            "INSERT INTO store_write_schemas (write_id, schema_version) VALUES (?1, ?2)",
+            rusqlite::params![write_id.as_str(), schema_version],
+        )?;
         let payloads = self.replace_store_write_partitions(
             write_id,
             partitions,

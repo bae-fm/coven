@@ -438,7 +438,7 @@ async fn writer_migrates_the_retained_replay_image_with_the_store() {
         error,
         coven_database::OpenError::CovenMigration(coven_database::CovenMigrationError::Pending {
             current: 0,
-            target: 2
+            target: 3
         })
     ));
 

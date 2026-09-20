@@ -74,6 +74,7 @@ impl ReplayProjectionResult {
                 &mut authority,
                 live.authority.root(),
                 effect,
+                live.schema_history,
                 schema,
                 live.gates,
                 routing_key,
@@ -256,6 +257,7 @@ impl ReplayProjection {
         coverage: &coven_protocol::circle::CircleBootstrapCoverageRef,
         synced_tables: &[coven_protocol::synced_schema::SyncedTable],
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
     ) -> Result<(), DbError> {
         let staged = crate::store::verify_circle_bootstrap_rows(
             &self.connection,
@@ -264,6 +266,7 @@ impl ReplayProjection {
             coverage.circle_id,
             synced_tables,
             routing_key,
+            schema_history,
         )
         .map_err(|error| {
             DbError::context(
@@ -301,6 +304,7 @@ impl ReplayProjection {
         >,
         materialization: crate::PreparedMergeMaterialization,
         local_effect: Option<crate::MergeReplayWriteEffect>,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
         schema: std::sync::Arc<TableSchema>,
         private_rows: &mut super::merge_materialization_transaction::ReplayRows,
     ) -> Result<super::merge_materialization_transaction::AppliedMergeMaterialization, DbError>
@@ -324,6 +328,7 @@ impl ReplayProjection {
             Some(circle_bootstrap_cuts),
             materialization,
             local_effect,
+            schema_history,
             schema,
             &mut next_private_rows,
         )?;
@@ -345,6 +350,7 @@ impl ReplayProjection {
         authority: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
         effect: crate::MergeReplayWriteEffect,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
         schema: std::sync::Arc<TableSchema>,
         gates: &crate::Gates,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
@@ -362,6 +368,7 @@ impl ReplayProjection {
             authority,
             root,
             effect,
+            schema_history,
             schema,
             gates,
             routing_key,

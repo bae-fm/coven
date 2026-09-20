@@ -32,6 +32,7 @@ impl VerifiedStoreTransaction<'_, '_, '_, '_> {
             self.blob_decls,
             self.gates,
             self.synced_tables,
+            self.schema_history,
             routing_key,
             Some(&frontier),
             crate::ReplayJournal::Rebase,

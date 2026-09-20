@@ -269,6 +269,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         authority: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
         effect: crate::MergeReplayWriteEffect,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
         schema: std::sync::Arc<TableSchema>,
         gates: &crate::Gates,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
@@ -278,6 +279,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             authority,
             root,
             effect,
+            schema_history,
             schema,
             gates,
             routing_key,
@@ -303,6 +305,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         >,
         materialization: PreparedMergeMaterialization,
         local_effect: Option<crate::MergeReplayWriteEffect>,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
         schema: std::sync::Arc<TableSchema>,
         replay_rows: &mut ReplayRows,
     ) -> Result<AppliedMergeMaterialization, DbError> {
@@ -317,6 +320,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             baseline_circle_cuts,
             materialization,
             local_effect,
+            schema_history,
             schema,
             replay_rows,
         )

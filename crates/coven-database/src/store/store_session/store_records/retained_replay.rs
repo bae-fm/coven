@@ -294,6 +294,7 @@ impl StoreRecords<'_> {
     ) -> Result<Vec<crate::write_models::RetainedStoreWriteManifest>, DbError> {
         #[derive(serde::Serialize)]
         struct ManifestInput<'a> {
+            schema_version: Option<u32>,
             ordinal: i64,
             write_id: &'a str,
             status: &'a str,
@@ -312,7 +313,9 @@ impl StoreRecords<'_> {
         let writes = crate::query_mapped_rows(
             self.conn,
             "SELECT ordinal, write_id, status, affected_rows, changeset_hash,
-                    base, blob_facts, prepared, rebased
+                    base, blob_facts, prepared, rebased,
+                    (SELECT schema_version FROM store_write_schemas schemas
+                     WHERE schemas.write_id = store_writes.write_id)
              FROM store_writes
              ORDER BY ordinal",
             [],
@@ -327,6 +330,7 @@ impl StoreRecords<'_> {
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<u32>>(9)?,
                 ))
             },
         )?;
@@ -341,6 +345,7 @@ impl StoreRecords<'_> {
             blob_facts,
             prepared,
             rebased,
+            schema_version,
         ) in writes
         {
             let partitions = crate::query_mapped_rows(
@@ -377,6 +382,7 @@ impl StoreRecords<'_> {
                 DbError::context(format!("Store write receipt {write_id} status"), error)
             })?;
             let manifest_input = ManifestInput {
+                schema_version,
                 ordinal,
                 write_id: &write_id,
                 status: &raw_status,
@@ -397,7 +403,8 @@ impl StoreRecords<'_> {
             );
             match changeset_hash {
                 None => {
-                    if affected_rows.is_some()
+                    if schema_version.is_some()
+                        || affected_rows.is_some()
                         || base.is_some()
                         || blob_facts.is_some()
                         || prepared.is_some()
@@ -415,6 +422,11 @@ impl StoreRecords<'_> {
                 }
                 Some(changeset_hash) => {
                     manifests.push(crate::write_models::RetainedStoreWriteManifest {
+                        schema_version: schema_version.ok_or_else(|| {
+                            DbError::Message(format!(
+                                "retained Store write {write_id} has no captured schema version"
+                            ))
+                        })?,
                         ordinal,
                         write_id,
                         status: raw_status,
@@ -838,6 +850,7 @@ impl StoreTransaction<'_, '_> {
         blob_decls: &crate::BlobDecls,
         gates: &crate::Gates,
         synced_tables: &[coven_protocol::synced_schema::SyncedTable],
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         retracted: &BTreeSet<coven_protocol::store_commit::StoreBatchCommitRef>,
         history_cut: Option<&coven_protocol::store_commit::CommitFrontier>,
@@ -856,6 +869,7 @@ impl StoreTransaction<'_, '_> {
             blob_decls,
             gates,
             synced_tables,
+            schema_history,
             routing_key,
             retracted,
             history_cut,

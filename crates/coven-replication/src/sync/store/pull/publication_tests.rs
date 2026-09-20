@@ -851,28 +851,27 @@ async fn assert_join_restores_circle_access(snapshot_precedes_circle: bool) {
 
 #[tokio::test]
 async fn joining_installs_circle_rows_after_a_tail_control() {
-    fn open_database(directory: coven_foundation::store_dir::StoreDir) -> coven_database::Database {
-        crate::sync::test_helpers::open_test_db_schema(
-            directory,
-            vec![coven_protocol::synced_schema::SyncedTable::new(
-                "documents",
-                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
-            )
-            .scoped_by("audience")],
-            vec![coven_database::Migration::sql(
-                1,
-                "Circle join row schema",
-                "CREATE TABLE documents (
-                    id TEXT PRIMARY KEY,
-                    audience TEXT,
-                    body TEXT NOT NULL,
-                    _updated_at TEXT NOT NULL
-                ) STRICT;",
-            )],
-        )
-    }
+    let tables = vec![coven_protocol::synced_schema::SyncedTable::new(
+        "documents",
+        coven_protocol::synced_schema::RowIdentity::IndependentUuid,
+    )
+    .scoped_by("audience")];
+    let migrations = vec![coven_database::Migration::sql(
+        1,
+        "Circle join row schema",
+        "CREATE TABLE documents (
+            id TEXT PRIMARY KEY,
+            audience TEXT,
+            body TEXT NOT NULL,
+            _updated_at TEXT NOT NULL
+        ) STRICT;",
+    )];
     let source_dir = test_store_dir();
-    let source = open_database(source_dir.clone());
+    let source = crate::sync::test_helpers::open_test_db_schema(
+        source_dir.clone(),
+        tables.clone(),
+        migrations.clone(),
+    );
     let signer = UserKeypair::generate();
     let (store, storage) = TestStore::create_with_connection(
         &source,
@@ -935,19 +934,20 @@ async fn joining_installs_circle_rows_after_a_tail_control() {
     );
     drop(writer);
     let target_dir = test_store_dir();
-    let target = open_database(target_dir.clone());
-    let joined = crate::sync::test_helpers::TestDevice::activate_joined(
+    let joined = crate::sync::test_helpers::TestDevice::activate_joined_from_snapshot(
         owner,
-        StoreDatabase::new(&target),
         target_dir,
         &signer,
         "0000000003000-0000-joiner",
         storage,
+        tables,
+        migrations,
+        1,
     )
     .await
     .expect("join through Circle control and row tail");
     assert_eq!(
-        target
+        joined
             .query_test_text(
                 "SELECT body FROM documents WHERE id = '00000000-0000-4000-8000-000000000001'"
             )

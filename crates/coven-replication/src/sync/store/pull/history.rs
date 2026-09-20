@@ -131,6 +131,20 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         let (PullDatabase::Installed(database) | PullDatabase::Checkpoint { database, .. }) =
             &self.database;
 
+        if let Err(error) = database
+            .validate_source_changeset(package.schema_version(), package.changeset().to_vec())
+            .await
+        {
+            return match error {
+                coven_database::DbError::Changeset(error) => Ok(Err(
+                    HeldStorePositionReason::ChangesetUnreadable(error.into()),
+                )),
+                error @ coven_database::DbError::ChangesetMigration(_) => Ok(Err(
+                    HeldStorePositionReason::InvalidChangesetDatabase(error.into()),
+                )),
+                error => Err(error.into()),
+            };
+        }
         let changeset =
             match coven_database::ValidatedChangeset::new(package.changeset().to_vec(), schema) {
                 Ok(changeset) => changeset,
@@ -161,10 +175,13 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
                 )));
             }
         };
-        if let Err(error) = database.validate_local_blob_cleanup_changes(&old_changes, &changes) {
-            return Ok(Err(HeldStorePositionReason::InvalidChangesetBlobDecl(
-                error.into(),
-            )));
+        if package.schema_version() == database.schema_version() {
+            if let Err(error) = database.validate_local_blob_cleanup_changes(&old_changes, &changes)
+            {
+                return Ok(Err(HeldStorePositionReason::InvalidChangesetBlobDecl(
+                    error.into(),
+                )));
+            }
         }
         Ok(Ok(PreparedMergeMaterializationPackage {
             package,

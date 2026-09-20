@@ -145,24 +145,36 @@ impl Changegroup {
         new: &[Option<Value>],
         indirect: bool,
     ) -> Result<(), GateError> {
+        self.add_typed_change(table, ffi::SQLITE_UPDATE, old, new, indirect)
+    }
+
+    /// Encode a typed INSERT, UPDATE or DELETE against the configured schema.
+    pub(crate) fn add_typed_change(
+        &self,
+        table: &str,
+        operation: c_int,
+        old: &[Option<Value>],
+        new: &[Option<Value>],
+        indirect: bool,
+    ) -> Result<(), GateError> {
         if old.len() != new.len() || c_int::try_from(old.len()).is_err() {
-            return Err(GateError::Ffi("encode UPDATE columns", ffi::SQLITE_RANGE));
+            return Err(GateError::Ffi("encode change columns", ffi::SQLITE_RANGE));
         }
         let table = CString::new(table)
-            .map_err(|_| GateError::Ffi("encode UPDATE table name", ffi::SQLITE_MISUSE))?;
+            .map_err(|_| GateError::Ffi("encode change table name", ffi::SQLITE_MISUSE))?;
         let mut message = ptr::null_mut();
         // SQLite copies the table name and each value before the call returns;
         // the group owns its native storage for the entire operation.
         let rc = unsafe {
             ffi::sqlite3changegroup_change_begin(
                 self.raw,
-                ffi::SQLITE_UPDATE,
+                operation,
                 table.as_ptr(),
                 c_int::from(indirect),
                 &mut message,
             )
         };
-        change_result("begin typed UPDATE", rc, message)?;
+        change_result("begin typed change", rc, message)?;
         let values = (|| {
             for (is_new, cells) in [(false, old), (true, new)] {
                 for (index, cell) in cells.iter().enumerate() {
@@ -181,7 +193,7 @@ impl Changegroup {
                 &mut message,
             )
         };
-        let finished = change_result("finish typed UPDATE", rc, message);
+        let finished = change_result("finish typed change", rc, message);
         match (values, finished) {
             (Ok(()), result) => result,
             (Err(operation), Ok(())) => Err(operation),

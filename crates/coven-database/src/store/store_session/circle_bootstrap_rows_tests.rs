@@ -16,12 +16,19 @@ const HOST_SCHEMA: &str = "CREATE TABLE documents (
          _updated_at TEXT NOT NULL
      ) STRICT;";
 
+fn schema_history(sql: &'static str) -> crate::changeset_migration::ApplicationSchemaHistory {
+    crate::changeset_migration::ApplicationSchemaHistory::new(std::sync::Arc::from(vec![
+        crate::Migration::sql(1, "host", sql),
+    ]))
+    .expect("registered schema")
+}
+
 fn declared_tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("documents", RowIdentity::IndependentUuid)]
 }
 
 /// A database carrying the host schema every test here declares, at schema
-/// version 7.
+/// version 1.
 fn host_database() -> Connection {
     let connection = Connection::open_in_memory().expect("open bootstrap rows database");
     connection
@@ -29,7 +36,7 @@ fn host_database() -> Connection {
         .expect("create the host schema");
     crate::apply_coven_schema(&connection).expect("create the Coven tables");
     connection
-        .pragma_update(None, "user_version", 7)
+        .pragma_update(None, "user_version", 1)
         .expect("state the schema version");
     connection
 }
@@ -74,6 +81,7 @@ fn verify(
         CircleId::from_bytes([3; 16]),
         &declared_tables(),
         None,
+        &schema_history(HOST_SCHEMA),
     )
 }
 
@@ -278,7 +286,7 @@ fn a_bootstrap_refuses_a_repeated_row() {
 }
 
 #[test]
-fn a_bootstrap_refuses_another_schema_version() {
+fn a_bootstrap_refuses_a_future_schema_version() {
     let receiver = host_database();
     let rows = crate::gate::full_state_rows(
         &receiver,
@@ -286,7 +294,7 @@ fn a_bootstrap_refuses_another_schema_version() {
     )
     .expect("state the bootstrap rows");
     let mut reference = reference_for(&receiver, &rows);
-    reference.schema_version = 6;
+    reference.schema_version = 2;
 
     let error = verify(&receiver, &rows, &reference)
         .map(|_| ())
@@ -294,7 +302,7 @@ fn a_bootstrap_refuses_another_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("Circle bootstrap schema is 6, this database is 7"),
+            .contains("changeset schema 2 is newer than supported schema 1"),
         "{error}"
     );
 }
@@ -331,22 +339,18 @@ fn a_bootstrap_refuses_a_blob_its_reference_does_not_bind() {
     .with_id_column("photo_id");
     let blob_tables =
         vec![SyncedTable::new("photos", RowIdentity::IndependentUuid).carries_blob(declaration)];
+    const BLOB_SCHEMA: &str = "CREATE TABLE photos (
+        id TEXT PRIMARY KEY, photo_id TEXT, size INTEGER, hash TEXT,
+        _updated_at TEXT NOT NULL
+    ) STRICT;";
     let blob_database = || {
         let connection = Connection::open_in_memory().expect("open blob database");
         connection
-            .execute_batch(
-                "CREATE TABLE photos (
-                     id TEXT PRIMARY KEY,
-                     photo_id TEXT,
-                     size INTEGER,
-                     hash TEXT,
-                     _updated_at TEXT NOT NULL
-                 ) STRICT;",
-            )
-            .expect("create the blob schema");
+            .execute_batch(BLOB_SCHEMA)
+            .expect("create blob schema");
         crate::apply_coven_schema(&connection).expect("create the Coven tables");
         connection
-            .pragma_update(None, "user_version", 7)
+            .pragma_update(None, "user_version", 1)
             .expect("state the schema version");
         connection
     };
@@ -372,7 +376,7 @@ fn a_bootstrap_refuses_a_blob_its_reference_does_not_bind() {
     let image_hash = ObjectHash::digest(&rows);
     let reference = CircleBootstrapRef {
         coverage: CommitFrontier(BTreeMap::new()),
-        schema_version: 7,
+        schema_version: 1,
         sync_routing_hash: crate::SyncRoutingContract::from_connection(&receiver, &blob_tables)
             .expect("read the routing contract")
             .hash(),
@@ -397,6 +401,7 @@ fn a_bootstrap_refuses_a_blob_its_reference_does_not_bind() {
         CircleId::from_bytes([3; 16]),
         &blob_tables,
         None,
+        &schema_history(BLOB_SCHEMA),
     )
     .map(|_| ())
     .expect_err("a blob its reference does not bind is not installable");
@@ -483,4 +488,62 @@ fn an_incomplete_foreign_key_rolls_the_whole_install_back() {
         0,
         "the refused install leaves no rows behind"
     );
+}
+
+#[test]
+fn an_older_bootstrap_is_transformed_before_current_schema_validation() {
+    let migrations = vec![
+        crate::Migration::sql(1, "host", HOST_SCHEMA),
+        crate::Migration::sql(2, "origin", "ALTER TABLE documents ADD COLUMN origin TEXT"),
+        crate::Migration::sql(
+            3,
+            "remove_origin",
+            "ALTER TABLE documents DROP COLUMN origin",
+        )
+        .changesets(vec![crate::TableChangesetMigration::new(
+            "documents",
+            &[],
+            |row, _| {
+                row.columns.retain(|column| column.name != "origin");
+                Ok(())
+            },
+        )]),
+    ];
+    let source = host_database();
+    migrations[1].up.apply(&source).unwrap();
+    source.pragma_update(None, "user_version", 2).unwrap();
+    source.execute_batch("INSERT INTO documents VALUES ('01890a5d-ac96-774b-bcce-b302099c3f74', 'body', 42, 1.5, X'00FF', '0000000001000-0000-owner', 'typed')").unwrap();
+    let rows = crate::gate::full_state_rows(&source, &["documents".into()]).unwrap();
+    let reference = reference_for(&source, &rows);
+    let receiver = host_database();
+    receiver.pragma_update(None, "user_version", 3).unwrap();
+    let history =
+        crate::changeset_migration::ApplicationSchemaHistory::new(std::sync::Arc::from(migrations))
+            .unwrap();
+    let staged = verify_circle_bootstrap_rows(
+        &receiver,
+        &rows,
+        &reference,
+        CircleId::from_bytes([3; 16]),
+        &declared_tables(),
+        None,
+        &history,
+    )
+    .unwrap();
+    assert_eq!(document_rows(&staged.scratch), document_rows(&source));
+    assert_eq!(reference.image.image_hash, ObjectHash::digest(&rows));
+    let mut repeated = rows.clone();
+    repeated.extend_from_slice(&rows);
+    let error = verify_circle_bootstrap_rows(
+        &receiver,
+        &repeated,
+        &reference,
+        CircleId::from_bytes([3; 16]),
+        &declared_tables(),
+        None,
+        &history,
+    )
+    .err()
+    .unwrap();
+    assert!(error.to_string().contains("repeats row"), "{error}");
 }

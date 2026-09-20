@@ -18,14 +18,23 @@ pub(super) fn verify_circle_bootstrap_image(
     circle_id: coven_protocol::circle::CircleId,
     tables: &[SyncedTable],
     routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+    schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
 ) -> Result<(), SnapshotImageError> {
     if coven_protocol::store_commit::ObjectHash::digest(rows) != reference.image.image_hash {
         return Err(SnapshotImageError::Projection(
             "Circle bootstrap image differs from its signed hash".to_string(),
         ));
     }
-    verify_circle_bootstrap_rows(receiver, rows, reference, circle_id, tables, routing_key)
-        .map(|_| ())
+    verify_circle_bootstrap_rows(
+        receiver,
+        rows,
+        reference,
+        circle_id,
+        tables,
+        routing_key,
+        schema_history,
+    )
+    .map(|_| ())
 }
 
 /// One Circle bootstrap changeset decoded onto the receiver's own schema: the
@@ -45,36 +54,8 @@ impl StagedCircleRows {
         rows: &[u8],
         tables: &[SyncedTable],
     ) -> Result<Self, SnapshotImageError> {
+        validate_rows(receiver, rows, tables)?;
         let projection_tables = circle_projection_tables(receiver, tables)?;
-        let mut stated = BTreeSet::new();
-        for change in changeset_rows(rows)? {
-            if change.op != rusqlite::hooks::Action::SQLITE_INSERT {
-                return Err(SnapshotImageError::Projection(format!(
-                    "Circle bootstrap changeset carries a non-insert change to {}",
-                    change.table
-                )));
-            }
-            if !projection_tables.contains(&change.table) {
-                return Err(SnapshotImageError::Projection(format!(
-                    "Circle bootstrap changeset names undeclared table {}",
-                    change.table
-                )));
-            }
-            if !stated.insert((change.table.clone(), change.row_id.clone())) {
-                return Err(SnapshotImageError::Projection(format!(
-                    "Circle bootstrap changeset repeats row {}.{}",
-                    change.table, change.row_id
-                )));
-            }
-        }
-        crate::changeset_identity::validate_changeset_row_identities(
-            &crate::gate::recorded_host_changeset(rows)?,
-            tables,
-        )
-        .map_err(|error| {
-            SnapshotImageError::Projection(format!("Circle bootstrap changeset identity: {error}"))
-        })?;
-
         let scratch = Connection::open_in_memory().map_err(DbError::from)?;
         scratch
             .pragma_update(None, "foreign_keys", "OFF")
@@ -103,6 +84,22 @@ impl StagedCircleRows {
                 source: error,
             })?;
         Ok(Self { scratch })
+    }
+
+    pub(super) fn stage_historical(
+        receiver: &Connection,
+        rows: &[u8],
+        tables: &[SyncedTable],
+        source_version: u32,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
+    ) -> Result<Self, SnapshotImageError> {
+        // Check the authenticated row sequence before conversion: SQLite's
+        // change group may combine repeated operations on the same identity.
+        validate_rows(receiver, rows, tables)?;
+        let converted = schema_history
+            .migrate(receiver, source_version, rows)
+            .map_err(SnapshotImageError::from)?;
+        Self::stage(receiver, &converted, tables)
     }
 
     /// Install these rows and their blob graph onto `conn` directly — no
@@ -254,6 +251,44 @@ impl StagedCircleRows {
     }
 }
 
+fn validate_rows(
+    receiver: &Connection,
+    rows: &[u8],
+    tables: &[SyncedTable],
+) -> Result<(), SnapshotImageError> {
+    let projection_tables = circle_projection_tables(receiver, tables)?;
+    let mut stated = BTreeSet::new();
+    for change in changeset_rows(rows)? {
+        if change.op != rusqlite::hooks::Action::SQLITE_INSERT {
+            return Err(SnapshotImageError::Projection(format!(
+                "Circle bootstrap changeset carries a non-insert change to {}",
+                change.table
+            )));
+        }
+        if !projection_tables.contains(&change.table) {
+            return Err(SnapshotImageError::Projection(format!(
+                "Circle bootstrap changeset names undeclared table {}",
+                change.table
+            )));
+        }
+        if !stated.insert((change.table.clone(), change.row_id.clone())) {
+            return Err(SnapshotImageError::Projection(format!(
+                "Circle bootstrap changeset repeats row {}.{}",
+                change.table, change.row_id
+            )));
+        }
+    }
+    crate::changeset_identity::validate_changeset_row_identities(
+        &crate::gate::recorded_host_changeset(rows)?,
+        tables,
+    )
+    .map_err(|error| {
+        SnapshotImageError::Projection(format!("Circle bootstrap changeset identity: {error}"))
+    })?;
+
+    Ok(())
+}
+
 /// The bootstrap payload's changes, each as its operation, table, and the
 /// primary key the row states.
 pub(crate) struct StagedChange {
@@ -307,16 +342,8 @@ pub(crate) fn verify_circle_bootstrap_rows(
     circle_id: coven_protocol::circle::CircleId,
     tables: &[SyncedTable],
     routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+    schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
 ) -> Result<StagedCircleRows, SnapshotImageError> {
-    let schema_version: u32 = receiver
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(SnapshotImageError::from)?;
-    if reference.schema_version != schema_version {
-        return Err(SnapshotImageError::Projection(format!(
-            "Circle bootstrap schema is {}, this database is {schema_version}",
-            reference.schema_version
-        )));
-    }
     let routing_contract = crate::SyncRoutingContract::from_connection(receiver, tables)
         .map_err(SnapshotImageError::from)?;
     if routing_contract.hash() != reference.sync_routing_hash {
@@ -324,7 +351,13 @@ pub(crate) fn verify_circle_bootstrap_rows(
             "Circle bootstrap routing contract differs from its signed hash".to_string(),
         ));
     }
-    let staged = StagedCircleRows::stage(receiver, rows, tables)?;
+    let staged = StagedCircleRows::stage_historical(
+        receiver,
+        rows,
+        tables,
+        reference.schema_version,
+        schema_history,
+    )?;
     let scratch = &staged.scratch;
     let gates = crate::Gates::from_tables(scratch, tables).map_err(SnapshotImageError::from)?;
     if gates.has_scoped_graph() {

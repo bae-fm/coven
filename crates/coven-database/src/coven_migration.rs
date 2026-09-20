@@ -17,8 +17,8 @@ use rusqlite::Connection;
 
 use crate::coven_schema::{
     expected_coven_schema_manifest, expected_coven_schema_v0_manifest,
-    expected_coven_schema_v1_manifest, live_coven_schema_manifest,
-    recreate_current_transition_tables, CovenSchemaManifest,
+    expected_coven_schema_v1_manifest, expected_coven_schema_v2_manifest,
+    live_coven_schema_manifest, recreate_current_transition_tables, CovenSchemaManifest,
 };
 use crate::{
     get_protocol_state_on, set_protocol_state_on, DbError, COVEN_INITIALIZED_STATE_KEY,
@@ -29,7 +29,7 @@ pub(crate) const COVEN_SCHEMA_VERSION_STATE_KEY: &str = "coven_schema_version";
 
 type ApplyCovenMigration = fn(&Connection) -> Result<(), CovenMigrationError>;
 
-const COVEN_MIGRATION_COUNT: usize = 2;
+const COVEN_MIGRATION_COUNT: usize = 3;
 const LATEST_COVEN_SCHEMA_VERSION: u32 = COVEN_MIGRATION_COUNT as u32;
 
 pub(crate) struct CovenMigrationStep<'a> {
@@ -236,6 +236,14 @@ fn drop_derived_baseline_and_snapshot_columns(
     Ok(())
 }
 
+fn add_store_write_schemas(conn: &Connection) -> Result<(), CovenMigrationError> {
+    conn.execute_batch(&format!(
+        "CREATE TABLE store_write_schemas ({}) STRICT",
+        crate::coven_schema_definitions::STORE_WRITE_SCHEMAS_COLUMNS
+    ))?;
+    Ok(())
+}
+
 fn apply_migration_steps(
     conn: &Connection,
     current_version: u32,
@@ -312,8 +320,12 @@ fn migration_ladder(
             apply: add_root_label_to_transition_tables,
         },
         CovenMigrationStep {
-            expected_manifest: expected_coven_schema_manifest(include_routing)?,
+            expected_manifest: expected_coven_schema_v2_manifest(include_routing)?,
             apply: drop_derived_baseline_and_snapshot_columns,
+        },
+        CovenMigrationStep {
+            expected_manifest: expected_coven_schema_manifest(include_routing)?,
+            apply: add_store_write_schemas,
         },
     ])
 }
@@ -395,28 +407,37 @@ pub(crate) fn run_coven_migrations_in_transaction(
     conn: &Connection,
     include_routing: bool,
     policy: CovenMigrationPolicy,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    host_migrations: &[crate::Migration],
 ) -> Result<(), CovenMigrationError> {
     let migrations = migration_ladder(include_routing)?;
-    run_coven_migrations_with_ladder(
-        conn,
-        policy,
-        expected_coven_schema_v0_manifest(include_routing)?,
-        &migrations,
-    )
+    let v0 = expected_coven_schema_v0_manifest(include_routing)?;
+    let recover = matches!(classify_schema(conn, v0, &migrations)?, CovenSchemaState::Pending { current } if current < 3);
+    run_coven_migrations_with_ladder(conn, policy, v0, &migrations)?;
+    if recover {
+        crate::store::recover_store_write_schemas(conn, store_dir, host_migrations)?;
+    }
+    crate::store::validate_store_write_schemas(conn)?;
+    Ok(())
 }
 
 pub(crate) fn run_uninitialized_snapshot_coven_migrations_in_transaction(
     conn: &Connection,
     include_routing: bool,
     policy: CovenMigrationPolicy,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    host_migrations: &[crate::Migration],
 ) -> Result<(), CovenMigrationError> {
     let migrations = migration_ladder(include_routing)?;
-    run_uninitialized_snapshot_migrations_with_ladder(
-        conn,
-        policy,
-        expected_coven_schema_v0_manifest(include_routing)?,
-        &migrations,
-    )
+    let v0 = expected_coven_schema_v0_manifest(include_routing)?;
+    let current = ledgerless_version(&live_coven_schema_manifest(conn)?, v0, &migrations)
+        .ok_or(CovenMigrationError::UnknownUnversionedSchema)?;
+    run_uninitialized_snapshot_migrations_with_ladder(conn, policy, v0, &migrations)?;
+    if current < 3 {
+        crate::store::recover_store_write_schemas(conn, store_dir, host_migrations)?;
+    }
+    crate::store::validate_store_write_schemas(conn)?;
+    Ok(())
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -444,7 +465,9 @@ pub(crate) fn validate_coven_schema_for_reader(
         expected_coven_schema_v0_manifest(include_routing)?,
         &migrations,
     )? {
-        CovenSchemaState::Current => Ok(()),
+        CovenSchemaState::Current => {
+            crate::store::validate_store_write_schemas(conn).map_err(CovenMigrationError::from)
+        }
         CovenSchemaState::Pending { current } => Err(CovenMigrationError::Pending {
             current,
             target: migrations.len() as u32,

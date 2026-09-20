@@ -50,13 +50,18 @@ pub use cloud_home_setup::{
 pub use cloud_outbox_live_query::CloudOutboxLiveQuery;
 pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
 pub use coven_database::prepare_external_blob;
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_database::resolve_and_apply_historical_changeset;
 pub use coven_database::{
     BlobFileFailure, BlobFileFailures, CloudOutboxSnapshot, DbError, ExternalBlob,
     MakeRemoteProgress, OutboxFailure, OutboxFailureKind, PreparedExternalBlob, QueuedMakeRemote,
     QueuedUpload, QueuedUploadPhase, SqlContext, SqlReadContext, StuckReclaimOperation, WriteBatch,
 };
+pub use coven_database::{
+    ChangesetColumn, ChangesetMigrationError, ChangesetRow, Migration, MigrationContext,
+    MigrationError, MigrationStep, TableChangesetMigration,
+};
 pub use coven_database::{CovenMigrationError, CovenMigrationPolicy};
-pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use coven_domain::joining::{join_with_device_pairing, DeviceJoinTransportOutcome};
 pub use coven_domain::joining::{
     BootstrapError, DevicePairingError, DevicePairingHost, DevicePairingOffer, DevicePairingPhase,

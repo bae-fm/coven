@@ -284,6 +284,9 @@ impl DatabaseCore {
         // something different — the migration ladder with the number of
         // migrations, the snapshot install and the two full-image passes at the
         // end with the size of the image — so they are named separately.
+        let schema_history = crate::changeset_migration::ApplicationSchemaHistory::new(Arc::from(
+            migrations.to_vec(),
+        ))?;
         let mut timings = StageTimings::start("Store database open");
         let mut conn = timings.mark("open the connection", || {
             let conn = Connection::open(path).map_err(DbError::from)?;
@@ -357,6 +360,8 @@ impl DatabaseCore {
                             &tx,
                             pinned.has_scoped_graph(),
                             coven_migration_policy,
+                            &store_dir,
+                            migrations,
                         )
                     })?;
                 }
@@ -401,6 +406,8 @@ impl DatabaseCore {
                                     &tx,
                                     resolved.has_scoped_graph(),
                                     coven_migration_policy,
+                                    &store_dir,
+                                    migrations,
                                 )?;
                                 initialize_coven_metadata_on(
                                     &tx,
@@ -496,7 +503,7 @@ impl DatabaseCore {
             conn,
             hlc,
             synced_tables,
-            Arc::from(migrations.to_vec()),
+            schema_history,
             coven_migration_policy,
             schema_version,
             sync_routing_hash,
@@ -521,6 +528,9 @@ impl DatabaseCore {
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<Self, OpenError> {
+        let schema_history = crate::changeset_migration::ApplicationSchemaHistory::new(Arc::from(
+            migrations.to_vec(),
+        ))?;
         use rusqlite::OpenFlags;
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -562,7 +572,7 @@ impl DatabaseCore {
             conn,
             hlc,
             synced_tables,
-            Arc::from(migrations.to_vec()),
+            schema_history,
             CovenMigrationPolicy::RefusePending,
             schema_version,
             sync_routing_hash,

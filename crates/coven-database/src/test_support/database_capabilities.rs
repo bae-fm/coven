@@ -43,8 +43,8 @@ impl Database {
                      )",
                     [changeset_hash],
                 )
-                .map(|_| ())
-                .map_err(DbError::from)
+                .map_err(DbError::from)?;
+            database.execute("INSERT INTO store_write_schemas (write_id, schema_version) SELECT 'existing-write', user_version FROM pragma_user_version", []).map(|_| ()).map_err(DbError::from)
         })
         .await
     }

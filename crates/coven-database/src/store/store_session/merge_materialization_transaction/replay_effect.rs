@@ -7,11 +7,13 @@ impl MergeMaterializationTransaction<'_, '_> {
         authority: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
         effect: crate::MergeReplayWriteEffect,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
         schema: std::sync::Arc<TableSchema>,
         gates: &crate::Gates,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         replay_rows: &mut ReplayRows,
     ) -> Result<(), DbError> {
+        let effect = self.migrate_replay_effect(effect, schema_history)?;
         self.validate_unaccepted_circle_context(authority, root, &effect)?;
         let public_rows =
             replay_effect_public_rows(self.store.transaction, gates, &effect, routing_key)?;
@@ -145,12 +147,14 @@ impl MergeMaterializationTransaction<'_, '_> {
     pub(super) fn apply_local_replay_effect(
         &self,
         effect: crate::MergeReplayWriteEffect,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
         schema: std::sync::Arc<TableSchema>,
         gates: &crate::Gates,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         commit: &StoreBatchCommitRef,
         replay_rows: &mut ReplayRows,
     ) -> Result<Option<crate::MaterializationHold>, DbError> {
+        let effect = self.migrate_replay_effect(effect, schema_history)?;
         let public_rows =
             replay_effect_public_rows(self.store.transaction, gates, &effect, routing_key)?;
         let local_rows = replay_effect_local_rows(&effect)?;
@@ -215,6 +219,27 @@ impl MergeMaterializationTransaction<'_, '_> {
             self.record_replayed_row(schema, replay_rows, table, row_id)?;
         }
         Ok(None)
+    }
+
+    fn migrate_replay_effect(
+        &self,
+        mut effect: crate::MergeReplayWriteEffect,
+        schema_history: &crate::changeset_migration::ApplicationSchemaHistory,
+    ) -> Result<crate::MergeReplayWriteEffect, DbError> {
+        for partition in effect
+            .partitions
+            .store
+            .iter_mut()
+            .chain(effect.partitions.circles.iter_mut())
+            .chain(effect.partitions.local.iter_mut())
+        {
+            partition.changeset = schema_history.migrate(
+                self.store.transaction,
+                effect.schema_version,
+                &partition.changeset,
+            )?;
+        }
+        Ok(effect)
     }
 
     fn apply_replay_partitions(

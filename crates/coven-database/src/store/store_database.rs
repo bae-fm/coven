@@ -221,6 +221,16 @@ impl StoreDatabase {
         self.database.store_blob_ref_from_change(change)
     }
 
+    /// Validate the original column layout before ordered materialization converts it.
+    pub async fn validate_source_changeset(
+        &self,
+        version: u32,
+        bytes: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| session.validate_source_changeset(version, &bytes))
+            .await
+    }
+
     pub fn validate_local_blob_cleanup_changes(
         &self,
         old_changes: &[coven_foundation::changeset::RowChange],

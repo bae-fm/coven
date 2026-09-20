@@ -79,7 +79,9 @@ impl StoreSession<'_> {
         let stored = self
             .conn
             .query_row(
-                "SELECT write_id, base, blob_facts FROM store_writes
+                "SELECT write_id, base, blob_facts,
+                        (SELECT schema_version FROM store_write_schemas schemas
+                         WHERE schemas.write_id = store_writes.write_id) FROM store_writes
                  WHERE status = '\"pending\"'
                    AND ordinal = (
                        SELECT MIN(ordinal) FROM store_writes
@@ -97,12 +99,13 @@ impl StoreSession<'_> {
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, u32>(3)?,
                     ))
                 },
             )
             .optional()
             .map_err(DbError::from)?;
-        let Some((write_id, base, blob_facts)) = stored else {
+        let Some((write_id, base, blob_facts, schema_version)) = stored else {
             return Ok(None);
         };
         let (Some(base), Some(blob_facts)) = (base, blob_facts) else {
@@ -120,6 +123,7 @@ impl StoreSession<'_> {
                 .map_err(|error| DbError::context("pending write blob facts", error))?,
         };
         Ok(Some(PreparedStoreWrite {
+            schema_version,
             write_id,
             partitions,
             base: effective_base,
@@ -771,6 +775,10 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             write_id,
         } = self;
         (|| {
+            let schema_version: u32 = tx
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .map_err(DbError::from)
+                .map_err(E::from)?;
             let mut journal = rusqlite::session::Session::new(&tx)
                 .map_err(|error| DbError::context("failed to create capture session", error))
                 .map_err(E::from)?;
@@ -982,6 +990,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 let status = crate::store::store_session::StoreTransaction::new(&tx, store_dir)
                     .insert_store_write(
                         &write_id,
+                        schema_version,
                         &partitioned.partitions,
                         changeset_hash,
                         &base,

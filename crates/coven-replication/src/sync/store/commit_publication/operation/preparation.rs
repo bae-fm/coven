@@ -54,8 +54,8 @@ impl AuthorizedWriterOperation<'_> {
         let local = authorship.read_local_commit_state(stream_id).await?;
         let (previous, _frontier, membership, publication) = local.into_parts();
         let publication_previous = publication.require_observed()?.clone();
-        let db = &database;
         let PreparedStoreWrite {
+            schema_version,
             write_id,
             base,
             blob_facts,
@@ -142,7 +142,7 @@ impl AuthorizedWriterOperation<'_> {
                                 candidate_family,
                                 &write_id,
                                 &coord,
-                                db.schema_version(),
+                                schema_version,
                                 stream_id.to_string(),
                                 seq,
                                 partition,
@@ -162,7 +162,7 @@ impl AuthorizedWriterOperation<'_> {
                                 candidate_family,
                                 &write_id,
                                 &coord,
-                                db.schema_version(),
+                                schema_version,
                                 stream_id.to_string(),
                                 seq,
                                 partition,
@@ -183,7 +183,7 @@ impl AuthorizedWriterOperation<'_> {
                 .find(|package| package.audience == coven_protocol::circle::Audience::Store)
                 .map(|package| StorePackageInput {
                     candidate_family,
-                    schema_version: db.schema_version(),
+                    schema_version,
                     bytes: package.semantic_bytes.as_slice(),
                     object: package.prepared.reference().clone(),
                 });
@@ -206,7 +206,7 @@ impl AuthorizedWriterOperation<'_> {
                             .expect("Circle partition carries exact key fingerprint"),
                         package: StorePackageInput {
                             candidate_family,
-                            schema_version: db.schema_version(),
+                            schema_version,
                             bytes: package.semantic_bytes.as_slice(),
                             object: package.prepared.reference().clone(),
                         },

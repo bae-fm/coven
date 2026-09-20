@@ -4,12 +4,6 @@ pub enum PullError {
     MembershipObject(coven_protocol::objects::StoreObjectError),
     MembershipLoad(crate::sync::store::membership::AnchoredChainError),
     Apply(String),
-    /// The sync storage requires a schema version newer than ours.
-    /// The client must upgrade before syncing.
-    SchemaVersionTooOld {
-        local_version: u32,
-        min_version: u32,
-    },
     /// The membership chain is not anchored to the store's pinned owner — it was
     /// wiped and/or refounded under a different key (an owner-takeover attempt,
     /// issue #95). The cycle is refused rather than trusting the tampered chain.
@@ -25,13 +19,6 @@ impl std::fmt::Display for PullError {
             }
             PullError::MembershipLoad(e) => write!(f, "membership chain failed: {e}"),
             PullError::Apply(e) => write!(f, "changeset apply failed: {e}"),
-            PullError::SchemaVersionTooOld {
-                local_version,
-                min_version,
-            } => write!(
-                f,
-                "Update the app to keep syncing — this store was upgraded by a newer device (schema v{min_version}; you have v{local_version})."
-            ),
             PullError::MembershipTampered(e) => write!(f, "membership chain tampered: {e}"),
         }
     }
@@ -43,7 +30,7 @@ impl std::error::Error for PullError {
             Self::Storage(error) => Some(error),
             Self::MembershipObject(error) => Some(error),
             Self::MembershipLoad(error) => Some(error),
-            Self::Apply(_) | Self::SchemaVersionTooOld { .. } | Self::MembershipTampered(_) => None,
+            Self::Apply(_) | Self::MembershipTampered(_) => None,
         }
     }
 }

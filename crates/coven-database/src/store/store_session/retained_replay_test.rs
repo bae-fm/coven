@@ -119,6 +119,7 @@ fn generation_zero_projection_reads_uncommitted_founder_state_and_removes_local_
             ["00".repeat(32)],
         )
         .expect("insert excluded autoincrement row");
+    source.execute("INSERT INTO store_write_schemas (write_id, schema_version) SELECT 'excluded-write', user_version FROM pragma_user_version", []).expect("record captured schema");
     source
         .execute("DELETE FROM store_device_registration_activations", [])
         .expect("remove committed founder fixture");

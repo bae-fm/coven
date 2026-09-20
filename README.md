@@ -42,6 +42,12 @@ Coven to advance its own bookkeeping-schema ladder before the host ladder;
 `RefusePending` opens only when no Coven migration is pending. Read-only opens
 never authorize migration and always refuse pending Coven schema changes.
 
+When a migration changes a table's row shape or meaning, register its historical
+changeset conversion with `Migration::changesets`. Captured writes retain their
+authoring schema through publication and replay; the converter derives
+current-schema rows without rewriting signed original packages. See
+[Schema evolution](https://coven.bae.fm/docs/schema-evolution).
+
 `(table, id)` identifies one logical row across every device. Independently
 created rows use canonical UUIDv4 or UUIDv7 ids; `RowIdentity::SharedKey` is for
 application keys whose equal values intentionally merge as one row. Changing a

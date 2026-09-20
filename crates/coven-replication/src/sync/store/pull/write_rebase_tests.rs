@@ -21,6 +21,8 @@ mod constraints;
 mod covered_circles;
 #[path = "write_rebase_private_tests.rs"]
 mod private;
+#[path = "write_rebase_schema_tests.rs"]
+mod schema;
 
 struct RebaseFixture {
     _directory: tempfile::TempDir,

@@ -257,7 +257,7 @@ async fn exact_v0_snapshot_obeys_writer_coven_migration_policy() {
         error,
         coven_database::OpenError::CovenMigration(coven_database::CovenMigrationError::Pending {
             current: 0,
-            target: 2
+            target: 3
         })
     ));
     // A refused migration publishes nothing: the destination goes with it,

@@ -1,43 +1,18 @@
 # Schema evolution
 
-Devices that share a store do not all run the same app version at once. Someone
-updates their phone on Monday and their laptop the following week; in between, two
-versions of the schema are live against one cloud home. This page is how coven
-keeps those versions from corrupting each other after release, once `rm -rf` is no
-longer an option.
-
-The examples use the todos app from [Sync](/docs/sync-model): a `list` holds
-`todos`, Alice and Bob share the store.
-
-Three things are in play:
-
-- The **migration ladder** moves *one device's own* database from the old shape
-  to the new one when its app updates. Its top rung is the device's schema
-  version.
-- The per-changeset **`schema_version`** stamp lets a reader recognize, and
-  skip, a change written by a newer schema than its own.
-- A **`min_schema_version`** floor in storage hard-stops a client that is too old
-  to safely participate at all.
-
-A migration fixes *your local database*; it does not rewrite the changesets
-other devices already wrote to the cloud, nor the ones you already published. So
-"can I migrate my data forward" and "can these two app versions share a store"
-are separate questions, answered by different mechanisms.
-
-<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+A database image and a retained write have separate schema versions. Updating an
+app migrates its local database, but does not rewrite the packages other devices
+signed or the writes this device already captured. Coven interprets each retained
+write under its authoring schema, then applies the host's registered changeset
+transformations before merging it into the current database.
 
 ## The migration ladder
 
-Each device has to move its own database forward on its own schedule, and the
-database itself has to know how far it got: version as a fact of the *file*,
-not of whichever binary happens to open it. That is what the ladder over
-`PRAGMA user_version` provides.
-
-The host passes an ordered ladder of
-[`Migration`](rustdoc:struct:coven::Migration)s to the builder;
-Coven applies it over `PRAGMA user_version` at every writer open. The host also
-chooses whether that writer may advance Coven's separate bookkeeping-schema
-ladder:
+The host passes contiguous versions `1..=N` to the builder. Coven applies pending
+steps over SQLite's `PRAGMA user_version` inside the database-open transaction.
+A failure rolls back the pending migrations and their version updates together.
+A database newer than the registered ladder is refused with
+[`MigrationError::SchemaTooNew`](rustdoc:enum:coven::MigrationError).
 
 ```rust
 let handle = Coven::builder(store_dir, config)
@@ -45,170 +20,117 @@ let handle = Coven::builder(store_dir, config)
     .coven_migration_policy(coven::CovenMigrationPolicy::ApplyPending)
     .migrations(vec![
         Migration::sql(1, "initial", include_str!("migrations/0001_initial.sql")),
-        Migration::sql(2, "add_due_date", include_str!("migrations/0002_add_due_date.sql")),
+        Migration::sql(2, "remove_origin", include_str!("migrations/0002_remove_origin.sql"))
+            .changesets(vec![coven::TableChangesetMigration::new(
+                "todos",
+                &[],
+                |row, _identity| {
+                    row.columns.retain(|column| column.name != "origin");
+                    Ok(())
+                },
+            )]),
     ])
     .open()?;
 ```
 
-<svg class="flow" viewBox="0 0 660 150" role="img" aria-label="The ladder walks user_version from 0 through each migration to the top rung, which is the wire schema version">
-<rect class="chipd" x="16" y="48" width="120" height="30" rx="7"/>
-<text class="lbl s11" x="76" y="67" text-anchor="middle">user_version 0</text>
-<line class="arr" x1="140" y1="63" x2="184" y2="63" marker-end="url(#fa)"/>
-<text class="sub" x="162" y="48" text-anchor="middle">1 · initial</text>
-<rect class="chip" x="188" y="48" width="120" height="30" rx="7"/>
-<text class="lbl s11" x="248" y="67" text-anchor="middle">user_version 1</text>
-<line class="arr" x1="312" y1="63" x2="356" y2="63" marker-end="url(#fa)"/>
-<text class="sub" x="334" y="48" text-anchor="middle">2 · add_due_date</text>
-<rect class="chipa" x="360" y="48" width="120" height="30" rx="7"/>
-<text class="lbl s11" x="420" y="67" text-anchor="middle">user_version 2</text>
-<line class="arrd" x1="484" y1="63" x2="524" y2="63" marker-end="url(#fam)"/>
-<rect class="chipo" x="528" y="48" width="118" height="30" rx="7"/>
-<text class="lbl s11" x="587" y="67" text-anchor="middle">wire version 2</text>
-<text class="sub" x="330" y="112" text-anchor="middle">all pending rungs and their version bumps share the open transaction: a failure rolls back all</text>
-<text class="sub" x="330" y="130" text-anchor="middle">the top rung is the schema_version every changeset is stamped with</text>
-</svg>
+`Migration::sql` runs a SQL batch; `Migration::run` accepts a callback for data
+migrations. The same registered ladder builds historical column layouts on a
+separate in-memory database. Migration callbacks must therefore operate on the
+provided SQL context; they cannot depend on an external cache or current wall
+clock to determine canonical synced values.
 
-The rules, all enforced before any database access:
+Coven's own bookkeeping tables have a separate ordered ladder and exact schema
+manifest. `ApplyPending` authorizes its pending steps; `RefusePending` refuses
+an existing database that needs them. Read-only opens never migrate. On writer
+open, Coven's migrations precede the host migrations in the same transaction.
+Final validation must succeed before any of those changes commit.
 
-- Versions must be exactly contiguous `1..=N`. A gap, a duplicate, or a set
-  that does not start at 1 is a startup error, not a silent skip.
-- Every pending step (`Migration::sql` for a DDL batch, or a closure for
-  rebuilds and backfills DDL cannot express) and its `PRAGMA user_version` bump
-  share the open transaction, so a failure rolls the full pending ladder back
-  and the ledger never advances over a half-applied migration.
-- If the on-disk `user_version` exceeds the ladder's top, the binary refuses to
-  open with
-  [`MigrationError::SchemaTooNew`](rustdoc:enum:coven::MigrationError)
-  ("update the app") rather than run against a schema it does not know.
+## Transform historical writes explicitly
 
-`user_version` is a SQLite header field, so it travels inside a snapshot's
-byte-for-byte image: a device that bootstraps inherits the writer's applied
-version directly. And the same number, reported by
-`Database::schema_version`,
-is the wire `schema_version` every changeset is stamped with. Bumping the
-schema *is* adding a migration; a device cannot stamp a version it has not
-migrated to.
+SQLite session changesets address columns by position. Renaming a column without
+changing its width does not make an older changeset mean the new thing; appending
+a required column does not supply the value an old INSERT needs. Register a
+`TableChangesetMigration` on the migration that changes the table's row meaning.
+Coven does not infer that meaning from column counts or names.
 
-That ladder covers the host's *synced* schema only. Coven owns a separate,
-ordered ladder and version ledger for its bookkeeping tables. Every known Coven
-version has one exact stored and live schema manifest. A writer configured with
-`CovenMigrationPolicy::ApplyPending` may advance from that exact version;
-`RefusePending` reports the pending migration without writing. A read-only open
-always refuses pending Coven migrations. Fresh databases are initialized at the
-latest Coven version under either writer policy.
+An adapter receives a `ChangesetRow` with named, typed `ChangesetColumn` cells.
+Each column has `old` and `new` values. `None` is an undefined cell in a sparse
+UPDATE; `Some(Value::Null)` is SQL NULL. Keep that distinction when translating
+values. An INSERT states new values, a DELETE states old values, and an UPDATE
+states its primary key and changed cells. A newly required column needs values
+on INSERT and DELETE, while an unchanged UPDATE column remains undefined.
 
-On an existing database, the Coven ladder runs before the host ladder in the
-same open transaction. The new Coven schema and ledger, every host migration,
-and final schema validation commit together; a failure in any later step rolls
-the whole open back to its previous Coven and host versions.
+Adapters compose from the write's recorded version through the current version.
+After each step the row must match that registered schema. They preserve the
+operation, table, primary key, indirect flag, and `_updated_at` cells. Changing
+row identities or the immutable sync-routing contract is not a column migration.
+The database's synced-table declarations still require `STRICT` tables and valid
+row identities, as described in [Local data](/docs/local-data).
 
-## Additive vs. structural changes
+A sparse UPDATE may omit an identity field needed by a transformation. Declare
+such fields explicitly in `TableChangesetMigration::new`'s second argument.
+Coven uses a stated old/new value when present; otherwise it reads that declared
+immutable field from the target row by primary key. An UPDATE that changes a
+declared immutable field is rejected. A missing target retains delete-wins
+behavior. Mutable current-row values are not exposed as historical facts.
 
-The kind of change decides what it costs to sync across versions.
+## Original bytes and current application
 
-Conflict resolution reads each column's index from `PRAGMA table_info` at apply
-time, and changesets address columns positionally. So **appending** a column or
-adding a table is *wire-compatible*: an older reader sees a prefix of the columns
-it knows and ignores the rest. A **structural** change (reordering, removing, or
-renaming a column, splitting a table) breaks that positional alignment: an older
-reader would map a changeset's values onto the wrong columns.
+Pull verifies the signed package and validates its original layout against the
+recorded authoring version. Conversion happens during ordered transactional
+application, before current-schema readers, audience checks, blob checks, and
+conflict resolution. An earlier INSERT in that transaction can therefore supply
+immutable context for a later sparse UPDATE.
 
-A table added in a later migration is still a synced table, so it is still
-checked at open: declare it `STRICT` along with the rest of the [synced-table
-contract](/docs/local-data), and declare its `RowIdentity`. Independently
-created rows require canonical UUIDv4 or UUIDv7 ids; `SharedKey` is for equal
-application keys that intentionally name one logical row. Open scans existing
-rows under that declaration, so changing a table to `IndependentUuid` requires
-every existing id already to satisfy the UUID contract. A primary-key change is
-an atomic deletion of the old identity and insertion of a new identity, which
-must satisfy the declared mode.
+The original authenticated bytes and their version remain retained unchanged.
+Converted bytes are an application value, not a replacement signed package.
+Retained history replay, local journal replay, and Circle bootstrap installation
+use the same registered transformations. Conversion or application failure rolls
+back the transaction; it cannot leave an earlier row committed while its
+materialized position reports otherwise.
 
-Both are valid *local* migrations. The difference is only whether a device on the
-other version can still apply the Store packages, which is what the two version
-numbers below gate.
+## Captured writes keep their version
 
-## `schema_version`: skip changes from a newer schema
+A local write records its authoring schema in the same transaction as its
+changeset and durable write receipt. Publication uses that captured version,
+even if the app upgraded before preparing or retrying the package. The currently
+open database's `user_version` is not a replacement version for older bytes.
 
-Every outgoing Store commit is stamped with the producer's ladder top. Pull
-applies its package only when `schema_version` is **at or below** the reader's
-own. A higher version is counted as skipped schema, leaves the exact device
-position unmaterialized, and holds later commits in that predecessor chain.
+When upgrading an existing unversioned journal, Coven uses an exact prepared
+package version only when the retained bytes agree. Otherwise it compares the
+registered historical layouts and transformations. Recovery succeeds only when
+the interpretation is unambiguous. A same-width rename with different meanings
+is an upgrade error, not a reason to label the write with the current version.
+The complete database-open transaction rolls back on that error.
 
-Leaving the position unmaterialized is the point: the commit is genuine and becomes
-applicable the moment the app updates. The device does **not** advance past it
-(that would strand those rows; a running device does not re-bootstrap from a
-snapshot mid-life) and does **not** reconcile them from a snapshot. It re-fetches
-from the held sequence on the next cycle after it upgrades.
+## Newer packages wait for an app update
 
-Worked example. The app ships v5, which adds a `due_date` column to `todos`
-(additive) as ladder rung 5. Bob updates; Alice has not.
+A package whose `schema_version` exceeds the receiver's supported version is
+held with `HeldStorePositionReason::NewerSchema`. Its materialized position does
+not advance, and dependent commits wait. After upgrading, the receiver can
+validate and apply those original packages.
 
-- **Bob (v5) → Alice (v4):** Bob's commits carry `schema_version = 5`. Alice
-  sees `5 > 4`, holds Bob's exact position, and keeps working on her v4
-  schema. She does not see Bob's new-schema rows yet.
-- **Alice (v4) → Bob (v5):** Alice's commits carry `schema_version = 4`. Bob
-  applies them; a newer reader understands an older package (v4's columns are a
-  prefix of v5's).
-- **Alice updates to v5:** her open runs rung 5, and her next cycle re-pulls
-  Bob's commits from the held position and applies them. She converges fully.
+An older package is interpreted through its registered migration path. A newer
+version number alone does not prove that every older row shape is understood:
+a missing transformation is an explicit failure. There is no storage-level
+`min_schema_version` enforcement; the package hold and registered schema
+interpretation are the implemented version boundaries.
 
-So the two versions coexist on one store. Sync stays live; the only effect is
-that the older client lags on the newer schema's rows until it upgrades, then
-catches up. No positional mismatch ever happens, because a device never applies a
-package stamped newer than itself.
+For example, a device at version 2 can receive a version-1 UPDATE after its
+`origin` column was removed when migration 2 declares the transformation above.
+A device still at version 1 holds version-2 packages until it upgrades. Neither
+device re-labels a write to make it fit.
 
-## `min_schema_version`: the hard floor
+## Snapshots and Circle images
 
-The skip above keeps an old client *safe but behind*. That is the right behavior
-for an additive change. A **structural** change is different: an old client must
-not keep going at all, because (a) it could not read the new state even after
-bootstrapping, and (b) the v4 changesets it keeps *writing* would now misalign
-against the v5 shape when a v5 device applies them. The hold only protects reads
-in one direction; it does nothing about the old client's writes.
+A Store snapshot is a SQLite database image containing its own `user_version`.
+Its signed metadata states the same schema version. A newer receiver runs the
+pending image migrations before applying the snapshot's retained tails. An
+older receiver refuses a snapshot newer than its supported schema.
 
-For that case, the release also raises the floor, the `min_schema_version` value
-in storage. Pull checks it before anything else: a client whose ladder top is
-below the stored `min_schema_version` gets
-`PullError::SchemaVersionTooOld` and
-syncs nothing, no reads, no writes, until the user updates the app. Its
-`Display` is the message shown to the user. This is a permanent stop, not a
-transient skip. The floor object itself is untrusted input: with a membership
-chain present it is honored only when signed by a current Owner, so a non-owner
-cannot freeze the fleet or roll the floor back.
-
-So the rule for a post-release schema change:
-
-| Change | Add a ladder rung | Raise `min_schema_version` | Effect on an un-updated client |
-| --- | --- | --- | --- |
-| Additive (append column / add table) | yes | no | keeps syncing; lags on the new rows until it updates, then catches up |
-| Structural (rename / remove / reorder / split) | yes | yes | hard-stopped (`SchemaVersionTooOld`) until it updates |
-
-## Snapshots carry the schema, and say so
-
-A [snapshot](/docs/bootstrap) is a physical `VACUUM INTO` image of the
-snapshotting device's database, so its bytes hold that device's full schema
-*including* its `user_version`, and the generation's signed metadata records
-that `schema_version` alongside its exact commit coverage. A snapshot sidesteps the
-positional-changeset problem entirely: it is a SQLite file, not a positional
-row encoding, so it can faithfully represent any schema.
-
-Version skew at bootstrap is handled on both sides:
-
-- **Joiner at or above the snapshot's version (forward):** safe by
-  construction. A snapshot taken at v4, adopted by a v5 binary, has rung 5 run
-  over it at open and lands at v5.
-- **Joiner below the snapshot's version (reverse):** refused *before the
-  download*. The metadata's recorded version exceeds the joiner's ladder top,
-  so bootstrap fails with
-  `SnapshotError::SchemaTooNew` and writes nothing. The at-open
-  [`MigrationError::SchemaTooNew`](rustdoc:enum:coven::MigrationError)
-  check backs this up for a database file that is already on disk (a copied
-  file, a downgraded app): a binary never runs against a schema from its
-  future.
-
-This is the same contract as changesets, with one difference in shape: a changeset
-degrades *per message* (skip the newer ones, park, catch up later), while a
-snapshot is *all-or-nothing*: it is adopted whole or the bootstrap is refused.
-The takeaway is the same either way: add a ladder rung for every change, and
-raise `min_schema_version` on any change an older binary cannot safely operate
-against.
+A Circle bootstrap is a changeset of INSERTs. Coven verifies the original hash,
+row identities, declared tables, and absence of repeated rows before converting
+those INSERTs. It then stages the converted rows on the receiver's schema and
+checks the routing contract and exact blob closure. Installation and its
+bookkeeping share the caller's transaction. The signed original image is never
+rewritten to impersonate a current-schema image.

@@ -119,6 +119,7 @@ pub(crate) use coven_schema::{
 pub use coven_schema::{
     expected_coven_schema_manifest, is_reserved_table_name, CovenSchemaManifest,
 };
+mod changeset_migration;
 mod circle_snapshot_records;
 mod database_open;
 mod database_runtime;
@@ -130,6 +131,11 @@ mod local_state;
 mod local_store_identity;
 mod make_remote;
 mod migration;
+#[cfg(any(test, feature = "test-utils"))]
+pub use changeset_migration::resolve_and_apply_historical_changeset;
+pub use changeset_migration::{
+    ChangesetColumn, ChangesetMigrationError, ChangesetRow, TableChangesetMigration,
+};
 mod operation_models;
 pub use operation_models::{
     ActiveStorePublication, ActiveStorePublicationAttempt, ActiveStorePublicationOwner,
@@ -555,6 +561,8 @@ pub enum DbError {
     BlobDecl(#[from] crate::BlobDeclError),
     #[error("{0}")]
     ChangesetIdentity(#[from] crate::ChangesetIdentityError),
+    #[error("{0}")]
+    ChangesetMigration(#[from] crate::ChangesetMigrationError),
     #[error("{0}")]
     Changeset(#[from] crate::ChangesetError),
     #[error("{0}")]
