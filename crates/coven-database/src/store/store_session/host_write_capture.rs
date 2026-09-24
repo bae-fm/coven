@@ -570,6 +570,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                         stamper,
                         synced_tables,
                         gates,
+                        store_dir,
                     ))
                 })
             })) {

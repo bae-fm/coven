@@ -108,6 +108,7 @@ pub struct SqlContext<'context, 'connection> {
     stamper: UpdatedAtStamper,
     tables: &'context [SyncedTable],
     gates: &'context Gates,
+    store_dir: &'context coven_foundation::store_dir::StoreDir,
 }
 
 impl<'context, 'connection> SqlContext<'context, 'connection> {
@@ -116,12 +117,14 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
         stamper: UpdatedAtStamper,
         tables: &'context [SyncedTable],
         gates: &'context Gates,
+        store_dir: &'context coven_foundation::store_dir::StoreDir,
     ) -> Self {
         Self {
             transaction,
             stamper,
             tables,
             gates,
+            store_dir,
         }
     }
 
@@ -307,6 +310,100 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
         crate::with_coven_sql_authority(|| {
             let declared = self.user_provided_blob_table(table)?;
             self.register_prepared_external_blob(declared, table, row_id, prepared)
+        })
+    }
+
+    /// Make `(root_table, root_id)` Remote as part of this write: record the
+    /// make-remote intent and queue one upload per row of `blob_rows`, in that
+    /// order, in this transaction. The rows are `(table, row_id)` pairs and
+    /// must be exactly the root's current blob-bearing rows as this write
+    /// leaves them; user-provided rows must already be registered in this
+    /// write. The root must be a gated root that is Local here.
+    ///
+    /// Recording needs no cloud connection: the queue is durable, and the
+    /// connection's drain uploads it whenever one exists. A host that creates a
+    /// root and wants it Remote from the start (an import) records both in one
+    /// write, so the rows never commit Local with the choice lost.
+    pub fn make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        root_label: &str,
+        pin: bool,
+        blob_rows: &[(&str, &str)],
+    ) -> Result<(), DbError> {
+        crate::observe_host_sql_write();
+        crate::with_coven_sql_authority(|| {
+            let root = self
+                .tables
+                .iter()
+                .find(|table| table.name() == root_table)
+                .ok_or_else(|| {
+                    DbError::Message(format!("undeclared synced table {root_table:?}"))
+                })?;
+            if root.is_remote_root() || root.gate_column().is_none() {
+                return Err(DbError::Message(format!(
+                    "{root_table:?} is not a gated root that can be made Remote"
+                )));
+            }
+            if Database::make_remote_intent_state(self.transaction, root_table, root_id)?.is_some()
+            {
+                return Err(DbError::Message(format!(
+                    "make_remote for {root_table:?}/{root_id:?} is already in progress"
+                )));
+            }
+            if blob_rows.is_empty() {
+                return Err(DbError::Message(format!(
+                    "{root_table:?}/{root_id:?} has no blob rows to make Remote"
+                )));
+            }
+            let mut uploads = Vec::with_capacity(blob_rows.len());
+            for (table, row_id) in blob_rows {
+                let declared = self.blob_table(table)?;
+                let reference =
+                    Database::row_blob_ref_on(self.transaction, self.gates, declared, row_id)?;
+                let blob = reference.blob();
+                let source_path = match blob.provenance {
+                    Provenance::UserProvided => {
+                        ExternalBlobRecords::new(self.transaction)
+                            .load(&reference)?
+                            .ok_or_else(|| {
+                                DbError::Message(format!(
+                                    "user-provided blob row {table:?}/{row_id:?} has no registered file"
+                                ))
+                            })?
+                            .path
+                    }
+                    Provenance::HostProvided => self
+                        .store_dir
+                        .local_blob_path(&blob.namespace, &blob.id)
+                        .map_err(|error| {
+                            DbError::Message(format!(
+                                "host-provided blob row {table:?}/{row_id:?} has no local path: {error}"
+                            ))
+                        })?,
+                };
+                uploads.push((reference, source_path));
+            }
+            match super::store_session::blob_transitions::admit_make_remote_on(
+                self.transaction,
+                self.gates,
+                self.tables,
+                root_table,
+                root_id,
+                root_label,
+                pin,
+                &self.stamper.stamp(),
+                &uploads,
+            )? {
+                Some(false) => Ok(()),
+                Some(true) => Err(DbError::Message(format!(
+                    "{root_table:?}/{root_id:?} is already Remote"
+                ))),
+                None => Err(DbError::Message(format!(
+                    "{root_table:?}/{root_id:?} has no resolvable Local/Remote state"
+                ))),
+            }
         })
     }
 

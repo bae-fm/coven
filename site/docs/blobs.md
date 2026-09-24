@@ -199,6 +199,22 @@ pin request. A user-provided source is the registered external file; a
 host-provided source is coven's local file. Enqueueing performs no upload and
 does not yet assign the final provider object.
 
+A host that creates a root and wants it Remote from the start records the
+transition inside the write that creates it, with
+[`SqlContext::make_remote`](rustdoc:method:coven::SqlContext::make_remote),
+naming the root's blob rows in upload order:
+
+```rust
+handle.write(move |sql| {
+    // insert the root and its blob rows, register user files ...
+    sql.make_remote("albums", &album_id, &label, pin, &[("tracks", &track_id)])?;
+    Ok(())
+}).await?;
+```
+
+The rows and the intent commit together or not at all, and recording needs no
+cloud connection: the queue waits for whichever connection drains it.
+
 The durable `cloud_outbox` holds uploads and nothing else — retiring a cloud
 object is accepted reclaim's, not a queued operation. The host observes the queue
 through coven's APIs rather than mutating it. Each upload progresses through:

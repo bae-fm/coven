@@ -38,6 +38,8 @@ mod test_support;
 #[cfg(test)]
 mod blob_facade_tests;
 #[cfg(test)]
+mod make_remote_in_write_tests;
+#[cfg(test)]
 mod prepared_external_blob_tests;
 #[cfg(test)]
 mod store_key_ownership_tests;

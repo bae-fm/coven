@@ -30,79 +30,89 @@ pub struct MakeRemoteAdmission {
     pub uploads: Vec<(RowBlobRef, std::path::PathBuf)>,
 }
 
-impl StoreSession<'_> {
-    fn gated_root_gate_column(&self, root_table: &str) -> Result<&str, DbError> {
-        self.synced_tables
-            .iter()
-            .find(|table| table.name() == root_table)
-            .and_then(|table| table.gate_column())
-            .ok_or_else(|| {
-                DbError::Message(format!(
-                    "blob locality transition root {root_table:?} has no boolean gate column"
-                ))
-            })
-    }
+fn gated_root_gate_column<'tables>(
+    synced_tables: &'tables [coven_protocol::synced_schema::SyncedTable],
+    root_table: &str,
+) -> Result<&'tables str, DbError> {
+    synced_tables
+        .iter()
+        .find(|table| table.name() == root_table)
+        .and_then(|table| table.gate_column())
+        .ok_or_else(|| {
+            DbError::Message(format!(
+                "blob locality transition root {root_table:?} has no boolean gate column"
+            ))
+        })
+}
 
+/// Record a make-remote of a Local root on `connection`'s open transaction:
+/// the intent, and one upload per supplied blob in the supplied order. The
+/// supplied blobs must be exactly the root's current blob set. Returns the
+/// root's locality; nothing is recorded unless it is Local (`Some(false)`).
+///
+/// Shared by the standalone admission and a host write's
+/// [`SqlContext::make_remote`](crate::SqlContext::make_remote), so a make-remote
+/// recorded either way is the same durable state.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn admit_make_remote_on(
+    connection: &rusqlite::Connection,
+    gates: &crate::Gates,
+    synced_tables: &[coven_protocol::synced_schema::SyncedTable],
+    root_table: &str,
+    root_id: &str,
+    root_label: &str,
+    pin: bool,
+    created_at: &str,
+    uploads: &[(RowBlobRef, std::path::PathBuf)],
+) -> Result<Option<bool>, DbError> {
+    let gate_column = gated_root_gate_column(synced_tables, root_table)?;
+    let locality =
+        crate::query_truth(connection, root_table, gate_column, root_id).map_err(DbError::from)?;
+    if locality == Some(false) {
+        let current = Database::row_blob_refs_for_root_on(
+            connection,
+            gates,
+            synced_tables,
+            root_table,
+            root_id,
+        )?;
+        let supplied_are_current = current.len() == uploads.len()
+            && uploads.iter().enumerate().all(|(index, (verified, _))| {
+                current.contains(verified)
+                    && !uploads[..index]
+                        .iter()
+                        .any(|(earlier, _)| earlier == verified)
+            });
+        if !supplied_are_current {
+            return Err(DbError::Message(format!(
+                "the blob rows supplied for {root_table:?}/{root_id:?} are not exactly its current blob set"
+            )));
+        }
+        Database::insert_make_remote_intent_on(connection, root_table, root_id, root_label, pin)?;
+        let cloud_outbox = CloudOutboxRecords::new(connection);
+        for (reference, source_path) in uploads {
+            cloud_outbox.enqueue_upload(
+                root_table,
+                root_id,
+                root_label,
+                reference,
+                source_path,
+                pin,
+                created_at,
+            )?;
+        }
+    }
+    Ok(locality)
+}
+
+impl StoreSession<'_> {
     fn gated_root_locality(
         &self,
         root_table: &str,
         root_id: &str,
     ) -> Result<Option<bool>, DbError> {
-        let gate_column = self.gated_root_gate_column(root_table)?;
+        let gate_column = gated_root_gate_column(self.synced_tables, root_table)?;
         crate::query_truth(self.conn, root_table, gate_column, root_id).map_err(DbError::from)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn admit_make_remote_on(
-        &self,
-        connection: &rusqlite::Connection,
-        root_table: &str,
-        root_id: &str,
-        root_label: &str,
-        pin: bool,
-        created_at: &str,
-        uploads: &[(RowBlobRef, std::path::PathBuf)],
-    ) -> Result<Option<bool>, DbError> {
-        let gate_column = self.gated_root_gate_column(root_table)?;
-        let locality = crate::query_truth(connection, root_table, gate_column, root_id)
-            .map_err(DbError::from)?;
-        if locality == Some(false) {
-            let current = Database::row_blob_refs_for_root_on(
-                connection,
-                self.gates,
-                self.synced_tables,
-                root_table,
-                root_id,
-            )?;
-            let supplied_are_current = current.len() == uploads.len()
-                && uploads.iter().enumerate().all(|(index, (verified, _))| {
-                    current.contains(verified)
-                        && !uploads[..index]
-                            .iter()
-                            .any(|(earlier, _)| earlier == verified)
-                });
-            if !supplied_are_current {
-                return Err(DbError::Message(format!(
-                    "blob rows below {root_table:?}/{root_id:?} changed while make_remote verified their sources"
-                )));
-            }
-            Database::insert_make_remote_intent_on(
-                connection, root_table, root_id, root_label, pin,
-            )?;
-            let cloud_outbox = CloudOutboxRecords::new(connection);
-            for (reference, source_path) in uploads {
-                cloud_outbox.enqueue_upload(
-                    root_table,
-                    root_id,
-                    root_label,
-                    reference,
-                    source_path,
-                    pin,
-                    created_at,
-                )?;
-            }
-        }
-        Ok(locality)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -116,8 +126,10 @@ impl StoreSession<'_> {
         uploads: &[(RowBlobRef, std::path::PathBuf)],
     ) -> Result<Option<bool>, DbError> {
         let transaction = self.conn.unchecked_transaction()?;
-        let locality = self.admit_make_remote_on(
+        let locality = admit_make_remote_on(
             &transaction,
+            self.gates,
+            self.synced_tables,
             root_table,
             root_id,
             root_label,
@@ -148,8 +160,10 @@ impl StoreSession<'_> {
             }
         }
         for root in roots {
-            match self.admit_make_remote_on(
+            match admit_make_remote_on(
                 &transaction,
+                self.gates,
+                self.synced_tables,
                 root_table,
                 &root.root_id,
                 &root.root_label,
@@ -308,7 +322,7 @@ impl StoreSession<'_> {
         materialized: &[MaterializedLocalBlob],
         write_id: coven_protocol::write::WriteId,
     ) -> Result<(), DbError> {
-        let gate_column = self.gated_root_gate_column(root_table)?.to_string();
+        let gate_column = gated_root_gate_column(self.synced_tables, root_table)?.to_string();
         super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
             self.conn,
             self.store_dir,
@@ -330,7 +344,7 @@ impl StoreSession<'_> {
     }
 
     fn cancel_make_remote(&self, root_table: &str, root_id: &str) -> Result<(), DbError> {
-        self.gated_root_gate_column(root_table)?;
+        gated_root_gate_column(self.synced_tables, root_table)?;
         let transaction = self.conn.unchecked_transaction()?;
         match Database::make_remote_intent_state(&transaction, root_table, root_id)? {
             Some(MakeRemoteIntentState::Uploading) => {
