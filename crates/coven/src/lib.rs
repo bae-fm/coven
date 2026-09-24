@@ -11,6 +11,8 @@
 pub(crate) mod circles;
 mod cloud_home_setup;
 mod cloud_outbox_live_query;
+#[cfg(test)]
+mod cloud_outbox_live_query_tests;
 pub(crate) mod coven;
 mod device_pairing;
 mod handle;

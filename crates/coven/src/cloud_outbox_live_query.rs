@@ -10,10 +10,16 @@ const OUTBOX_TABLES: &[&str] = &["cloud_outbox", "blob_make_remote_intents"];
 /// transaction that changes the upload queue or a make-remote intent, then read
 /// both tables in one database operation. Transfer byte callbacks do not write
 /// here; hosts combine their in-memory progress with this durable lower bound.
+///
+/// [`next`](Self::next) is cancel-safe: a snapshot stays owed until a read of
+/// it completes, so dropping a `next()` future mid-read (a `select!` branch
+/// losing) leaves the next call to deliver it.
 pub struct CloudOutboxLiveQuery {
     database: StoreDatabase,
     changes: tokio::sync::broadcast::Receiver<Arc<CommittedChanges>>,
-    initial: bool,
+    /// The initial snapshot, or a relevant change taken from `changes`, has
+    /// not been delivered yet.
+    snapshot_owed: bool,
 }
 
 impl CloudOutboxLiveQuery {
@@ -22,27 +28,30 @@ impl CloudOutboxLiveQuery {
         Self {
             database,
             changes,
-            initial: true,
+            snapshot_owed: true,
         }
     }
 
     /// Return the initial snapshot, or wait for the next relevant committed
-    /// change and return the resulting snapshot.
+    /// change and return the resulting snapshot. A read error is delivered in
+    /// place of that snapshot and does not end the subscription.
     pub async fn next(&mut self) -> Result<CloudOutboxSnapshot, crate::DbError> {
-        if self.initial {
-            self.initial = false;
-        } else {
-            loop {
-                match self.changes.recv().await {
-                    Ok(changes) if changes.affects_any_table(OUTBOX_TABLES) => break,
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        panic!("the cloud outbox live query retains its database")
-                    }
+        while !self.snapshot_owed {
+            match self.changes.recv().await {
+                Ok(changes) if changes.affects_any_table(OUTBOX_TABLES) => {
+                    self.snapshot_owed = true;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    self.snapshot_owed = true;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("the cloud outbox live query retains its database")
                 }
             }
         }
-        self.database.cloud_outbox_snapshot().await
+        let snapshot = self.database.cloud_outbox_snapshot().await;
+        self.snapshot_owed = false;
+        snapshot
     }
 }
