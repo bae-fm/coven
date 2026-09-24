@@ -57,6 +57,7 @@ pub use store::{
 };
 pub use store::{
     BlobCacheError, BlobStream, EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus,
+    PinProgress,
 };
 pub use store::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
 pub use sync_loop::{

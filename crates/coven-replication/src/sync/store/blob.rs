@@ -17,6 +17,7 @@ pub(crate) mod eager_cache;
 mod tests;
 
 pub use cache::{BlobCacheError, BlobStream};
+
 use cache::{BlobStreamSource, RemoteBlobAccess as ExactRemoteBlobAccess};
 
 #[derive(Debug, thiserror::Error)]
@@ -206,7 +207,22 @@ pub trait BlobAccess: Send + Sync {
     async fn read(&self, reference: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError>;
     async fn materialize(&self, reference: &RowBlobRef) -> Result<(), BlobCacheError>;
     async fn open_stream(&self, reference: &RowBlobRef) -> Result<BlobStream, BlobCacheError>;
-    async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError>;
+    async fn pin(
+        &self,
+        blobs: &[RowBlobRef],
+        on_progress: &(dyn Fn(PinProgress) + Send + Sync),
+    ) -> Result<(), BlobCacheError>;
+}
+
+/// How far one pin has come. Bytes are the blobs' stored (provider) sizes: a
+/// blob already on this device counts in full once its copy is kept, and a
+/// download counts the bytes that have arrived so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinProgress {
+    pub blobs_pinned: usize,
+    pub blobs_total: usize,
+    pub bytes_pinned: u64,
+    pub bytes_total: u64,
 }
 
 #[async_trait::async_trait]
@@ -223,8 +239,12 @@ impl BlobAccess for LocalStoreBlobAccess {
         LocalStoreBlobAccess::open_stream(self, reference).await
     }
 
-    async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        LocalStoreBlobAccess::pin(self, blobs).await
+    async fn pin(
+        &self,
+        blobs: &[RowBlobRef],
+        on_progress: &(dyn Fn(PinProgress) + Send + Sync),
+    ) -> Result<(), BlobCacheError> {
+        LocalStoreBlobAccess::pin(self, blobs, on_progress).await
     }
 }
 
@@ -242,8 +262,12 @@ impl BlobAccess for RemoteStoreBlobAccess {
         RemoteStoreBlobAccess::open_stream(self, reference).await
     }
 
-    async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        RemoteStoreBlobAccess::pin(self, blobs).await
+    async fn pin(
+        &self,
+        blobs: &[RowBlobRef],
+        on_progress: &(dyn Fn(PinProgress) + Send + Sync),
+    ) -> Result<(), BlobCacheError> {
+        RemoteStoreBlobAccess::pin(self, blobs, on_progress).await
     }
 }
 
@@ -475,8 +499,12 @@ impl LocalStoreBlobAccess {
         }
     }
 
-    pub(crate) async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        self.cache.pin(None, blobs).await
+    pub(crate) async fn pin(
+        &self,
+        blobs: &[RowBlobRef],
+        on_progress: &(dyn Fn(PinProgress) + Send + Sync),
+    ) -> Result<(), BlobCacheError> {
+        self.cache.pin(None, blobs, on_progress).await
     }
 
     pub async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
@@ -842,8 +870,15 @@ impl RemoteStoreBlobAccess {
             .await
     }
 
-    pub(crate) async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        self.local.cache.pin(Some(&self.remote), blobs).await
+    pub(crate) async fn pin(
+        &self,
+        blobs: &[RowBlobRef],
+        on_progress: &(dyn Fn(PinProgress) + Send + Sync),
+    ) -> Result<(), BlobCacheError> {
+        self.local
+            .cache
+            .pin(Some(&self.remote), blobs, on_progress)
+            .await
     }
 
     pub async fn stage_verified_local_copy(
@@ -922,6 +957,14 @@ impl RemoteStoreBlobAccess {
             .await?;
         Ok(source)
     }
+}
+
+/// One pin call's running count: blobs kept, their stored bytes, and the bytes
+/// each download in flight has brought over so far.
+struct PinTally {
+    blobs_pinned: usize,
+    bytes_pinned: u64,
+    arriving: Vec<u64>,
 }
 
 #[derive(Clone)]
@@ -1068,15 +1111,60 @@ impl StoreBlobCache {
             .map_err(BlobCacheError::File)
     }
 
+    /// Keep every blob in `blobs` in the pinned folder, fetching the ones not
+    /// already on this device, up to the download limit at once. Reports
+    /// [`PinProgress`] as blobs are kept and as downloads advance.
     pub(crate) async fn pin(
         &self,
         remote: Option<&CurrentRemoteBlobSource>,
         blobs: &[RowBlobRef],
+        on_progress: &(dyn Fn(PinProgress) + Send + Sync),
     ) -> Result<(), BlobCacheError> {
         let limit = self.database.transfer_limits().downloads.get();
-        futures_util::stream::iter(blobs.iter().map(Ok::<&RowBlobRef, BlobCacheError>))
-            .try_for_each_concurrent(limit, |reference| async move {
-                self.pin_one(remote, reference).await
+        let sizes = blobs
+            .iter()
+            .map(|blob| {
+                blob.stored()
+                    .map_or(0, |stored| stored.object().stored_size())
+            })
+            .collect::<Vec<_>>();
+        let tally = std::sync::Mutex::new(PinTally {
+            blobs_pinned: 0,
+            bytes_pinned: 0,
+            arriving: vec![0; blobs.len()],
+        });
+        let report = |tally: &PinTally| PinProgress {
+            blobs_pinned: tally.blobs_pinned,
+            blobs_total: blobs.len(),
+            bytes_pinned: tally.bytes_pinned + tally.arriving.iter().sum::<u64>(),
+            bytes_total: sizes.iter().sum(),
+        };
+        on_progress(report(&tally.lock().expect("pin tally poisoned")));
+        futures_util::stream::iter(blobs.iter().enumerate().map(Ok::<_, BlobCacheError>))
+            .try_for_each_concurrent(limit, |(index, reference)| {
+                let tally = &tally;
+                let sizes = &sizes;
+                let report = &report;
+                async move {
+                    let arrived = |bytes: u64| {
+                        let progress = {
+                            let mut tally = tally.lock().expect("pin tally poisoned");
+                            tally.arriving[index] = bytes.min(sizes[index]);
+                            report(&tally)
+                        };
+                        on_progress(progress);
+                    };
+                    self.pin_one(remote, reference, &arrived).await?;
+                    let progress = {
+                        let mut tally = tally.lock().expect("pin tally poisoned");
+                        tally.arriving[index] = 0;
+                        tally.blobs_pinned += 1;
+                        tally.bytes_pinned += sizes[index];
+                        report(&tally)
+                    };
+                    on_progress(progress);
+                    Ok(())
+                }
             })
             .await
     }
@@ -1085,6 +1173,7 @@ impl StoreBlobCache {
         &self,
         remote: Option<&CurrentRemoteBlobSource>,
         reference: &RowBlobRef,
+        arrived: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<(), BlobCacheError> {
         self.database.validate_row_blob_ref(reference).await?;
         let stored = remote_stored_ref(reference)?;
@@ -1121,9 +1210,16 @@ impl StoreBlobCache {
             .stage_atomic_file(&pinned)
             .await
             .map_err(BlobCacheError::File)?;
-        let staged = remote
-            .stage_verified_plaintext(stored, stage, coven_storage::cloud::no_download_progress())
-            .await?;
+        let mut progress = crate::blob::progress::TransferProgress::new();
+        let staging = remote.stage_verified_plaintext(stored, stage, progress.callback());
+        tokio::pin!(staging);
+        let staged = loop {
+            tokio::select! {
+                biased;
+                staged = &mut staging => break staged?,
+                current = progress.changed() => arrived(current),
+            }
+        };
         verify_exact_file(staged.path(), reference).await?;
         self.database.validate_row_blob_ref(reference).await?;
         self.publish_materialization(staged, reference).await

@@ -149,9 +149,9 @@ pub use coven_replication::sync::{
     DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
     DeviceRegistrationRequest, EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus,
     HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, JoinedStore,
-    JoiningDeviceJoinProgress, JoiningDeviceJoinProgressObserver, ProviderReadyDeviceBootstrap,
-    ProvisionalDeviceBootstrap, RetryStuckReclaimError, SyncError, SyncLoopAlerts, SyncLoopFailure,
-    SyncLoopStatus, SyncLoopSuccess,
+    JoiningDeviceJoinProgress, JoiningDeviceJoinProgressObserver, PinProgress,
+    ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap, RetryStuckReclaimError, SyncError,
+    SyncLoopAlerts, SyncLoopFailure, SyncLoopStatus, SyncLoopSuccess,
 };
 #[cfg(feature = "oauth-providers")]
 pub use coven_storage::fetch_account_email;

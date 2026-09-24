@@ -271,10 +271,15 @@ impl TestOwnerGraph {
         &self,
         storage: Option<Arc<dyn CloudSyncObjectStorage>>,
         references: &[coven_protocol::blob::RowBlobRef],
+        on_progress: &(dyn Fn(crate::sync::PinProgress) + Send + Sync),
     ) -> Result<(), crate::sync::BlobCacheError> {
         match storage {
-            Some(storage) => self.remote_blob_access(storage).pin(references).await,
-            None => self.local_access.pin(references).await,
+            Some(storage) => {
+                self.remote_blob_access(storage)
+                    .pin(references, on_progress)
+                    .await
+            }
+            None => self.local_access.pin(references, on_progress).await,
         }
     }
 

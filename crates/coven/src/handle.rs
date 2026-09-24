@@ -834,8 +834,16 @@ impl CovenHandle {
     /// Pin a Remote blob set for offline: coven fetches each into the protected
     /// cache (`storage/pinned/`) — from the evictable cache if already there, else
     /// the cloud — exempt from the size budget. Idempotent.
-    pub async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        self.blobs.pin(blobs).await
+    ///
+    /// `on_progress` receives [`PinProgress`](crate::PinProgress): once before
+    /// any work, as downloads advance (at the transfer cadence), and as each
+    /// blob is kept, ending with every blob counted.
+    pub async fn pin(
+        &self,
+        blobs: &[RowBlobRef],
+        on_progress: &(dyn Fn(crate::PinProgress) + Send + Sync),
+    ) -> Result<(), BlobCacheError> {
+        self.blobs.pin(blobs, on_progress).await
     }
 
     /// Unpin a Remote blob set: coven moves each from `storage/pinned/` to the

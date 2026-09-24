@@ -52,7 +52,7 @@ pub use acknowledgements::{
     ReplayBaselineAdvance, ReplayBaselineDecline, StagedStoreAcknowledgement,
 };
 pub use blob::eager_cache::{EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus};
-pub use blob::{BlobCacheError, BlobStream};
+pub use blob::{BlobCacheError, BlobStream, PinProgress};
 pub use circles::CircleOperationError;
 #[cfg(test)]
 pub(crate) use commit_publication::operation::commit_plan::StoreOperationBatch;

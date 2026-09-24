@@ -319,6 +319,7 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_pinned_cache() {
         .pin_blobs(
             Some(cloud_storage.clone()),
             std::slice::from_ref(&reference),
+            &|_| {},
         )
         .await
         .expect("pin the exact locator");
@@ -507,7 +508,11 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
         .is_err());
 
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), store_dir.clone())
-        .pin_blobs(Some(cloud_storage.clone()), std::slice::from_ref(&second))
+        .pin_blobs(
+            Some(cloud_storage.clone()),
+            std::slice::from_ref(&second),
+            &|_| {},
+        )
         .await
         .expect("pin only the current exact locator");
     assert!(first_path.exists());
@@ -897,6 +902,7 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
         .pin_blobs(
             Some(cloud_storage.clone()),
             std::slice::from_ref(&reference),
+            &|_| {},
         )
         .await
         .expect("pin promotes the cached blob");
@@ -983,6 +989,7 @@ async fn pin_downloads_remote_blob_straight_to_pinned_file() {
         .pin_blobs(
             Some(cloud_storage.clone()),
             std::slice::from_ref(&reference),
+            &|_| {},
         )
         .await
         .expect("pin downloads remote blob");
@@ -1020,7 +1027,7 @@ async fn pin_at_limit_one_pins_every_blob() {
         .install_many(&db, 4)
         .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
-        .pin_blobs(Some(cloud_storage.clone()), &blobs)
+        .pin_blobs(Some(cloud_storage.clone()), &blobs, &|_| {})
         .await
         .expect("pin every blob serially");
 
@@ -1053,7 +1060,7 @@ async fn pin_runs_downloads_concurrently_up_to_the_limit() {
         .install_many(&db, 4)
         .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
-        .pin_blobs(Some(cloud_storage.clone()), &blobs)
+        .pin_blobs(Some(cloud_storage.clone()), &blobs, &|_| {})
         .await
         .expect("pin runs downloads concurrently");
 
@@ -1108,7 +1115,7 @@ async fn pin_mid_batch_failure_surfaces_the_error() {
 
     let err =
         crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
-            .pin_blobs(Some(cloud_storage.clone()), &blobs)
+            .pin_blobs(Some(cloud_storage.clone()), &blobs, &|_| {})
             .await
             .expect_err("a missing blob fails the pin");
     assert!(
@@ -1245,6 +1252,7 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
         .pin_blobs(
             Some(cloud_storage.clone()),
             std::slice::from_ref(&reference),
+            &|_| {},
         )
         .await
         .expect("pin promotes the staged file without a cloud fetch");
@@ -3261,7 +3269,11 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         "the CacheEager blob lands in the evictable cache on pull",
     );
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db2), ld.clone())
-        .pin_blobs(Some(cloud_storage.clone()), std::slice::from_ref(&eager))
+        .pin_blobs(
+            Some(cloud_storage.clone()),
+            std::slice::from_ref(&eager),
+            &|_| {},
+        )
         .await
         .expect("pin the eager blob into pinned/");
     assert!(pinned_path(&ld, &eager).exists());
@@ -3297,6 +3309,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .pin_blobs(
             Some(cloud_storage.clone()),
             std::slice::from_ref(&lazy_reference),
+            &|_| {},
         )
         .await
         .expect("user-pin the lazy blob");
@@ -3771,3 +3784,5 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
         "the renamed temp became the committed blob intact",
     );
 }
+
+mod pin_observation;

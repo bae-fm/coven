@@ -135,8 +135,12 @@ impl StoreBlobAccess {
         self.resolve().await?.access().open_stream(blob).await
     }
 
-    pub(crate) async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        self.resolve().await?.access().pin(blobs).await
+    pub(crate) async fn pin(
+        &self,
+        blobs: &[RowBlobRef],
+        on_progress: &(dyn Fn(crate::PinProgress) + Send + Sync),
+    ) -> Result<(), BlobCacheError> {
+        self.resolve().await?.access().pin(blobs, on_progress).await
     }
 
     pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
@@ -238,8 +242,12 @@ impl StoreBlobs {
         self.blobs.open_stream(blob).await
     }
 
-    pub(crate) async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        self.blobs.pin(blobs).await
+    pub(crate) async fn pin(
+        &self,
+        blobs: &[RowBlobRef],
+        on_progress: &(dyn Fn(crate::PinProgress) + Send + Sync),
+    ) -> Result<(), BlobCacheError> {
+        self.blobs.pin(blobs, on_progress).await
     }
 
     pub(crate) async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {

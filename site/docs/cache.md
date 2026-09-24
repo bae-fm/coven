@@ -190,7 +190,7 @@ safe from eviction (an offline-for-the-flight gesture).
 both present and protected, in `storage/pinned/<namespace>/<id>`:
 
 ```rust
-handle.pin(&blobs).await?;
+handle.pin(&blobs, &|progress| show(progress.blobs_pinned, progress.blobs_total)).await?;
 ```
 
 A pin *populates*, it is not a flag flip. Three cases per blob: already in
