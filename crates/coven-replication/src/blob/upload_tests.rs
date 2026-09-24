@@ -26,6 +26,7 @@ use coven_storage::cloud::{
 };
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
+mod abandon_tests;
 mod pause_tests;
 mod publication_tests;
 mod scheduling_tests;

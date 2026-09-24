@@ -32,8 +32,49 @@ struct BlobUploadAttempt<'operation, 'storage, 'authority> {
     authority: &'operation coven_protocol::objects::BlobWriteAuthority<'authority>,
     routing_encryption: Option<&'operation EncryptionService>,
     observer: Option<&'operation dyn BlobTransitionObserver>,
+    open: OpenAttemptReport<'operation>,
     now: chrono::DateTime<chrono::Utc>,
     entry: OutboxEntry,
+}
+
+/// The attempt the observer was told started and not yet told ended. Every
+/// attempt that reports a start reports an end: `on_blob_uploaded` or
+/// `on_blob_upload_failed` when it runs to one, and
+/// `on_blob_upload_abandoned` from here when the drain running it is dropped
+/// first.
+struct OpenAttemptReport<'operation> {
+    observer: Option<&'operation dyn BlobTransitionObserver>,
+    upload: std::sync::Mutex<Option<RowBlobRef>>,
+}
+
+impl<'operation> OpenAttemptReport<'operation> {
+    fn new(observer: Option<&'operation dyn BlobTransitionObserver>) -> Self {
+        Self {
+            observer,
+            upload: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn opened(&self, upload: &RowBlobRef) {
+        *self.upload.lock().expect("open attempt report poisoned") = Some(upload.clone());
+    }
+
+    fn closed(&self) {
+        *self.upload.lock().expect("open attempt report poisoned") = None;
+    }
+}
+
+impl Drop for OpenAttemptReport<'_> {
+    fn drop(&mut self) {
+        let open = self
+            .upload
+            .get_mut()
+            .expect("open attempt report poisoned")
+            .take();
+        if let (Some(observer), Some(upload)) = (self.observer, open) {
+            observer.on_blob_upload_abandoned(&upload);
+        }
+    }
 }
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
@@ -198,6 +239,7 @@ impl AuthorizedBlobUploadLane<'_> {
                         authority: &authority,
                         routing_encryption,
                         observer,
+                        open: OpenAttemptReport::new(observer),
                         now,
                         entry,
                     }
@@ -448,6 +490,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         let (stored, spool_path) = match state {
             OutboxUploadState::Pending => {
                 if let Some(observer) = self.observer {
+                    self.open.opened(&row);
                     observer.on_blob_preparation_started(&row).await;
                 }
                 let key_fingerprint = match self.writer.store_blob_key_fingerprint() {
@@ -549,6 +592,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
 
         if matches!(&self.entry.upload.state, OutboxUploadState::Prepared { .. }) {
             if let Some(observer) = self.observer {
+                self.open.opened(&row);
                 observer.on_blob_upload_started(&row).await;
             }
             if let Err(error) = self.create_with_progress(&stored, &spool_path, &row).await {
@@ -567,6 +611,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             });
             created_this_pass = true;
             if let Some(observer) = self.observer {
+                self.open.closed();
                 observer.on_blob_uploaded(&row).await;
             }
         }
@@ -792,6 +837,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             );
         }
         if let Some(observer) = self.observer {
+            self.open.closed();
             observer.on_blob_upload_failed(upload, &message).await;
         }
     }

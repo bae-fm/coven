@@ -449,7 +449,11 @@ coalesced at a 300 ms cadence, with the final total forwarded when needed.
 `on_blob_uploaded` follows successful provider creation and the durable Created
 record. Spool cleanup, pinning, or transition finalization can still fail after
 that notification. `on_blob_upload_failed` reports attempt failures; the retained
-journal determines what retry resumes. A Created retry skips preparation and the
+journal determines what retry resumes. When the drain running an attempt is
+dropped (a host cancelling its `drain_uploads` future) after the attempt reported
+a preparation or upload start and before it reported success or failure,
+`on_blob_upload_abandoned` ends it; no failure is recorded and a later drain
+resumes the entry from its journal. A Created retry skips preparation and the
 upload's start, progress, and success callbacks; remaining work can still report
 an attempt failure.
 Use the durable Publishing state, rather than the upload callback, to distinguish

@@ -652,6 +652,8 @@ pub enum RowBlobRefError {
 /// only — the durable queue records Created and the Store publication later
 /// activates the root),
 /// and `on_blob_upload_failed` when an attempt fails and its entry stays queued.
+/// An attempt dropped with its drain before either reports
+/// `on_blob_upload_abandoned`, so every reported start has a reported end.
 ///
 /// A make-remote's root state is durable and belongs in
 /// `CloudOutboxLiveQuery`, not an observer callback that can be lost across a
@@ -707,6 +709,17 @@ pub trait BlobTransitionObserver: Send + Sync {
 
     /// An upload attempt failed; the entry remains queued for retry.
     async fn on_blob_upload_failed(&self, upload: &RowBlobRef, error: &str);
+
+    /// An attempt that reported [`Self::on_blob_preparation_started`] or
+    /// [`Self::on_blob_upload_started`] stopped before reporting
+    /// [`Self::on_blob_uploaded`] or [`Self::on_blob_upload_failed`], because
+    /// the drain running it was dropped. The entry stays queued in its last
+    /// durable phase with no failure recorded, and a later drain resumes it.
+    /// Synchronous because it is reported while the attempt is dropped, where
+    /// nothing can be awaited. The default is a no-op.
+    fn on_blob_upload_abandoned(&self, upload: &RowBlobRef) {
+        let _ = upload;
+    }
 
     /// Whether upload work is currently paused. The drain checks this before
     /// admission and while provider work is active. The default is `false` so
