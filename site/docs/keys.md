@@ -215,6 +215,24 @@ host secret's name forge another store's account), or matching one of
 coven's own reserved slot names, is refused with
 [`KeyError::InvalidSecretName`](rustdoc:enum:coven::KeyError).
 
+## Deleting a store from this device
+
+[`Coven::delete_store`](rustdoc:method:coven::Coven::delete_store) removes a
+closed store's keyring entries — its device signing identity, master key,
+cloud-home credentials, and the host secrets the host names — and then its
+directory. It takes the store's open lock first, so an open store is refused
+before anything is removed, and it works on a store whose database no longer
+opens. The keyring cannot list a store's entries, so the host passes the names
+of its own secrets:
+
+```rust
+drop(handle);
+coven::Coven::delete_store(&store_dir, &store_id, &["discogs_api_key"])?;
+```
+
+A deletion that fails partway is finished by running it again. The cloud copy
+of the store is not touched.
+
 ## Per-platform host requirements
 
 ### Android

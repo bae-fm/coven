@@ -1,17 +1,71 @@
 use coven_keys::keys::{test_keyring, StoreKeys};
 use std::sync::Arc;
 
+/// Deleting a store from this device leaves nothing of it behind: its
+/// directory, and every keyring entry held for it — the device signing
+/// identity, the master key, the cloud-home credentials, and the host's own
+/// secrets — in one call, while a store still open is refused whole.
 #[test]
-fn coven_forgets_a_closed_store_master_key_without_exposing_store_keys() {
+fn deleting_a_closed_store_removes_its_directory_and_every_keyring_entry() {
+    use coven_keys::keys::DeviceIdentityCustody;
+
     test_keyring::install();
-    let store_id = "closed-store-master-key";
+    let store_id = "deleted-store";
+    let directory = tempfile::tempdir().expect("app directory");
+    let store_dir = crate::StoreDir::new_ephemeral(directory.path().join(store_id));
+    let handle = crate::Coven::builder(
+        store_dir.clone(),
+        crate::Config::with_defaults(
+            store_id.to_string(),
+            "device-test".to_string(),
+            "Deleted Store".to_string(),
+        ),
+    )
+    .synced_tables(coven_replication::sync::test_helpers::test_synced_tables())
+    .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
+    .migrations(coven_replication::sync::test_helpers::test_migrations())
+    .open()
+    .expect("open store");
+    handle.initialize_identity().expect("establish identity");
+    handle
+        .set_host_secret("api_token", "host-owned")
+        .expect("store a host secret");
     let keys = StoreKeys::bind(store_id.to_string());
     keys.set_encryption_key(&"11".repeat(32))
         .expect("seed master key");
+    keys.set_cloud_home_credentials(&coven_keys::keys::CloudHomeCredentials::S3 {
+        access_key: "access".to_string(),
+        secret_key: "secret".to_string(),
+    })
+    .expect("seed cloud credentials");
 
-    crate::Coven::forget_keyring_master_key(store_id).expect("forget master key");
+    assert!(
+        matches!(
+            crate::Coven::delete_store(&store_dir, store_id, &["api_token"]),
+            Err(crate::StoreDeletionError::Open(_))
+        ),
+        "an open store is not deleted out from under its handle"
+    );
+    assert!(keys.unlock().expect("read identity").is_some());
 
+    drop(handle);
+    crate::Coven::delete_store(&store_dir, store_id, &["api_token"]).expect("delete the store");
+
+    assert!(!store_dir.exists(), "the store directory is gone");
+    assert!(keys.unlock().expect("read identity").is_none());
     assert_eq!(keys.get_encryption_key().expect("read master key"), None);
+    assert!(keys
+        .get_cloud_home_credentials()
+        .expect("read cloud credentials")
+        .is_none());
+    assert_eq!(
+        keys.get_host_secret("api_token").expect("read secret"),
+        None
+    );
+
+    crate::Coven::delete_store(&store_dir, store_id, &["api_token"])
+        .expect("deleting an already-deleted store is a retry that succeeds");
+    assert!(!store_dir.exists());
 }
 
 #[tokio::test]

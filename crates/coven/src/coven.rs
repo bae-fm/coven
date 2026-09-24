@@ -182,16 +182,47 @@ impl Coven {
         }
     }
 
-    /// Remove the master key for a closed store that cannot be opened.
+    /// Delete a closed store from this device: every keyring entry Coven holds
+    /// for it (the device signing identity, the master key, the cloud-home
+    /// credentials, and the host secrets named in `host_secret_names`), then
+    /// its directory, which holds the database, blobs, caches, and any
+    /// passphrase-custody files. The store's cloud copy is untouched.
     ///
-    /// An open store performs this through [`CovenHandle::forget_master_key`],
-    /// which also disconnects operations retaining the unlocked value. This
-    /// entry point exists for host deletion flows whose damaged local database
-    /// prevents constructing a handle at all; Coven still owns the keyring
-    /// account and slot selection.
-    pub fn forget_keyring_master_key(store_id: &str) -> Result<(), coven_keys::keys::KeyError> {
-        StoreKeys::bind(store_id.to_string()).delete_encryption_key()
+    /// Works on a store whose database cannot be opened. It holds the store's
+    /// open lock throughout, so a store open anywhere is refused with
+    /// [`StoreDeletionError::Open`] before anything is removed. Keyring entries
+    /// go first: a deletion that fails partway leaves a directory that no longer
+    /// opens rather than secrets nothing points at, and running it again
+    /// finishes the job. A [`crate::KeyCustody::Custom`] or
+    /// [`crate::IdentityCustody::Custom`] custody's storage is the host's.
+    pub fn delete_store(
+        store_dir: &StoreDir,
+        store_id: &str,
+        host_secret_names: &[&str],
+    ) -> Result<(), StoreDeletionError> {
+        let _open = StoreOpenGuard::acquire(store_dir).map_err(StoreDeletionError::Open)?;
+        StoreKeys::bind(store_id.to_string())
+            .forget_store(host_secret_names)
+            .map_err(StoreDeletionError::Keyring)?;
+        store_dir
+            .remove_tree()
+            .map_err(StoreDeletionError::Directory)
     }
+}
+
+/// Why [`Coven::delete_store`] did not finish. Whatever it removed stays
+/// removed; running it again completes the deletion.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreDeletionError {
+    /// The store is open (or its lock could not be taken); nothing was removed.
+    #[error("store lock: {0}")]
+    Open(#[source] coven_foundation::store_dir::StoreOpenGuardError),
+    /// A keyring entry could not be removed.
+    #[error("store keyring entries: {0}")]
+    Keyring(#[source] coven_keys::keys::KeyError),
+    /// Every keyring entry is gone but the directory could not be removed.
+    #[error("store directory: {0}")]
+    Directory(#[source] std::io::Error),
 }
 
 pub struct CovenBuilder {

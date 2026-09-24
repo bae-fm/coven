@@ -50,7 +50,7 @@ pub use cloud_home_setup::{
     ConnectedCloudHome,
 };
 pub use cloud_outbox_live_query::CloudOutboxLiveQuery;
-pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
+pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult, StoreDeletionError};
 pub use coven_database::prepare_external_blob;
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_database::resolve_and_apply_historical_changeset;

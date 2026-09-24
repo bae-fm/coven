@@ -758,6 +758,33 @@ impl StoreKeys {
         Ok(())
     }
 
+    /// Remove every keyring entry held for this store: the device signing
+    /// identity, the encryption master key, the cloud-home credentials, and
+    /// each named host secret. Absent entries are not errors, so a deletion
+    /// interrupted partway is finished by running it again.
+    pub fn forget_store(&self, host_secret_names: &[&str]) -> Result<(), KeyError> {
+        for name in host_secret_names {
+            validate_host_secret_name(name)?;
+        }
+        let service = self.keyring.service()?;
+        let store_id = self.store_id.clone();
+        for slot in [
+            KeyringSlot::DeviceSigningKey(store_id.clone()),
+            KeyringSlot::EncryptionMasterKey(store_id.clone()),
+            KeyringSlot::CloudHomeCredentials(store_id),
+        ]
+        .into_iter()
+        .chain(
+            host_secret_names
+                .iter()
+                .map(|name| self.host_secret_slot(name)),
+        ) {
+            service.delete(&slot)?;
+        }
+        info!("Removed every keyring entry for this store");
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn write_empty_encryption_key_for_test(&self) -> Result<(), KeyError> {
         self.keyring
