@@ -8,6 +8,7 @@ use tracing::{debug, error, info};
 use super::{BlockedOperation, SyncCommand, SyncLoopFailure, SyncLoopHandleInner, SyncLoopStatus};
 use crate::sync::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
 use coven_foundation::stage_timing::StageTimings;
+use coven_protocol::blob::BlobTransitionObserver;
 
 struct RuntimeSlotState {
     loop_thread: Option<SyncLoopThread>,
@@ -263,24 +264,16 @@ impl SyncLoopThread {
                 "sync loop iteration",
                 self.inner.components.provider_requests(),
             );
-            self.status_tx.send_replace(SyncLoopStatus::CheckingStorage);
-            let reachable = timings
-                .stage("probe storage", self.inner.components.probe_storage())
-                .await;
-            let (decision, status) = match reachable {
-                Err(error) => {
-                    let error = Arc::new(error);
-                    let status = storage_check_failure_status(Arc::clone(&error));
-                    let failure = SyncLoopFailure::Storage(error);
-                    (
-                        loop_policy::after_failure(failure, consecutive_failures, 300),
-                        status,
-                    )
-                }
-                Ok(_) => {
-                    self.status_tx.send_replace(SyncLoopStatus::Publishing);
-                    self.run_reachable_cycle(consecutive_failures, &mut timings)
-                        .await
+            let stop = self.stop_rx.clone();
+            let observer = self.inner.observer.clone();
+            let this = &*self;
+            let iteration = this.run_iteration(consecutive_failures, &mut timings);
+            let (decision, status) = tokio::select! {
+                biased;
+                outcome = iteration => outcome,
+                () = stopped_while_uploads_paused(stop, observer) => {
+                    info!("Sync loop stopped while uploads are paused; ending the paused cycle");
+                    break;
                 }
             };
             timings.report();
@@ -291,6 +284,34 @@ impl SyncLoopThread {
                 .await
             {
                 break;
+            }
+        }
+    }
+
+    /// One storage probe and, when storage is reachable, one cycle.
+    async fn run_iteration(
+        &self,
+        consecutive_failures: u32,
+        timings: &mut StageTimings,
+    ) -> (loop_policy::SyncLoopDecision, SyncLoopStatus) {
+        self.status_tx.send_replace(SyncLoopStatus::CheckingStorage);
+        let reachable = timings
+            .stage("probe storage", self.inner.components.probe_storage())
+            .await;
+        match reachable {
+            Err(error) => {
+                let error = Arc::new(error);
+                let status = storage_check_failure_status(Arc::clone(&error));
+                let failure = SyncLoopFailure::Storage(error);
+                (
+                    loop_policy::after_failure(failure, consecutive_failures, 300),
+                    status,
+                )
+            }
+            Ok(_) => {
+                self.status_tx.send_replace(SyncLoopStatus::Publishing);
+                self.run_reachable_cycle(consecutive_failures, timings)
+                    .await
             }
         }
     }
@@ -422,6 +443,28 @@ impl SyncLoopThread {
                 true
             }
         }
+    }
+}
+
+/// Complete once a stop is requested while the host has uploads paused.
+///
+/// A paused upload waits for a resume that a stopping loop will not see, so
+/// the cycle holding it could never finish and `stop` would join forever.
+/// Stopping instead ends that cycle; its upload attempts report themselves
+/// abandoned and stay queued in their journaled phase. A cycle whose uploads
+/// are running still finishes before the loop stops.
+async fn stopped_while_uploads_paused(
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    observer: Option<Arc<dyn BlobTransitionObserver>>,
+) {
+    let Some(observer) = observer else {
+        return std::future::pending().await;
+    };
+    if stop.wait_for(|stopping| *stopping).await.is_err() {
+        return std::future::pending().await;
+    }
+    while !observer.should_skip_uploads() {
+        observer.wait_until_uploads_paused().await;
     }
 }
 

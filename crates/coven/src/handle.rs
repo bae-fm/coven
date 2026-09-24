@@ -629,6 +629,11 @@ impl CovenHandle {
     /// connected so [`start_sync`](Self::start_sync) can resume it, and publish
     /// [`SyncLoopStatus::Stopped`]. A no-op when no provider is connected.
     ///
+    /// A cycle whose uploads the observer has paused cannot finish, so it is
+    /// ended instead: its open attempts report
+    /// [`on_blob_upload_abandoned`](crate::BlobTransitionObserver::on_blob_upload_abandoned)
+    /// and stay queued for the next start.
+    ///
     /// The material a running loop resolved from custody (the master keyring,
     /// the device signing identity) is cached only inside that loop for as
     /// long as it runs — nowhere else in the handle — and this is where it is

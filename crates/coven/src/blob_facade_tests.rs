@@ -819,3 +819,116 @@ async fn run_a_cancel_is_recordable_with_no_provider_connected() {
         Some(crate::MakeRemoteProgress::Cancelling),
     );
 }
+
+/// Pauses the pipeline the moment a provider upload starts, the way a person
+/// pressing pause mid-transfer does, and records how the attempt ended.
+#[derive(Default)]
+struct PauseOnStart {
+    paused: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+    started: tokio::sync::Notify,
+    abandoned: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::BlobTransitionObserver for PauseOnStart {
+    async fn on_blob_upload_started(&self, _upload: &crate::RowBlobRef) {
+        self.paused.send_replace(true);
+        self.started.notify_one();
+    }
+
+    async fn on_blob_uploaded(&self, _upload: &crate::RowBlobRef) {}
+
+    async fn on_blob_upload_failed(&self, _upload: &crate::RowBlobRef, _error: &str) {}
+
+    fn on_blob_upload_abandoned(&self, _upload: &crate::RowBlobRef) {
+        self.abandoned
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn should_skip_uploads(&self) -> bool {
+        *self.paused.borrow()
+    }
+
+    async fn wait_until_uploads_paused(&self) {
+        let mut paused = self.paused.subscribe();
+        let _ = paused.wait_for(|paused| *paused).await;
+    }
+
+    async fn wait_until_uploads_resumed(&self) {
+        let mut paused = self.paused.subscribe();
+        let _ = paused.wait_for(|paused| !*paused).await;
+    }
+}
+
+/// A paused transfer never resumes on its own, so a loop that waited for its
+/// cycle to finish would never stop. Stopping sync while uploads are paused
+/// ends the paused attempt instead, leaving the entry queued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_sync_returns_while_an_upload_is_paused() {
+    coven_keys::keys::test_keyring::install();
+    let tmp = tempfile::tempdir().expect("store directory");
+    let owner = coven_keys::keys::UserKeypair::generate();
+    let encryption = crate::EncryptionService::from_key([42; 32]);
+    let observer = std::sync::Arc::new(PauseOnStart::default());
+    let handle = builder(crate::StoreDir::new_ephemeral(tmp.path()))
+        .synced_tables(note_tables())
+        .migrations(test_migrations())
+        .key_custody(crate::KeyCustody::InMemory(crate::MasterKeyring::from(
+            encryption.clone(),
+        )))
+        .identity_custody(crate::IdentityCustody::InMemory(owner.clone()))
+        .observer(observer.clone())
+        .open()
+        .expect("open the store");
+    let home = test_cloud_home();
+    handle
+        .create_test_store("stop-while-paused", owner, home.clone())
+        .await
+        .expect("create Store");
+    handle
+        .connect_sync_with_test_home(home, coven_storage::CloudCipher::Encrypted(encryption))
+        .await
+        .expect("connect Store with its loop");
+    let user_dir = tempfile::tempdir().expect("user directory");
+    let bytes = b"a photo paused mid-upload".to_vec();
+    let path = user_dir.path().join("photo.jpg");
+    std::fs::write(&path, &bytes).expect("write source photo");
+    handle
+        .write_note_with_external_photo("note-1", "photo-1", &path, &bytes)
+        .await
+        .expect("write the note");
+    handle
+        .make_remote_with_discovered_order_for_test("notes", "note-1", "Notes Root", false)
+        .await
+        .expect("start the transition");
+    handle.sync_now();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        observer.started.notified(),
+    )
+    .await
+    .expect("the loop starts the upload");
+
+    // A plain thread, not `spawn_blocking`: a stop that never returns must fail
+    // this test rather than hold the runtime's shutdown open.
+    let (stopped_tx, stopped) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        handle.stop_sync();
+        let _ = stopped_tx.send(handle);
+    });
+    let handle = tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+        .await
+        .expect("stop_sync returns while the upload is paused")
+        .expect("stop thread");
+
+    assert_eq!(
+        observer.abandoned.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the paused attempt is reported ended"
+    );
+    assert_eq!(
+        handle.queued_uploads().await.expect("read the queue").len(),
+        1,
+        "the upload stays queued for the next start"
+    );
+}
