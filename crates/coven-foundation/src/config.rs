@@ -151,6 +151,16 @@ pub enum ConfigError {
     File(#[from] crate::atomic_file::FileError),
 }
 
+impl ConfigError {
+    /// Whether the failed [`Config::save_to_config_yaml`] had already installed
+    /// the new `config.yaml`: readers see the new configuration and only the
+    /// durability work after the rename failed. `false` for every failure
+    /// that left the previous file in place, and for reads.
+    pub fn installed_new_file(&self) -> bool {
+        matches!(self, Self::File(error) if error.installed_new_bytes())
+    }
+}
+
 /// Sync + storage configuration for one store.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -290,6 +300,33 @@ mod tests {
         let loaded = Config::load_from_config_yaml(&store_dir).expect("load");
 
         assert_eq!(loaded, config);
+    }
+
+    /// A host that keeps its own state beside `config.yaml` must know whether
+    /// a failed save already installed the new file, without walking the
+    /// error's source chain for coven's write type.
+    #[test]
+    fn a_failed_save_says_whether_the_new_file_was_installed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new_ephemeral(dir.path());
+        std::fs::create_dir_all(store_dir.config_path()).expect("block config.yaml");
+        let config = Config::with_defaults(
+            "store-1".to_string(),
+            "device-1".to_string(),
+            "My Store".to_string(),
+        );
+        let refused = config
+            .save_to_config_yaml(&store_dir)
+            .expect_err("a directory at config.yaml refuses the rename");
+        assert!(!refused.installed_new_file());
+
+        let after_rename = ConfigError::File(crate::atomic_file::FileError::AtomicWrite {
+            path: store_dir.config_path(),
+            source: crate::atomic_file::WriteError::AfterCommit(std::io::Error::other(
+                "sync directory",
+            )),
+        });
+        assert!(after_rename.installed_new_file());
     }
 
     /// A CloudKit share join persists `cloudkit_owner_name` and

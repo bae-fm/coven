@@ -143,6 +143,13 @@ pub enum FileError {
 }
 
 impl FileError {
+    /// Whether this failure came after an atomic write renamed its new bytes
+    /// into place, so readers already see them and only the durability work
+    /// that follows failed.
+    pub fn installed_new_bytes(&self) -> bool {
+        matches!(self, Self::AtomicWrite { source, .. } if source.committed())
+    }
+
     pub fn at(operation: &'static str, path: impl Into<PathBuf>, source: std::io::Error) -> Self {
         Self::Path {
             operation,
