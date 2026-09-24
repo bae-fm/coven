@@ -86,14 +86,10 @@ impl StoreSync {
 }
 
 impl PreparedSyncConnection {
+    /// Install the connection, then release its loop. Installing first
+    /// publishes the connection's `Offline` status before the loop can send a
+    /// cycle status of its own.
     fn install(mut self, owner: &StoreSync) {
-        if matches!(&self.driver, Some(SyncDriver::Loop)) {
-            self.sync
-                .as_ref()
-                .expect("prepared sync exists until install")
-                .activate();
-            info!("Sync loop activated");
-        }
         let sync = self
             .sync
             .take()
@@ -106,7 +102,12 @@ impl PreparedSyncConnection {
             .driver
             .take()
             .expect("prepared driver exists until install");
-        owner.install_cloud(sync, storage, driver);
+        let activate = matches!(&driver, SyncDriver::Loop);
+        owner.install_cloud(Arc::clone(&sync), storage, driver);
+        if activate {
+            sync.activate();
+            info!("Sync loop activated");
+        }
     }
 }
 

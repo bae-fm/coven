@@ -74,8 +74,11 @@ impl SyncLoopRuntimeFactory for SystemSyncLoopRuntimeFactory {
     }
 }
 
-/// A sync-loop status the host renders. The loop reports provider reachability,
-/// publication, and one terminal status. [`Blocked`](Self::Blocked) is a
+/// A sync-loop status the host renders. The handle reports where the
+/// connection stands ([`Disconnected`](Self::Disconnected),
+/// [`Stopped`](Self::Stopped), and [`Offline`](Self::Offline) when a
+/// connection is installed); its loop reports provider reachability,
+/// publication, and one terminal status per cycle. [`Blocked`](Self::Blocked) is a
 /// successful storage cycle with durable operations waiting on a person;
 /// [`Synchronized`](Self::Synchronized) has none, while
 /// [`Failed`](Self::Failed) means the cycle itself failed. The in-progress marker
@@ -91,6 +94,12 @@ impl SyncLoopRuntimeFactory for SystemSyncLoopRuntimeFactory {
 /// refresh hint, not a complete change stream.
 #[derive(Debug, Clone)]
 pub enum SyncLoopStatus {
+    /// No cloud connection is installed: none was made, or it was
+    /// disconnected. Connecting installs one.
+    Disconnected,
+    /// The connection is installed but its loop is stopped; starting sync
+    /// resumes it.
+    Stopped,
     /// No provider operation has succeeded for the current connection.
     Offline,
     /// The loop is checking whether storage is reachable.

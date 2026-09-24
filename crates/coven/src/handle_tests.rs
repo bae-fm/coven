@@ -2225,10 +2225,10 @@ async fn sync_now_interrupts_the_startup_delay() {
         .await;
 }
 
-/// The current state starts offline, moves through storage checking and
+/// The current state starts disconnected, moves through storage checking and
 /// publication, then reports synchronization.
 #[tokio::test]
-async fn subscribed_host_sees_offline_checking_publishing_then_synchronized() {
+async fn subscribed_host_sees_disconnected_checking_publishing_then_synchronized() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -2237,7 +2237,7 @@ async fn subscribed_host_sees_offline_checking_publishing_then_synchronized() {
 
                 let handle = status_test_handle("lib-status-syncing");
                 let mut rx = handle.subscribe_sync_status();
-                assert_eq!(format!("{:?}", *rx.borrow()), "Offline");
+                assert_eq!(format!("{:?}", *rx.borrow()), "Disconnected");
 
                 let home = InMemoryCloudHome::new();
                 handle
@@ -2359,6 +2359,10 @@ async fn subscription_survives_a_reconnect() {
                     .connect_sync_with_test_home(home, CloudCipher::Plaintext)
                     .await
                     .expect("reconnect");
+                assert!(
+                    matches!(*rx.borrow_and_update(), SyncLoopStatus::Offline),
+                    "the reconnect publishes its new connection"
+                );
 
                 tokio::time::timeout(Duration::from_secs(20), rx.changed())
                     .await
@@ -2426,3 +2430,6 @@ async fn disconnect_sync_drops_the_connection_not_just_the_loop() {
 
 #[path = "handle_tests/join_through_the_facade.rs"]
 mod join_through_the_facade;
+
+#[path = "handle_tests/sync_status_lifecycle.rs"]
+mod sync_status_lifecycle;

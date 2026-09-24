@@ -328,9 +328,14 @@ impl CovenHandle {
 
     /// Subscribe to the sync loop's [`SyncLoopStatus`] stream. The channel is
     /// owned by this handle, not the loop, so the receiver keeps working across a
-    /// reconnect and may be created before any provider is connected (it starts
-    /// receiving once a loop runs). Infallible for that reason — there is no loop
-    /// state to check.
+    /// reconnect and may be created before any provider is connected.
+    /// Infallible for that reason — there is no loop state to check.
+    ///
+    /// The stream starts [`SyncLoopStatus::Disconnected`]; installing a
+    /// connection publishes [`SyncLoopStatus::Offline`], `stop_sync` publishes
+    /// [`SyncLoopStatus::Stopped`], and every disconnect publishes
+    /// `Disconnected` again, so a host renders the connection from this stream
+    /// alone.
     ///
     /// The receiver immediately contains the current value. Intermediate values
     /// may be coalesced; `Synchronized.row_changes` is a refresh hint rather than a
@@ -621,8 +626,8 @@ impl CovenHandle {
     }
 
     /// Stop the sync loop after the in-flight cycle while keeping the provider
-    /// connected so [`start_sync`](Self::start_sync) can resume it. A no-op when
-    /// no provider is connected.
+    /// connected so [`start_sync`](Self::start_sync) can resume it, and publish
+    /// [`SyncLoopStatus::Stopped`]. A no-op when no provider is connected.
     ///
     /// The material a running loop resolved from custody (the master keyring,
     /// the device signing identity) is cached only inside that loop for as
@@ -637,7 +642,8 @@ impl CovenHandle {
 
     /// Disconnect the provider entirely: stop the loop and drop the connection.
     /// The store becomes home-less until the next
-    /// [`connect_sync`](Self::connect_sync).
+    /// [`connect_sync`](Self::connect_sync), and the status stream reads
+    /// [`SyncLoopStatus::Disconnected`].
     ///
     /// Carries the same purge as [`stop_sync`](Self::stop_sync), so nothing about
     /// the previous connection — including which custody it resolved material

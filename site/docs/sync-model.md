@@ -392,6 +392,8 @@ host observes it with
 
 ```rust
 pub enum SyncLoopStatus {
+    Disconnected,
+    Stopped,
     Offline,
     CheckingStorage,
     Publishing,
@@ -400,6 +402,11 @@ pub enum SyncLoopStatus {
     Failed { error: SyncLoopFailure },
 }
 ```
+
+The handle publishes the connection's own transitions on the same channel: the
+stream starts `Disconnected`, installing a connection publishes `Offline` until
+a provider operation succeeds, `stop_sync` publishes `Stopped`, and every
+disconnect publishes `Disconnected`. The loop publishes the rest.
 
 The receiver immediately contains the current value and survives loop restarts.
 Intermediate values may be coalesced, so `Synchronized.row_changes` is a refresh

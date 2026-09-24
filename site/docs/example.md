@@ -231,8 +231,11 @@ tokio::spawn(async move {
             coven::SyncLoopStatus::Failed { error } => {
                 // Show the whole-cycle failure.
             }
-            coven::SyncLoopStatus::Blocked { success, writes } => {
-                // Refresh from success, then show the prerequisite each write names.
+            coven::SyncLoopStatus::Blocked { success, operations } => {
+                // Refresh from success, then show the prerequisite each operation names.
+            }
+            coven::SyncLoopStatus::Disconnected | coven::SyncLoopStatus::Stopped => {
+                // Show that no cloud sync is running.
             }
             coven::SyncLoopStatus::Offline
             | coven::SyncLoopStatus::CheckingStorage

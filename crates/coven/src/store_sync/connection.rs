@@ -36,7 +36,7 @@ impl StoreSync {
             blob_access,
             state: Arc::new(RwLock::new(SyncConnection::Disconnected)),
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
-            status_tx: tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            status_tx: tokio::sync::watch::channel(SyncLoopStatus::Disconnected).0,
             eager_cache_status_tx: tokio::sync::watch::channel(
                 coven_replication::sync::store::EagerCacheFillStatus::NotRunning,
             )
@@ -60,11 +60,25 @@ impl StoreSync {
             storage,
             driver,
         };
+        self.status_tx.send_replace(SyncLoopStatus::Offline);
     }
 
-    pub(super) fn install_without_cloud(&self) {
+    /// Install the cloud-less connection. `status` says why there is no
+    /// cloud: [`SyncLoopStatus::Stopped`] when `stop_sync` released one that
+    /// `start_sync` can resume, [`SyncLoopStatus::Disconnected`] when no
+    /// provider is configured.
+    pub(super) fn install_without_cloud(&self, status: SyncLoopStatus) {
         self.blob_access.clear_connection();
         *self.state.write().expect("write Store sync connection") = SyncConnection::WithoutCloud;
+        self.status_tx.send_replace(status);
+    }
+
+    /// Stop and drop the current connection, leaving none installed. The loop
+    /// is joined before the status is published, so no status it sends can
+    /// follow `Disconnected`.
+    pub(super) fn disconnect_current(&self) {
+        self.stop_current();
+        self.status_tx.send_replace(SyncLoopStatus::Disconnected);
     }
 
     pub(super) fn stop_current(&self) -> bool {
@@ -119,7 +133,7 @@ impl StoreSync {
     ) -> Result<(), SyncError> {
         let Some(storage) = storage else {
             self.stop_current();
-            self.install_without_cloud();
+            self.install_without_cloud(SyncLoopStatus::Disconnected);
             info!("start_sync: sync not configured; no loop started");
             return Ok(());
         };
@@ -209,7 +223,7 @@ impl StoreSync {
     async fn forget_master_key_on_cloud_runtime(&self) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.security.forget_master_key()?;
-        self.stop_current();
+        self.disconnect_current();
         Ok(())
     }
 
@@ -224,7 +238,7 @@ impl StoreSync {
     async fn disconnect_cloud_home_on_cloud_runtime(&self) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.cloud_storage.forget_credentials()?;
-        self.stop_current();
+        self.disconnect_current();
         info!("cloud home disconnected and its credentials forgotten");
         Ok(())
     }
@@ -406,14 +420,14 @@ impl StoreSync {
     pub(crate) fn stop(&self) {
         let was_connected = self.stop_current();
         if was_connected {
-            self.install_without_cloud();
+            self.install_without_cloud(SyncLoopStatus::Stopped);
         } else {
             debug!("stop_sync: no provider connected; nothing to stop");
         }
     }
 
     pub(crate) fn disconnect(&self) {
-        self.stop_current();
+        self.disconnect_current();
         info!("store sync disconnected");
     }
 
