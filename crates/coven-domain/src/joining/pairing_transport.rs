@@ -316,7 +316,7 @@ impl DevicePairingHost {
             HostResponse::AwaitingApproval => Ok(None),
             HostResponse::Invited(invitation) => Ok(Some(invitation.clone())),
             HostResponse::Cancelling(_) | HostResponse::Cancelled => {
-                Err(DevicePairingTransportError::Cancelled)
+                Err(DevicePairingTransportError::SessionCancelled)
             }
         }
     }
@@ -454,7 +454,7 @@ pub async fn receive_device_invitation(
     let mut failures = Vec::new();
     loop {
         if *cancel.borrow() {
-            return Err(DevicePairingTransportError::Cancelled);
+            return Err(DevicePairingTransportError::WaitCancelled);
         }
         if clock.now().timestamp() >= offer.expires_at_unix_seconds() {
             return Err(DevicePairingTransportError::Expired);
@@ -472,7 +472,7 @@ pub async fn receive_device_invitation(
                         .map_err(DevicePairingTransportError::Ciphertext)
                 }
                 Ok(PairingWireResponse::Cancelled) => {
-                    return Err(DevicePairingTransportError::Cancelled)
+                    return Err(DevicePairingTransportError::SessionCancelled)
                 }
                 Ok(PairingWireResponse::SessionClaimed) => {
                     return Err(DevicePairingTransportError::SessionClaimed)
@@ -564,8 +564,14 @@ pub enum DevicePairingTransportError {
     RequestMismatch,
     #[error("pairing session already has another terminal response")]
     ResponseConflict,
-    #[error("pairing was cancelled")]
-    Cancelled,
+    /// The owner cancelled the pairing session. Durable: every later
+    /// exchange with this session answers the same way.
+    #[error("the owner cancelled the pairing session")]
+    SessionCancelled,
+    /// This caller's own cancel signal stopped its wait for an invitation.
+    /// The session itself is untouched and the owner can still approve it.
+    #[error("waiting for the pairing invitation was cancelled on this device")]
+    WaitCancelled,
     #[error("pairing cancellation channel closed")]
     CancellationChannelClosed,
     #[error("pairing host stopped")]
@@ -792,9 +798,40 @@ mod tests {
 
         assert!(matches!(
             receiving.await.expect("joining task"),
-            Err(DevicePairingTransportError::Cancelled)
+            Err(DevicePairingTransportError::SessionCancelled)
         ));
         assert!(journal.path().join("pairing.json").exists());
+    }
+
+    /// The joining device stopping its own wait is not the owner declining
+    /// it: the session is still open and the owner can still approve.
+    #[tokio::test]
+    async fn a_joining_device_cancelling_its_wait_is_not_an_owner_cancellation() {
+        let (host, joining_identity, _journal) = host().await;
+        let request = DevicePairingRequest::signed(host.offer(), &joining_identity, None);
+        let sealed = SealedDevicePairingRequest::new(host.offer(), &request).expect("seal request");
+        let (cancel_tx, cancel) = watch::channel(false);
+        let receiving = tokio::spawn({
+            let offer = host.offer().clone();
+            async move {
+                receive_device_invitation(
+                    &offer,
+                    &sealed,
+                    timing(),
+                    Arc::new(coven_foundation::clock::SystemClock),
+                    &cancel,
+                )
+                .await
+            }
+        });
+        assert_eq!(host.wait_for_request().await.expect("request"), request);
+        cancel_tx.send_replace(true);
+
+        assert!(matches!(
+            receiving.await.expect("joining task"),
+            Err(DevicePairingTransportError::WaitCancelled)
+        ));
+        assert_eq!(host.invitation(&request).expect("session still open"), None);
     }
 
     #[tokio::test]
