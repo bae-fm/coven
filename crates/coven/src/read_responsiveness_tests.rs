@@ -286,7 +286,7 @@ async fn a_commit_during_processing_remains_pending() {
 }
 
 #[tokio::test]
-async fn superseded_processing_does_not_publish_an_old_request() {
+async fn processing_superseded_by_a_request_publishes_the_request_it_answers() {
     let (_temp, handle) = open_handle();
     insert_note(&handle, NOTE_ONE, "One").await;
     insert_note(&handle, NOTE_TWO, "Two").await;
@@ -312,10 +312,14 @@ async fn superseded_processing_does_not_publish_an_old_request() {
     tokio::select! { () = pause.first_read.notified() => {}, _ = &mut next => panic!("processor returned prematurely") }
     let revision = requests.set(NOTE_TWO.to_string()).unwrap();
     pause.release();
-    let event = next.await;
-    assert_eq!(event.revision(), revision);
-    assert_eq!(event.request(), NOTE_TWO);
-    assert_eq!(event.into_result().unwrap(), "Two");
+    let finished = next.await;
+    assert_eq!(finished.revision().get(), 0);
+    assert_eq!(finished.request(), NOTE_ONE);
+    assert_eq!(finished.into_result().unwrap(), "One");
+    let latest = query.next().await;
+    assert_eq!(latest.revision(), revision);
+    assert_eq!(latest.request(), NOTE_TWO);
+    assert_eq!(latest.into_result().unwrap(), "Two");
 }
 
 #[tokio::test]

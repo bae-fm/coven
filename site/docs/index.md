@@ -171,8 +171,10 @@ bounded pool after releasing the connection. Fetch every database input in `fetc
 `transform` receives owned values without a SQL context. The live equivalents are
 `subscribe(fetch).process(transform)` and
 `subscribe_reconfigurable(request, fetch).process(transform)`: dependencies
-stay attached to the read that produced the data, and superseded requests do
-not replace newer results.
+stay attached to the read that produced the data, and each event carries the
+request and revision it answers. A read that finishes after the request changed
+is still delivered, then the latest request runs, so requests that change
+during every read cannot starve the subscription.
 
 Without `.process(...)`, awaiting the read returns the fetched values directly.
 Reads begin when awaited; subscriptions begin when their `next()` is awaited.

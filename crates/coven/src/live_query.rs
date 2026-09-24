@@ -46,16 +46,18 @@ enum PendingRun {
 }
 
 impl PendingRun {
+    fn requested() -> Self {
+        Self::Triggered {
+            request_changed: true,
+            commits: Vec::new(),
+            unknown_commit: false,
+            previous_dependencies_matched: false,
+        }
+    }
+
     fn request_changed(&mut self) {
         match self {
-            Self::Initial => {
-                *self = Self::Triggered {
-                    request_changed: true,
-                    commits: Vec::new(),
-                    unknown_commit: false,
-                    previous_dependencies_matched: false,
-                };
-            }
+            Self::Initial => *self = Self::requested(),
             Self::Triggered {
                 request_changed, ..
             } => *request_changed = true,
@@ -199,8 +201,13 @@ impl<Request, Value> ReconfigurableLiveQueryEvent<Request, Value> {
 /// Construct one with
 /// [`CovenHandle::subscribe_reconfigurable`](crate::CovenHandle::subscribe_reconfigurable).
 /// Request changes and relevant commits are coalesced before each run. If the
-/// request changes while a run is in progress, that result is discarded and
-/// the latest request is evaluated before an event is returned.
+/// request changes while a run is in progress, that run's result is still
+/// delivered, carrying the request and revision it answers, and the latest
+/// request runs next. Every finished read is therefore delivered or skipped as
+/// an equal value, so request changes of any frequency cannot starve the
+/// subscription; a host showing only the newest request compares
+/// [`ReconfigurableLiveQueryEvent::revision`] with the revision
+/// [`LiveQueryRequests::set`] returned.
 ///
 /// A run caused only by committed changes whose value equals the last
 /// delivered value is not delivered: the query's read dependencies are
@@ -337,50 +344,45 @@ where
 
     /// Evaluate the pending run. `None` means the run produced the value
     /// already delivered and no event is due.
+    ///
+    /// A request that changed while the read ran does not discard it: the
+    /// finished read answers the request it ran with, and the newer request
+    /// becomes the next pending run. Discarding would let a request that
+    /// changes during every read starve the subscription.
     async fn run(&mut self) -> Option<ReconfigurableLiveQueryEvent<Request, Value>>
     where
         Value: Clone + PartialEq,
     {
-        loop {
-            let state = self.current.clone();
-            let query = self.query.clone();
-            let request = state.request.clone();
-            let outcome = query(self.reader.clone(), request).await;
+        let state = self.current.clone();
+        let outcome = (self.query)(self.reader.clone(), state.request.clone()).await;
 
-            if self.request_receiver.has_changed().unwrap_or(false) {
-                self.pending
-                    .as_mut()
-                    .expect("live query run is pending")
-                    .request_changed();
-                self.accept_latest_request();
-                self.drain_pending();
-                continue;
+        let result = match outcome {
+            Ok((result, dependencies)) => {
+                self.dependencies = dependencies;
+                result
             }
-
-            let result = match outcome {
-                Ok((result, dependencies)) => {
-                    self.dependencies = dependencies;
-                    result
-                }
-                Err(error) => {
-                    self.dependencies = QueryDependencies::unknown();
-                    Err(error)
-                }
-            };
-            let pending = self.pending.take().expect("live query run is pending");
-            let cause = pending.cause(&self.dependencies);
-            if cause == ReconfigurableLiveQueryCause::DatabaseChanged
-                && matches!((&result, &self.last_delivered), (Ok(value), Some(last)) if value == last)
-            {
-                return None;
+            Err(error) => {
+                self.dependencies = QueryDependencies::unknown();
+                Err(error)
             }
-            self.last_delivered = result.as_ref().ok().cloned();
-            return Some(ReconfigurableLiveQueryEvent {
-                cause,
-                state,
-                result,
-            });
+        };
+        let pending = self.pending.take().expect("live query run is pending");
+        let cause = pending.cause(&self.dependencies);
+        if self.request_receiver.has_changed().unwrap_or(false) {
+            self.accept_latest_request();
+            self.pending = Some(PendingRun::requested());
         }
+        if cause == ReconfigurableLiveQueryCause::DatabaseChanged
+            && matches!((&result, &self.last_delivered), (Ok(value), Some(last)) if value == last)
+        {
+            return None;
+        }
+        self.last_delivered = result.as_ref().ok().cloned();
+        Some(ReconfigurableLiveQueryEvent {
+            cause,
+            state,
+            result,
+        })
     }
 
     async fn await_pending(&mut self) {
@@ -389,12 +391,7 @@ where
                 changed = self.request_receiver.changed() => {
                     changed.expect("the live query retains its request sender");
                     self.accept_latest_request();
-                    self.pending = Some(PendingRun::Triggered {
-                        request_changed: true,
-                        commits: Vec::new(),
-                        unknown_commit: false,
-                        previous_dependencies_matched: false,
-                    });
+                    self.pending = Some(PendingRun::requested());
                 }
                 changes = self.changes.recv() => {
                     match changes {

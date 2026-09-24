@@ -954,7 +954,7 @@ async fn reconfigurable_query_request_handle_reports_subscription_drop() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn request_changed_during_a_query_discards_the_superseded_result() {
+async fn request_changed_during_a_query_delivers_that_read_then_the_new_request() {
     let (_temp, handle) = open_handle();
     insert_note(&handle, NOTE_ONE, "One").await;
     insert_note(&handle, NOTE_TWO, "Two").await;
@@ -983,7 +983,10 @@ async fn request_changed_during_a_query_discards_the_superseded_result() {
         });
     let requests = notes.requests();
 
-    let delivery = tokio::spawn(async move { notes.next().await });
+    let delivery = tokio::spawn(async move {
+        let event = notes.next().await;
+        (notes, event)
+    });
     first_started.notified().await;
     let revision = requests
         .set(vec![NOTE_TWO.to_string()])
@@ -992,15 +995,44 @@ async fn request_changed_during_a_query_discards_the_superseded_result() {
     *released.lock().expect("release mutex poisoned") = true;
     wake.notify_one();
 
-    let delivered = delivery.await.expect("delivery task");
-    assert_eq!(
-        delivered.cause(),
-        ReconfigurableLiveQueryCause::RequestChanged
-    );
-    assert_eq!(delivered.revision(), revision);
-    assert_eq!(delivered.request(), &[NOTE_TWO.to_string()]);
-    assert_eq!(delivered.into_result().expect("latest result"), "Two");
+    let (mut notes, finished) = delivery.await.expect("delivery task");
+    assert_eq!(finished.cause(), ReconfigurableLiveQueryCause::Initial);
+    assert_eq!(finished.revision().get(), 0);
+    assert_eq!(finished.request(), &[NOTE_ONE.to_string()]);
+    assert_eq!(finished.into_result().expect("finished result"), "One");
+    assert_eq!(invocations.load(Ordering::Acquire), 1);
+
+    let latest = notes.next().await;
+    assert_eq!(latest.cause(), ReconfigurableLiveQueryCause::RequestChanged);
+    assert_eq!(latest.revision(), revision);
+    assert_eq!(latest.request(), &[NOTE_TWO.to_string()]);
+    assert_eq!(latest.into_result().expect("latest result"), "Two");
     assert_eq!(invocations.load(Ordering::Acquire), 2);
+}
+
+/// A request that changes during every read must not keep the query from
+/// ever delivering: each finished read is delivered with the request it
+/// answers.
+#[tokio::test]
+async fn a_request_changing_during_every_read_still_delivers() {
+    let (_temp, handle) = open_handle();
+    let requests = Arc::new(std::sync::OnceLock::<crate::LiveQueryRequests<u64>>::new());
+    let query_requests = requests.clone();
+    let mut counter = handle.subscribe_reconfigurable(0_u64, move |request, _sql| {
+        if let Some(requests) = query_requests.get() {
+            let _ = requests.set(request + 1);
+        }
+        Ok(*request)
+    });
+    assert!(requests.set(counter.requests()).is_ok());
+
+    for expected in 0..3 {
+        let event = tokio::time::timeout(Duration::from_secs(5), counter.next())
+            .await
+            .expect("a finished read is delivered despite a newer request");
+        assert_eq!(event.request(), &expected);
+        assert_eq!(event.into_result().expect("counter value"), expected);
+    }
 }
 
 #[tokio::test]

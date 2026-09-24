@@ -157,8 +157,9 @@ receives no SQL context: all database inputs belong in the first closure.
 `handle.subscribe_reconfigurable(request, fetch).process(transform)`
 apply the same split to live queries. The extracted values retain their exact
 read dependencies through processing, including processing errors. Relevant
-commits arriving during processing remain available for the next query run;
-a result for a superseded request is discarded before delivery.
+commits arriving during processing remain available for the next query run.
+A result whose request was replaced while it ran is still delivered with that
+request and its revision, and the replacement request runs next.
 
 For a reconfigurable subscription, `fetch` receives `(&request, sql)` and
 `transform` receives `(&request, fetched)`, both for the same request revision.
