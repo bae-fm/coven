@@ -840,3 +840,108 @@ async fn run_facade_cancellation_unwinds_a_persisted_invitation_without_an_appro
         .config_path()
         .exists());
 }
+
+/// Cancelling from the owner's UI while that session's approval is still
+/// running must end the approval as cancelled, not race it: the two share one
+/// Store attempt, and exactly one of them may unwind and close it.
+#[test]
+fn facade_cancellation_during_a_running_approval_ends_that_approval() {
+    on_a_deep_stack(run_facade_cancellation_during_a_running_approval_ends_that_approval);
+}
+
+async fn run_facade_cancellation_during_a_running_approval_ends_that_approval() {
+    let fixture = FacadeFixture::build("facade-concurrent-cancellation").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind pairing listener");
+    let endpoint = listener.local_addr().expect("pairing endpoint");
+    let pairing_key = crate::UserKeypair::generate();
+    let offer = crate::DevicePairingOffer::new(
+        &pairing_key,
+        vec![endpoint],
+        "Facade Join Store".to_string(),
+        crate::CloudProvider::S3,
+        1_900_000_000,
+    )
+    .expect("pairing offer");
+    let pairing_journal = tempfile::tempdir().expect("pairing journal directory");
+    let journal_path = pairing_journal.path().join("pairing.json");
+    let host = crate::DevicePairingHost::start(
+        listener,
+        offer.clone(),
+        pairing_key,
+        journal_path.clone(),
+        Arc::new(crate::SystemClock),
+    )
+    .await
+    .expect("start pairing host");
+    let pairing =
+        crate::PreparedDevicePairing::open_or_create(&offer.encode(), None, &fixture.layout)
+            .expect("prepare joining identity from the scanned code");
+    let (_join_cancel_tx, join_cancel) = tokio::sync::watch::channel(false);
+    let joining = coven_domain::joining::join_with_device_pairing_over_test_home(
+        &pairing,
+        fixture.layout.clone(),
+        fixture.tables.clone(),
+        test_migrations(),
+        crate::CovenMigrationPolicy::ApplyPending,
+        Arc::new(crate::SystemClock),
+        fixture.home.clone(),
+        timing(),
+        Arc::new(|_| {}),
+        &join_cancel,
+    );
+    tokio::pin!(joining);
+    let request = tokio::select! {
+        request = host.wait_for_request() => request.expect("receive signed request"),
+        outcome = &mut joining => panic!("joining finished before approval: {outcome:?}"),
+    };
+    // The approval's own cancel signal never fires: only the separate cancel
+    // call can end it.
+    let (_approval_cancel_tx, approval_cancel) = tokio::sync::watch::channel(false);
+    let approving = fixture.handle.approve_device_pairing(
+        &host,
+        &request,
+        crate::MemberRole::Member,
+        crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
+        None,
+        &|_| {},
+        approval_cancel,
+    );
+    tokio::pin!(approving);
+    loop {
+        tokio::select! {
+            outcome = &mut approving => panic!("approval finished before cancellation: {outcome:?}"),
+            outcome = &mut joining => panic!("joining finished before cancellation: {outcome:?}"),
+            () = tokio::time::sleep(Duration::from_millis(2)) => {
+                if host.invitation(&request).expect("read pairing journal").is_some() {
+                    break;
+                }
+            }
+        }
+    }
+
+    let (approved, cancelled, joined) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(
+            &mut approving,
+            fixture.handle.cancel_device_pairing(&host),
+            &mut joining,
+        )
+    })
+    .await
+    .expect("approval, cancellation, and join all settle");
+
+    assert!(
+        matches!(approved, Err(crate::ApproveDevicePairingError::Cancelled)),
+        "the running approval ends cancelled: {approved:?}"
+    );
+    cancelled.expect("cancellation succeeds");
+    assert!(matches!(
+        joined.expect("joining device completes cancellation"),
+        crate::DeviceJoinTransportOutcome::Abandoned(_)
+    ));
+    assert!(
+        !journal_path.exists(),
+        "the closed session leaves no journal"
+    );
+}

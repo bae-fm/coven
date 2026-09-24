@@ -19,7 +19,8 @@ pub use pairing::{
     PreparedDevicePairing, SealedDevicePairingRequest,
 };
 pub use pairing_transport::{
-    receive_device_invitation, DevicePairingHost, DevicePairingTransportError,
+    receive_device_invitation, DevicePairingHost, DevicePairingOperation,
+    DevicePairingTransportError,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use transport::join_with_device_pairing_over_test_home;

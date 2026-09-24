@@ -124,6 +124,14 @@ struct DevicePairingHostInner {
     journal: PairingJournal,
     request_tx: watch::Sender<Option<DevicePairingRequest>>,
     server: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Held across one approval or cancellation, so the two never act on
+    /// the session's Store attempt at once.
+    operation: tokio::sync::Mutex<()>,
+    /// Raised by a cancellation before it waits for `operation`, so a running
+    /// approval sees it and unwinds instead of holding the session.
+    cancel_requested: watch::Sender<bool>,
+    /// The journal was removed; the session has nothing left to record.
+    finished: std::sync::atomic::AtomicBool,
 }
 
 impl Drop for DevicePairingHostInner {
@@ -252,12 +260,42 @@ impl DevicePairingHost {
                 journal,
                 request_tx,
                 server: Mutex::new(Some(server)),
+                operation: tokio::sync::Mutex::new(()),
+                cancel_requested: watch::channel(false).0,
+                finished: std::sync::atomic::AtomicBool::new(false),
             }),
         })
     }
 
     pub fn offer(&self) -> &DevicePairingOffer {
         &self.inner.offer
+    }
+
+    /// Take this session's operation slot: approval and cancellation each run
+    /// under it, one at a time.
+    pub async fn operation(&self) -> DevicePairingOperation<'_> {
+        DevicePairingOperation {
+            _slot: self.inner.operation.lock().await,
+        }
+    }
+
+    /// Ask a running approval to unwind. The cancellation that raises this
+    /// then takes the operation slot and finds the session already cancelled
+    /// or still to cancel.
+    pub fn request_cancel(&self) {
+        self.inner.cancel_requested.send_replace(true);
+    }
+
+    /// Complete once cancellation of this session has been requested.
+    pub async fn cancellation_requested(&self) {
+        let mut requested = self.inner.cancel_requested.subscribe();
+        if requested.wait_for(|requested| *requested).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    pub fn is_cancel_requested(&self) -> bool {
+        *self.inner.cancel_requested.borrow()
     }
 
     pub fn subscribe_request(&self) -> watch::Receiver<Option<DevicePairingRequest>> {
@@ -341,8 +379,18 @@ impl DevicePairingHost {
 
     /// Persist cancellation and return the delivered invitation, when one
     /// exists, so the owner can unwind the exact Store attempt it started.
+    ///
+    /// A finished session has no journal left to record in, so cancelling it
+    /// again changes nothing and returns `None`.
     pub fn cancel(&self) -> Result<Option<Vec<u8>>, DevicePairingTransportError> {
         let mut persisted = self.inner.state.lock().expect("lock pairing host state");
+        if self
+            .inner
+            .finished
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(None);
+        }
         let mut next = persisted.clone();
         let invitation = match &next.state.response {
             HostResponse::AwaitingApproval => None,
@@ -362,11 +410,28 @@ impl DevicePairingHost {
 
     pub fn finish(&self) -> Result<(), DevicePairingTransportError> {
         let persisted = self.inner.state.lock().expect("lock pairing host state");
+        if self
+            .inner
+            .finished
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
         if matches!(persisted.state.response, HostResponse::AwaitingApproval) {
             return Err(DevicePairingTransportError::ResponseConflict);
         }
-        self.inner.journal.remove()
+        self.inner.journal.remove()?;
+        self.inner
+            .finished
+            .store(true, std::sync::atomic::Ordering::Release);
+        drop(persisted);
+        Ok(())
     }
+}
+
+/// One approval or cancellation's exclusive hold on a pairing session.
+pub struct DevicePairingOperation<'host> {
+    _slot: tokio::sync::MutexGuard<'host, ()>,
 }
 
 #[derive(Serialize, Deserialize)]

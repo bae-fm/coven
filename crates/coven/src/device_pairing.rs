@@ -105,6 +105,12 @@ impl StoreDevicePairing {
     /// Admit the exact signed request the owner reviewed, return its sealed
     /// invitation over the local pairing session, and drive the Store
     /// registration protocol to its terminal outcome.
+    ///
+    /// Runs under the session's operation slot, so a concurrent
+    /// [`cancel`](Self::cancel) never acts on the Store attempt this creates
+    /// while it is being created or driven: the cancellation asks this
+    /// approval to unwind, and this approval returns
+    /// [`ApproveDevicePairingError::Cancelled`] once it has.
     pub(crate) async fn approve(
         &self,
         host: &DevicePairingHost,
@@ -116,6 +122,13 @@ impl StoreDevicePairing {
         cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<crate::DeviceJoinDriveOutcome, ApproveDevicePairingError> {
         let timing = crate::DeviceJoinTransportTiming::interactive();
+        let _operation = host.operation().await;
+        if host.is_cancel_requested() {
+            // The cancellation waiting behind this slot unwinds and closes
+            // the session; starting a Store attempt now would only leave it
+            // more to unwind.
+            return Err(ApproveDevicePairingError::Cancelled);
+        }
         if let Some(bytes) = host.cancellation_invitation(request)? {
             let invitation = coven_domain::joining::DeviceJoinInvite::from_bytes(&bytes)?;
             self.sync
@@ -140,7 +153,12 @@ impl StoreDevicePairing {
             on_progress,
             timing,
         );
-        let cancellation = cancellation_requested(cancel);
+        let cancellation = async {
+            tokio::select! {
+                () = cancellation_requested(cancel) => {}
+                () = host.cancellation_requested() => {}
+            }
+        };
         tokio::pin!(drive);
         tokio::pin!(cancellation);
         let outcome = tokio::select! {
@@ -160,10 +178,15 @@ impl StoreDevicePairing {
 
     /// Persist cancellation, unwind the exact Store attempt retained by the
     /// pairing journal, and close the local pairing session.
+    ///
+    /// A running approval of this session is asked to unwind first and this
+    /// waits for it; if it already closed the session, nothing is left to do.
     pub(crate) async fn cancel(
         &self,
         host: &DevicePairingHost,
     ) -> Result<(), ApproveDevicePairingError> {
+        host.request_cancel();
+        let _operation = host.operation().await;
         if let Some(bytes) = host.cancel()? {
             let invitation = coven_domain::joining::DeviceJoinInvite::from_bytes(&bytes)?;
             self.sync
