@@ -13,17 +13,24 @@ impl MergeMaterializationTransaction<'_, '_> {
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         replay_rows: &mut ReplayRows,
     ) -> Result<(), DbError> {
-        let effect = self.migrate_replay_effect(effect, schema_history)?;
+        let mut effect = self.migrate_replay_effect(effect, schema_history)?;
         self.validate_unaccepted_circle_context(authority, root, &effect)?;
         let public_rows =
             replay_effect_public_rows(self.store.transaction, gates, &effect, routing_key)?;
+        let joined = match self.local_rows_meeting_shared_rows(
+            gates,
+            &schema,
+            &public_rows,
+            &replay_effect_local_rows(&effect)?,
+        )? {
+            SharedRowMeeting::Joined(joined) => joined,
+            SharedRowMeeting::Conflict((table, row_id)) => {
+                return Err(Self::local_shared_conflict(&effect.write_id, table, row_id));
+            }
+        };
+        self.drop_joined_private_changes(&mut effect, &joined)?;
         let local_rows = replay_effect_local_rows(&effect)?;
         let changed_rows = replay_effect_rows(&effect)?;
-        if let Some((table, row_id)) =
-            self.local_write_would_change_shared_row(gates, &public_rows, &local_rows)?
-        {
-            return Err(Self::local_shared_conflict(&effect.write_id, table, row_id));
-        }
         let partitions = effect
             .partitions
             .store
@@ -154,19 +161,26 @@ impl MergeMaterializationTransaction<'_, '_> {
         commit: &StoreBatchCommitRef,
         replay_rows: &mut ReplayRows,
     ) -> Result<Option<crate::MaterializationHold>, DbError> {
-        let effect = self.migrate_replay_effect(effect, schema_history)?;
+        let mut effect = self.migrate_replay_effect(effect, schema_history)?;
         let public_rows =
             replay_effect_public_rows(self.store.transaction, gates, &effect, routing_key)?;
+        let joined = match self.local_rows_meeting_shared_rows(
+            gates,
+            &schema,
+            &public_rows,
+            &replay_effect_local_rows(&effect)?,
+        )? {
+            SharedRowMeeting::Joined(joined) => joined,
+            SharedRowMeeting::Conflict((table, row_id)) => {
+                return Ok(Some(crate::MaterializationHold::PrivateSharedConflict {
+                    table,
+                    row_id,
+                    commit: commit.clone(),
+                }));
+            }
+        };
+        self.drop_joined_private_changes(&mut effect, &joined)?;
         let local_rows = replay_effect_local_rows(&effect)?;
-        if let Some((table, row_id)) =
-            self.local_write_would_change_shared_row(gates, &public_rows, &local_rows)?
-        {
-            return Ok(Some(crate::MaterializationHold::PrivateSharedConflict {
-                table,
-                row_id,
-                commit: commit.clone(),
-            }));
-        }
         self.apply_replay_partitions(&effect.write_id, effect.partitions.local, schema.clone())?;
         if let Some((table, row_id)) = self.update_private_rows_after_effect(
             gates,
@@ -184,20 +198,75 @@ impl MergeMaterializationTransaction<'_, '_> {
         Ok(None)
     }
 
-    pub(super) fn local_write_would_change_shared_row(
+    /// The private rows of a replayed write that are already shared here.
+    ///
+    /// Rows that [join](super::private_shared::joins_shared_row) their shared
+    /// copy are returned so the write's private change to them is dropped: the
+    /// accepted shared row stands, as it does when a pull meets the private
+    /// row. Any other such row is a conflict.
+    fn local_rows_meeting_shared_rows(
         &self,
         gates: &crate::Gates,
+        schema: &TableSchema,
         public_rows: &BTreeSet<(String, String)>,
         local_rows: &BTreeSet<(String, String)>,
-    ) -> Result<Option<(String, String)>, DbError> {
+    ) -> Result<SharedRowMeeting, DbError> {
         let shared_before = gates.shared_rows(self.store.transaction)?;
+        let mut joined = BTreeSet::new();
         for (table, row_id) in local_rows {
             let key = (table.clone(), row_id.clone());
-            if !public_rows.contains(&key) && shared_before.contains(table, row_id)? {
-                return Ok(Some(key));
+            if public_rows.contains(&key) || !shared_before.contains(table, row_id)? {
+                continue;
             }
+            if !super::private_shared::joins_shared_row(gates, schema, table) {
+                return Ok(SharedRowMeeting::Conflict(key));
+            }
+            joined.insert(key);
         }
-        Ok(None)
+        Ok(SharedRowMeeting::Joined(joined))
+    }
+
+    /// Remove the changes to `joined` rows from the write's private partition.
+    fn drop_joined_private_changes(
+        &self,
+        effect: &mut crate::MergeReplayWriteEffect,
+        joined: &BTreeSet<(String, String)>,
+    ) -> Result<(), DbError> {
+        if joined.is_empty() {
+            return Ok(());
+        }
+        if let Some(partition) = &mut effect.partitions.local {
+            let group = crate::gate::Changegroup::new().map_err(DbError::from)?;
+            // SAFETY: the iterator passed to `add_change` is the one
+            // `for_each_change` is positioned on, and the connection handle
+            // outlives the changegroup.
+            unsafe {
+                group
+                    .set_schema(self.store.transaction.handle())
+                    .map_err(DbError::from)?;
+                crate::gate::for_each_change(&partition.changeset, |iter, change| {
+                    let joined_row = change.pk().is_some_and(|row_id| {
+                        joined.contains(&(change.table.clone(), row_id.to_string()))
+                    });
+                    if joined_row {
+                        Ok(())
+                    } else {
+                        group.add_change(iter)
+                    }
+                })
+                .map_err(DbError::from)?;
+            }
+            partition.changeset = group.output().map_err(DbError::from)?;
+        }
+        if effect
+            .partitions
+            .local
+            .as_ref()
+            .is_some_and(|partition| partition.changeset.is_empty())
+        {
+            effect.partitions.local = None;
+        }
+        Ok(())
     }
 
     fn update_private_rows_after_effect(
@@ -272,6 +341,14 @@ impl MergeMaterializationTransaction<'_, '_> {
             )
             .map_err(DbError::from)
     }
+}
+
+/// How a replayed write's private rows meet rows already shared here.
+enum SharedRowMeeting {
+    /// Every such row joins its shared copy; these are the rows.
+    Joined(BTreeSet<(String, String)>),
+    /// This row cannot join the shared row it meets.
+    Conflict((String, String)),
 }
 
 fn invalid_circle_context(

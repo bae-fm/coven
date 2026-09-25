@@ -22,6 +22,8 @@ mod local_replay_causality_tests;
 mod local_replay_invariant_tests;
 pub(crate) mod loop_policy;
 #[cfg(test)]
+mod private_shared_key_join_tests;
+#[cfg(test)]
 mod pull_tests;
 #[cfg(test)]
 mod refresh_tests;

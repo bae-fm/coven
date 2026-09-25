@@ -38,6 +38,8 @@ devices; every id must be a canonical lowercase hyphenated UUIDv4 or UUIDv7.
 Use `RowIdentity::SharedKey` only when an application key intentionally names
 the same logical row everywhere, such as `settings(id = 'preferences')`. Equal
 shared keys merge as one row under the normal `_updated_at` policy.
+A row one device holds privately joins the shared row with its key when the
+shared copy arrives; see [which rows merge](/docs/merge#which-rows-merge).
 
 Changing a primary key removes the old identity and inserts the new identity in
 one transaction; SQLite records that the same way as an explicit delete plus

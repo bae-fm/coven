@@ -83,31 +83,36 @@ impl MergeMaterializationTransaction<'_, '_> {
                 adopted.insert(key);
                 continue;
             }
-            if change.op != coven_foundation::changeset::ChangeOp::Insert
-                || !self.private_row_is_equivalent(
-                    gates,
-                    blob_decls,
-                    schema,
-                    private,
-                    exact_inserts.get(&key).ok_or_else(|| {
-                        DbError::Message(format!(
-                            "effective incoming INSERT {}/{} has no exact row image",
-                            change.table, row_id
-                        ))
-                    })?,
-                    &change,
-                    package,
-                )?
-            {
+            if change.op != coven_foundation::changeset::ChangeOp::Insert {
                 return Ok(Some(private_shared_hold(key, commit)));
             }
-            self.install_accepted_row_metadata(
-                gates,
-                schema,
-                &change.table,
-                row_id,
-                exact_inserts.get(&key).expect("exact INSERT checked above"),
-            )?;
+            let incoming = exact_inserts.get(&key).ok_or_else(|| {
+                DbError::Message(format!(
+                    "effective incoming INSERT {}/{} has no exact row image",
+                    change.table, row_id
+                ))
+            })?;
+            if self.private_row_is_equivalent(
+                gates, blob_decls, schema, private, incoming, &change, package,
+            )? {
+                self.install_accepted_columns(
+                    schema,
+                    &change.table,
+                    row_id,
+                    incoming,
+                    &accepted_metadata_columns(gates, schema, &change.table)?,
+                )?;
+            } else if joins_shared_row(gates, schema, &change.table) {
+                self.install_accepted_columns(
+                    schema,
+                    &change.table,
+                    row_id,
+                    incoming,
+                    &all_non_key_columns(schema, &change.table)?,
+                )?;
+            } else {
+                return Ok(Some(private_shared_hold(key, commit)));
+            }
             adopted.insert(key);
         }
         Ok(None)
@@ -250,28 +255,19 @@ impl MergeMaterializationTransaction<'_, '_> {
         }
     }
 
-    fn install_accepted_row_metadata(
+    /// Overwrite `columns` of the local copy of `table`/`row_id` with the
+    /// accepted incoming row image.
+    fn install_accepted_columns(
         &self,
-        gates: &crate::Gates,
         schema: &TableSchema,
         table: &str,
         row_id: &str,
         incoming_columns: &[ExactSqlValue],
+        indices: &[usize],
     ) -> Result<(), DbError> {
         let columns = schema
             .columns(table)
             .ok_or_else(|| DbError::Message(format!("synced table {table} has no column map")))?;
-        let updated_at = schema.updated_at(table).ok_or_else(|| {
-            DbError::Message(format!(
-                "synced table {table} has no _updated_at column index"
-            ))
-        })?;
-        let mut indices = vec![updated_at];
-        if let Some(locality) = gates.locality_column_index(table) {
-            indices.push(locality);
-        }
-        indices.sort_unstable();
-        indices.dedup();
         let assignments = indices
             .iter()
             .enumerate()
@@ -388,6 +384,56 @@ fn owned_value(value: ValueRef<'_>) -> ExactSqlValue {
         ValueRef::Text(value) => ExactSqlValue::Text(value.to_vec()),
         ValueRef::Blob(value) => ExactSqlValue::Blob(value.to_vec()),
     }
+}
+
+/// Whether a private row of `table` joins the shared row with its key rather
+/// than holding the pull.
+///
+/// A row is one logical row per `(table, id)`, so a device that created a row
+/// privately and a peer that shared a row with the same id created one row
+/// concurrently. When the shared copy reaches this device, the private copy
+/// takes the accepted shared state: its values were never published, and
+/// publishing them because another device shared the key would leak what
+/// this device kept private. Once this device shares the row itself, its
+/// edits publish and merge like any other.
+///
+/// This applies where privacy is derived from the row's relatives: the table
+/// has no gate or audience column of its own (joining would otherwise decide
+/// a gate this device set), carries no blob (a Local blob cannot be replaced
+/// by an accepted locator without a transition), and is outside the scoped
+/// graph. Other private rows still hold unless the shared copy is equivalent.
+pub(super) fn joins_shared_row(gates: &crate::Gates, schema: &TableSchema, table: &str) -> bool {
+    gates.locality_column_index(table).is_none()
+        && schema.blob_columns(table).is_none()
+        && !gates.table_is_scoped(table)
+}
+
+/// The accepted version metadata an equivalent private row takes: its
+/// `_updated_at` and its locality column.
+fn accepted_metadata_columns(
+    gates: &crate::Gates,
+    schema: &TableSchema,
+    table: &str,
+) -> Result<Vec<usize>, DbError> {
+    let updated_at = schema.updated_at(table).ok_or_else(|| {
+        DbError::Message(format!(
+            "synced table {table} has no _updated_at column index"
+        ))
+    })?;
+    let mut indices = vec![updated_at];
+    if let Some(locality) = gates.locality_column_index(table) {
+        indices.push(locality);
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    Ok(indices)
+}
+
+fn all_non_key_columns(schema: &TableSchema, table: &str) -> Result<Vec<usize>, DbError> {
+    let columns = schema
+        .columns(table)
+        .ok_or_else(|| DbError::Message(format!("synced table {table} has no column map")))?;
+    Ok((1..columns.len()).collect())
 }
 
 fn private_shared_hold(

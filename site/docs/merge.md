@@ -72,6 +72,19 @@ canonical UUIDv4 or UUIDv7 ids. Tables with application keys that intentionally
 name shared state declare `RowIdentity::SharedKey`; equal keys then merge as one
 row under `_updated_at`.
 
+A device can hold such a row privately — created inside a subtree it has not
+shared — when another device shares a row with the same key. The private copy
+then joins the shared row: when a pull brings the shared copy, or a rebase
+replays the device's own private write onto accepted state that holds it, the
+accepted shared row stands and the private copy's values are dropped. They were
+never published, and another device sharing the key is not this device sharing
+them. From then on the row is shared here too; this device's later edits
+publish and merge like any others, and sharing the subtree it created privately
+re-emits the row as it now stands. The join applies to rows whose privacy comes
+from their relatives: a table with its own gate or audience column, or with a
+blob, keeps the stricter rule below, where only an identical shared copy is
+adopted and any other holds.
+
 A primary-key change removes the old identity and inserts the new identity;
 SQLite records it the same way as an explicit delete plus insert. The introduced
 id must satisfy the table's mode. A valid UUID collision still means one logical
@@ -177,7 +190,8 @@ merge used for ordinary apply. Disjoint column edits survive, same-column edits
 follow their captured timestamps, and deletes win over concurrent updates.
 Equal row identities enter that same merge. A declared SQLite `CHECK`, `UNIQUE`,
 `NOT NULL`, or foreign-key violation still produces a typed conflict, as does
-a private edit colliding with accepted shared state or an invalid captured
+a private edit colliding with accepted shared state it cannot join (above), or
+an invalid captured
 Circle context. Failure rolls back the whole rebase and retains the unresolved
 write and its dependent suffix.
 
