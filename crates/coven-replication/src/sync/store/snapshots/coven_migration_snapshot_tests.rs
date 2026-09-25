@@ -87,7 +87,11 @@ async fn assert_cold_open_rejects_unaccepted_rows(in_write_ahead_log: bool) {
         .expect("prepare the authenticated snapshot");
     let (image, install) = direct_open_fixture(bootstrap);
     let accepted_image = std::fs::read(image.path()).unwrap();
-    let changed = coven_database::DatabaseImageTest::open(image.path()).unwrap();
+    // Every connection this test opens is closed before the cold open, which
+    // may remove the image, and one open elsewhere would block that removal
+    // on Windows. None of them checkpoints the log it leaves behind.
+    let changed =
+        coven_database::DatabaseImageTest::open_keeping_write_ahead_log(image.path()).unwrap();
     if in_write_ahead_log {
         changed.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
     }
@@ -99,18 +103,19 @@ async fn assert_cold_open_rejects_unaccepted_rows(in_write_ahead_log: bool) {
             [],
         )
         .expect("replace the downloaded image with different valid SQLite bytes");
+    drop(changed);
     // Replacing the main image does not remove a prior writer's committed WAL.
-    // Keep that writer open to prevent its close from checkpointing those pages.
     if in_write_ahead_log {
         std::fs::write(image.path(), &accepted_image).unwrap();
-        let visible: i64 = coven_database::DatabaseImageTest::open(image.path())
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM notes WHERE id = 'unaccepted-row'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("a new SQLite reader sees the committed sidecar row");
+        let visible: i64 =
+            coven_database::DatabaseImageTest::open_keeping_write_ahead_log(image.path())
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM notes WHERE id = 'unaccepted-row'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("a new SQLite reader sees the committed sidecar row");
         assert_eq!(visible, 1);
         assert_eq!(
             coven_protocol::store_commit::ObjectHash::digest(&std::fs::read(image.path()).unwrap()),

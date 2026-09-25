@@ -85,6 +85,7 @@ impl BackedUpDevice {
                 .await
                 .expect("publish the founder Circle")
         };
+        db.close().await;
         drop(db);
         let backup = tempfile::tempdir().expect("backup directory");
         copy_store_tree(&store_root(&dir), backup.path());
@@ -175,6 +176,7 @@ async fn a_stale_backup_cannot_fill_a_circle_position_the_live_history_filled() 
             .await
             .expect("publish the rename that fills the position");
         let positions = fixture.metadata_positions(&db).await;
+        db.close().await;
         drop(db);
         positions
     };

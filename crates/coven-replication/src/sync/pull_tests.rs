@@ -5124,15 +5124,15 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     let store_dir = crate::sync::test_helpers::store_dir_for_test_database(&database_path);
     let target = open_blob_test_db_at(&database_path, store_dir.clone(), cleanup_decl());
     storage.pull_into(&target, &store_dir).await;
-    let deleted_locator_hash = target
+    let deleted_locator = target
         .row_blob_ref("note_photos", "cleanup01")
         .await
         .expect("load exact blob before deletion")
         .stored()
         .expect("pulled blob has exact storage")
         .locator()
-        .locator_hash()
-        .to_string();
+        .locator_hash();
+    let deleted_locator_hash = deleted_locator.to_string();
     let deletion = source
         .capture_test_changeset(&["DELETE FROM note_photos WHERE id = 'cleanup01'"])
         .await;
@@ -5140,11 +5140,23 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
         .publish_founder_changeset(deletion, 1)
         .await
         .expect("publish exact blob-bearing Store changeset");
-    if store_dir.storage_dir().exists() {
-        std::fs::remove_dir_all(store_dir.storage_dir()).expect("remove storage directory");
+    // A directory standing where a copy's file is fails that file's removal on
+    // every platform, where a path through a file reads as already gone on
+    // Windows.
+    let obstructions = [
+        store_dir
+            .pinned_blob_path("photos", deleted_locator)
+            .expect("pinned copy path"),
+        store_dir
+            .local_blob_path("photos", "cleanup01")
+            .expect("local copy path"),
+    ];
+    for obstruction in &obstructions {
+        if obstruction.exists() {
+            std::fs::remove_file(obstruction).expect("remove the copy");
+        }
+        std::fs::create_dir_all(obstruction.join("occupied")).expect("obstruct the copy path");
     }
-    let obstructing_file = store_dir.as_ref().join("storage");
-    std::fs::write(&obstructing_file, b"not a directory").expect("obstruct cleanup paths");
 
     let error = storage
         .pull_into_result(&target, &store_dir)
@@ -5168,7 +5180,9 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     tokio::task::spawn_blocking(move || drop(target))
         .await
         .expect("close database before restart");
-    std::fs::remove_file(&obstructing_file).expect("restore cleanup paths");
+    for obstruction in &obstructions {
+        std::fs::remove_dir_all(obstruction).expect("restore the copy path");
+    }
 
     let restarted = open_blob_test_db_at(&database_path, store_dir.clone(), cleanup_decl());
     let (_updated, second) = storage.pull_into(&restarted, &store_dir).await;

@@ -12,6 +12,19 @@ impl DatabaseImageTest {
         })
     }
 
+    /// Open `path` with a connection that leaves its write-ahead log in place
+    /// when it closes, instead of checkpointing it into the database file.
+    pub fn open_keeping_write_ahead_log(path: &std::path::Path) -> Result<Self, DbError> {
+        let connection = Connection::open(path).map_err(DbError::from)?;
+        connection
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .map_err(DbError::from)?;
+        Ok(Self { connection })
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DbError> {
         let mut connection = Connection::open_in_memory().map_err(DbError::from)?;
         crate::connection_io::deserialize_database_image_into(&mut connection, bytes)?;

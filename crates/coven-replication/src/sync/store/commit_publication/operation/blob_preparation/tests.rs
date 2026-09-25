@@ -1,9 +1,14 @@
 use super::*;
 
+/// A spool path that is absolute on every platform; nothing is written there.
+fn spool(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join("spool").join(name)
+}
+
 fn exact_partition_blob(
     physical_id: &str,
     uploaded_verified: bool,
-    spool_path: Option<&str>,
+    spool_path: Option<std::path::PathBuf>,
 ) -> PreparedPartitionBlob {
     let uploader_bytes = b"outbound exact-ref test uploader";
     let uploader = coven_protocol::store_commit::StoreDeviceRegistrationRef {
@@ -44,7 +49,7 @@ fn exact_partition_blob(
         audience: coven_protocol::blob::locator::RemoteAudience::Store,
         stored: coven_protocol::blob::locator::StoredBlobRef::new(locator, object)
             .expect("valid exact stored blob"),
-        spool_path: spool_path.map(std::path::PathBuf::from),
+        spool_path,
         uploaded_verified,
     }
 }
@@ -74,7 +79,7 @@ fn exact_blob_owner() -> StoreBatchCommitRef {
 fn blob_closure_deduplicates_only_identical_exact_refs_and_merges_state() {
     let owner = exact_blob_owner();
     let close = |reversed: bool| {
-        let prepared = exact_partition_blob("physical-a", false, Some("/spool/shared"));
+        let prepared = exact_partition_blob("physical-a", false, Some(spool("shared")));
         let uploaded = exact_partition_blob("physical-a", true, None);
         let distinct = exact_partition_blob("physical-b", true, None);
         let blobs = if reversed {
@@ -113,14 +118,11 @@ fn blob_closure_deduplicates_only_identical_exact_refs_and_merges_state() {
         .iter()
         .find(|blob| blob.remote_object_id() == first_id)
         .expect("identical exact ref retains its index");
-    assert_eq!(
-        first_index.spool_path(),
-        Some(std::path::Path::new("/spool/shared"))
-    );
+    assert_eq!(first_index.spool_path(), Some(spool("shared").as_path()));
     let conflict = close_prepared_blobs(
         vec![
-            exact_partition_blob("physical-a", false, Some("/spool/first")),
-            exact_partition_blob("physical-a", false, Some("/spool/second")),
+            exact_partition_blob("physical-a", false, Some(spool("first"))),
+            exact_partition_blob("physical-a", false, Some(spool("second"))),
         ],
         &owner,
     )
