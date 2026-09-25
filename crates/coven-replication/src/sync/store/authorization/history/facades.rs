@@ -2,6 +2,12 @@ use super::*;
 use crate::sync::store::authorization::HistoryConstructionAuthority;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
+    /// Close the database this history reads and writes, waiting until its
+    /// files are closed.
+    pub(crate) async fn close(&self) {
+        self.database.close().await;
+    }
+
     pub(crate) async fn history_has_only_acknowledgements(
         &mut self,
         previous: &coven_protocol::store_commit::StoreHistoryCut,

@@ -6,13 +6,20 @@ impl<'storage> RestoringStore<'storage> {
         offer: coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<crate::sync::store::JoiningStore<'storage>, crate::sync::store::DeviceJoinError>
     {
-        crate::sync::store::JoiningStore::begin_from_restored_history(
+        // A refusal consumes the history, so the database is closed here
+        // rather than left to close on its own after this returns.
+        let database = self.database;
+        let begun = crate::sync::store::JoiningStore::begin_from_restored_history(
             self.history,
             self.identity,
             pending,
             offer,
         )
-        .await
+        .await;
+        if begun.is_err() {
+            database.close().await;
+        }
+        begun
     }
 
     #[allow(clippy::too_many_arguments)]

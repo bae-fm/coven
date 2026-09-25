@@ -40,6 +40,13 @@ pub struct RestoringStore<'storage> {
 }
 
 impl<'storage> RestoringStore<'storage> {
+    /// Close the restored database, waiting until its files are closed. The
+    /// flow that owns the store directory calls this on every exit before it
+    /// touches the directory again.
+    pub async fn close(&self) {
+        self.database.close().await;
+    }
+
     async fn complete_owner_recovery_predecessor_history(
         &mut self,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,

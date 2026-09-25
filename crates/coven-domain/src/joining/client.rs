@@ -809,18 +809,23 @@ impl DeviceJoinClient {
             )
             .await?;
         let published_at = self.clock.now().to_rfc3339();
+        // Beginning the join closes the installed database if it refuses, and
+        // the joining store is closed on every exit after it, so nothing of
+        // this attempt stays open in the store directory once it returns.
         let mut joining = timings
             .stage(
                 "load membership",
                 opened.begin_device_join(&pending, offer.as_ref().clone()),
             )
             .await?;
-        Ok(timings
+        let bootstrapped = timings
             .stage(
                 "install history",
                 joining.bootstrap(bootstrap, &published_at, Some(&routing_encryption)),
             )
-            .await?)
+            .await;
+        joining.close().await;
+        Ok(bootstrapped?)
     }
 
     pub(crate) async fn complete_device_join(
@@ -890,73 +895,80 @@ impl DeviceJoinClient {
             self.coven_migration_policy,
             &self.migrations,
         )?;
-        let database = coven_database::StoreDatabase::from_database(db.clone());
-        let routing_encryption = EncryptionService::from(join.keyring.clone());
-        let observation = timings
-            .stage(
-                "read Store root",
-                coven_replication::sync::store::PendingDeviceJoinObservation::open(
-                    &pending,
-                    &join.storage,
-                    &self.admission.store_root,
-                    attempt_id,
-                ),
-            )
-            .await?;
-        let mut joining = timings
-            .stage(
-                "load membership",
-                observation.into_joining_store(
-                    database,
-                    &store_dir,
-                    signer.clone(),
-                    Some(join.membership.chain().clone()),
-                    Some(routing_encryption.clone()),
-                ),
-            )
-            .await?;
-        on_progress(coven_replication::sync::JoiningDeviceJoinProgress::CatchingUp);
-        timings
-            .stage(
-                "pull history",
-                joining.pull_store_history(Some(&routing_encryption)),
-            )
-            .await?;
-        let joined = timings
-            .stage(
-                "materialize activation",
-                joining.materialize(activation.clone()),
-            )
-            .await?;
-        if pending_readiness
-            .as_ref()
-            .is_some_and(|readiness| joined.registration != readiness.proof.registration)
-            || joined.registration.device_id.to_string() != device_id
-        {
-            return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into());
+        // Every exit below closes the database before this flow returns, so
+        // nothing it leaves open outlives the attempt in the store directory.
+        let completed = async {
+            let database = coven_database::StoreDatabase::from_database(db.clone());
+            let routing_encryption = EncryptionService::from(join.keyring.clone());
+            let observation = timings
+                .stage(
+                    "read Store root",
+                    coven_replication::sync::store::PendingDeviceJoinObservation::open(
+                        &pending,
+                        &join.storage,
+                        &self.admission.store_root,
+                        attempt_id,
+                    ),
+                )
+                .await?;
+            let mut joining = timings
+                .stage(
+                    "load membership",
+                    observation.into_joining_store(
+                        database,
+                        &store_dir,
+                        signer.clone(),
+                        Some(join.membership.chain().clone()),
+                        Some(routing_encryption.clone()),
+                    ),
+                )
+                .await?;
+            on_progress(coven_replication::sync::JoiningDeviceJoinProgress::CatchingUp);
+            timings
+                .stage(
+                    "pull history",
+                    joining.pull_store_history(Some(&routing_encryption)),
+                )
+                .await?;
+            let joined = timings
+                .stage(
+                    "materialize activation",
+                    joining.materialize(activation.clone()),
+                )
+                .await?;
+            if pending_readiness
+                .as_ref()
+                .is_some_and(|readiness| joined.registration != readiness.proof.registration)
+                || joined.registration.device_id.to_string() != device_id
+            {
+                return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into());
+            }
+            on_progress(coven_replication::sync::JoiningDeviceJoinProgress::SavingLibrary);
+            self.custody.persist(&join.keyring)?;
+            self.identity_custody.establish(&signer)?;
+            if let Some(credentials) = derive_credentials(&self.admission.join_info) {
+                self.store_keys.set_cloud_home_credentials(&credentials)?;
+            }
+            let cipher = CloudCipher::Encrypted(join.keyring.clone().into());
+            let mut config = super::build_config(
+                &self.admission.store_id,
+                &device_id,
+                &self.admission.store_name,
+                &self.admission.join_info,
+                &cipher,
+            );
+            config.cloud_home.exact_upload_verification = self.exact_upload_verification;
+            config.save_to_config_yaml(&store_dir)?;
+            timings
+                .stage("close join journal", joining.complete(activation))
+                .await?;
+            coven_keys::keys::discard_pending_identity(&self.member_pubkey)?;
+            info!(store_id = %self.admission.store_id, "joined Store device");
+            Ok(config)
         }
-        on_progress(coven_replication::sync::JoiningDeviceJoinProgress::SavingLibrary);
-        self.custody.persist(&join.keyring)?;
-        self.identity_custody.establish(&signer)?;
-        if let Some(credentials) = derive_credentials(&self.admission.join_info) {
-            self.store_keys.set_cloud_home_credentials(&credentials)?;
-        }
-        let cipher = CloudCipher::Encrypted(join.keyring.clone().into());
-        let mut config = super::build_config(
-            &self.admission.store_id,
-            &device_id,
-            &self.admission.store_name,
-            &self.admission.join_info,
-            &cipher,
-        );
-        config.cloud_home.exact_upload_verification = self.exact_upload_verification;
-        config.save_to_config_yaml(&store_dir)?;
-        timings
-            .stage("close join journal", joining.complete(activation))
-            .await?;
-        coven_keys::keys::discard_pending_identity(&self.member_pubkey)?;
-        info!(store_id = %self.admission.store_id, "joined Store device");
-        Ok(config)
+        .await;
+        db.close().await;
+        completed
     }
 
     pub(crate) async fn install_same_principal_device_join(

@@ -42,17 +42,15 @@ impl InstalledDeviceJoinSnapshot {
             .complete()
             .await
             .expect("complete the device join");
-        let row_id = row_id.to_owned();
-        let restored_stamp = database
-            .read(move |context| {
-                context.query_row(
-                    "SELECT _updated_at FROM documents WHERE id = ?1",
-                    [row_id],
-                    |row| row.get::<_, String>(0),
-                )
-            })
-            .await
-            .expect("read the joined database")
+        // The completion closed the joined database, so the row is read back
+        // from the file it left, the way the host's next open finds it.
+        let restored_stamp: String = coven_database::DatabaseImageTest::open(&store_dir.db_path())
+            .expect("open the joined database file")
+            .query_row(
+                "SELECT _updated_at FROM documents WHERE id = ?1",
+                [row_id],
+                |row| row.get(0),
+            )
             .expect("the Circle snapshot restored its row");
         assert_eq!(restored_stamp, row_stamp);
         let next = database.stamp();

@@ -225,6 +225,13 @@ fn progress_offer(progress: &JoinerJoinProgress) -> Option<&DeviceJoinOffer> {
 }
 
 impl<'storage> JoiningStore<'storage> {
+    /// Close the joined database, waiting until its files are closed. The
+    /// flow that owns the store directory calls this on every exit before it
+    /// touches the directory again.
+    pub async fn close(&self) {
+        self.history.close().await;
+    }
+
     pub(crate) async fn begin_from_restored_history(
         mut history: super::AuthorizedStoreHistory<'storage>,
         identity: UserKeypair,
@@ -572,151 +579,159 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         membership: Option<coven_protocol::membership::MembershipChain>,
     ) -> Result<PendingSamePrincipalDeviceJoinCompletion, DeviceJoinError> {
-        let mut run = coven_foundation::stage_timing::StageTimings::counting(
-            "Same-provider join history install",
-            storage.provider_requests(),
-        );
-        let timings = &mut run;
-        join.verify_shape()?;
-        let attempt_id = join
-            .bootstrap
-            .bootstrap
-            .publication_authorization
-            .attempt_id;
-        let expected_registration = join
-            .bootstrap
-            .bootstrap
-            .request
-            .expected_registration()
-            .clone();
-        if installed.root
-            != join
+        // The installed database is this completion's to close: every exit
+        // below closes it, so none of its files outlive the call.
+        let database = installed.database.clone();
+        let prepared = async {
+            let mut run = coven_foundation::stage_timing::StageTimings::counting(
+                "Same-provider join history install",
+                storage.provider_requests(),
+            );
+            let timings = &mut run;
+            join.verify_shape()?;
+            let attempt_id = join
+                .bootstrap
+                .bootstrap
+                .publication_authorization
+                .attempt_id;
+            let expected_registration = join
                 .bootstrap
                 .bootstrap
                 .request
-                .approval()
-                .request
-                .offer
-                .store_root
-            || join.activation.attempt_id != attempt_id
-        {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
-        let activation_commit = installed
-            .bootstrap
-            .verified_commit(&join.activation.outcome_activation)
-            .ok_or(DeviceJoinError::AttemptMismatch)?;
-        let activated_registration_matches = activation_commit
-            .value()
-            .device_registrations()
-            .iter()
-            .any(|reference| {
-                reference.registration.device_id == expected_registration.device_id
-                    && matches!(
-                        &reference.authority,
-                        coven_protocol::store_commit::StoreDeviceRegistrationActivationRef::Join {
-                            attempt_id: named,
-                        } if *named == attempt_id
-                    )
-            });
-        if activation_commit.value().device_join_attempt_decisions()
-            != std::slice::from_ref(&DeviceJoinAttemptDecisionRef::Attempt(attempt_id))
-            || !activated_registration_matches
-        {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
-        let owner = activation_commit.author().clone();
-        let approval = join.bootstrap.bootstrap.request.approval();
-        let database = installed.database;
-        approval.verify(&installed.verified_root, &owner)?;
-        // The installed snapshot image covers the history behind it; every
-        // commit between that snapshot and the bootstrap cut still carries its
-        // rows in a package this device has to read before it installs.
-        let observation = timings
-            .stage(
-                "pin the Store root",
-                PendingDeviceJoinObservation::open(pending, storage, &installed.root, attempt_id),
+                .expected_registration()
+                .clone();
+            if installed.root
+                != join
+                    .bootstrap
+                    .bootstrap
+                    .request
+                    .approval()
+                    .request
+                    .offer
+                    .store_root
+                || join.activation.attempt_id != attempt_id
+            {
+                return Err(DeviceJoinError::AttemptMismatch);
+            }
+            let activation_commit = installed
+                .bootstrap
+                .verified_commit(&join.activation.outcome_activation)
+                .ok_or(DeviceJoinError::AttemptMismatch)?;
+            let activated_registration_matches = activation_commit
+                .value()
+                .device_registrations()
+                .iter()
+                .any(|reference| {
+                    reference.registration.device_id == expected_registration.device_id
+                        && matches!(
+                            &reference.authority,
+                            coven_protocol::store_commit::StoreDeviceRegistrationActivationRef::Join {
+                                attempt_id: named,
+                            } if *named == attempt_id
+                        )
+                });
+            if activation_commit.value().device_join_attempt_decisions()
+                != std::slice::from_ref(&DeviceJoinAttemptDecisionRef::Attempt(attempt_id))
+                || !activated_registration_matches
+            {
+                return Err(DeviceJoinError::AttemptMismatch);
+            }
+            let owner = activation_commit.author().clone();
+            let approval = join.bootstrap.bootstrap.request.approval();
+            let database = installed.database;
+            approval.verify(&installed.verified_root, &owner)?;
+            // The installed snapshot image covers the history behind it; every
+            // commit between that snapshot and the bootstrap cut still carries its
+            // rows in a package this device has to read before it installs.
+            let observation = timings
+                .stage(
+                    "pin the Store root",
+                    PendingDeviceJoinObservation::open(pending, storage, &installed.root, attempt_id),
+                )
+                .await?;
+            // Installing the owner anchor walks the membership chain from the cloud
+            // slot by slot — the same traversal the joining device already paid for
+            // when it opened its cloud home, and it grows with the store's
+            // membership history rather than with this join.
+            let mut joining = timings
+                .stage(
+                    "install the owner membership",
+                    observation.into_joining_store(
+                        database.clone(),
+                        store_dir,
+                        identity.clone(),
+                        membership,
+                        routing_encryption.cloned(),
+                    ),
+                )
+                .await?;
+            let resolved = timings
+                .stage(
+                    "resolve row data",
+                    joining.resolve_bootstrap(installed.bootstrap, routing_encryption),
+                )
+                .await?;
+            drop(joining);
+            let proof = super::history::bootstrap_pending_device_on(
+                &database,
+                storage.as_ref(),
+                identity,
+                attempt_id,
+                &join.bootstrap.bootstrap.request,
+                resolved,
+                join.activation.outcome_activation.clone(),
+                &owner,
+                published_at,
+                timings,
             )
             .await?;
-        // Installing the owner anchor walks the membership chain from the cloud
-        // slot by slot — the same traversal the joining device already paid for
-        // when it opened its cloud home, and it grows with the store's
-        // membership history rather than with this join.
-        let mut joining = timings
-            .stage(
-                "install the owner membership",
-                observation.into_joining_store(
-                    database.clone(),
-                    store_dir,
-                    identity.clone(),
-                    membership,
-                    routing_encryption.cloned(),
-                ),
-            )
-            .await?;
-        let resolved = timings
-            .stage(
-                "resolve row data",
-                joining.resolve_bootstrap(installed.bootstrap, routing_encryption),
-            )
-            .await?;
-        drop(joining);
-        let proof = super::history::bootstrap_pending_device_on(
-            &database,
-            storage.as_ref(),
-            identity,
-            attempt_id,
-            &join.bootstrap.bootstrap.request,
-            resolved,
-            join.activation.outcome_activation.clone(),
-            &owner,
-            published_at,
-            timings,
-        )
-        .await?;
-        let readiness = DeviceJoinReadiness {
-            proof,
-            provider: DeviceProviderReadiness::SamePrincipal,
-        };
-        let journal = PendingJoinJournal::new(pending, join.activation.attempt_id);
-        let readiness = journal.record_readiness(join.bootstrap, readiness)?;
-        let observed = journal
-            .observe_activation_if_pending(&join.activation)?
-            .ok_or(DeviceJoinError::JournalConflict)?;
-        if observed != readiness {
-            return Err(DeviceJoinError::JournalConflict);
+            let readiness = DeviceJoinReadiness {
+                proof,
+                provider: DeviceProviderReadiness::SamePrincipal,
+            };
+            let journal = PendingJoinJournal::new(pending, join.activation.attempt_id);
+            let readiness = journal.record_readiness(join.bootstrap, readiness)?;
+            let observed = journal
+                .observe_activation_if_pending(&join.activation)?
+                .ok_or(DeviceJoinError::JournalConflict)?;
+            if observed != readiness {
+                return Err(DeviceJoinError::JournalConflict);
+            }
+            let joined = timings
+                .stage(
+                    "read the joined store",
+                    joined_store_from_materialized(
+                        &database,
+                        installed.root.clone(),
+                        &expected_registration,
+                        join.activation,
+                    ),
+                )
+                .await?;
+            if joined.registration != readiness.proof.registration {
+                return Err(DeviceJoinError::JournalConflict);
+            }
+            let current = journal.load()?.ok_or(DeviceJoinError::JournalConflict)?;
+            let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ActivationObserved {
+                readiness: current_readiness,
+                activation: current_activation,
+            }) = &*current.progress
+            else {
+                return Err(DeviceJoinError::JournalConflict);
+            };
+            if current_readiness != &readiness || current_activation != &joined.activation {
+                return Err(DeviceJoinError::JournalConflict);
+            }
+            run.report();
+            Ok(PendingSamePrincipalDeviceJoinCompletion {
+                journal,
+                current,
+                joined,
+            })
         }
-        let joined = timings
-            .stage(
-                "read the joined store",
-                joined_store_from_materialized(
-                    &database,
-                    installed.root.clone(),
-                    &expected_registration,
-                    join.activation,
-                ),
-            )
-            .await?;
-        if joined.registration != readiness.proof.registration {
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        let current = journal.load()?.ok_or(DeviceJoinError::JournalConflict)?;
-        let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ActivationObserved {
-            readiness: current_readiness,
-            activation: current_activation,
-        }) = &*current.progress
-        else {
-            return Err(DeviceJoinError::JournalConflict);
-        };
-        if current_readiness != &readiness || current_activation != &joined.activation {
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        run.report();
-        Ok(PendingSamePrincipalDeviceJoinCompletion {
-            journal,
-            current,
-            joined,
-        })
+        .await;
+        database.close().await;
+        prepared
     }
 
     pub async fn open(

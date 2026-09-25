@@ -389,45 +389,51 @@ pub async fn restore_from_cloud(
                 routing_encryption.as_ref(),
             )
             .await?;
+        // Every exit below closes the restored database before this flow
+        // returns, so a failure's cleanup never removes files it holds open.
+        let completed = async {
+            if *cancel.borrow() {
+                return Err(BootstrapError::Cancelled);
+            }
+            let pull_result = store.pull(routing_encryption.as_ref()).await?;
 
-        if *cancel.borrow() {
-            return Err(BootstrapError::Cancelled);
-        }
-        let pull_result = store.pull(routing_encryption.as_ref()).await?;
+            if let Some(continuation) = continuation {
+                store
+                    .install_activated_device_continuation(continuation.clone())
+                    .await?;
+            }
+            if let coven_protocol::recovery::RestoreAuthority::OwnerRecovery(recovery) = authority {
+                store
+                    .recover_owner_device(recovery, routing_encryption.as_ref())
+                    .await?;
+            }
 
-        if let Some(continuation) = continuation {
-            store
-                .install_activated_device_continuation(continuation.clone())
-                .await?;
-        }
-        if let coven_protocol::recovery::RestoreAuthority::OwnerRecovery(recovery) = authority {
-            store
-                .recover_owner_device(recovery, routing_encryption.as_ref())
-                .await?;
-        }
+            if pull_result.changesets_applied > 0 {
+                info!(
+                    "Applied {} changesets since snapshot",
+                    pull_result.changesets_applied
+                );
+            }
 
-        if pull_result.changesets_applied > 0 {
-            info!(
-                "Applied {} changesets since snapshot",
-                pull_result.changesets_applied
-            );
-        }
+            if let Some(keyring) = &master_key {
+                custody.persist(keyring)?;
+            }
+            if let Some(credentials) = derive_credentials(join_info) {
+                store_keys.set_cloud_home_credentials(&credentials)?;
+            }
+            identity_custody.establish(keypair)?;
 
-        if let Some(keyring) = &master_key {
-            custody.persist(keyring)?;
+            // The config is the completion marker, so report this phase after all
+            // other durable local state is present and immediately before saving it.
+            on_status("Saving configuration...");
+            let mut config = build_config(store_id, &device_id, store_name, join_info, &cipher);
+            config.cloud_home.exact_upload_verification = exact_upload_verification;
+            config.save_to_config_yaml(&store_dir)?;
+            Ok(config)
         }
-        if let Some(credentials) = derive_credentials(join_info) {
-            store_keys.set_cloud_home_credentials(&credentials)?;
-        }
-        identity_custody.establish(keypair)?;
-
-        // The config is the completion marker, so report this phase after all
-        // other durable local state is present and immediately before saving it.
-        on_status("Saving configuration...");
-        let mut config = build_config(store_id, &device_id, store_name, join_info, &cipher);
-        config.cloud_home.exact_upload_verification = exact_upload_verification;
-        config.save_to_config_yaml(&store_dir)?;
-        Ok(config)
+        .await;
+        store.close().await;
+        completed
     }
     .await;
 
