@@ -128,13 +128,18 @@ jobs:
       # The full run is not green yet, and the reason is a second Windows defect
       # rather than anything POSIX-only about the tests: `ConnectionThread::drop`
       # detaches the SQLite worker thread when it runs inside a tokio runtime
-      # instead of joining it, so the connection is still open when a staged
-      # snapshot image is deleted. Unlinking an open file is fine on POSIX and
-      # is `ERROR_SHARING_VIOLATION` (os error 32) here, which fails 15 tests
-      # across joining, restoration, Circle rotation, and snapshot bootstrap.
-      # Those tests are not gated off, because they are reporting a real bug —
-      # closing the connection deterministically before the delete is the fix,
-      # and this line becomes `cargo test --all-features` with it.
+      # instead of joining it, so a flow that drops a database and then deletes
+      # or replaces its files (a failed restore's cleanup, a staged snapshot
+      # image) races the thread still closing them. Unlinking an open file is
+      # fine on POSIX and is `ERROR_SHARING_VIOLATION` (os error 32) here, which
+      # fails 11 tests: 6 in coven-domain (joining, restoration) and 5 in
+      # coven-replication (a pull restart, a Circle backup, blob preparation,
+      # cold snapshot open). The store lock no longer frees before those
+      # threads close their files, so everything behind `open` and
+      # `delete_store` passes. The rest are not gated off, because they report
+      # a real bug — those flows closing their database before touching its
+      # files is the fix, and this line becomes `cargo test --all-features`
+      # with it.
       - name: Windows keyring store round-trip
         run: cargo test -p coven --all-features --test windows_keyring
 

@@ -71,3 +71,59 @@ async fn a_closed_store_holds_no_file_and_deletes_under_a_live_clone() {
     crate::Coven::delete_store(&store_dir, store_id, &[]).expect("delete the closed store");
     assert!(!store_dir.exists());
 }
+
+/// Dropping the last handle inside a runtime, without closing it, leaves the
+/// connection threads closing their files after the drop returns. The store
+/// lock stays held until they have: once it can be taken, the lock file is the
+/// only file of the store still open, and the directory deletes.
+#[tokio::test]
+async fn a_dropped_store_frees_its_lock_only_after_its_files_close() {
+    test_keyring::install();
+    let directory = tempfile::tempdir().expect("app directory");
+    let store_dir = crate::StoreDir::new_ephemeral(directory.path().join("dropped-store"));
+    let handle = crate::Coven::builder(
+        store_dir.clone(),
+        crate::Config::with_defaults(
+            "dropped-store".to_string(),
+            "device-test".to_string(),
+            "Dropped Store".to_string(),
+        ),
+    )
+    .synced_tables(coven_replication::sync::test_helpers::test_synced_tables())
+    .coven_migration_policy(crate::CovenMigrationPolicy::ApplyPending)
+    .migrations(coven_replication::sync::test_helpers::test_migrations())
+    .open()
+    .expect("open store");
+    handle
+        .read(|sql| {
+            sql.query_row("SELECT count(*) FROM notes", [], |row| row.get::<_, i64>(0))
+                .map_err(crate::CovenError::from)
+        })
+        .await
+        .expect("read notes");
+
+    drop(handle);
+
+    // The threads end on their own schedule, so the only thing to wait for is
+    // the lock; what matters is what is open at the moment it frees.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let lock = loop {
+        match coven_foundation::store_dir::StoreOpenGuard::acquire(&store_dir) {
+            Ok(lock) => break lock,
+            Err(coven_foundation::store_dir::StoreOpenGuardError::AlreadyOpen { .. }) => {
+                assert!(std::time::Instant::now() < deadline, "the lock never freed");
+                tokio::task::yield_now().await;
+            }
+            Err(error) => panic!("take the store lock: {error}"),
+        }
+    };
+    let lock_file = store_dir
+        .join(".coven-lock")
+        .canonicalize()
+        .expect("canonicalize lock file");
+    let open = coven_foundation::open_files::open_files_under(&store_dir);
+    assert!(open.iter().all(|path| *path == lock_file), "{open:#?}");
+    // Where open files are not listed, deleting the directory is the check.
+    drop(lock);
+    std::fs::remove_dir_all(&*store_dir).expect("delete the dropped store's directory");
+}

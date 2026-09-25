@@ -209,12 +209,16 @@ impl DatabaseConnection {
         let (jobs, receiver) = tokio::sync::mpsc::unbounded_channel();
         let worker = ConnectionWorker { core, receiver };
         // Nothing is ever sent on this channel. The thread holds the sender
-        // until the worker, and the connection it owns, are gone.
+        // until the worker, and the connection it owns, are gone, and only
+        // then releases its share of the store lock.
         let (exit, exited) = tokio::sync::watch::channel(());
+        let store_lock = coven_foundation::store_dir::HeldStoreLock::default();
+        let thread_store_lock = store_lock.clone();
         let join = std::thread::Builder::new()
             .name(thread_name.to_string())
             .spawn(move || {
                 worker.run();
+                thread_store_lock.release();
                 drop(exit);
             })
             .map_err(|error| DbError::context("spawn database connection thread", error))?;
@@ -222,6 +226,7 @@ impl DatabaseConnection {
             thread: Arc::new(ConnectionThread {
                 jobs,
                 exited,
+                store_lock,
                 join: Some(join),
             }),
             context,
@@ -713,6 +718,12 @@ impl DatabaseConnection {
         }
     }
 
+    /// Keep a share of the store lock until the connection thread has closed
+    /// the connection, so the lock is never free while it is open.
+    pub(crate) fn hold_store_lock(&self, lock: Arc<coven_foundation::store_dir::StoreOpenGuard>) {
+        self.thread.store_lock.hold(lock);
+    }
+
     /// Stop the connection thread after the work already queued and wait until
     /// it has closed the connection. Every clone's later call fails with
     /// [`DbError::StoreClosed`].
@@ -762,6 +773,7 @@ enum DbJob {
 struct ConnectionThread {
     jobs: tokio::sync::mpsc::UnboundedSender<DbJob>,
     exited: tokio::sync::watch::Receiver<()>,
+    store_lock: coven_foundation::store_dir::HeldStoreLock,
     join: Option<std::thread::JoinHandle<()>>,
 }
 

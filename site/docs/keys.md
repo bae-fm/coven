@@ -227,8 +227,9 @@ of its own secrets. Close the handle first:
 [`CovenHandle::close`](rustdoc:method:coven::CovenHandle::close) returns once
 the sync loop, the database connections, and the lock are gone, so nothing of
 the store is open when the deletion runs. Dropping the handle on an async
-runtime instead leaves its connections closing in the background, and on
-Windows a file still open blocks the deletion.
+runtime instead leaves its connections closing in the background, and they
+keep the store's lock until they have, so a deletion that runs first is
+refused as open.
 
 ```rust
 handle.close().await;

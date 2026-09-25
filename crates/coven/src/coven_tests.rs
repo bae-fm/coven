@@ -332,8 +332,11 @@ async fn configured_clock_is_the_hlc_wall_source() {
     assert_eq!(receipt.value, "0000000001234-0000-device-test");
 }
 
-#[tokio::test]
-async fn second_open_of_one_store_is_refused_until_the_first_handle_drops() {
+/// Outside a runtime the last handle's drop joins its connection threads, so
+/// the lock is free when the drop returns. Inside one, a host closes the
+/// handle first (see `store_close_tests`).
+#[test]
+fn second_open_of_one_store_is_refused_until_the_first_handle_drops() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = StoreDir::new_ephemeral(tmp.path());
     let first = builder(dir.clone())
@@ -449,6 +452,7 @@ async fn write_survives_reopen_before_sync_cycle() {
         })
         .await
         .expect("write before reopen");
+    handle.close().await;
     drop(handle);
 
     let reopened = open_files_handle_in(dir);
@@ -496,6 +500,7 @@ async fn separate_host_transactions_publish_as_separate_store_commits_after_rest
         assert_eq!(receipt.status, crate::WriteStatus::Pending);
         write_ids.push(receipt.write_id);
     }
+    handle.close().await;
     drop(handle);
 
     let reopened = open_files_handle_in(dir);
@@ -711,6 +716,7 @@ async fn delete_survives_reopen_before_sync_cycle() {
         })
         .await
         .expect("delete before reopen");
+    handle.close().await;
     drop(handle);
 
     let reopened = open_files_handle_in(dir);
@@ -812,6 +818,7 @@ async fn open_of_a_too_new_db_yields_the_matchable_migration_variant() {
         ])
         .open()
         .expect("open at version 2");
+    ahead.close().await;
     drop(ahead);
 
     // Reopen with only the first step: an older binary meeting a db a newer one
@@ -1802,7 +1809,7 @@ async fn public_materialization_survives_store_reopen_without_a_cloud_connection
                     .expect("exact cache path");
                 assert_eq!(std::fs::read(&cached).expect("read exact cache"), expected);
 
-                handle.disconnect_sync();
+                handle.close().await;
                 drop(handle);
                 let reopened = open();
                 let reopened_reference = reopened
@@ -2126,6 +2133,7 @@ async fn pending_write_blob_ownership_survives_restart() {
                 let dir = StoreDir::new_ephemeral(tmp.path());
                 let handle = open_files_handle_in(dir.clone());
                 let replacement = PendingReplacement::queue(&handle, &dir).await;
+                handle.close().await;
                 drop(handle);
 
                 let reopened = open_files_handle_in(dir);

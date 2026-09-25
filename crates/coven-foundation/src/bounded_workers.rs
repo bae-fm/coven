@@ -1,5 +1,6 @@
 //! Owned synchronous workers with bounded, cancellation-aware FIFO admission.
 
+use crate::store_dir::{HeldStoreLock, StoreOpenGuard};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -29,11 +30,15 @@ impl<State: Send + 'static> BoundedWorkers<State> {
         );
         let (sender, receiver) = mpsc::channel::<Job<State>>(capacity.get());
         let receiver = Arc::new(Mutex::new(receiver));
-        // Nothing is ever sent on this channel. Each worker holds the sender
-        // until it has dropped its state, so the channel closing means every
-        // worker's state is gone.
+        // Each worker holds this until it has dropped its state, so the last
+        // one to go closes the exit channel and releases the store lock after
+        // every worker's state is gone.
         let (exit, exited) = watch::channel(());
-        let exit = Arc::new(exit);
+        let store_lock = HeldStoreLock::default();
+        let exit = Arc::new(WorkerExit {
+            _exit: exit,
+            store_lock: store_lock.clone(),
+        });
         let mut joins = Vec::with_capacity(states.len());
         for (index, mut state) in states.into_iter().enumerate() {
             let receiver = receiver.clone();
@@ -63,6 +68,7 @@ impl<State: Send + 'static> BoundedWorkers<State> {
             inner: Arc::new(Workers {
                 sender: Mutex::new(Some(sender)),
                 exited,
+                store_lock,
                 joins,
             }),
         })
@@ -110,6 +116,12 @@ impl<State: Send + 'static> BoundedWorkers<State> {
         }
     }
 
+    /// Keep a share of the store lock until every worker has dropped its
+    /// state, so the lock outlives whatever store files the states hold.
+    pub fn hold_store_lock(&self, lock: Arc<StoreOpenGuard>) {
+        self.inner.store_lock.hold(lock);
+    }
+
     /// Stop admitting work, let the workers finish what was already admitted,
     /// and wait until every worker has dropped its state. Later calls on any
     /// clone fail with [`WorkersClosed`].
@@ -136,7 +148,21 @@ pub struct WorkersClosed;
 struct Workers<State> {
     sender: Mutex<Option<mpsc::Sender<Job<State>>>>,
     exited: watch::Receiver<()>,
+    store_lock: HeldStoreLock,
     joins: Vec<std::thread::JoinHandle<()>>,
+}
+
+/// Shared by the workers and dropped by the last of them to exit, after its
+/// state: closing the exit channel and releasing the store lock share.
+struct WorkerExit {
+    _exit: watch::Sender<()>,
+    store_lock: HeldStoreLock,
+}
+
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        self.store_lock.release();
+    }
 }
 
 impl<State> Drop for Workers<State> {
