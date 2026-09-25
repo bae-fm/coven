@@ -65,6 +65,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         changeset_max: &mut Option<coven_protocol::hlc::Timestamp>,
         returned_changes: &mut Vec<RowChange>,
     ) -> Result<MergeSubsetOutcome, DbError> {
+        let bytes = crate::retain_referenced_ancestors(self.store.transaction, gates, &bytes)
+            .map_err(DbError::from)?;
         let applied_changeset = source
             .validate_subset(bytes.clone())
             .map_err(DbError::from)?;

@@ -249,6 +249,17 @@ only to the outgoing changeset, never deletes locally, and fires once on the fli
 cycle. A root that was never shared has nothing on peers to retract, so it emits
 nothing.
 
+An ancestor's retract can race a new child. While one device removes an
+album's last shared release, which retracts the album, another device can add
+a release to the same album. The new child keeps the ancestor alive: applying
+a history, coven skips the DELETE of a `gated_by_descendants` row that a
+remaining inferred child still references, while a DELETE whose children the
+same commit also removes applies as before. The new child's own commit carries
+the ancestor it keeps (a newly shared row re-emits its shared ancestors), so
+the ancestor is present whichever of the two commits comes first, and every
+device converges on it. The withdrawing device sees the album shared again,
+kept by the other device's release.
+
 <svg class="flow" viewBox="0 0 660 240" role="img" aria-label="While shared is on, peers hold the subtree; the flag flips off; one retract removes it from peers while the owner keeps it">
 <text class="hdr" x="120" y="22" text-anchor="middle">FLIPPING DEVICE</text>
 <text class="hdr" x="540" y="22" text-anchor="middle">PEERS</text>

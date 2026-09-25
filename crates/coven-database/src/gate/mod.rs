@@ -77,11 +77,13 @@ use rusqlite::{Connection, OptionalExtension, Params};
 
 use crate::quote_ident;
 
+mod ancestor_keep;
 mod audience;
 mod ffi;
 mod model;
 mod outbound;
 
+pub(crate) use ancestor_keep::retain_referenced_ancestors;
 pub(crate) use audience::{
     active_circle_control, align_inbound_scoped_root_audiences, audience_moves,
     capture_routing_changes, filter_inbound_circle_changeset, filter_inbound_store_rows,

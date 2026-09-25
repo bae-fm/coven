@@ -8,6 +8,8 @@ pub mod cycle;
 pub mod store;
 // Exercises the register clock through `Database::hlc()`.
 #[cfg(test)]
+mod concurrent_ancestor_keep_tests;
+#[cfg(test)]
 mod cycle_tests;
 mod error;
 #[cfg(test)]

@@ -37,7 +37,7 @@ impl MergeMaterializationTransaction<'_, '_> {
             .into_iter()
             .chain(effect.partitions.circles)
             .chain(effect.partitions.local);
-        self.apply_replay_partitions(&effect.write_id, partitions, schema.clone())?;
+        self.apply_replay_partitions(&effect.write_id, partitions, schema.clone(), gates)?;
         self.validate_recorded_foreign_keys(&effect.write_id, &schema)?;
         if let Some((table, row_id)) = self.update_replay_rows_after_unaccepted_effect(
             gates,
@@ -124,13 +124,21 @@ impl MergeMaterializationTransaction<'_, '_> {
         local_rows: &BTreeSet<(String, String)>,
     ) -> Result<Option<(String, String)>, DbError> {
         let shared_after = gates.shared_rows(self.store.transaction)?;
+        let mut joined = BTreeSet::new();
         for (table, row_id) in local_rows {
             if shared_after.contains(table, row_id)? {
-                return Ok(Some((table.clone(), row_id.clone())));
+                if !super::private_shared::joins_shared_row(gates, schema, table) {
+                    return Ok(Some((table.clone(), row_id.clone())));
+                }
+                joined.insert((table.clone(), row_id.clone()));
             }
         }
         for (table, row_id) in changed_rows {
-            self.record_replayed_row(schema, replay_rows, table, row_id)?;
+            if joined.contains(&(table.clone(), row_id.clone())) {
+                replay_rows.private.remove(&(table.clone(), row_id.clone()));
+            } else {
+                self.record_replayed_row(schema, replay_rows, table, row_id)?;
+            }
         }
         Ok(None)
     }
@@ -181,7 +189,12 @@ impl MergeMaterializationTransaction<'_, '_> {
         };
         self.drop_joined_private_changes(&mut effect, &joined)?;
         let local_rows = replay_effect_local_rows(&effect)?;
-        self.apply_replay_partitions(&effect.write_id, effect.partitions.local, schema.clone())?;
+        self.apply_replay_partitions(
+            &effect.write_id,
+            effect.partitions.local,
+            schema.clone(),
+            gates,
+        )?;
         if let Some((table, row_id)) = self.update_private_rows_after_effect(
             gates,
             &schema,
@@ -283,7 +296,11 @@ impl MergeMaterializationTransaction<'_, '_> {
         let shared_after = gates.shared_rows(self.store.transaction)?;
         for (table, row_id) in local_rows {
             if shared_after.contains(table, row_id)? {
-                return Ok(Some((table.clone(), row_id.clone())));
+                if !super::private_shared::joins_shared_row(gates, schema, table) {
+                    return Ok(Some((table.clone(), row_id.clone())));
+                }
+                replay_rows.private.remove(&(table.clone(), row_id.clone()));
+                continue;
             }
             self.record_replayed_row(schema, replay_rows, table, row_id)?;
         }
@@ -316,16 +333,22 @@ impl MergeMaterializationTransaction<'_, '_> {
         write_id: &WriteId,
         partitions: impl IntoIterator<Item = crate::AudiencePartition>,
         schema: std::sync::Arc<TableSchema>,
+        gates: &crate::Gates,
     ) -> Result<(), DbError> {
         self.store
             .transaction
             .pragma_update(None, "defer_foreign_keys", "ON")
             .map_err(DbError::from)?;
         for partition in partitions {
-            let changeset =
-                ValidatedChangeset::new(partition.changeset, schema.clone()).map_err(|error| {
-                    DbError::context(format!("local replay write {write_id} changeset"), error)
-                })?;
+            let bytes = crate::retain_referenced_ancestors(
+                self.store.transaction,
+                gates,
+                &partition.changeset,
+            )
+            .map_err(DbError::from)?;
+            let changeset = ValidatedChangeset::new(bytes, schema.clone()).map_err(|error| {
+                DbError::context(format!("local replay write {write_id} changeset"), error)
+            })?;
             self.apply_recorded_changeset(changeset, write_id)?;
         }
         Ok(())
