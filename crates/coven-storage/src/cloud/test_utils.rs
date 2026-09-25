@@ -112,6 +112,7 @@ pub struct InMemoryCloudHome {
     deletes: Arc<Mutex<Vec<String>>>,
     fail_writes: Arc<AtomicBool>,
     fail_next_exact_stream_reads: Arc<AtomicUsize>,
+    exact_stream_read_failure: Arc<Mutex<Option<coven_protocol::objects::StorageBackendFailure>>>,
     fail_exact_stream_read_after_bytes: Arc<Mutex<Option<u64>>>,
     exact_create_count: Arc<AtomicUsize>,
     exact_creates: Arc<Mutex<Vec<ObjectSlot>>>,
@@ -192,6 +193,7 @@ impl InMemoryCloudHome {
             deletes: Arc::new(Mutex::new(Vec::new())),
             fail_writes: Arc::new(AtomicBool::new(false)),
             fail_next_exact_stream_reads: Arc::new(AtomicUsize::new(0)),
+            exact_stream_read_failure: Arc::new(Mutex::new(None)),
             fail_exact_stream_read_after_bytes: Arc::new(Mutex::new(None)),
             exact_create_count: Arc::new(AtomicUsize::new(0)),
             exact_creates: Arc::new(Mutex::new(Vec::new())),
@@ -254,6 +256,16 @@ impl InMemoryCloudHome {
     /// without changing the durable object stored in the shared test home.
     pub fn fail_next_exact_stream_reads(&self, n: usize) {
         self.fail_next_exact_stream_reads.store(n, Ordering::SeqCst);
+    }
+
+    /// Make every later exact streaming read fail as the provider answering
+    /// with `failure` — bad credentials, a missing bucket — until cleared with
+    /// `None`.
+    pub fn fail_exact_stream_reads_with(
+        &self,
+        failure: Option<coven_protocol::objects::StorageBackendFailure>,
+    ) {
+        *self.exact_stream_read_failure.lock().unwrap() = failure;
     }
 
     /// Arm the next exact streaming read to serve `n` bytes of the object and
@@ -785,6 +797,13 @@ impl InMemoryCloudHome {
         {
             return Err(CloudHomeError::Transport(
                 "InMemoryCloudHome: armed exact stream-read failure".into(),
+            ));
+        }
+        if let Some(failure) = *self.exact_stream_read_failure.lock().unwrap() {
+            return Err(CloudHomeError::backend(
+                failure,
+                "read an exact object from the in-memory cloud home",
+                std::io::Error::other("injected provider answer"),
             ));
         }
         self.exact_stream_read_count.fetch_add(1, Ordering::SeqCst);

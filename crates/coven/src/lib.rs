@@ -39,6 +39,8 @@ mod test_support;
 #[cfg(test)]
 mod blob_facade_tests;
 #[cfg(test)]
+mod blob_read_failure_tests;
+#[cfg(test)]
 mod make_remote_in_write_tests;
 #[cfg(test)]
 mod prepared_external_blob_tests;
@@ -115,7 +117,7 @@ pub use coven_protocol::blob::{
 };
 pub use coven_protocol::hlc::Timestamp;
 pub use coven_protocol::objects::{
-    ExactObjectRef, ObjectSlot, PhysicalObjectLocator, StorageError,
+    ExactObjectRef, ObjectSlot, PhysicalObjectLocator, StorageBackendFailure, StorageError,
 };
 pub use coven_protocol::reclaim::ReclaimTarget;
 pub use coven_protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};

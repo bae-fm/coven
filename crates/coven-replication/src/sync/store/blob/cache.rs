@@ -407,6 +407,22 @@ impl From<RequiredLocalBlobPathError> for BlobCacheError {
     }
 }
 
+impl BlobCacheError {
+    /// What the storage provider answered, when a provider answer is why the
+    /// blob could not be read: bad credentials, a missing bucket, no permission,
+    /// a transport failure. `None` for failures on this device (a missing
+    /// file, a database error) and for a store with no cloud home connected.
+    pub fn backend_failure(&self) -> Option<coven_protocol::objects::StorageBackendFailure> {
+        match self {
+            Self::Storage(error) => error.backend_failure(),
+            Self::StorageSetup(coven_storage::cloud::setup::StorageSetupError::CloudHome(
+                error,
+            )) => error.backend_failure(),
+            _ => None,
+        }
+    }
+}
+
 impl From<CachedLocatorRemovalError> for BlobCacheError {
     fn from(error: CachedLocatorRemovalError) -> Self {
         match error {
