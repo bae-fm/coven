@@ -96,7 +96,7 @@ pub use coven_foundation::config::{
 pub use coven_foundation::id_provider::SequentialIdProvider;
 pub use coven_foundation::id_provider::{IdProvider, IdRef, UuidProvider};
 #[cfg(any(test, feature = "test-utils"))]
-pub use coven_foundation::open_files::assert_no_open_files_under;
+pub use coven_foundation::open_files::{assert_no_open_files_under, open_files_under};
 pub use coven_foundation::store_dir::{StoreDir, StoreLayout};
 pub use coven_keys::custody::{KeyCustody, Passphrase};
 #[cfg(any(test, feature = "test-utils"))]

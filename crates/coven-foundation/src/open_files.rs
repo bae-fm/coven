@@ -7,16 +7,22 @@
 
 use std::path::{Path, PathBuf};
 
-/// Panic naming every file under `dir` this process has open. Windows does
-/// not list handles here; deleting the directory is the check there.
-pub fn assert_no_open_files_under(dir: &Path) {
+/// Every file under `dir` this process has open, once per open descriptor.
+/// Empty on Windows, which does not list handles here.
+pub fn open_files_under(dir: &Path) -> Vec<PathBuf> {
     let dir = dir
         .canonicalize()
         .unwrap_or_else(|error| panic!("canonicalize {}: {error}", dir.display()));
-    let open: Vec<PathBuf> = open_file_paths()
+    open_file_paths()
         .into_iter()
         .filter(|path| path.starts_with(&dir))
-        .collect();
+        .collect()
+}
+
+/// Panic naming every file under `dir` this process has open. Windows does
+/// not list handles here; deleting the directory is the check there.
+pub fn assert_no_open_files_under(dir: &Path) {
+    let open = open_files_under(dir);
     assert!(
         open.is_empty(),
         "files still open under {}: {open:#?}",
@@ -63,4 +69,34 @@ fn open_file_paths() -> Vec<PathBuf> {
 )))]
 fn open_file_paths() -> Vec<PathBuf> {
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "android"
+    ))]
+    #[test]
+    fn lists_each_open_descriptor_under_the_directory_until_it_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        std::fs::write(&path, b"a").unwrap();
+        let path = path.canonicalize().unwrap();
+
+        let first = std::fs::File::open(&path).unwrap();
+        let second = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            open_files_under(dir.path()),
+            vec![path.clone(), path.clone()]
+        );
+        drop(first);
+        assert_eq!(open_files_under(dir.path()), vec![path]);
+        drop(second);
+        assert_no_open_files_under(dir.path());
+    }
 }
