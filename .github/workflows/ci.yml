@@ -121,27 +121,10 @@ jobs:
       - name: Lib-only check (production feature sets, no test cfg)
         shell: bash
         run: scripts/check-lib-only.sh
-      # This should run `cargo test --all-features`, the way the Linux job does.
-      # Running only one integration test is how ten copies of a POSIX-only
-      # directory fsync compiled here at every push without once executing.
-      #
-      # The full run is not green yet, and the reason is a second Windows defect
-      # rather than anything POSIX-only about the tests: `ConnectionThread::drop`
-      # detaches the SQLite worker thread when it runs inside a tokio runtime
-      # instead of joining it, so a flow that drops a database and then deletes
-      # or replaces its files (a failed restore's cleanup, a staged snapshot
-      # image) races the thread still closing them. Unlinking an open file is
-      # fine on POSIX and is `ERROR_SHARING_VIOLATION` (os error 32) here, which
-      # fails 11 tests: 6 in coven-domain (joining, restoration) and 5 in
-      # coven-replication (a pull restart, a Circle backup, blob preparation,
-      # cold snapshot open). The store lock no longer frees before those
-      # threads close their files, so everything behind `open` and
-      # `delete_store` passes. The rest are not gated off, because they report
-      # a real bug — those flows closing their database before touching its
-      # files is the fix, and this line becomes `cargo test --all-features`
-      # with it.
-      - name: Windows keyring store round-trip
-        run: cargo test -p coven --all-features --test windows_keyring
+      # The whole suite, the way the Linux job runs it: a file a store still
+      # holds open blocks its removal here and nowhere else.
+      - name: Test
+        run: cargo test --all-features
 
   check-macos:
     runs-on: macos-latest
