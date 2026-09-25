@@ -1202,6 +1202,30 @@ pub struct StoreOpenGuard {
     file: std::sync::Mutex<Option<std::fs::File>>,
 }
 
+/// A share of the store lock kept by threads that hold store files. The
+/// threads [`release`](Self::release) it only after the files they held are
+/// closed, so the lock is never free while one of them is still open,
+/// whether the store closes or its last handle is dropped.
+#[derive(Clone, Default)]
+pub struct HeldStoreLock(std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<StoreOpenGuard>>>>);
+
+impl HeldStoreLock {
+    /// Keep a share of `lock` until the threads release it.
+    pub fn hold(&self, lock: std::sync::Arc<StoreOpenGuard>) {
+        *self.0.lock().expect("held store lock mutex poisoned") = Some(lock);
+    }
+
+    /// Drop this share, once the files the threads held are closed.
+    pub fn release(&self) {
+        drop(
+            self.0
+                .lock()
+                .expect("held store lock mutex poisoned")
+                .take(),
+        );
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreOpenGuardError {
     #[error("store is already open: {}", store_dir.display())]

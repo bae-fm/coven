@@ -34,6 +34,12 @@ impl Database {
         self.connection.close().await;
     }
 
+    /// Keep a share of the store lock until the connection is closed, however
+    /// the database ends.
+    pub fn hold_store_lock(&self, lock: Arc<coven_foundation::store_dir::StoreOpenGuard>) {
+        self.connection.hold_store_lock(lock);
+    }
+
     pub(crate) async fn prepare_received_snapshot_circles(
         &self,
         selection: crate::StagedCircleRestore,

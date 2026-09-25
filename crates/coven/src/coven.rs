@@ -379,6 +379,10 @@ impl CovenBuilder {
         // Application reads get independent snapshots after the writer has
         // completed schema validation. Opening every reader is part of open.
         let read_db = StoreReads::open(&db_path)?;
+        // The connection threads keep the lock until their files are closed,
+        // so dropping the last handle never frees it early.
+        db.hold_store_lock(open_guard.clone());
+        read_db.hold_store_lock(open_guard.clone());
         let (key_service, key_custody, identity_custody) =
             resolve_custody(&config, &store_dir, self.key_custody, self.identity_custody);
         Ok(CovenHandle::new(

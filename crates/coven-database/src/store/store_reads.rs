@@ -79,6 +79,15 @@ impl StoreReads {
             .map_err(|WorkersClosed| DbError::StoreClosed)
     }
 
+    /// Keep a share of the store lock until every read connection is closed,
+    /// however the readers end.
+    pub fn hold_store_lock(
+        &self,
+        lock: std::sync::Arc<coven_foundation::store_dir::StoreOpenGuard>,
+    ) {
+        self.connections.hold_store_lock(lock);
+    }
+
     /// Stop admitting reads and wait until every read connection is closed.
     /// Every clone's later read fails with [`DbError::StoreClosed`].
     pub async fn close(&self) {
