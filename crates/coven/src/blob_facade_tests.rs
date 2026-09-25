@@ -115,8 +115,8 @@ impl ExternalPhotoTestHost for crate::CovenHandle {
 /// Open the same store again over the same directory and key, the way a
 /// relaunched app does.
 ///
-/// The caller stops sync and drops the previous handle before entering this
-/// construction boundary, matching a relaunched process with no prior owner.
+/// The caller closes the previous handle before entering this construction
+/// boundary, matching a relaunched process with no prior owner.
 fn reopen(
     dir: crate::StoreDir,
     keyring: crate::MasterKeyring,
@@ -251,7 +251,7 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
 
     // A relaunched app reads the same queue: it is a table in the store, not
     // anything the process was holding.
-    handle.disconnect_sync();
+    handle.close().await;
     drop(handle);
     let reopened = reopen(dir, keyring, owner);
     let after_restart = reopened

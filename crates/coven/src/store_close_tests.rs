@@ -75,7 +75,7 @@ async fn a_closed_store_holds_no_file_and_deletes_under_a_live_clone() {
 /// Dropping the last handle inside a runtime, without closing it, leaves the
 /// connection threads closing their files after the drop returns. The store
 /// lock stays held until they have: once it can be taken, the lock file is the
-/// only file of the store still open.
+/// only file of the store still open, and the directory deletes.
 #[tokio::test]
 async fn a_dropped_store_frees_its_lock_only_after_its_files_close() {
     test_keyring::install();
@@ -121,9 +121,9 @@ async fn a_dropped_store_frees_its_lock_only_after_its_files_close() {
         .join(".coven-lock")
         .canonicalize()
         .expect("canonicalize lock file");
-    assert_eq!(
-        coven_foundation::open_files::open_files_under(&store_dir),
-        vec![lock_file]
-    );
+    let open = coven_foundation::open_files::open_files_under(&store_dir);
+    assert!(open.iter().all(|path| *path == lock_file), "{open:#?}");
+    // Where open files are not listed, deleting the directory is the check.
     drop(lock);
+    std::fs::remove_dir_all(&*store_dir).expect("delete the dropped store's directory");
 }
