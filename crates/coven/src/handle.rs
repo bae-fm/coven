@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::device_pairing::StoreDevicePairing;
+use crate::open_store::OpenStore;
 use crate::store_blobs::StoreBlobAccess;
 use crate::store_blobs::StoreBlobs;
 use crate::store_circles::StoreCircles;
@@ -134,6 +135,7 @@ pub struct CovenHandle {
     pairing: StoreDevicePairing,
     recovery: StoreRecovery,
     circles: StoreCircles,
+    open_store: OpenStore,
 }
 
 impl CovenHandle {
@@ -163,6 +165,8 @@ impl CovenHandle {
         blob_chunking: coven_storage::BlobChunking,
     ) -> Self {
         let database = StoreDatabase::from_database(db);
+        let open_store =
+            OpenStore::new(database.clone(), read_database.clone(), open_guard.clone());
         let cloud_homes = coven_storage::cloud::CloudHomeFactory::new(oauth_clients);
         let credentials = coven_keys::keys::CloudHomeCredentialsOwner::new(key_service.clone());
         let security = StoreSecurity::new(
@@ -234,7 +238,23 @@ impl CovenHandle {
             pairing,
             recovery,
             circles,
+            open_store,
         }
+    }
+
+    /// Close the store: disconnect sync, joining its loop, close the writer
+    /// and read connections, waiting until each is closed, and release the
+    /// store lock. When this returns, nothing of this handle holds a file in
+    /// the store directory, so [`Coven::delete_store`](crate::Coven::delete_store)
+    /// or a new [`open`](crate::CovenBuilder::open) can proceed. Every later
+    /// call on this handle or any clone that needs the database fails with
+    /// [`DbError::StoreClosed`].
+    pub async fn close(&self) {
+        let sync = self.sync.clone();
+        tokio::task::spawn_blocking(move || sync.disconnect())
+            .await
+            .expect("disconnect sync while closing the store");
+        self.open_store.close().await;
     }
 
     pub async fn write<F, R>(&self, sql: F) -> crate::CovenResult<crate::WriteReceipt<R>>

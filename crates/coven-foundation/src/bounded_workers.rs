@@ -2,7 +2,7 @@
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 type Job<State> = Box<dyn FnOnce(&mut State) + Send>;
 
@@ -29,9 +29,15 @@ impl<State: Send + 'static> BoundedWorkers<State> {
         );
         let (sender, receiver) = mpsc::channel::<Job<State>>(capacity.get());
         let receiver = Arc::new(Mutex::new(receiver));
+        // Nothing is ever sent on this channel. Each worker holds the sender
+        // until it has dropped its state, so the channel closing means every
+        // worker's state is gone.
+        let (exit, exited) = watch::channel(());
+        let exit = Arc::new(exit);
         let mut joins = Vec::with_capacity(states.len());
         for (index, mut state) in states.into_iter().enumerate() {
             let receiver = receiver.clone();
+            let exit = exit.clone();
             joins.push(
                 std::thread::Builder::new()
                     .name(format!("{name}-{index}"))
@@ -48,12 +54,15 @@ impl<State: Send + 'static> BoundedWorkers<State> {
                                 None => break,
                             }
                         }
+                        drop(state);
+                        drop(exit);
                     })?,
             );
         }
         Ok(Self {
             inner: Arc::new(Workers {
-                sender: Some(sender),
+                sender: Mutex::new(Some(sender)),
+                exited,
                 joins,
             }),
         })
@@ -62,7 +71,8 @@ impl<State: Send + 'static> BoundedWorkers<State> {
     /// Wait for bounded admission and completion. Cancelling before execution
     /// discards the closure; running work finishes, but its reply is discarded.
     /// A closure panic resumes on the caller and leaves the worker available.
-    pub async fn call<F, R>(&self, operation: F) -> R
+    /// Once the pool is [closed](Self::close), nothing more is admitted.
+    pub async fn call<F, R>(&self, operation: F) -> Result<R, WorkersClosed>
     where
         F: FnOnce(&mut State) -> R + Send + 'static,
         R: Send + 'static,
@@ -80,27 +90,52 @@ impl<State: Send + 'static> BoundedWorkers<State> {
                 tracing::debug!("discarding completed work for a cancelled caller");
             }
         });
-        if self
+        let sender = self
             .inner
             .sender
-            .as_ref()
-            .expect("live workers retain their sender")
-            .send(job)
-            .await
-            .is_err()
-        {
+            .lock()
+            .expect("worker admission mutex poisoned")
+            .clone()
+            .ok_or(WorkersClosed)?;
+        // Workers stop receiving only once every sender is gone, and this call
+        // holds one, so admission fails only if every worker has died.
+        if sender.send(job).await.is_err() {
             panic!("worker pool stopped before admitting a call");
         }
+        drop(sender);
         match result.await {
-            Ok(Ok(value)) => value,
+            Ok(Ok(value)) => Ok(value),
             Ok(Err(panic)) => std::panic::resume_unwind(panic),
             Err(_) => panic!("worker pool dropped a call without responding"),
         }
     }
+
+    /// Stop admitting work, let the workers finish what was already admitted,
+    /// and wait until every worker has dropped its state. Later calls on any
+    /// clone fail with [`WorkersClosed`].
+    pub async fn close(&self) {
+        drop(
+            self.inner
+                .sender
+                .lock()
+                .expect("worker admission mutex poisoned")
+                .take(),
+        );
+        let mut exited = self.inner.exited.clone();
+        // The value never changes, so this returns only when the last worker
+        // drops the sender.
+        let _ = exited.changed().await;
+    }
 }
 
+/// The pool was [closed](BoundedWorkers::close) before this call was admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the worker pool is closed")]
+pub struct WorkersClosed;
+
 struct Workers<State> {
-    sender: Option<mpsc::Sender<Job<State>>>,
+    sender: Mutex<Option<mpsc::Sender<Job<State>>>>,
+    exited: watch::Receiver<()>,
     joins: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -108,7 +143,12 @@ impl<State> Drop for Workers<State> {
     fn drop(&mut self) {
         // Closing admission lets workers drain cancelled jobs and drop their
         // retained state on their own thread. Never block an async executor.
-        drop(self.sender.take());
+        drop(
+            self.sender
+                .get_mut()
+                .expect("worker admission mutex poisoned")
+                .take(),
+        );
         let current_thread = std::thread::current().id();
         let on_owned_worker = self
             .joins

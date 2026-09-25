@@ -80,6 +80,7 @@ pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("device_pairing", Region::Host),
     ("handle", Region::Host),
     ("live_query", Region::Host),
+    ("open_store", Region::Host),
     ("read", Region::Host),
     ("read_handle", Region::Host),
     ("rows_pinned_live_query", Region::Host),

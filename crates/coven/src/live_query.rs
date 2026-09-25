@@ -304,7 +304,7 @@ where
                 Box::pin(async move {
                     let (result, dependencies) = query(reader.clone(), request.clone()).await?;
                     let result = match result {
-                        Ok(raw) => reader.process(move || process(&request, raw)).await,
+                        Ok(raw) => reader.process(move || process(&request, raw)).await?,
                         Err(error) => Err(error),
                     };
                     Ok((result, dependencies))

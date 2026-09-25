@@ -27,6 +27,13 @@ pub(crate) fn store_dir_of(path: &Path) -> coven_foundation::store_dir::StoreDir
 }
 
 impl Database {
+    /// Close the connection: finish the work already queued, then wait until
+    /// the connection thread has closed it. Every clone's later call fails with
+    /// [`DbError::StoreClosed`].
+    pub async fn close(&self) {
+        self.connection.close().await;
+    }
+
     pub(crate) async fn prepare_received_snapshot_circles(
         &self,
         selection: crate::StagedCircleRestore,

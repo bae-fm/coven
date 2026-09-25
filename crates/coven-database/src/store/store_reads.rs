@@ -1,6 +1,6 @@
 use super::{host_sql_reads::HostSqlReads, SqlReadContext};
 use crate::{DbError, QueryDependencies};
-use coven_foundation::bounded_workers::BoundedWorkers;
+use coven_foundation::bounded_workers::{BoundedWorkers, WorkersClosed};
 use rusqlite::{Connection, OpenFlags};
 use std::{num::NonZeroUsize, path::Path};
 
@@ -49,6 +49,7 @@ impl StoreReads {
         self.connections
             .call(move |connection| HostSqlReads::new(connection).read(read))
             .await
+            .map_err(|WorkersClosed| DbError::StoreClosed)?
     }
 
     pub async fn read_tracked<F, R, E>(
@@ -63,14 +64,25 @@ impl StoreReads {
         self.connections
             .call(move |connection| HostSqlReads::new(connection).read_tracked(read))
             .await
+            .map_err(|WorkersClosed| DbError::StoreClosed)?
     }
 
     /// Run owned result processing without occupying a read connection.
-    pub async fn process<F, R>(&self, process: F) -> R
+    pub async fn process<F, R>(&self, process: F) -> Result<R, DbError>
     where
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
-        self.processing.call(move |()| process()).await
+        self.processing
+            .call(move |()| process())
+            .await
+            .map_err(|WorkersClosed| DbError::StoreClosed)
+    }
+
+    /// Stop admitting reads and wait until every read connection is closed.
+    /// Every clone's later read fails with [`DbError::StoreClosed`].
+    pub async fn close(&self) {
+        self.connections.close().await;
+        self.processing.close().await;
     }
 }

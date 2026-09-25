@@ -100,6 +100,12 @@ impl StoreDatabase {
         Self { database }
     }
 
+    /// Close the store's writer connection and wait until it is closed. Every
+    /// clone's later call fails with [`DbError::StoreClosed`].
+    pub async fn close(&self) {
+        self.database.close().await;
+    }
+
     #[doc(hidden)]
     pub fn subscribe_committed_changes(
         &self,

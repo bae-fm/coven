@@ -1195,8 +1195,11 @@ async fn walk_files(path: &Path) -> Result<Vec<(PathBuf, u64, u64)>, FileError> 
 /// atomically (temp + rename), so a reader and the writer touching the same
 /// cache file never tear it. This lets one writer and any number of read-only
 /// readers coexist on one store.
+///
+/// The lock releases when the last owner drops the guard, or earlier when the
+/// closing store [releases](Self::release) it once nothing else of it is open.
 pub struct StoreOpenGuard {
-    _file: std::fs::File,
+    file: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1229,7 +1232,9 @@ impl StoreOpenGuard {
                 StoreOpenGuardError::File(FileError::at("open store lock", &lock_path, source))
             })?;
         match Self::try_lock_exclusive(&file) {
-            Ok(()) => Ok(Self { _file: file }),
+            Ok(()) => Ok(Self {
+                file: std::sync::Mutex::new(Some(file)),
+            }),
             Err(std::fs::TryLockError::WouldBlock) => Err(StoreOpenGuardError::AlreadyOpen {
                 store_dir: dir.to_path_buf(),
             }),
@@ -1237,6 +1242,12 @@ impl StoreOpenGuard {
                 FileError::at("lock store", lock_path, source),
             )),
         }
+    }
+
+    /// Release the lock now, closing the lock file. Only a store that has
+    /// closed everything else it holds in the directory releases it.
+    pub fn release(&self) {
+        drop(self.file.lock().expect("store lock mutex poisoned").take());
     }
 
     #[cfg(not(target_os = "android"))]

@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[tokio::test]
 async fn bounded_admission_discards_cancelled_work_before_execution() {
@@ -24,14 +24,32 @@ async fn bounded_admission_discards_cancelled_work_before_execution() {
         queued_ran.store(true, Ordering::SeqCst);
     }));
     assert!(futures_util::poll!(&mut cancelled).is_pending());
-    assert_eq!(pool.inner.sender.as_ref().unwrap().capacity(), 0);
+    assert_eq!(
+        pool.inner
+            .sender
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .capacity(),
+        0
+    );
     let mut waiting = Box::pin(pool.call(|()| 7));
     assert!(futures_util::poll!(&mut waiting).is_pending());
-    assert_eq!(pool.inner.sender.as_ref().unwrap().capacity(), 0);
+    assert_eq!(
+        pool.inner
+            .sender
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .capacity(),
+        0
+    );
     drop(cancelled);
     release.send(()).unwrap();
-    first.await.unwrap();
-    assert_eq!(waiting.await, 7);
+    first.await.unwrap().unwrap();
+    assert_eq!(waiting.await, Ok(7));
     assert!(!ran.load(Ordering::SeqCst));
 }
 
@@ -48,9 +66,9 @@ async fn panic_and_error_leave_the_worker_available() {
     );
     assert_eq!(
         pool.call(|()| Err::<(), _>("read error")).await,
-        Err("read error")
+        Ok(Err("read error"))
     );
-    assert_eq!(pool.call(|()| 42).await, 42);
+    assert_eq!(pool.call(|()| 42).await, Ok(42));
 }
 
 #[tokio::test]
@@ -79,4 +97,42 @@ async fn cancelled_work_can_drop_the_last_pool_clone_on_its_worker() {
         .await
         .expect("dropping the last clone on an owned worker must not join itself")
         .unwrap();
+}
+
+/// Closing finishes the work already admitted, returns only once every worker
+/// has dropped its state, and refuses every later call on any clone.
+#[tokio::test]
+async fn close_drops_every_worker_state_before_returning() {
+    struct Held(Arc<AtomicUsize>);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let states = (0..3).map(|_| Held(dropped.clone())).collect();
+    let pool = BoundedWorkers::start(states, NonZeroUsize::new(4).unwrap(), "close-test").unwrap();
+    let clone = pool.clone();
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let admitted_started = started.clone();
+    let admitted = tokio::spawn(async move {
+        clone
+            .call(move |_| {
+                admitted_started.notify_one();
+                wait.recv().unwrap();
+                5
+            })
+            .await
+    });
+    started.notified().await;
+
+    let mut closing = Box::pin(pool.close());
+    assert!(futures_util::poll!(&mut closing).is_pending());
+    assert_eq!(pool.call(|_| ()).await, Err(WorkersClosed));
+    release.send(()).unwrap();
+    closing.await;
+
+    assert_eq!(dropped.load(Ordering::SeqCst), 3);
+    assert_eq!(admitted.await.unwrap(), Ok(5));
 }

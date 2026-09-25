@@ -21,6 +21,7 @@ mod host_callback_error_tests;
 mod live_query;
 #[cfg(test)]
 mod live_query_tests;
+mod open_store;
 mod read;
 mod read_handle;
 mod rows_pinned_live_query;
@@ -46,6 +47,8 @@ mod make_remote_in_write_tests;
 mod prepared_external_blob_tests;
 #[cfg(test)]
 mod rows_pinned_live_query_tests;
+#[cfg(test)]
+mod store_close_tests;
 #[cfg(test)]
 mod store_key_ownership_tests;
 
@@ -92,6 +95,8 @@ pub use coven_foundation::config::{
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_foundation::id_provider::SequentialIdProvider;
 pub use coven_foundation::id_provider::{IdProvider, IdRef, UuidProvider};
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_foundation::open_files::assert_no_open_files_under;
 pub use coven_foundation::store_dir::{StoreDir, StoreLayout};
 pub use coven_keys::custody::{KeyCustody, Passphrase};
 #[cfg(any(test, feature = "test-utils"))]

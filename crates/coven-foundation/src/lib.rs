@@ -23,5 +23,7 @@ pub mod config;
 pub mod id_provider;
 pub mod local_file;
 pub mod object_hash;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod open_files;
 pub mod stage_timing;
 pub mod store_dir;

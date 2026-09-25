@@ -208,13 +208,20 @@ impl DatabaseConnection {
         let context = core.context.clone();
         let (jobs, receiver) = tokio::sync::mpsc::unbounded_channel();
         let worker = ConnectionWorker { core, receiver };
+        // Nothing is ever sent on this channel. The thread holds the sender
+        // until the worker, and the connection it owns, are gone.
+        let (exit, exited) = tokio::sync::watch::channel(());
         let join = std::thread::Builder::new()
             .name(thread_name.to_string())
-            .spawn(move || worker.run())
+            .spawn(move || {
+                worker.run();
+                drop(exit);
+            })
             .map_err(|error| DbError::context("spawn database connection thread", error))?;
         Ok(Self {
             thread: Arc::new(ConnectionThread {
                 jobs,
+                exited,
                 join: Some(join),
             }),
             context,
@@ -672,11 +679,19 @@ impl DatabaseConnection {
     // Put the operation in the existing job allocation before constructing the
     // returned future. Keeping this frame separate prevents large captures from
     // occupying every forwarding future and its caller's polling stack.
+    //
+    // After [`close`](Self::close), every call fails with
+    // [`DbError::StoreClosed`]: one sent after the worker stopped, and one
+    // queued behind the stop, which the worker drops unrun.
     #[inline(never)]
-    fn on_connection_thread<F, R>(&self, f: F) -> impl std::future::Future<Output = R> + Send + '_
+    fn on_connection_thread<F, R, E>(
+        &self,
+        f: F,
+    ) -> impl std::future::Future<Output = Result<R, E>> + Send + '_
     where
-        F: FnOnce(&mut DatabaseCore) -> R + Send + 'static,
+        F: FnOnce(&mut DatabaseCore) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
+        E: From<DbError> + Send + 'static,
     {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let job = DbJob::Run(Box::new(move |core| {
@@ -688,16 +703,26 @@ impl DatabaseConnection {
         async move {
             // Creating or dropping an unpolled call must not submit work.
             if self.thread.jobs.send(job).is_err() {
-                panic!("database connection thread stopped before a call completed");
+                return Err(DbError::StoreClosed.into());
             }
             match reply_rx.await {
                 Ok(Ok(value)) => value,
                 Ok(Err(panic)) => std::panic::resume_unwind(panic),
-                Err(_) => {
-                    panic!("database connection thread dropped a call's reply without responding")
-                }
+                Err(_) => Err(DbError::StoreClosed.into()),
             }
         }
+    }
+
+    /// Stop the connection thread after the work already queued and wait until
+    /// it has closed the connection. Every clone's later call fails with
+    /// [`DbError::StoreClosed`].
+    pub(crate) async fn close(&self) {
+        // A send fails only when the worker has already stopped.
+        let _ = self.thread.jobs.send(DbJob::Stop);
+        let mut exited = self.thread.exited.clone();
+        // The value never changes, so this returns only when the thread drops
+        // the sender after the worker and its connection are gone.
+        let _ = exited.changed().await;
     }
 }
 
@@ -719,8 +744,8 @@ fn store_session(core: &mut DatabaseCore) -> crate::store::StoreSession<'_> {
 }
 
 /// A unit of work for the connection thread: a caller's closure to run against
-/// the owned core, or the sentinel the final [`DatabaseConnection`] clone sends
-/// as it drops to stop the thread.
+/// the owned core, or the sentinel that stops the thread, sent by
+/// [`DatabaseConnection::close`] or by the final clone as it drops.
 enum DbJob {
     Run(Box<dyn FnOnce(&mut DatabaseCore) + Send>),
     SealSnapshot(tokio::sync::oneshot::Sender<Result<PreparedStoreSnapshot, DbError>>),
@@ -732,9 +757,11 @@ enum DbJob {
 }
 
 /// The channel and join handle shared by every [`DatabaseConnection`] clone.
-/// Its final owner queues `Stop` and releases the worker thread.
+/// Its final owner queues `Stop` and releases the worker thread. `exited`
+/// closes once the thread has dropped the worker and its connection.
 struct ConnectionThread {
     jobs: tokio::sync::mpsc::UnboundedSender<DbJob>,
+    exited: tokio::sync::watch::Receiver<()>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 

@@ -257,6 +257,8 @@ pub(crate) const FILESYSTEM_BOUNDARY: &[GatedCapability] = &[GatedCapability {
 ///
 /// - `atomic_file.rs` / `store_dir.rs`: the staged-write and store-directory
 ///   owners, including the single-writer open guard.
+/// - `open_files.rs`: the test-only listing of the files this process holds
+///   open, which checks that a closed store leaves none in its directory.
 /// - `config.rs`, `custody.rs`, `envelope.rs`, `identity_custody.rs`: config
 ///   and sealed-secret files.
 /// - `database/`: SQLite files, staged database images, the device-join
@@ -270,6 +272,7 @@ const FILESYSTEM_HOMES: &[&str] = &[
     "crates/coven-foundation/src/atomic_file.rs",
     "crates/coven-foundation/src/local_file.rs",
     "crates/coven-foundation/src/store_dir.rs",
+    "crates/coven-foundation/src/open_files.rs",
     "crates/coven-foundation/src/config.rs",
     "crates/coven-keys/src/custody.rs",
     "crates/coven-keys/src/envelope.rs",

@@ -182,11 +182,12 @@ impl Coven {
         }
     }
 
-    /// Delete a closed store from this device: every keyring entry Coven holds
-    /// for it (the device signing identity, the master key, the cloud-home
-    /// credentials, and the host secrets named in `host_secret_names`), then
-    /// its directory, which holds the database, blobs, caches, and any
-    /// passphrase-custody files. The store's cloud copy is untouched.
+    /// Delete a store closed with [`CovenHandle::close`] from this device:
+    /// every keyring entry Coven holds for it (the device signing identity,
+    /// the master key, the cloud-home credentials, and the host secrets named
+    /// in `host_secret_names`), then its directory, which holds the database,
+    /// blobs, caches, and any passphrase-custody files. The store's cloud copy
+    /// is untouched.
     ///
     /// Works on a store whose database cannot be opened. It holds the store's
     /// open lock throughout, so a store open anywhere is refused with

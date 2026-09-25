@@ -51,7 +51,7 @@ where
     {
         let database = self.database;
         let raw = self.await?;
-        database.process(move || process(raw)).await
+        database.process(move || process(raw)).await?
     }
 }
 

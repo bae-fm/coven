@@ -493,6 +493,9 @@ impl std::fmt::Display for StagedBlobRollbackFailures {
 pub enum DbError {
     #[error("database error: {0}")]
     Message(String),
+    /// The store was closed; its connections no longer serve calls.
+    #[error("the store is closed")]
+    StoreClosed,
     #[error("Store writes depend on state being removed: {writes:?}")]
     WriteDependencyConflict { writes: Vec<WriteId> },
     #[error("{0}")]
