@@ -92,6 +92,12 @@ pub enum StoreBlobFileError {
     File(#[from] FileError),
     #[error("commit store blob: {0}")]
     Commit(#[from] crate::local_file::CommitNewFileError),
+    #[error("store blob {} has {actual_size} bytes, expected {expected_size}", path.display())]
+    SizeMismatch {
+        path: PathBuf,
+        expected_size: u64,
+        actual_size: u64,
+    },
     #[error("store blob {} has size/hash {actual_size}/{actual_hash}, expected {expected_size}/{expected_hash}", path.display())]
     Integrity {
         path: PathBuf,
@@ -612,6 +618,44 @@ impl StoreDir {
                     })
                 }
             }
+        }
+    }
+
+    /// Whether a kept copy of the blob is in the pinned folder, answered from
+    /// the file's presence and size without reading it. Every file there was
+    /// verified against its exact size and hash before an atomic rename put it
+    /// under its locator name, and reads verify the bytes again, so this is the
+    /// answer to "is it kept offline" that a host can ask for many rows at
+    /// once. A file of the wrong size is corruption and is an error.
+    pub async fn pinned_blob_is_present(
+        &self,
+        namespace: &str,
+        locator_hash: crate::object_hash::ObjectHash,
+        expected_size: u64,
+    ) -> Result<bool, StoreBlobFileError> {
+        let path = self
+            .pinned_blob_path(namespace, locator_hash)
+            .map_err(StoreBlobFileError::Path)?;
+        let metadata = match tokio::fs::metadata(&path).await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => {
+                return Err(StoreBlobFileError::File(FileError::at(
+                    "stat pinned blob",
+                    &path,
+                    source,
+                )))
+            }
+        };
+        if metadata.len() == expected_size {
+            Ok(true)
+        } else {
+            Err(StoreBlobFileError::SizeMismatch {
+                path,
+                expected_size,
+                actual_size: metadata.len(),
+            })
         }
     }
 

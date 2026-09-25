@@ -1279,7 +1279,7 @@ impl StoreBlobCache {
                 .ok_or_else(|| BlobCacheError::LocalityUnresolved {
                     id: blob.blob().id.clone(),
                 })?;
-            if !self.pinned_copy_is_exact(blob, stored).await? {
+            if !self.pinned_copy_is_present(blob, stored).await? {
                 return Ok(false);
             }
         }
@@ -1298,25 +1298,24 @@ impl StoreBlobCache {
         let mut pinned = Vec::with_capacity(blobs.len());
         for blob in blobs {
             pinned.push(match blob.stored() {
-                Some(stored) => self.pinned_copy_is_exact(blob, stored).await?,
+                Some(stored) => self.pinned_copy_is_present(blob, stored).await?,
                 None => false,
             });
         }
         Ok(pinned)
     }
 
-    async fn pinned_copy_is_exact(
+    async fn pinned_copy_is_present(
         &self,
         blob: &RowBlobRef,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, BlobCacheError> {
         let locator = stored.locator();
         self.store_dir
-            .pinned_blob_is_exact(
+            .pinned_blob_is_present(
                 locator.namespace(),
                 locator.locator_hash(),
                 blob.plaintext_size(),
-                blob.plaintext_hash(),
             )
             .await
             .map_err(BlobCacheError::from)

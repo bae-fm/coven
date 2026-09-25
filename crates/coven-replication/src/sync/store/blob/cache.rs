@@ -237,7 +237,8 @@ pub enum BlobCacheError {
         id: String,
         path: std::path::PathBuf,
     },
-    /// A local-store blob has a different length from its stored declaration.
+    /// A local-store or kept blob copy has a different length from its stored
+    /// declaration.
     LocalSizeMismatch {
         path: std::path::PathBuf,
         expected_size: u64,
@@ -421,6 +422,15 @@ impl From<StoreBlobFileError> for BlobCacheError {
             StoreBlobFileError::Path(error) => Self::Path(error),
             StoreBlobFileError::File(error) => Self::File(error),
             StoreBlobFileError::Commit(error) => Self::Commit(error),
+            StoreBlobFileError::SizeMismatch {
+                path,
+                expected_size,
+                actual_size,
+            } => Self::LocalSizeMismatch {
+                path,
+                expected_size,
+                actual_size,
+            },
             StoreBlobFileError::Integrity {
                 path,
                 expected_size,

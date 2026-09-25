@@ -44,3 +44,41 @@ async fn pin_reports_progress_until_every_blob_is_kept() {
         "{reports:?}"
     );
 }
+
+/// Asking whether rows are kept offline must not read the kept files: a host
+/// asks about a page of large files on every refresh. The pinned folder is
+/// written only through verified, atomic copies named by locator, so its
+/// answer is the file's presence at the expected size; a read of the bytes
+/// still verifies them.
+#[cfg(unix)]
+#[tokio::test]
+async fn pin_state_is_answered_without_reading_the_pinned_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = read_test_db_with_download_limit(db_store_dir.clone(), "audio", 1);
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let (storage, cloud_storage) = create_store(&db, db_store_dir.clone(), home.clone()).await;
+    let (blobs, _bytes) = prepare_exact_remote_blobs(&storage)
+        .await
+        .install_many(&db, 1)
+        .await;
+    crate::sync::test_owner_graph::TestOwnerGraph::new(
+        StoreDatabase::new(&db),
+        db_store_dir.clone(),
+    )
+    .pin_blobs(Some(cloud_storage.clone()), &blobs, &|_| {})
+    .await
+    .expect("pin the blob");
+    let pinned = pinned_path(&db_store_dir, &blobs[0]);
+    std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o000))
+        .expect("make the pinned file unreadable");
+
+    let cache = StoreBlobCache::new(StoreDatabase::new(&db), db_store_dir.clone());
+    let each = cache.each_pinned(&blobs).await;
+    let all = cache.all_pinned(&blobs).await;
+    std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o600))
+        .expect("restore the pinned file");
+    assert_eq!(each.expect("answer each row"), vec![true]);
+    assert!(all.expect("answer the set"));
+}

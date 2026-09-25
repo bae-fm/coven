@@ -857,7 +857,9 @@ impl CovenHandle {
     /// kept offline" through this instead of stat-ing coven's cache layout itself.
     /// An empty set is vacuously pinned. A blob not pinned (in the evictable cache
     /// or absent) makes the whole set unpinned; an existence-check failure is
-    /// surfaced, never read as "not pinned".
+    /// surfaced, never read as "not pinned". The answer comes from each kept
+    /// file's presence and size, without reading it; reading the blob verifies
+    /// its bytes.
     pub async fn is_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
         self.blobs.all_pinned(blobs).await
     }
