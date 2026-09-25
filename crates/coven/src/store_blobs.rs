@@ -279,6 +279,24 @@ impl StoreBlobs {
         self.local.evict(blob).await
     }
 
+    pub(crate) fn subscribe_rows_pinned(
+        &self,
+        table: &str,
+        row_ids: Vec<String>,
+    ) -> crate::RowsPinnedLiveQuery {
+        crate::RowsPinnedLiveQuery::new(self.clone(), table.to_string(), row_ids)
+    }
+
+    pub(crate) fn subscribe_committed_changes(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<Arc<coven_database::CommittedChanges>> {
+        self.database.subscribe_committed_changes()
+    }
+
+    pub(crate) fn subscribe_blob_copies(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.local.subscribe_blob_copies()
+    }
+
     pub(crate) async fn row_blob_ref(
         &self,
         table: &str,

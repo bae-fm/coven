@@ -299,8 +299,10 @@ impl StoreLayout {
     /// ([`validate_path_token`]) BEFORE calling, as every
     /// join/restore/create flow already does.
     pub fn store_dir(&self, store_id: &str) -> StoreDir {
+        let path = self.stores_root().join(store_id);
         StoreDir {
-            path: self.stores_root().join(store_id),
+            blob_copies: crate::blob_copy_signal::BlobCopySignal::for_directory(&path),
+            path,
             file_sync: crate::atomic_file::FileSync::Enabled,
             #[cfg(any(test, feature = "test-utils"))]
             _owned_tree: None,
@@ -316,6 +318,7 @@ impl StoreLayout {
 pub struct StoreDir {
     path: PathBuf,
     file_sync: crate::atomic_file::FileSync,
+    blob_copies: crate::blob_copy_signal::BlobCopySignal,
     /// The temporary tree this handle owns, removed once the last clone of it
     /// drops. A host's store directory outlives every handle to it, so this is
     /// `None` everywhere but [`StoreDir::temp_for_test`], whose directory
@@ -332,8 +335,10 @@ impl PartialEq for StoreDir {
 
 impl StoreDir {
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
         Self {
-            path: path.into(),
+            blob_copies: crate::blob_copy_signal::BlobCopySignal::for_directory(&path),
+            path,
             file_sync: crate::atomic_file::FileSync::Enabled,
             #[cfg(any(test, feature = "test-utils"))]
             _owned_tree: None,
@@ -349,8 +354,10 @@ impl StoreDir {
     /// tree and decides when it goes. A directory that owns itself comes from
     /// [`StoreDir::temp_for_test`].
     pub fn new_ephemeral(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
         Self {
-            path: path.into(),
+            blob_copies: crate::blob_copy_signal::BlobCopySignal::for_directory(&path),
+            path,
             file_sync: crate::atomic_file::FileSync::Disabled,
             #[cfg(any(test, feature = "test-utils"))]
             _owned_tree: None,
@@ -370,6 +377,7 @@ impl StoreDir {
             .tempdir()
             .expect("create temporary store directory");
         Self {
+            blob_copies: crate::blob_copy_signal::BlobCopySignal::for_directory(tree.path()),
             path: tree.path().to_path_buf(),
             file_sync: crate::atomic_file::FileSync::Disabled,
             _owned_tree: Some(std::sync::Arc::new(tree)),
@@ -381,9 +389,11 @@ impl StoreDir {
         path: impl Into<PathBuf>,
     ) -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let path = path.into();
         (
             Self {
-                path: path.into(),
+                blob_copies: crate::blob_copy_signal::BlobCopySignal::for_directory(&path),
+                path,
                 file_sync: crate::atomic_file::FileSync::ObservedDisabled(requests.clone()),
                 _owned_tree: None,
             },
@@ -518,7 +528,9 @@ impl StoreDir {
             .pinned_blob_path(namespace, locator_hash)
             .map_err(StoreBlobFileError::Path)?;
         self.populate_exact_blob_from_file(destination, expected_size, expected_hash, source)
-            .await
+            .await?;
+        self.blob_copies.raise();
+        Ok(())
     }
 
     pub async fn populate_cached_blob_from_file(
@@ -539,6 +551,7 @@ impl StoreDir {
             source,
         )
         .await?;
+        self.blob_copies.raise();
         Ok(destination)
     }
 
@@ -724,11 +737,52 @@ impl StoreDir {
             self.cache_blob_path(namespace, locator_hash)
                 .map_err(CachedLocatorRemovalError::Path)?,
         ] {
-            remove_file(&path)
+            if remove_file(&path)
                 .await
-                .map_err(CachedLocatorRemovalError::File)?;
+                .map_err(CachedLocatorRemovalError::File)?
+            {
+                self.blob_copies.raise();
+            }
         }
         Ok(())
+    }
+
+    /// Install a staged copy into the cache or pinned folder, refusing to
+    /// replace an existing file.
+    pub async fn commit_new_blob_copy(
+        &self,
+        staged: crate::local_file::AtomicStagedFile,
+    ) -> Result<(), crate::local_file::CommitNewFileError> {
+        staged.commit_new().await?;
+        self.blob_copies.raise();
+        Ok(())
+    }
+
+    /// Install a staged copy into the cache or pinned folder.
+    pub async fn commit_blob_copy(
+        &self,
+        staged: crate::local_file::AtomicStagedFile,
+    ) -> Result<(), FileError> {
+        staged.commit().await?;
+        self.blob_copies.raise();
+        Ok(())
+    }
+
+    /// Remove one copy from the cache or pinned folder. `false` when it was
+    /// already absent.
+    pub async fn remove_blob_copy(&self, path: &Path) -> Result<bool, FileError> {
+        let removed = remove_file(path).await?;
+        if removed {
+            self.blob_copies.raise();
+        }
+        Ok(removed)
+    }
+
+    /// Watch this directory's cache and pinned folders: the value changes
+    /// after any copy in them is written or removed, by any owner of this
+    /// directory in the process.
+    pub fn subscribe_blob_copies(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.blob_copies.subscribe()
     }
 
     /// `storage/<folder>/<namespace>/{ab}/{cd}/<locator-hash>` — the single blob-path builder
@@ -880,7 +934,7 @@ impl StoreDir {
         &self,
         file: &CachedBlobFile,
     ) -> Result<bool, StoreBlobFileError> {
-        remove_file(file.path())
+        self.remove_blob_copy(file.path())
             .await
             .map_err(StoreBlobFileError::File)
     }
@@ -968,10 +1022,12 @@ impl StoreDir {
     /// Remove the complete store directory tree. Absence is success: the tree
     /// is already gone.
     pub fn remove_tree(&self) -> std::io::Result<()> {
-        match std::fs::remove_dir_all(&self.path) {
+        let removed = match std::fs::remove_dir_all(&self.path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
-        }
+        };
+        self.blob_copies.raise();
+        removed
     }
 
     #[cfg(any(test, feature = "test-utils"))]

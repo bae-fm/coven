@@ -206,6 +206,19 @@ so the file stays readable but becomes evictable again. It is not a delete.
 Unpin works on any blob regardless of its `CacheFill`; a `CacheEager` blob that
 was never pinned is already evictable, so unpinning it is a no-op.
 
+`pin` reports [`PinProgress`](rustdoc:struct:coven::PinProgress) as it goes:
+blobs kept so far and their stored bytes, counting downloads in flight.
+
+A host shows which rows are kept offline with
+[`CovenHandle::rows_pinned`](rustdoc:method:coven::CovenHandle::rows_pinned),
+or keeps the answer current with
+[`CovenHandle::subscribe_rows_pinned`](rustdoc:method:coven::CovenHandle::subscribe_rows_pinned).
+The subscription re-reads after a commit or after any copy in `cache/` or
+`pinned/` is written or removed, and delivers only answers that changed;
+`set_rows` moves it to another page of rows. Pin state is the kept file's
+presence at its expected size, so answering reads no file contents; reading the
+blob verifies its bytes.
+
 ## The size budget
 
 `pinned/` grows with what the user chose to keep; `cache/` grows with what gets

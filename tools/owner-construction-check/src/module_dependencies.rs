@@ -82,6 +82,7 @@ pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("live_query", Region::Host),
     ("read", Region::Host),
     ("read_handle", Region::Host),
+    ("rows_pinned_live_query", Region::Host),
     ("store_blobs", Region::Host),
     ("store_circles", Region::Host),
     ("store_cloud_storage", Region::Host),

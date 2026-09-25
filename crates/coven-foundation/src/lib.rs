@@ -13,6 +13,7 @@
 //! `pub(crate)` or narrower.
 
 pub mod atomic_file;
+mod blob_copy_signal;
 pub mod blocking;
 pub mod bounded_workers;
 pub mod changeset;

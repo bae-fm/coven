@@ -523,6 +523,12 @@ impl LocalStoreBlobAccess {
         self.cache.evict(blob).await
     }
 
+    /// Watch this store's kept and cached blob copies; see
+    /// [`StoreDir::subscribe_blob_copies`].
+    pub fn subscribe_blob_copies(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.store_dir.subscribe_blob_copies()
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn uses_store_dir_for_test(&self, expected: &StoreDir) -> bool {
         &self.store_dir == expected
@@ -1050,7 +1056,7 @@ impl StoreBlobCache {
         staged: coven_foundation::local_file::AtomicStagedFile,
         reference: &RowBlobRef,
     ) -> Result<(), BlobCacheError> {
-        match staged.commit_new().await {
+        match self.store_dir.commit_new_blob_copy(staged).await {
             Ok(()) => Ok(()),
             Err(coven_foundation::local_file::CommitNewFileError::DestinationExists(path)) => {
                 verify_exact_file(&path, reference).await
@@ -1094,16 +1100,13 @@ impl StoreBlobCache {
             .await?;
         self.database.validate_row_blob_ref(reference).await?;
         self.publish_materialization(staged, reference).await?;
-        match tokio::fs::remove_file(source).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(BlobCacheError::File(FileError::at(
-                    "remove cached blob",
-                    source,
-                    error,
-                )))
-            }
+        if !self
+            .store_dir
+            .remove_blob_copy(source)
+            .await
+            .map_err(BlobCacheError::File)?
+        {
+            return Ok(());
         }
         self.store_dir
             .sync_parent_dir(source)
@@ -1401,7 +1404,10 @@ impl StoreBlobCache {
             .write_bytes(bytes)
             .await
             .map_err(BlobCacheError::File)?;
-        staged.commit().await.map_err(BlobCacheError::File)?;
+        self.store_dir
+            .commit_blob_copy(staged)
+            .await
+            .map_err(BlobCacheError::File)?;
         self.enforce_budget(namespace, Some(&destination)).await
     }
 

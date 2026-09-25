@@ -211,6 +211,7 @@ fn operation_scope_exemptions_only_name_operation_authorities() {
             "PreparedStoreSnapshot",
             "PreparedSyncLoopRuntime",
             "ReconfigurableLiveQuery",
+            "RowsPinnedLiveQuery",
             "RuntimeSlot",
             "RuntimeSlotState",
             "SnapshotPreparation",

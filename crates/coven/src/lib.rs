@@ -23,6 +23,7 @@ mod live_query;
 mod live_query_tests;
 mod read;
 mod read_handle;
+mod rows_pinned_live_query;
 pub(crate) mod store_blobs;
 pub(crate) mod store_circles;
 pub(crate) mod store_cloud_storage;
@@ -41,6 +42,8 @@ mod blob_facade_tests;
 mod make_remote_in_write_tests;
 #[cfg(test)]
 mod prepared_external_blob_tests;
+#[cfg(test)]
+mod rows_pinned_live_query_tests;
 #[cfg(test)]
 mod store_key_ownership_tests;
 
@@ -182,5 +185,6 @@ pub use live_query::{
 };
 pub use read::Read;
 pub use read_handle::CovenReadHandle;
+pub use rows_pinned_live_query::RowsPinnedLiveQuery;
 pub use store_joining::DeviceAdmissionError;
 pub use store_security::CloudHomeKeyState;

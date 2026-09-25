@@ -79,6 +79,7 @@ pub(super) const OPERATION_SCOPED_OWNER_TYPES: &[&str] = &[
     "PreparedStoreSnapshot",
     "PreparedSyncLoopRuntime",
     "ReconfigurableLiveQuery",
+    "RowsPinnedLiveQuery",
     "RuntimeSlot",
     "RuntimeSlotState",
     "SnapshotPreparation",

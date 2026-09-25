@@ -886,6 +886,18 @@ impl CovenHandle {
         self.blobs.rows_pinned(table, row_ids).await
     }
 
+    /// Watch whether each of `table`'s `row_ids` is kept offline: the answer
+    /// [`rows_pinned`](Self::rows_pinned) gives, delivered again whenever it
+    /// changes, from a pin or unpin, an upload keeping its copy, or a row
+    /// becoming Remote or Local. See [`crate::RowsPinnedLiveQuery`].
+    pub fn subscribe_rows_pinned(
+        &self,
+        table: &str,
+        row_ids: Vec<String>,
+    ) -> crate::RowsPinnedLiveQuery {
+        self.blobs.subscribe_rows_pinned(table, row_ids)
+    }
+
     /// Remove one Remote blob's re-fetchable on-device cache copies from both
     /// `storage/pinned/` and `storage/cache/`. This never touches the local store,
     /// whose bytes may be the only usable copy owned by an unpublished write.
