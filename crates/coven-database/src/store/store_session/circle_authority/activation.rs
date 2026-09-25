@@ -219,7 +219,10 @@ impl StoreDatabase {
         .await
     }
 
-    /// See [`StoreDatabase::retained_circle_activation_on`].
+    /// The verified activation `activating_commit` accepted for `circle_id`,
+    /// when this device still retains that commit's materialization; `None`
+    /// otherwise, and the caller proves the activation through the
+    /// candidate's predecessor history instead.
     pub async fn retained_circle_activation(
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
