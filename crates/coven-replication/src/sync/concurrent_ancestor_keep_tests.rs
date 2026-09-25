@@ -16,14 +16,22 @@ use coven_protocol::synced_schema::{RowIdentity, SyncedTable};
 fn album_schema() -> (Vec<SyncedTable>, Vec<Migration>) {
     (
         vec![
+            SyncedTable::new("artists", RowIdentity::SharedKey).gated_by_descendants(),
             SyncedTable::new("albums", RowIdentity::SharedKey).gated_by_descendants(),
             SyncedTable::new("releases", RowIdentity::SharedKey).gated_by("shared"),
         ],
         vec![Migration::sql(
             1,
             "concurrent-ancestor-keep",
-            "CREATE TABLE albums (
+            "CREATE TABLE artists (
                  id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE albums (
+                 id TEXT PRIMARY KEY,
+                 artist_id TEXT NOT NULL REFERENCES artists(id),
                  title TEXT NOT NULL,
                  _updated_at TEXT NOT NULL,
                  created_at TEXT NOT NULL
@@ -97,7 +105,17 @@ enum Withdrawer {
     Peer,
 }
 
-async fn exercise(order: FirstPublished, replayed_first: FirstReplayed) {
+/// How the adding device adds its release.
+#[derive(Clone, Copy, Debug)]
+enum Adding {
+    /// One write inserts the release already shared.
+    Shared,
+    /// One write inserts the release privately and a later write shares it,
+    /// the way an import lands Local and is then made Remote.
+    PrivateThenShared,
+}
+
+async fn exercise(order: FirstPublished, replayed_first: FirstReplayed, adding_as: Adding) {
     let seed = 81;
     let author_dir = test_store_dir();
     let (tables, migrations) = album_schema();
@@ -135,7 +153,8 @@ async fn exercise(order: FirstPublished, replayed_first: FirstReplayed) {
     let author_stream = stream_of(&author, async {
         write(
             &author_db,
-            "INSERT INTO albums VALUES ('album', 'Album', '0000000001000-0000-author', '2026-01-01');
+            "INSERT INTO artists VALUES ('artist', 'Artist', '0000000001000-0000-author', '2026-01-01');
+             INSERT INTO albums VALUES ('album', 'artist', 'Album', '0000000001000-0000-author', '2026-01-01');
              INSERT INTO releases VALUES ('first', 'album', 1, '0000000001000-0000-author', '2026-01-01');",
         )
         .await;
@@ -148,7 +167,8 @@ async fn exercise(order: FirstPublished, replayed_first: FirstReplayed) {
     let peer_stream = stream_of(&peer, async {
         write(
             &peer_db,
-            "INSERT INTO albums VALUES ('probe', 'Probe', '0000000001100-0000-peer', '2026-01-01');
+            "INSERT INTO artists VALUES ('probe', 'Probe', '0000000001100-0000-peer', '2026-01-01');
+             INSERT INTO albums VALUES ('probe', 'probe', 'Probe', '0000000001100-0000-peer', '2026-01-01');
              INSERT INTO releases VALUES ('probe', 'probe', 1, '0000000001100-0000-peer', '2026-01-01');",
         )
         .await;
@@ -170,11 +190,27 @@ async fn exercise(order: FirstPublished, replayed_first: FirstReplayed) {
         Withdrawer::Peer => (&peer, &peer_db, &author, &author_db),
     };
     write(withdrawing_db, "DELETE FROM releases WHERE id = 'first';").await;
-    write(
-        adding_db,
-        "INSERT INTO releases VALUES ('second', 'album', 1, '0000000002000-0000-adder', '2026-01-01');",
-    )
-    .await;
+    match adding_as {
+        Adding::Shared => {
+            write(
+                adding_db,
+                "INSERT INTO releases VALUES ('second', 'album', 1, '0000000002000-0000-adder', '2026-01-01');",
+            )
+            .await;
+        }
+        Adding::PrivateThenShared => {
+            write(
+                adding_db,
+                "INSERT INTO releases VALUES ('second', 'album', 0, '0000000002000-0000-adder', '2026-01-01');",
+            )
+            .await;
+            write(
+                adding_db,
+                "UPDATE releases SET shared = 1, _updated_at = '0000000002100-0000-adder' WHERE id = 'second';",
+            )
+            .await;
+        }
+    }
     match order {
         FirstPublished::Withdrawal => {
             drain(withdrawing).await;
@@ -189,7 +225,7 @@ async fn exercise(order: FirstPublished, replayed_first: FirstReplayed) {
         let (_, pull) = device.pull_store().await.expect("pull");
         assert!(
             pull.held_positions.is_empty(),
-            "{order:?}/{replayed_first:?}: a pull held: {:?}",
+            "{order:?}/{replayed_first:?}/{adding_as:?}: a pull held: {:?}",
             pull.held_positions
         );
     }
@@ -202,34 +238,100 @@ async fn exercise(order: FirstPublished, replayed_first: FirstReplayed) {
                 )
                 .await,
             "probe,second",
-            "{order:?}/{replayed_first:?}: {name}'s releases",
+            "{order:?}/{replayed_first:?}/{adding_as:?}: {name}'s releases",
         );
         assert_eq!(
             device
-                .query_test_text("SELECT title FROM albums WHERE id = 'album'")
+                .query_test_text(
+                    "SELECT title || ' by ' || name FROM albums JOIN artists ON artists.id = albums.artist_id WHERE albums.id = 'album'"
+                )
                 .await,
-            "Album",
-            "{order:?}/{replayed_first:?}: {name} keeps the album the new release keeps alive",
+            "Album by Artist",
+            "{order:?}/{replayed_first:?}/{adding_as:?}: {name} keeps the album the new release keeps alive",
         );
     }
 }
 
 #[tokio::test]
-async fn withdrawal_replayed_and_published_first_keeps_the_ancestor() {
-    exercise(FirstPublished::Withdrawal, FirstReplayed::Withdrawal).await;
+async fn withdrawal_replayed_first_withdrawal_published_first_shared_child_keeps_the_ancestor() {
+    exercise(
+        FirstPublished::Withdrawal,
+        FirstReplayed::Withdrawal,
+        Adding::Shared,
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn withdrawal_replayed_first_but_published_second_keeps_the_ancestor() {
-    exercise(FirstPublished::NewChild, FirstReplayed::Withdrawal).await;
+async fn withdrawal_replayed_first_withdrawal_published_first_private_then_shared_child_keeps_the_ancestor(
+) {
+    exercise(
+        FirstPublished::Withdrawal,
+        FirstReplayed::Withdrawal,
+        Adding::PrivateThenShared,
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn new_child_replayed_first_but_published_second_keeps_the_ancestor() {
-    exercise(FirstPublished::Withdrawal, FirstReplayed::NewChild).await;
+async fn new_child_replayed_first_withdrawal_published_first_shared_child_keeps_the_ancestor() {
+    exercise(
+        FirstPublished::Withdrawal,
+        FirstReplayed::NewChild,
+        Adding::Shared,
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn new_child_replayed_and_published_first_keeps_the_ancestor() {
-    exercise(FirstPublished::NewChild, FirstReplayed::NewChild).await;
+async fn new_child_replayed_first_withdrawal_published_first_private_then_shared_child_keeps_the_ancestor(
+) {
+    exercise(
+        FirstPublished::Withdrawal,
+        FirstReplayed::NewChild,
+        Adding::PrivateThenShared,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn withdrawal_replayed_first_new_child_published_first_shared_child_keeps_the_ancestor() {
+    exercise(
+        FirstPublished::NewChild,
+        FirstReplayed::Withdrawal,
+        Adding::Shared,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn withdrawal_replayed_first_new_child_published_first_private_then_shared_child_keeps_the_ancestor(
+) {
+    exercise(
+        FirstPublished::NewChild,
+        FirstReplayed::Withdrawal,
+        Adding::PrivateThenShared,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn new_child_replayed_first_new_child_published_first_shared_child_keeps_the_ancestor() {
+    exercise(
+        FirstPublished::NewChild,
+        FirstReplayed::NewChild,
+        Adding::Shared,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn new_child_replayed_first_new_child_published_first_private_then_shared_child_keeps_the_ancestor(
+) {
+    exercise(
+        FirstPublished::NewChild,
+        FirstReplayed::NewChild,
+        Adding::PrivateThenShared,
+    )
+    .await;
 }

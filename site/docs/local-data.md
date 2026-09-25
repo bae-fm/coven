@@ -254,7 +254,8 @@ album's last shared release, which retracts the album, another device can add
 a release to the same album. The new child keeps the ancestor alive: applying
 a history, coven skips the DELETE of a `gated_by_descendants` row that a
 remaining inferred child still references, while a DELETE whose children the
-same commit also removes applies as before. The new child's own commit carries
+same commit also removes applies as before, and an ancestor kept this way keeps
+its own ancestors (the album's artist) too. The new child's own commit carries
 the ancestor it keeps (a newly shared row re-emits its shared ancestors), so
 the ancestor is present whichever of the two commits comes first, and every
 device converges on it. The withdrawing device sees the album shared again,

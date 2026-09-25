@@ -19,7 +19,8 @@ use crate::quote_ident;
 /// The ancestor is shared exactly while some child keeps it, so the concurrent
 /// child keeps it alive: the retract does not remove a row a remaining child
 /// references. A DELETE whose children this same changeset also deletes still
-/// applies. The rule reads only the projection the changeset applies to, so
+/// applies. An ancestor kept this way keeps its own ancestors in turn. The
+/// rule reads only the projection the changeset applies to, so
 /// every device applying the same history keeps the same ancestors.
 pub(crate) fn retain_referenced_ancestors(
     conn: &Connection,
@@ -30,27 +31,40 @@ pub(crate) fn retain_referenced_ancestors(
     // is positioned on, and `conn` outlives the changegroup.
     unsafe {
         let deleted = collect_deletes(changeset)?;
-        let referenced = deleted
-            .iter()
-            .filter(|((table, _), _)| {
-                matches!(gates.tables.get(table), Some(TableGate::Parent { .. }))
-            })
-            .map(|(key, row)| {
+        // A retained ancestor still references its own ancestors, so retaining
+        // one can retain the next level up: repeat until nothing changes.
+        let mut referenced = HashSet::new();
+        loop {
+            let mut grew = false;
+            for (key, row) in &deleted {
+                if referenced.contains(key) {
+                    continue;
+                }
                 let Some(TableGate::Parent { children }) = gates.tables.get(&key.0) else {
-                    unreachable!("filtered to ancestor tables above");
+                    continue;
                 };
                 for (child, fk_col, parent_col) in children {
                     let Some(Some(parent_value)) = row.old.get(parent_col.index) else {
                         continue;
                     };
-                    if child_references(conn, &deleted, child, &fk_col.name, parent_value)? {
-                        return Ok(Some(key.clone()));
+                    if child_references(
+                        conn,
+                        &deleted,
+                        &referenced,
+                        child,
+                        &fk_col.name,
+                        parent_value,
+                    )? {
+                        referenced.insert(key.clone());
+                        grew = true;
+                        break;
                     }
                 }
-                Ok(None)
-            })
-            .filter_map(Result::transpose)
-            .collect::<Result<HashSet<_>, GateError>>()?;
+            }
+            if !grew {
+                break;
+            }
+        }
         if referenced.is_empty() {
             return Ok(changeset.to_vec());
         }
@@ -71,11 +85,12 @@ pub(crate) fn retain_referenced_ancestors(
     }
 }
 
-/// Whether a row of `child` that `deleted` does not remove references
-/// `parent_value` through `fk_col`.
+/// Whether a row of `child` that stays — one `deleted` does not remove, or
+/// one `retained` keeps — references `parent_value` through `fk_col`.
 fn child_references(
     conn: &Connection,
     deleted: &std::collections::HashMap<(String, String), super::ffi::ChangeRow>,
+    retained: &HashSet<(String, String)>,
     child: &str,
     fk_col: &str,
     parent_value: &str,
@@ -94,7 +109,8 @@ fn child_references(
         .map_err(|error| GateError::Sql(format!("read children of {child}"), error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| GateError::Sql(format!("read children of {child}"), error))?;
-    Ok(ids
-        .into_iter()
-        .any(|id| !deleted.contains_key(&(child.to_string(), id))))
+    Ok(ids.into_iter().any(|id| {
+        let key = (child.to_string(), id);
+        !deleted.contains_key(&key) || retained.contains(&key)
+    }))
 }
