@@ -15,6 +15,28 @@ async fn a_cancelled_next_does_not_lose_the_snapshot_it_was_reading() {
     let handle = open_local(crate::StoreDir::new_ephemeral(tmp.path()));
     let mut outbox = handle.subscribe_cloud_outbox();
 
+    // Hold the store's connection in a write that changes nothing, so the
+    // snapshot read the first poll sends waits behind it however fast the
+    // connection thread would otherwise answer.
+    let (held, holding) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let writer = handle.clone();
+    let hold = tokio::spawn(async move {
+        writer
+            .write(move |sql| {
+                held.send(()).expect("the test waits for the hold");
+                released.recv().expect("the test releases the hold");
+                sql.execute("DELETE FROM notes WHERE id = 'absent'", [])?;
+                Ok(())
+            })
+            .await
+            .expect("hold the connection")
+    });
+    tokio::task::spawn_blocking(move || holding.recv())
+        .await
+        .expect("wait for the hold")
+        .expect("the connection is held");
+
     {
         let mut first = std::pin::pin!(outbox.next());
         let polled = std::future::poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx))).await;
@@ -23,6 +45,8 @@ async fn a_cancelled_next_does_not_lose_the_snapshot_it_was_reading() {
             "the first poll starts the snapshot read and waits on it"
         );
     }
+    release.send(()).expect("the hold waits for release");
+    hold.await.expect("the hold ends");
 
     let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), outbox.next())
         .await
