@@ -44,7 +44,6 @@ async fn same_principal_activation_holds_its_position_against_the_owners_own_syn
         .expect("member admission has an accepted predecessor");
     let store_dir = owner_db_store_dir.clone();
 
-    let mut test_points = owner_db.observe_test_points();
     let (position_held, resume_acceptance) =
         owner_db.arm_test_pause(coven_database::DatabaseTestPoint::DeviceJoinAttemptPositionHeld);
     let accept_store = approval.owner.clone();
@@ -59,13 +58,13 @@ async fn same_principal_activation_holds_its_position_against_the_owners_own_syn
     // publish into.
     position_held.notified().await;
     let drain_db = owner_db.clone();
-    let drain_cloud_storage = cloud_storage;
-    let drain_store_dir = store_dir;
+    let (authorized, drain_authorized) = tokio::sync::oneshot::channel();
+    let (joined, join_published) = tokio::sync::oneshot::channel();
     let drain = tokio::spawn(async move {
         let store = crate::sync::store::Store::load(
             coven_database::StoreDatabase::new(&drain_db),
-            drain_cloud_storage,
-            drain_store_dir,
+            cloud_storage,
+            store_dir,
             owner.clone(),
             Some(coven_keys::encryption::EncryptionService::from_key(
                 [42; 32],
@@ -77,28 +76,34 @@ async fn same_principal_activation_holds_its_position_against_the_owners_own_syn
             .authorize_writer()
             .await
             .expect("authorize the owner's registered writer");
-        assert!(writer
+        authorized.send(()).expect("the test waits for the writer");
+        // Asked while the Join holds its position, the queued write waits for
+        // the author's turn. The Join hands that turn on once its publication is
+        // staged, and the staged publication reserves the position, so the write
+        // defers behind it rather than preparing into it.
+        let prepared_behind_the_join = writer
             .prepare_pending_store_write()
             .await
-            .expect("prepare queued write after the Join's author turn"));
-        Box::pin(writer.drain_store_writes()).await
+            .expect("ask for the queued write while the Join holds its position");
+        join_published.await.expect("the Join publishes");
+        let prepared_after_the_join = writer
+            .prepare_pending_store_write()
+            .await
+            .expect("prepare the queued write after the Join");
+        (
+            prepared_behind_the_join,
+            prepared_after_the_join,
+            Box::pin(writer.drain_store_writes()).await,
+        )
     });
-    // The competing drain cannot upload while the Join owns preparation.
-    let reached_the_position = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while let Some(point) = test_points.recv().await {
-            if matches!(
-                point,
-                coven_database::DatabaseTestPoint::StoreWriteCommitUploaded { .. }
-            ) {
-                return true;
-            }
-        }
-        false
-    })
-    .await;
+    // Sending does not yield, so once this resumes the drain has gone on to
+    // wait for the author's turn, which the Join holds.
+    drain_authorized
+        .await
+        .expect("the drain authorizes its writer");
     assert!(
-        reached_the_position.is_err(),
-        "the sync loop reached the acceptance's position while the acceptance held it",
+        !drain.is_finished(),
+        "the queued write waits for the author's turn the Join holds"
     );
     resume_acceptance.notify_one();
 
@@ -106,10 +111,18 @@ async fn same_principal_activation_holds_its_position_against_the_owners_own_syn
         .await
         .expect("join the acceptance task")
         .expect("the acceptance keeps the position it composed against");
-    let drained = drain
-        .await
-        .expect("join the sync loop drain task")
-        .expect("the sync loop publishes after the Join");
+    joined.send(()).expect("the drain waits for the Join");
+    let (prepared_behind_the_join, prepared_after_the_join, drained) =
+        drain.await.expect("join the sync loop drain task");
+    assert!(
+        !prepared_behind_the_join,
+        "the queued write defers behind the Join's reserved publication"
+    );
+    assert!(
+        prepared_after_the_join,
+        "the queued write prepares once the Join has published"
+    );
+    let drained = drained.expect("the sync loop publishes after the Join");
     assert_eq!(
         accepted.activation.outcome_activation.coord.sequence(),
         previous.coord.sequence() + 1,
