@@ -123,7 +123,6 @@ async fn a_dropped_store_frees_its_lock_only_after_its_files_close() {
         .expect("canonicalize lock file");
     let open = coven_foundation::open_files::open_files_under(&store_dir);
     assert!(open.iter().all(|path| *path == lock_file), "{open:#?}");
-    // Where open files are not listed, deleting the directory is the check.
     drop(lock);
     std::fs::remove_dir_all(&*store_dir).expect("delete the dropped store's directory");
 }

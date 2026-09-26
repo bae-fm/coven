@@ -3,12 +3,12 @@
 //! A closed store must hold no file in its directory. POSIX lets a directory
 //! with open files be deleted, so a leftover handle goes unseen on macOS and
 //! Linux and fails the delete only on Windows. Listing the process's open file
-//! descriptors catches it on every platform that can list them.
+//! descriptors, or handles on Windows, catches it on every platform.
 
 use std::path::{Path, PathBuf};
 
-/// Every file under `dir` this process has open, once per open descriptor.
-/// Empty on Windows, which does not list handles here.
+/// Every file under `dir` this process has open, once per open descriptor or
+/// handle.
 pub fn open_files_under(dir: &Path) -> Vec<PathBuf> {
     let dir = dir
         .canonicalize()
@@ -19,8 +19,7 @@ pub fn open_files_under(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Panic naming every file under `dir` this process has open. Windows does
-/// not list handles here; deleting the directory is the check there.
+/// Panic naming every file under `dir` this process has open.
 pub fn assert_no_open_files_under(dir: &Path) {
     let open = open_files_under(dir);
     assert!(
@@ -61,26 +60,62 @@ fn open_file_paths() -> Vec<PathBuf> {
         .collect()
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "linux",
-    target_os = "android"
-)))]
+/// Windows gives no listing of a process's handles, so every handle value is
+/// asked in turn (they are multiples of four) until as many valid ones have
+/// answered as the process holds. A disk file's handle names its path.
+#[cfg(windows)]
 fn open_file_paths() -> Vec<PathBuf> {
-    Vec::new()
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileType, GetFinalPathNameByHandleW, FILE_TYPE_DISK, VOLUME_NAME_DOS,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+    let mut held = 0u32;
+    // SAFETY: the pseudo-handle for this process needs no closing, and the
+    // count is written to a local.
+    if unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut held) } == 0 {
+        panic!(
+            "count this process's handles: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    let mut paths = Vec::new();
+    let mut answered = 0u32;
+    let mut value = 4usize;
+    let mut name = vec![0u16; 32_768];
+    // Handle values stay far below this; it only bounds a count that moved
+    // while the values were being asked.
+    while answered < held && value < 1 << 24 {
+        let handle = value as HANDLE;
+        let mut flags = 0u32;
+        // SAFETY: an invalid value only fails these calls; none of them
+        // reads or writes through the handle, and it is never closed here.
+        if unsafe { GetHandleInformation(handle, &mut flags) } != 0 {
+            answered += 1;
+            if unsafe { GetFileType(handle) } == FILE_TYPE_DISK {
+                let length = unsafe {
+                    GetFinalPathNameByHandleW(
+                        handle,
+                        name.as_mut_ptr(),
+                        name.len() as u32,
+                        VOLUME_NAME_DOS,
+                    )
+                } as usize;
+                if length > 0 && length < name.len() {
+                    paths.push(PathBuf::from(std::ffi::OsString::from_wide(
+                        &name[..length],
+                    )));
+                }
+            }
+        }
+        value += 4;
+    }
+    paths
 }
 
-/// Only where descriptors are listed; Windows has nothing here to test.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "linux",
-        target_os = "android"
-    )
-))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
