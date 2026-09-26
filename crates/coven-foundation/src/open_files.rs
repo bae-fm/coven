@@ -74,18 +74,20 @@ fn open_file_paths() -> Vec<PathBuf> {
         .collect()
 }
 
-/// The process's handles in one snapshot the kernel takes at once, so a
-/// handle closed and another opened while the list is read are never both in
-/// it. A handle open for a disk file's data names its path; one opened only
-/// to read attributes, as `std::fs::metadata` and `canonicalize` do here and
-/// no Unix descriptor stands for, holds no file open.
+/// The disk files this process holds open for their data, read from one
+/// snapshot of its handles that the kernel takes at once.
+///
+/// Paths are named after the snapshot, one handle at a time, and a handle
+/// value freed meanwhile can be taken by a new handle. So only values that
+/// were file handles in the snapshot are named: a file opened since then under
+/// a value that held something else is never counted beside the one it
+/// replaced, and the list never names more files than were open at the
+/// snapshot. A handle opened only to read attributes, as `std::fs::metadata`
+/// and `canonicalize` do here and no Unix descriptor stands for, holds no file
+/// open, and neither does one on a directory.
 #[cfg(windows)]
 fn open_file_paths() -> Vec<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Wdk::System::Threading::{
-        NtQueryInformationProcess, ProcessHandleInformation,
-    };
-    use windows_sys::Win32::Foundation::{HANDLE, STATUS_INFO_LENGTH_MISMATCH};
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
         BY_HANDLE_FILE_INFORMATION, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_READ_DATA,
@@ -93,68 +95,13 @@ fn open_file_paths() -> Vec<PathBuf> {
     };
 
     const DATA_ACCESS: u32 = FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA;
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-
-    /// `PROCESS_HANDLE_TABLE_ENTRY_INFO`, one handle of the snapshot.
-    #[repr(C)]
-    struct HandleEntry {
-        handle_value: HANDLE,
-        handle_count: usize,
-        pointer_count: usize,
-        granted_access: u32,
-        object_type_index: u32,
-        handle_attributes: u32,
-        reserved: u32,
-    }
-
-    // `PROCESS_HANDLE_SNAPSHOT_INFORMATION`: a handle count and a reserved
-    // word, then the entries. Grown until the snapshot fits; usize words keep
-    // the entries aligned.
-    let header = 2 * std::mem::size_of::<usize>();
-    let mut buffer: Vec<usize> = vec![0; 4096];
-    loop {
-        let bytes = std::mem::size_of_val(buffer.as_slice()) as u32;
-        let mut needed = 0u32;
-        // SAFETY: the pseudo-handle for this process needs no closing, and the
-        // call writes at most `bytes` into the buffer it is given.
-        let status = unsafe {
-            NtQueryInformationProcess(
-                GetCurrentProcess(),
-                ProcessHandleInformation,
-                buffer.as_mut_ptr().cast(),
-                bytes,
-                &mut needed,
-            )
-        };
-        if status == STATUS_INFO_LENGTH_MISMATCH {
-            let words =
-                (needed as usize).max(bytes as usize * 2) / std::mem::size_of::<usize>() + 1;
-            buffer = vec![0; words];
-            continue;
-        }
-        assert!(
-            status >= 0,
-            "snapshot this process's handles: status {status:#x}"
-        );
-        break;
-    }
-    let count = buffer[0];
-    // SAFETY: the snapshot holds `count` entries right after its header,
-    // inside the buffer the call filled.
-    let entries = unsafe {
-        std::slice::from_raw_parts(
-            buffer
-                .as_ptr()
-                .cast::<u8>()
-                .add(header)
-                .cast::<HandleEntry>(),
-            count,
-        )
-    };
+    let file_type = windows_handles::file_object_type();
     let mut name = vec![0u16; 32_768];
-    entries
-        .iter()
-        .filter(|entry| entry.granted_access & DATA_ACCESS != 0)
+    windows_handles::snapshot()
+        .into_iter()
+        .filter(|entry| {
+            entry.object_type_index == file_type && entry.granted_access & DATA_ACCESS != 0
+        })
         .filter_map(|entry| {
             let handle = entry.handle_value;
             // SAFETY: none of these reads or writes through the handle or
@@ -180,6 +127,94 @@ fn open_file_paths() -> Vec<PathBuf> {
             }
         })
         .collect()
+}
+
+#[cfg(windows)]
+mod windows_handles {
+    use windows_sys::Wdk::System::Threading::{
+        NtQueryInformationProcess, ProcessHandleInformation,
+    };
+    use windows_sys::Win32::Foundation::{HANDLE, STATUS_INFO_LENGTH_MISMATCH};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    /// `PROCESS_HANDLE_TABLE_ENTRY_INFO`, one handle of a snapshot.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub(super) struct HandleEntry {
+        pub(super) handle_value: HANDLE,
+        handle_count: usize,
+        pointer_count: usize,
+        pub(super) granted_access: u32,
+        pub(super) object_type_index: u32,
+        handle_attributes: u32,
+        reserved: u32,
+    }
+
+    /// Every handle of this process at one instant.
+    pub(super) fn snapshot() -> Vec<HandleEntry> {
+        // `PROCESS_HANDLE_SNAPSHOT_INFORMATION`: a handle count and a reserved
+        // word, then the entries. Grown until the snapshot fits; usize words
+        // keep the entries aligned.
+        let header = 2 * std::mem::size_of::<usize>();
+        let mut buffer: Vec<usize> = vec![0; 4096];
+        loop {
+            let bytes = std::mem::size_of_val(buffer.as_slice()) as u32;
+            let mut needed = 0u32;
+            // SAFETY: the pseudo-handle for this process needs no closing, and
+            // the call writes at most `bytes` into the buffer it is given.
+            let status = unsafe {
+                NtQueryInformationProcess(
+                    GetCurrentProcess(),
+                    ProcessHandleInformation,
+                    buffer.as_mut_ptr().cast(),
+                    bytes,
+                    &mut needed,
+                )
+            };
+            if status == STATUS_INFO_LENGTH_MISMATCH {
+                let words =
+                    (needed as usize).max(bytes as usize * 2) / std::mem::size_of::<usize>() + 1;
+                buffer = vec![0; words];
+                continue;
+            }
+            assert!(
+                status >= 0,
+                "snapshot this process's handles: status {status:#x}"
+            );
+            break;
+        }
+        let count = buffer[0];
+        // SAFETY: the snapshot holds `count` entries right after its header,
+        // inside the buffer the call filled.
+        unsafe {
+            std::slice::from_raw_parts(
+                buffer
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(header)
+                    .cast::<HandleEntry>(),
+                count,
+            )
+        }
+        .to_vec()
+    }
+
+    /// The kernel's type number for file objects, read once off a file this
+    /// opens for the purpose: it names the type in every later snapshot.
+    pub(super) fn file_object_type() -> u32 {
+        use std::os::windows::io::AsRawHandle;
+        static FILE_TYPE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        *FILE_TYPE.get_or_init(|| {
+            let probe = std::fs::File::open(std::env::current_exe().expect("this executable"))
+                .expect("open this executable");
+            let value = probe.as_raw_handle() as HANDLE;
+            snapshot()
+                .into_iter()
+                .find(|entry| entry.handle_value == value)
+                .expect("an open file is in its process's snapshot")
+                .object_type_index
+        })
+    }
 }
 
 #[cfg(test)]
