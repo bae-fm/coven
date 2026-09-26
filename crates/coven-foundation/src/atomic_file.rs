@@ -243,6 +243,46 @@ impl<E: std::error::Error + 'static> std::error::Error for WriteError<E> {
     }
 }
 
+/// `path` in the form every file API accepts at any length.
+///
+/// Windows refuses a path past 260 characters unless it is absolute and
+/// prefixed `\\?\`. std's own file functions add that prefix themselves, but
+/// tempfile's rename (the commit of every staged file) passes the path as
+/// given, so a content-addressed file deep inside a long store path could be
+/// written and never committed. Other platforms have no such limit.
+#[cfg(windows)]
+pub(crate) fn extended_length(path: &Path) -> std::io::Result<std::borrow::Cow<'_, Path>> {
+    use std::path::{Component, Prefix};
+
+    let absolute = std::path::absolute(path)?;
+    let Some(Component::Prefix(prefix)) = absolute.components().next() else {
+        return Ok(std::borrow::Cow::Owned(absolute));
+    };
+    let extended = match prefix.kind() {
+        Prefix::Verbatim(_) | Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(..) => absolute,
+        Prefix::UNC(..) => {
+            use std::os::windows::ffi::{OsStrExt, OsStringExt};
+            // `\\server\share\…` becomes `\\?\UNC\server\share\…`.
+            let mut wide: Vec<u16> = r"\\?\UNC".encode_utf16().collect();
+            wide.extend(absolute.as_os_str().encode_wide().skip(1));
+            PathBuf::from(std::ffi::OsString::from_wide(&wide))
+        }
+        Prefix::Disk(_) => {
+            let mut extended = std::ffi::OsString::from(r"\\?\");
+            extended.push(absolute.as_os_str());
+            PathBuf::from(extended)
+        }
+        Prefix::DeviceNS(_) => absolute,
+    };
+    Ok(std::borrow::Cow::Owned(extended))
+}
+
+/// `path` in the form every file API accepts at any length.
+#[cfg(not(windows))]
+pub(crate) fn extended_length(path: &Path) -> std::io::Result<std::borrow::Cow<'_, Path>> {
+    Ok(std::borrow::Cow::Borrowed(path))
+}
+
 /// Install `bytes` as the complete contents of `path`.
 ///
 /// The bytes go to a temporary sibling that is flushed to disk and then
@@ -256,14 +296,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WriteError<std::io:
 
     let mut temp = tempfile::Builder::new()
         .prefix(TEMP_FILE_PREFIX)
-        .tempfile_in(parent)
+        .tempfile_in(extended_length(parent).map_err(WriteError::BeforeCommit)?)
         .map_err(WriteError::BeforeCommit)?;
     temp.write_all(bytes).map_err(WriteError::BeforeCommit)?;
     temp.as_file()
         .sync_all()
         .map_err(WriteError::BeforeCommit)?;
     // Dropping the `NamedTempFile` on any failure above removes the sibling.
-    temp.persist(path)
+    temp.persist(extended_length(path).map_err(WriteError::BeforeCommit)?)
         .map_err(|error| WriteError::BeforeCommit(error.error))?;
     flush_directory_blocking(parent).map_err(WriteError::AfterCommit)
 }
@@ -291,7 +331,7 @@ impl AtomicFileStage {
         std::fs::create_dir_all(parent)?;
         let temp = tempfile::Builder::new()
             .prefix(TEMP_FILE_PREFIX)
-            .tempfile_in(parent)?;
+            .tempfile_in(extended_length(parent)?)?;
         Ok(Self {
             parent: parent.to_path_buf(),
             temp,
@@ -314,12 +354,18 @@ impl AtomicFileStage {
             .map_err(|source| {
                 WriteError::BeforeCommit(FileError::at("sync staged file", &staged_path, source))
             })?;
-        self.temp.persist(destination).map_err(|error| {
+        let persisted = extended_length(destination).and_then(|extended| {
+            self.temp
+                .persist(extended)
+                .map(drop)
+                .map_err(|error| error.error)
+        });
+        persisted.map_err(|source| {
             WriteError::BeforeCommit(FileError::between(
                 "persist atomic stage",
                 &staged_path,
                 destination,
-                error.error,
+                source,
             ))
         })?;
         self.file_sync
@@ -433,6 +479,39 @@ fn flush_directory_blocking(_directory: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory deep enough that a file in it is past Windows' 260
+    /// character path limit.
+    fn past_the_path_limit(root: &Path) -> PathBuf {
+        let mut directory = root.to_path_buf();
+        while directory.as_os_str().len() < 300 {
+            directory.push("a-directory-name-of-forty-characters-xx");
+        }
+        std::fs::create_dir_all(&directory).expect("create the deep directory");
+        directory
+    }
+
+    /// A staged file commits, and an atomic write lands, at a path past
+    /// Windows' length limit.
+    #[test]
+    fn staged_writes_commit_past_the_path_limit() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let directory = past_the_path_limit(root.path());
+        let destination = directory.join("e".repeat(64));
+
+        let mut stage = AtomicFileStage::create_in(&directory).expect("stage");
+        stage.write_all(b"bytes").expect("write the stage");
+        stage
+            .commit(&destination)
+            .expect("commit past the path limit");
+        write_atomic(&directory.join("config.yaml"), b"config").expect("atomic write");
+
+        assert_eq!(std::fs::read(&destination).expect("read"), b"bytes");
+        assert_eq!(
+            std::fs::read(directory.join("config.yaml")).expect("read"),
+            b"config"
+        );
+    }
 
     #[test]
     fn write_atomic_replaces_existing_contents() {

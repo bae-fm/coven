@@ -519,9 +519,11 @@ impl PublishedAtomicFile {
 
 impl AtomicTempFile {
     fn create_in(parent: &Path) -> Result<Self, FileError> {
+        let extended_parent = crate::atomic_file::extended_length(parent)
+            .map_err(|source| FileError::at("resolve temporary blob directory", parent, source))?;
         let named = tempfile::Builder::new()
             .prefix(TEMP_BLOB_PREFIX)
-            .tempfile_in(parent)
+            .tempfile_in(extended_parent)
             .map_err(|source| FileError::at("create temporary blob", parent, source))?;
         let (file, path) = named.into_parts();
         let path = path
@@ -565,7 +567,7 @@ impl AtomicTempFile {
     fn rename_noreplace(&mut self, destination: &Path) -> Result<(), std::io::Error> {
         self.close();
         let path = tempfile::TempPath::try_from_path(self.path.clone())?;
-        match path.persist_noclobber(destination) {
+        match path.persist_noclobber(crate::atomic_file::extended_length(destination)?) {
             Ok(()) => {
                 self.armed = false;
                 Ok(())

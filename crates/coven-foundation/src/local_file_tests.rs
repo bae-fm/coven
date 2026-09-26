@@ -646,3 +646,35 @@ async fn write_atomic_durable_leaves_a_readable_file() {
 
     assert_eq!(read(&path).await.expect("read back"), bytes);
 }
+
+/// A verified file publishes without replacement at a path past Windows' 260
+/// character limit, as a content-addressed blob deep in a long store path is.
+#[tokio::test]
+async fn staged_new_file_publishes_past_the_path_limit() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let mut directory = tmp.path().to_path_buf();
+    while directory.as_os_str().len() < 300 {
+        directory.push("a-directory-name-of-forty-characters-xx");
+    }
+    std::fs::create_dir_all(&directory).expect("create the deep directory");
+    let destination = directory.join("e".repeat(64));
+    let mut staged = AtomicStagedFile::create(&destination)
+        .await
+        .expect("allocate staging path");
+    staged
+        .write_bytes(b"downloaded")
+        .await
+        .expect("write verified staged file");
+
+    staged
+        .commit_new()
+        .await
+        .expect("publish past the path limit");
+
+    assert_eq!(
+        tokio::fs::read(&destination)
+            .await
+            .expect("read published file"),
+        b"downloaded"
+    );
+}
