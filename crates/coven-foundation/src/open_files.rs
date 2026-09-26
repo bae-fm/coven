@@ -71,16 +71,19 @@ fn open_file_paths() -> Vec<PathBuf> {
     Vec::new()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(any(
+/// Only where descriptors are listed; Windows has nothing here to test.
+#[cfg(all(
+    test,
+    any(
         target_os = "macos",
         target_os = "ios",
         target_os = "linux",
         target_os = "android"
-    ))]
+    )
+))]
+mod tests {
+    use super::*;
+
     #[test]
     fn lists_each_open_descriptor_under_the_directory_until_it_closes() {
         let dir = tempfile::tempdir().unwrap();
