@@ -99,7 +99,9 @@ self_named_constructors = "allow"
 result_large_err = "allow"
 
 [profile.dev]
-incremental = true
+# Many worktrees build into one shared target dir through sccache, which
+# cannot cache incremental compiles; incremental state only grew that dir.
+incremental = false
 # Line tables are enough debuginfo for a debug build, as the test profile
 # already says: backtraces keep their file:line and every rlib shrinks
 # several-fold, which is what stops a shared target dir from filling a disk
@@ -108,7 +110,7 @@ incremental = true
 debug = "line-tables-only"
 
 [profile.test]
-incremental = true
+incremental = false
 opt-level = 1
 debug = "line-tables-only"
 
